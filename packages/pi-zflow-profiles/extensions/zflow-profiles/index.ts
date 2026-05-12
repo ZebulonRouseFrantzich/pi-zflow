@@ -224,6 +224,8 @@ export interface ProfileService {
   buildAgentOverrides: typeof buildAgentOverrides
   syncProfileToSettings: typeof syncProfileToSettings
   formatSyncSummary: typeof formatSyncSummary
+  getResolvedAgentBinding: typeof getResolvedAgentBinding
+  getResolvedLane: typeof getResolvedLane
 }
 
 // ── Capability name ─────────────────────────────────────────────
@@ -395,6 +397,88 @@ export async function ensureResolved(
  */
 function createEmptyRegistry(): ModelRegistry {
   return { getModel: () => undefined }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Shared lane lookup API (Task 2.11)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Get the resolved agent binding for a specific agent.
+ *
+ * Reads the active profile cache and looks up the binding by agent
+ * runtime name. This is the primary API that sibling packages (e.g.
+ * `pi-zflow-review`, `pi-zflow-agents`) should use to discover which
+ * model was resolved for a particular agent.
+ *
+ * If no cache exists or the agent is not found, returns `null`.
+ * Callers should handle `null` gracefully (e.g. by calling
+ * `ensureResolved()` first to activate a profile).
+ *
+ * This is the file-backed fallback path: it reads the user-local
+ * `active-profile.json` written by `activateProfile()`. External
+ * tools or packages that cannot access the zflow registry can also
+ * read this file directly.
+ *
+ * @param agentName - The agent runtime name (e.g. "zflow.planner-frontier").
+ * @param cachePath - Optional override for the cache file path.
+ * @returns The resolved agent binding, or `null` if not found.
+ */
+export async function getResolvedAgentBinding(
+  agentName: string,
+  cachePath?: string,
+): Promise<ResolvedAgentBinding | null> {
+  const cache = await readActiveProfileCache(cachePath)
+  if (!cache) return null
+
+  const cachedBinding = cache.agentBindings[agentName]
+  if (!cachedBinding) return null
+
+  const laneResult = cache.resolvedLanes[cachedBinding.lane]
+  return {
+    agent: agentName,
+    lane: cachedBinding.lane,
+    resolvedModel: cachedBinding.resolvedModel,
+    optional: laneResult?.optional ?? false,
+    tools: cachedBinding.tools,
+    maxOutput: cachedBinding.maxOutput,
+    maxSubagentDepth: cachedBinding.maxSubagentDepth,
+    status:
+      laneResult?.status ??
+      (cachedBinding.resolvedModel ? "resolved" : "unresolved-required"),
+    reason: laneResult?.reason,
+  }
+}
+
+/**
+ * Get the resolved lane result for a specific lane.
+ *
+ * Reads the active profile cache and looks up the lane by name.
+ * Returns `null` if no cache exists or the lane is not found.
+ *
+ * @param laneName - The lane name (e.g. "planning-frontier").
+ * @param cachePath - Optional override for the cache file path.
+ * @returns The resolved lane, or `null` if not found.
+ */
+export async function getResolvedLane(
+  laneName: string,
+  cachePath?: string,
+): Promise<ResolvedLane | null> {
+  const cache = await readActiveProfileCache(cachePath)
+  if (!cache) return null
+
+  const cachedLane = cache.resolvedLanes[laneName]
+  if (!cachedLane) return null
+
+  return {
+    lane: laneName,
+    model: cachedLane.model,
+    required: cachedLane.required,
+    optional: cachedLane.optional,
+    thinking: cachedLane.thinking,
+    status: cachedLane.status,
+    reason: cachedLane.reason,
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1078,6 +1162,8 @@ export default function activateZflowProfilesExtension(pi: ExtensionAPI): void {
     buildAgentOverrides,
     syncProfileToSettings,
     formatSyncSummary,
+    getResolvedAgentBinding,
+    getResolvedLane,
   }
 
   registry.provide(PROFILES_CAPABILITY, profileService)
