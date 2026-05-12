@@ -35,20 +35,20 @@ All pins must be exact — no `^`, `~`, or `latest` ranges.
 
 | Package | Exact version/ref | Source | Status |
 |---|---|---|---|
-| `pi-subagents` | `0.24.2` | npm | Provisional — verify install and runtime |
-| `pi-rtk-optimizer` | `0.7.1` | npm | Provisional — verify install and runtime |
-| `pi-intercom` | `0.6.0` | npm | Provisional — verify install and runtime |
+| `pi-subagents` | `0.24.2` | npm | ✅ installed — extension entry point verified |
+| `pi-rtk-optimizer` | `0.7.1` | npm | ✅ installed — extension entry point verified |
+| `pi-intercom` | `0.6.0` | npm | ✅ installed — extension entry point verified |
 
 ### Recommended first-pass packages
 
 | Package | Exact version/ref | Source | Status |
 |---|---|---|---|
-| `pi-web-access` | `0.10.7` | npm | Provisional — verify install |
-| `pi-interview` | `0.8.7` | npm | Provisional — verify install |
-| `pi-mono-sentinel` | `1.11.0` | npm | Provisional — verify install |
-| `pi-mono-context-guard` | `1.7.3` | npm | Provisional — verify install |
-| `pi-mono-multi-edit` | `1.7.3` | npm | Provisional — verify install |
-| `pi-mono-auto-fix` | `0.3.1` | npm | Provisional — verify install |
+| `pi-web-access` | `0.10.7` | npm | ✅ installed — extension entry point verified |
+| `pi-interview` | `0.8.7` | npm | ✅ installed — extension entry point verified |
+| `pi-mono-sentinel` | `1.11.0` | npm | ✅ installed — extension entry point verified |
+| `pi-mono-context-guard` | `1.7.3` | npm | ✅ installed — extension entry point verified |
+| `pi-mono-multi-edit` | `1.7.3` | npm | ✅ installed — extension entry point verified |
+| `pi-mono-auto-fix` | `0.3.1` | npm | ✅ installed — extension entry point verified |
 
 ### Optional packages
 

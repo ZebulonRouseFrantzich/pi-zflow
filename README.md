@@ -122,6 +122,38 @@ Version pins are recorded in two places:
 > See `docs/architecture/package-ownership.md` for the full canonical ownership and exclusion policy.
 > See `docs/foundation-versions.md` for version pins and the complete foundation record.
 
+## Foundation install record
+
+Installed by Phase 0 Task 0.3 on 2026-05-12. All packages are at user scope (no local `.pi/` override).
+
+### Required packages
+
+| Package | Version | Install status | Extension entry point |
+|---|---|---|---|
+| `pi-subagents` | `0.24.2` | ✅ installed | `./src/extension/index.ts` |
+| `pi-rtk-optimizer` | `0.7.1` | ✅ installed | `./index.ts` |
+| `pi-intercom` | `0.6.0` | ✅ installed | `./index.ts` |
+
+### Recommended first-pass packages
+
+| Package | Version | Install status | Extension entry point |
+|---|---|---|---|
+| `pi-web-access` | `0.10.7` | ✅ installed | `./index.ts` |
+| `pi-interview` | `0.8.7` | ✅ installed | `./index.ts` |
+| `pi-mono-sentinel` | `1.11.0` | ✅ installed | `./index.ts` |
+| `pi-mono-context-guard` | `1.7.3` | ✅ installed | `./index.ts` |
+| `pi-mono-multi-edit` | `1.7.3` | ✅ installed | `./index.ts` |
+| `pi-mono-auto-fix` | `0.3.1` | ✅ installed | `./index.ts` |
+
+### Install notes
+
+- Pi version at install time: `0.74.0`
+- All packages installed via `pi install npm:<pkg>@<pin>` (user scope, no `-l` flag)
+- No install failures. All 9 extension entry points verified present on disk.
+- `pi list` and `~/.pi/agent/settings.json` both confirm registration.
+- **Known issue**: running multiple `pi install` commands concurrently may cause some packages to be installed at the npm level but not registered in Pi `settings.json`. If a package appears in `npm root -g` but not in `pi list`, re-run `pi uninstall <pkg>` followed by `pi install <pkg>` for that package.
+- Deprecation warnings encountered for `@mariozechner/*` packages (used by transitive dependencies); these are informational only.
+
 ## License
 
 MIT
