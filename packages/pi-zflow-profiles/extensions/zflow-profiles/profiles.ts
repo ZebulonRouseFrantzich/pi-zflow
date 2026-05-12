@@ -258,6 +258,61 @@ export interface ModelInfo {
   thinkingCapability: "low" | "medium" | "high"
   /** Whether the user is authenticated and the model is available for use. */
   authenticated: boolean
+  /**
+   * Maximum context window size in tokens (optional).
+   * If omitted, context window is considered unconstrained.
+   */
+  contextWindow?: number
+  /**
+   * Maximum output tokens (optional).
+   * If omitted, output is considered unconstrained.
+   */
+  maxOutput?: number
+}
+
+/**
+ * Richer capability profile for a model, used by the capability checking
+ * module for detailed compatibility evaluation beyond basic availability.
+ *
+ * This builds on `ModelInfo` by adding structured enumerations for
+ * capability dimensions and numeric thresholds.
+ */
+export interface ModelCapabilityProfile {
+  /** Full model identifier. */
+  id: string
+  /** Whether the model supports tool calling. */
+  supportsTools: boolean
+  /** Whether the model supports text input/output. */
+  supportsText: boolean
+  /** The model's maximum thinking/reasoning capability. */
+  thinkingCapability: "low" | "medium" | "high"
+  /** Maximum context window in tokens (undefined = unconstrained). */
+  contextWindow?: number
+  /** Maximum output in tokens (undefined = unconstrained). */
+  maxOutput?: number
+  /** Maximum number of tools the model can call in a single turn. */
+  maxToolsPerTurn?: number
+}
+
+/**
+ * Requirements that a lane or agent binding imposes on candidate models.
+ *
+ * Used by the capability checking functions to determine whether a
+ * particular model is suitable for the role.
+ */
+export interface CapabilityRequirements {
+  /** Whether the model must support tool calling. */
+  requiresTools: boolean
+  /** Whether the model must support text input/output. */
+  requiresText: boolean
+  /** Minimum required thinking level (optional). */
+  requiredThinking?: "low" | "medium" | "high"
+  /** Whether this is a conservative lane that rejects thinking downgrades. */
+  isConservativeLane: boolean
+  /** Minimum context window size in tokens (optional). */
+  minContextWindow?: number
+  /** Minimum output tokens required (optional). */
+  minOutput?: number
 }
 
 /**

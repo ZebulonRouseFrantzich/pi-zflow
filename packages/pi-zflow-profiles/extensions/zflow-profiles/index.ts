@@ -25,6 +25,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { getZflowRegistry, type CapabilityClaim } from "pi-zflow-core"
 import { PI_ZFLOW_PROFILES_VERSION } from "pi-zflow-core"
 
+import {
+  validateLaneCandidate,
+  checkCapabilityRequirements,
+} from "./capabilities.js"
+
 // Re-export the public profile API so sibling packages or extensions
 // can import from "pi-zflow-profiles" directly.
 export {
@@ -58,6 +63,15 @@ export {
   CONSERVATIVE_LANES,
 } from "./model-resolution.js"
 
+// Re-export the capability checking API
+export {
+  checkThinkingCompatibility,
+  checkOutputWindowSufficiency,
+  checkContextWindowSufficiency,
+  checkCapabilityRequirements,
+  validateLaneCandidate,
+} from "./capabilities.js"
+
 export type {
   LaneDefinition,
   AgentBinding,
@@ -74,11 +88,20 @@ export type {
   LoadedProfiles,
   ModelInfo,
   ModelRegistry,
+  ModelCapabilityProfile,
+  CapabilityRequirements,
   ResolvedLane,
   ResolvedAgentBinding,
   ResolvedProfile,
   LaneStatus,
 } from "./profiles.js"
+
+export type {
+  ThinkingCompatibilityResult,
+  OutputWindowResult,
+  ContextWindowResult,
+  CapabilityCheckResult,
+} from "./capabilities.js"
 
 export type {
   ThinkingCheckResult,
@@ -101,6 +124,8 @@ export interface ProfileService {
   resolveProfile: typeof resolveProfile
   hasUnresolvedRequiredLanes: typeof hasUnresolvedRequiredLanes
   getLaneStatusSummary: typeof getLaneStatusSummary
+  validateLaneCandidate: typeof validateLaneCandidate
+  checkCapabilityRequirements: typeof checkCapabilityRequirements
 }
 
 // ── Capability name ─────────────────────────────────────────────
@@ -154,6 +179,8 @@ export default function activateZflowProfilesExtension(pi: ExtensionAPI): void {
     resolveProfile,
     hasUnresolvedRequiredLanes,
     getLaneStatusSummary,
+    validateLaneCandidate,
+    checkCapabilityRequirements,
   }
 
   registry.provide(PROFILES_CAPABILITY, profileService)

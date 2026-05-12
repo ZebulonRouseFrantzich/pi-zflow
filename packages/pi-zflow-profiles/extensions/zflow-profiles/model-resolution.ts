@@ -12,7 +12,7 @@
  * 2. For each candidate, check:
  *    - Model exists in the runtime registry
  *    - Authentication/config is present
- *    - Capability requirements are satisfied (tools, text, etc.)
+ *    - Capability requirements are satisfied (tools, text, output window, etc.)
  *    - Thinking level is compatible (or acceptable clamping)
  * 3. First valid candidate wins.
  * 4. If no candidate resolves:
@@ -34,121 +34,40 @@ import type {
   NormalizedProfileDefinition,
   NormalizedAgentBinding,
   ModelRegistry,
-  ModelInfo,
   ResolvedLane,
   ResolvedAgentBinding,
   ResolvedProfile,
-  LaneStatus,
+  CapabilityRequirements,
 } from "./profiles.js"
 
-// ── Constants ───────────────────────────────────────────────────
+import {
+  validateLaneCandidate,
+  checkThinkingCompatibility,
+  CONSERVATIVE_LANES,
+} from "./capabilities.js"
 
-/** Thinking capability levels mapped to numeric values for comparison. */
-const THINKING_SCORE: Record<string, number> = {
-  low: 1,
-  medium: 2,
-  high: 3,
-}
-
-/**
- * Lane names where thinking downgrades are NOT acceptable.
- * These are roles that genuinely require the requested reasoning depth.
- */
-export const CONSERVATIVE_LANES = new Set<string>([
-  "planning-frontier",
-  "worker-strong",
-  "review-security",
-  "synthesis-frontier",
-])
-
-// ── Thinking compatibility ───────────────────────────────────────
+// Re-export for backward compatibility with consumers from Task 2.3
+export { CONSERVATIVE_LANES } from "./capabilities.js"
+export type { ThinkingCompatibilityResult } from "./capabilities.js"
 
 /**
- * Result of a thinking compatibility check.
- */
-export interface ThinkingCheckResult {
-  /** Whether the model's thinking capability is acceptable. */
-  compatible: boolean
-  /**
-   * The effective thinking level after clamping.
-   * - If model's capability >= requested → model's capability (may be higher)
-   * - If model's capability < requested and acceptable → model's capability
-   * - If incompatible → the originally requested level (not used)
-   */
-  effectiveLevel: "low" | "medium" | "high"
-  /** Human-readable reason if clamped or incompatible. */
-  reason: string
-}
-
-/**
- * Map a thinking level string to its numeric score.
- */
-function scoreThinking(level: string): number {
-  return THINKING_SCORE[level] ?? 0
-}
-
-/**
- * Check whether a model's thinking capability is compatible with a
- * lane's requested thinking level.
+ * Legacy wrapper for `checkThinkingCompatibility`.
  *
- * Rules:
- * - If the lane does not specify a thinking level → always compatible,
- *   effective level defaults to `DEFAULT_THINKING` ("medium").
- * - If the model's capability is >= requested → compatible (clamping up
- *   is always acceptable; more reasoning is fine).
- * - If the model's capability is < requested → the downgrade is only
- *   acceptable for non-conservative lanes.
- *
- * @param model - The candidate model's info.
- * @param requestedLevel - The thinking level requested by the lane (optional).
- * @param isConservative - Whether the lane is conservative (rejects downgrades).
- * @returns The compatibility check result.
+ * @deprecated Use `checkThinkingCompatibility` from the capabilities module instead.
  */
+import { checkThinkingCompatibility as _checkThinking } from "./capabilities.js"
+import type { ModelInfo } from "./profiles.js"
 export function isModelThinkingCompatible(
   model: ModelInfo,
   requestedLevel?: "low" | "medium" | "high",
   isConservative: boolean = false,
-): ThinkingCheckResult {
-  // No request → always compatible, use model's capability or default
-  if (!requestedLevel) {
-    return {
-      compatible: true,
-      effectiveLevel: model.thinkingCapability,
-      reason: "",
-    }
-  }
-
-  const requestedScore = scoreThinking(requestedLevel)
-  const modelScore = scoreThinking(model.thinkingCapability)
-
-  // Model meets or exceeds requested level → compatible (clamp up is fine)
-  if (modelScore >= requestedScore) {
-    const reason =
-      modelScore > requestedScore
-        ? `Model "${model.id}" provides "${model.thinkingCapability}" thinking (exceeds requested "${requestedLevel}") — acceptable overprovisioning.`
-        : ""
-    return {
-      compatible: true,
-      effectiveLevel: model.thinkingCapability,
-      reason,
-    }
-  }
-
-  // Model falls short of requested level
-  if (isConservative) {
-    return {
-      compatible: false,
-      effectiveLevel: requestedLevel,
-      reason: `Conservative lane requires "${requestedLevel}" thinking, but model "${model.id}" only provides "${model.thinkingCapability}". Downgrade not permitted for this lane.`,
-    }
-  }
-
-  // Non-conservative lane: accept with warning
-  return {
-    compatible: true,
-    effectiveLevel: model.thinkingCapability,
-    reason: `Accepted: model "${model.id}" provides "${model.thinkingCapability}" thinking (requested "${requestedLevel}") — acceptable clamp for non-conservative lane.`,
-  }
+): ThinkingCompatibilityResult {
+  return _checkThinking(
+    model.thinkingCapability,
+    requestedLevel,
+    isConservative,
+    model.id,
+  )
 }
 
 // ── Candidate validation ────────────────────────────────────────
@@ -164,11 +83,8 @@ interface CandidateCheckResult {
 /**
  * Validate a candidate model against lane requirements.
  *
- * Checks performed:
- *   1. Model exists in the registry.
- *   2. Model is authenticated/available.
- *   3. Model supports tools and text.
- *   4. Thinking compatibility (with clamping rules).
+ * Delegates to `validateLaneCandidate` from the capabilities module for
+ * the actual availability and capability checks.
  *
  * @param modelId - The candidate model identifier.
  * @param registry - The model registry to query.
@@ -182,48 +98,18 @@ function checkCandidate(
   lane: NormalizedLaneDefinition,
   laneName: string,
 ): CandidateCheckResult {
-  const reasons: string[] = []
-
-  // 1. Model exists
   const model = registry.getModel(modelId)
-  if (!model) {
-    reasons.push(`Model "${modelId}" not found in registry`)
-    return { valid: false, reasons }
+
+  // Build capability requirements from the lane definition
+  const requirements: CapabilityRequirements = {
+    requiresTools: true,
+    requiresText: true,
+    requiredThinking: lane.thinking,
+    isConservativeLane: CONSERVATIVE_LANES.has(laneName),
   }
 
-  // 2. Authentication
-  if (!model.authenticated) {
-    reasons.push(`Model "${modelId}" is not authenticated`)
-    // Still check other capabilities so all reasons are gathered,
-    // but authentication failure alone is enough to reject.
-  }
-
-  // 3. Capability checks
-  if (!model.supportsTools) {
-    reasons.push(`Model "${modelId}" does not support tool calling`)
-  }
-  if (!model.supportsText) {
-    reasons.push(`Model "${modelId}" does not support text input/output`)
-  }
-
-  // If fundamental capabilities are missing → reject immediately
-  if (!model.authenticated || !model.supportsTools || !model.supportsText) {
-    return { valid: false, reasons }
-  }
-
-  // 4. Thinking compatibility
-  const isConservative = CONSERVATIVE_LANES.has(laneName)
-  const thinkingCheck = isModelThinkingCompatible(
-    model,
-    lane.thinking,
-    isConservative,
-  )
-  if (!thinkingCheck.compatible) {
-    reasons.push(thinkingCheck.reason)
-    return { valid: false, reasons }
-  }
-
-  return { valid: true, reasons }
+  const result = validateLaneCandidate(modelId, model, requirements)
+  return { valid: result.valid, reasons: result.reasons }
 }
 
 // ── Single lane resolution ───────────────────────────────────────
@@ -251,10 +137,11 @@ export function resolveLane(
       // Determine effective thinking level from the model
       const model = registry.getModel(modelId)!
       const isConservative = CONSERVATIVE_LANES.has(laneName)
-      const thinkingCheck = isModelThinkingCompatible(
-        model,
+      const thinkingCheck = checkThinkingCompatibility(
+        model.thinkingCapability,
         lane.thinking,
         isConservative,
+        model.id,
       )
 
       return {
