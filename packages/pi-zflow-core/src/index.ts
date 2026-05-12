@@ -43,3 +43,19 @@ export {
   checkUserDirs,
   resolveAgentInstallScope,
 } from "./user-dirs.js"
+
+// Re-export worktree setup hook types, contract, and runner
+// Also importable directly from "pi-zflow-core/worktree-setup-hook"
+export {
+  DEFAULT_HOOK_TIMEOUT_MS,
+  runWorktreeSetupHook,
+  classifyRepo,
+} from "./worktree-setup-hook.js"
+
+export type {
+  WorktreeSetupHookContext,
+  WorktreeSetupHookResult,
+  WorktreeSetupHookFn,
+  WorktreeSetupHookConfig,
+  RepoClass,
+} from "./worktree-setup-hook.js"

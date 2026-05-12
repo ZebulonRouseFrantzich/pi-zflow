@@ -10,9 +10,14 @@
     ".": "./src/index.ts",
     "./runtime-paths": "./src/runtime-paths.ts",
     "./user-dirs": "./src/user-dirs.ts",
+    "./worktree-setup-hook": "./src/worktree-setup-hook.ts",
     "./package.json": "./package.json"
   },
-  "keywords": ["pi-package", "pi-zflow", "library"],
+  "keywords": [
+    "pi-package",
+    "pi-zflow",
+    "library"
+  ],
   "license": "MIT",
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
