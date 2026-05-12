@@ -19,7 +19,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
-import { getZflowRegistry, type CapabilityClaim } from "pi-zflow-core"
+import { getZflowRegistry, type CapabilityClaim, resolveGitDir } from "pi-zflow-core"
 import { PI_ZFLOW_PROFILES_VERSION } from "pi-zflow-core"
 
 import {
@@ -40,9 +40,17 @@ import {
 import {
   preflightLaneHealth,
   checkLaneHealth,
+  handleLaneFailure,
+  reresolveLane,
+  getHealthStatusSummary,
 } from "./health.js"
 
 import type { ModelRegistry, ResolvedProfile } from "./profiles.js"
+import type {
+  ResolvedLane,
+  ActiveProfileCache,
+  LoadedProfiles,
+} from "./profiles.js"
 import {
   loadProfiles,
   loadProfilesSync,
@@ -73,6 +81,7 @@ import {
 } from "./profiles.js"
 
 import * as fs from "node:fs/promises"
+import * as path from "node:path"
 
 // Re-export the public profile API so sibling packages or extensions
 // can import from "pi-zflow-profiles" directly.
@@ -385,6 +394,486 @@ function createEmptyRegistry(): ModelRegistry {
   return { getModel: () => undefined }
 }
 
+// ═══════════════════════════════════════════════════════════════════
+//  /zflow-profile command handlers
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Resolve the repository root directory for profile commands.
+ *
+ * Uses `resolveGitDir` from pi-zflow-core to find the git root from
+ * the current working directory. Falls back to `process.cwd()` when
+ * not in a git repo so commands still produce useful output.
+ */
+function getRepoRoot(): string | undefined {
+  const gitDir = resolveGitDir(process.cwd())
+  if (gitDir) {
+    // resolveGitDir returns the .git path; the repo root is its parent
+    return path.dirname(gitDir)
+  }
+  // Fallback: use cwd directly; it may or may not be a repo root
+  return process.cwd()
+}
+
+/**
+ * Format a single lane resolution line for display.
+ *
+ * @example
+ * ```
+ * - planning-frontier → openai/gpt-5.4 (high thinking)
+ * - review-system ⚠ disabled (no matching authenticated model)
+ * - review-logic ✗ FAILED (required lane unresolved)
+ * ```
+ */
+function formatLaneLine(laneName: string, lane: ResolvedLane): string {
+  switch (lane.status) {
+    case "resolved": {
+      const thinking = lane.thinking ? ` (${lane.thinking} thinking)` : ""
+      return `- ${laneName} → ${lane.model}${thinking}`
+    }
+    case "disabled-optional":
+      return `- ${laneName} ⚠ disabled${lane.reason ? ` (${lane.reason})` : ""}`
+    case "unresolved-required":
+      return `- ${laneName} ✗ FAILED${lane.reason ? ` (${lane.reason})` : ""}`
+  }
+}
+
+/**
+ * Format the active profile summary block.
+ */
+function formatProfileSummary(
+  profile: ResolvedProfile,
+  cache?: ActiveProfileCache,
+): string {
+  const lines: string[] = []
+  lines.push(`Active profile: ${profile.profileName}`)
+  lines.push(`Source: ${profile.sourcePath}`)
+  lines.push(`Resolved at: ${profile.resolvedAt}`)
+  lines.push("")
+
+  // Resolved lanes
+  let hasResolved = false
+  let hasOptional = false
+  const resolvedLines: string[] = []
+  const optionalDisabled: string[] = []
+
+  for (const lane of Object.values(profile.resolvedLanes)) {
+    if (lane.status === "resolved") {
+      resolvedLines.push(formatLaneLine(lane.lane, lane))
+      hasResolved = true
+    } else if (lane.status === "disabled-optional") {
+      optionalDisabled.push(formatLaneLine(lane.lane, lane))
+      hasOptional = true
+    } else {
+      resolvedLines.push(formatLaneLine(lane.lane, lane))
+    }
+  }
+
+  if (hasResolved) {
+    lines.push("Resolved lanes:")
+    lines.push(...resolvedLines)
+    lines.push("")
+  }
+
+  if (hasOptional) {
+    lines.push("Optional disabled:")
+    lines.push(...optionalDisabled)
+    lines.push("")
+  }
+
+  // Cache invalidation info
+  if (cache) {
+    const age = Date.now() - new Date(cache.resolvedAt).getTime()
+    const ageMinutes = Math.round(age / 60000)
+    const ttlMinutes = cache.ttlMinutes
+    lines.push(
+      `Cache: ${ageMinutes}m old (TTL ${ttlMinutes}m)` +
+        `${ageMinutes > ttlMinutes ? " — EXPIRED" : ""}`,
+    )
+  }
+
+  return lines.join("\n")
+}
+
+/**
+ * Format detailed profile information for `/zflow-profile show`.
+ */
+function formatProfileDetail(
+  profile: ResolvedProfile,
+  cache?: ActiveProfileCache,
+): string {
+  const lines: string[] = []
+
+  lines.push(`Profile: ${profile.profileName}`)
+  lines.push(`Source file: ${profile.sourcePath}`)
+  lines.push(`Resolved at: ${profile.resolvedAt}`)
+  lines.push("")
+
+  // All lanes with full detail
+  lines.push("Lanes:")
+  for (const lane of Object.values(profile.resolvedLanes)) {
+    lines.push(formatLaneLine(lane.lane, lane))
+  }
+  lines.push("")
+
+  // Agent bindings
+  const bindingEntries = Object.entries(profile.agentBindings)
+  if (bindingEntries.length > 0) {
+    lines.push("Agent bindings:")
+    for (const [agent, binding] of bindingEntries) {
+      const model = binding.resolvedModel ?? "(unresolved)"
+      lines.push(`  - ${agent} → ${binding.lane} → ${model}`)
+      if (binding.tools) lines.push(`    tools: ${binding.tools}`)
+      if (binding.maxOutput) lines.push(`    maxOutput: ${binding.maxOutput}`)
+      if (binding.maxSubagentDepth !== undefined) lines.push(`    maxSubagentDepth: ${binding.maxSubagentDepth}`)
+    }
+    lines.push("")
+  }
+
+  // Cache invalidation metadata
+  if (cache) {
+    lines.push("Cache invalidation metadata:")
+    lines.push(`  TTL: ${cache.ttlMinutes}m`)
+    lines.push(`  Definition hash: ${cache.definitionHash}`)
+    lines.push(`  Environment fingerprint: ${cache.environmentFingerprint}`)
+    const age = Date.now() - new Date(cache.resolvedAt).getTime()
+    const ageMinutes = Math.round(age / 60000)
+    lines.push(`  Age: ${ageMinutes}m (TTL ${cache.ttlMinutes}m)`)
+    lines.push(`  Expired: ${age > cache.ttlMinutes * 60 * 1000 ? "yes" : "no"}`)
+  }
+
+  return lines.join("\n")
+}
+
+/**
+ * Handler for `/zflow-profile` (no arguments) — show active profile summary.
+ *
+ * Reads the active profile cache if available and displays a concise
+ * summary. If no cache exists, suggests activating the default profile.
+ */
+async function handleNoArgs(ui: {
+  notify: (message: string, type?: "info" | "warning" | "error") => void
+}): Promise<void> {
+  const cache = await readActiveProfileCache().catch(() => null)
+
+  if (!cache) {
+    ui.notify(
+      "No active profile found. Run `/zflow-profile default` to activate the default profile.",
+    )
+    return
+  }
+
+  const profile = cacheToResolvedProfile(cache)
+  const summary = formatProfileSummary(profile, cache)
+  ui.notify(summary)
+}
+
+/**
+ * Handler for `/zflow-profile default` — activate the default profile.
+ *
+ * Loads, resolves, and caches the "default" profile, then displays
+ * a summary of the resolved lanes.
+ */
+async function handleDefault(ui: {
+  notify: (message: string, type?: "info" | "warning" | "error") => void
+  setStatus: (key: string, text: string | undefined) => void
+}): Promise<void> {
+  try {
+    const resolved = await activateProfile("default", {
+      repoRoot: getRepoRoot(),
+    })
+
+    const summary = formatProfileSummary(resolved)
+    ui.notify(`Default profile activated.\n\n${summary}`)
+    ui.setStatus("zflow-profile", `Profile: ${resolved.profileName}`)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    ui.notify(`Failed to activate default profile:\n${message}`, "error")
+  }
+}
+
+/**
+ * Handler for `/zflow-profile show` — display detailed profile info.
+ *
+ * Shows the source file, every resolved lane with its model, disabled
+ * optional lanes with reasons, agent bindings, and cache invalidation
+ * metadata.
+ */
+async function handleShow(ui: {
+  notify: (message: string, type?: "info" | "warning" | "error") => void
+}): Promise<void> {
+  const cache = await readActiveProfileCache().catch(() => null)
+
+  if (!cache) {
+    ui.notify(
+      "No active profile cache found. Run `/zflow-profile default` to activate a profile first.",
+    )
+    return
+  }
+
+  const profile = cacheToResolvedProfile(cache)
+  const detail = formatProfileDetail(profile, cache)
+  ui.notify(detail)
+}
+
+/**
+ * Handler for `/zflow-profile lanes` — show lane definitions and
+ * resolution status.
+ */
+async function handleLanes(ui: {
+  notify: (message: string, type?: "info" | "warning" | "error") => void
+}): Promise<void> {
+  const repoRoot = getRepoRoot()
+
+  let profiles: LoadedProfiles
+  try {
+    profiles = await loadProfiles(repoRoot)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    ui.notify(`Failed to load profiles:\n${message}`, "error")
+    return
+  }
+
+  const cache = await readActiveProfileCache().catch(() => null)
+  const lines: string[] = []
+
+  // Show available profile names
+  const profileNames = Object.keys(profiles.profiles)
+  lines.push(`Available profiles: ${profileNames.join(", ")}`)
+
+  // Show the active profile name if cached
+  if (cache) {
+    lines.push(`Active profile: ${cache.profileName}`)
+  }
+  lines.push("")
+
+  // Show lane definitions for the active (or first) profile
+  const activeName = cache?.profileName ?? profileNames[0]
+  const activeProfile = profiles.profiles[activeName]
+
+  if (activeProfile) {
+    lines.push(`Profile "${activeName}" lanes:`)
+    for (const [laneName, lane] of Object.entries(activeProfile.lanes)) {
+      const flags = lane.required
+        ? "required"
+        : lane.optional
+          ? "optional"
+          : "required"
+      const thinking = lane.thinking ? `, thinking=${lane.thinking}` : ""
+      const models = lane.preferredModels.join(", ")
+      lines.push(`  - ${laneName} (${flags}${thinking})`)
+      lines.push(`    preferredModels: ${models}`)
+
+      // Show resolution status if cached
+      if (cache?.resolvedLanes[laneName]) {
+        const resolved = cache.resolvedLanes[laneName]
+        if (resolved.status === "resolved") {
+          lines.push(`    → resolved to: ${resolved.model}`)
+        } else if (resolved.status === "disabled-optional") {
+          lines.push(`    → disabled${resolved.reason ? `: ${resolved.reason}` : ""}`)
+        } else if (resolved.status === "unresolved-required") {
+          lines.push(`    → unresolved${resolved.reason ? `: ${resolved.reason}` : ""}`)
+        }
+      } else {
+        lines.push(`    → not yet resolved`)
+      }
+    }
+  }
+
+  ui.notify(lines.join("\n"))
+}
+
+/**
+ * Handler for `/zflow-profile refresh` — force re-resolution.
+ *
+ * Ignores the cached profile and re-resolves all lanes from the
+ * original definitions, then writes a fresh cache.
+ */
+async function handleRefresh(ui: {
+  notify: (message: string, type?: "info" | "warning" | "error") => void
+  setStatus: (key: string, text: string | undefined) => void
+}): Promise<void> {
+  try {
+    const resolved = await activateProfile("default", {
+      repoRoot: getRepoRoot(),
+    })
+
+    const summary = formatProfileSummary(resolved)
+    ui.notify(`Profile refreshed.\n\n${summary}`)
+    ui.setStatus("zflow-profile", `Profile: ${resolved.profileName}`)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    ui.notify(`Failed to refresh profile:\n${message}`, "error")
+  }
+}
+
+/**
+ * Settings overrides entry for a single agent binding.
+ */
+export interface SettingsAgentOverride {
+  model: string
+  tools?: string
+  maxOutput?: number
+}
+
+/**
+ * Handler for `/zflow-profile sync-project` — write resolved overrides
+ * into `.pi/settings.json`.
+ *
+ * This is an explicit opt-in operation that writes a `subagents.agentOverrides`
+ * block based on the currently resolved active profile. It never silently
+ * modifies unrelated settings.
+ */
+async function handleSyncProject(ui: {
+  notify: (message: string, type?: "info" | "warning" | "error") => void
+  confirm: (title: string, message: string) => Promise<boolean>
+}): Promise<void> {
+  const cache = await readActiveProfileCache().catch(() => null)
+
+  if (!cache) {
+    ui.notify(
+      "No active profile found. Run `/zflow-profile default` first to activate a profile.",
+    )
+    return
+  }
+
+  const repoRoot = getRepoRoot()
+  if (!repoRoot) {
+    ui.notify(
+      "Cannot determine project root. Run this command from within your project directory.",
+    )
+    return
+  }
+
+  const settingsPath = path.join(repoRoot, ".pi", "settings.json")
+
+  // Build agent overrides from resolved cache
+  const agentOverrides: Record<string, SettingsAgentOverride> = {}
+
+  for (const [agentName, binding] of Object.entries(cache.agentBindings)) {
+    if (binding.resolvedModel) {
+      agentOverrides[agentName] = {
+        model: binding.resolvedModel,
+        tools: binding.tools,
+        maxOutput: binding.maxOutput,
+      }
+    }
+  }
+
+  if (Object.keys(agentOverrides).length === 0) {
+    ui.notify(
+      "No resolved agent bindings to sync. Ensure the profile has resolved lanes with models.",
+    )
+    return
+  }
+
+  // Show a summary before writing
+  const summaryLines: string[] = [
+    "The following agent overrides will be written to:",
+    `  ${settingsPath}`,
+    "",
+  ]
+  for (const [agent, override] of Object.entries(agentOverrides)) {
+    summaryLines.push(`  ${agent}:`)
+    summaryLines.push(`    model: ${override.model}`)
+    if (override.tools) summaryLines.push(`    tools: ${override.tools}`)
+    if (override.maxOutput) summaryLines.push(`    maxOutput: ${override.maxOutput}`)
+  }
+  summaryLines.push("")
+  summaryLines.push("This will modify your project settings. Continue?")
+
+  const confirmed = await ui.confirm("Sync Profile to Settings", summaryLines.join("\n"))
+  if (!confirmed) {
+    ui.notify("Sync cancelled.")
+    return
+  }
+
+  // Read existing settings or start fresh
+  let settings: Record<string, unknown> = {}
+  try {
+    const existing = await fs.readFile(settingsPath, "utf8")
+    settings = JSON.parse(existing) as Record<string, unknown>
+  } catch {
+    // File doesn't exist or is invalid — start fresh
+    settings = {}
+  }
+
+  // Write the subagents.agentOverrides block without destroying other settings
+  settings.subagents = {
+    ...(settings.subagents as Record<string, unknown> | undefined),
+    agentOverrides,
+  }
+
+  // Ensure parent directory exists
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true })
+  await fs.writeFile(settingsPath, JSON.stringify(settings, null, 2), "utf8")
+
+  ui.notify(
+    `Wrote ${Object.keys(agentOverrides).length} agent override(s) to:\n` +
+      `  ${settingsPath}\n\n` +
+      `Run /zflow-profile refresh and then /zflow-profile sync-project again\n` +
+      `to update the overrides after changing your profile.`,
+  )
+}
+
+/**
+ * Main handler for the `/zflow-profile` command.
+ *
+ * Parses the first argument to dispatch to the correct subcommand handler.
+ * Supported subcommands:
+ *   (no args)  — show active profile summary
+ *   default    — activate the default profile
+ *   show       — display detailed profile info
+ *   lanes      — show lane definitions and status
+ *   refresh    — force re-resolution
+ *   sync-project — write resolved overrides to .pi/settings.json
+ */
+async function handleProfileCommand(
+  args: string,
+  ctx: { ui: {
+    notify: (message: string, type?: "info" | "warning" | "error") => void
+    setStatus: (key: string, text: string | undefined) => void
+    confirm: (title: string, message: string) => Promise<boolean>
+  }},
+): Promise<void> {
+  const trimmed = args.trim()
+  const subcommand = trimmed.split(/\s+/)[0]?.toLowerCase() ?? ""
+
+  if (!subcommand) {
+    await handleNoArgs(ctx.ui)
+    return
+  }
+
+  switch (subcommand) {
+    case "default":
+      await handleDefault(ctx.ui)
+      break
+    case "show":
+      await handleShow(ctx.ui)
+      break
+    case "lanes":
+      await handleLanes(ctx.ui)
+      break
+    case "refresh":
+      await handleRefresh(ctx.ui)
+      break
+    case "sync-project":
+      await handleSyncProject(ctx.ui)
+      break
+    default:
+      ctx.ui.notify(
+        `Unknown subcommand: "${subcommand}".\n\n` +
+          `Available subcommands:\n` +
+          `  /zflow-profile          — show active profile summary\n` +
+          `  /zflow-profile default   — activate the default profile\n` +
+          `  /zflow-profile show      — display detailed profile info\n` +
+          `  /zflow-profile lanes     — show lane definitions and status\n` +
+          `  /zflow-profile refresh   — force re-resolution\n` +
+          `  /zflow-profile sync-project — write resolved overrides to .pi/settings.json`,
+      )
+  }
+}
+
 // ── Extension activation ────────────────────────────────────────
 
 /**
@@ -447,4 +936,21 @@ export default function activateZflowProfilesExtension(pi: ExtensionAPI): void {
   }
 
   registry.provide(PROFILES_CAPABILITY, profileService)
+
+  // ── Register the /zflow-profile command ────────────────────────
+  pi.registerCommand("zflow-profile", {
+    description:
+      "Manage and inspect zflow profiles. Subcommands: " +
+      "default, show, lanes, refresh, sync-project. " +
+      "Use without arguments for a summary.",
+    handler: async (args: string, ctx: {
+      ui: {
+        notify: (message: string, type?: "info" | "warning" | "error") => void
+        setStatus: (key: string, text: string | undefined) => void
+        confirm: (title: string, message: string) => Promise<boolean>
+      }
+    }): Promise<void> => {
+      await handleProfileCommand(args, ctx)
+    },
+  })
 }
