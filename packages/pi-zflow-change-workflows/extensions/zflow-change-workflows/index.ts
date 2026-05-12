@@ -17,14 +17,8 @@
  *   - See orchestration.ts, apply-back.ts, verification.ts, plan-validator.ts,
  *     path-guard.ts, failure-log.ts
  */
-import type { Extension } from "@earendil-works/pi-coding-agent"
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
-const extension: Extension = {
-  name: "pi-zflow-change-workflows",
-  version: "0.1.0",
-  activate() {
-    // Registration logic will be added in Phase 7
-  },
+export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI): void {
+  // Registration logic will be added in Phase 7
 }
-
-export default extension

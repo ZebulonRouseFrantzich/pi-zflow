@@ -5,7 +5,7 @@ description: |
   Produce versioned planning artifacts for a requested change. Explores
   the codebase, resolves decisions with the user, and writes structured
   plan artifacts (design, execution-groups, standards, verification).
-tools: read, grep, find, ls, bash, zflow_write_plan_artifact, web_search, fetch_content
+tools: read, grep, find, ls, bash, zflow_write_plan_artifact, web_search, fetch_content, subagent
 thinking: high
 model: placeholder
 fallbackModels:

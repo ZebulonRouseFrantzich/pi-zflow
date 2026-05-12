@@ -16,14 +16,8 @@
  *   - No required public command in v1; may expose `/zflow-runecontext status`
  *   - See detect.ts, resolve-change.ts, runectx.ts
  */
-import type { Extension } from "@earendil-works/pi-coding-agent"
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
-const extension: Extension = {
-  name: "pi-zflow-runecontext",
-  version: "0.1.0",
-  activate() {
-    // Registration logic will be added in Phase 3
-  },
+export default function activateZflowRunecontextExtension(pi: ExtensionAPI): void {
+  // Registration logic will be added in Phase 3
 }
-
-export default extension

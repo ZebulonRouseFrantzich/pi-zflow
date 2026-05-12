@@ -22,6 +22,7 @@ import {
 import { fileURLToPath } from "node:url"
 import { dirname, resolve } from "node:path"
 import { createRequire } from "node:module"
+import { existsSync } from "node:fs"
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
@@ -47,8 +48,6 @@ function resolveZflowDocPaths(extensionRoot: string): ZflowDocPaths {
   // From the agents package root, go up 2 more levels to reach repo root in monorepo layout
   let repoRoot = resolve(pkgRoot, "..", "..")
 
-  // Verify by checking for the implementation plan
-  const { existsSync } = require("fs") as typeof import("fs")
   let implementationPlanPath: string | undefined
   let packageSplitContractPath: string | undefined
   let agentsPath: string | undefined
@@ -90,8 +89,9 @@ function resolveZflowDocPaths(extensionRoot: string): ZflowDocPaths {
 /**
  * Resolve Pi's own documentation paths.
  *
- * Uses `require.resolve` to find the Pi agent package on disk, then
- * navigates to the standard documentation files.
+ * Uses `createRequire` to find the Pi coding-agent package on disk, then
+ * navigates to the standard documentation files. Gracefully degrades when
+ * the package cannot be resolved (e.g. during testing without the Pi runtime).
  */
 function resolvePiDocPaths(): PiDocPaths {
   const _require = createRequire(import.meta.url)
@@ -104,7 +104,6 @@ function resolvePiDocPaths(): PiDocPaths {
     piRoot = resolve(piEntry, "..", "..")
 
     // Verify: Pi's README.md should be at the root
-    const { existsSync } = require("fs") as typeof import("fs")
     const readmeCandidate = resolve(piRoot, "README.md")
     if (!existsSync(readmeCandidate)) {
       // Try one level up (dist/ layout)
@@ -119,7 +118,6 @@ function resolvePiDocPaths(): PiDocPaths {
     return { readmePath: "", docsPath: "", examplesPath: "" }
   }
 
-  const { existsSync } = require("fs") as typeof import("fs")
   const readmePath = resolve(piRoot, "README.md")
   const docsPath = resolve(piRoot, "docs")
   const examplesPath = resolve(piRoot, "examples")

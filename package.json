@@ -9,11 +9,10 @@
   "scripts": {
     "clean": "git clean -fdX packages/",
     "bootstrap": "npm install --workspaces",
-    "test": "npm run test:core && npm run test:artifacts",
+    "test": "npm run test:all",
     "test:core": "npx tsx --test packages/pi-zflow-core/test/*.test.ts",
-    "test:artifacts": "npx tsx --test packages/pi-zflow-artifacts/test/*.test.ts 2>/dev/null || echo 'INFO: artifact tests not yet created'",
-    "test:watch": "npx tsx --test --watch packages/pi-zflow-core/test/*.test.ts",
-    "test:all": "for pkg in packages/*/; do if [ -d \"$pkg/test\" ]; then echo \"=== Testing $pkg ===\"; npx tsx --test \"$pkg/test\"/*.test.ts; fi; done"
+    "test:all": "sh -c 'set -e; for pkg in packages/*/; do test_dir=\"${pkg}test\"; if [ -d \"$test_dir\" ] && find \"$test_dir\" -maxdepth 1 -name \"*.test.ts\" -print -quit | grep -q .; then npx tsx --test \"$test_dir\"/*.test.ts; fi; done'",
+    "test:watch": "npx tsx --test --watch packages/pi-zflow-core/test/*.test.ts"
   },
   "engines": {
     "node": ">=22.0.0"

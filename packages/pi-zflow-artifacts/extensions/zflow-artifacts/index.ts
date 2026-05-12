@@ -26,8 +26,10 @@
  * ## Safety invariants
  *
  * - The tool is the ONLY write mechanism available to planner agents.
- *   Planner agents must NOT have `edit`, `write`, or `bash` in their
- *   frontmatter `tools:` field.
+ *   Planner agents must NOT have `edit` or `write` in their frontmatter
+ *   `tools:` field. They may have `bash` for read-only exploration (e.g.
+ *   `ls`, `grep`, `find`, `cat`); plan-mode enforcement at runtime blocks
+ *   write/delete operations via bash policy.
  * - The tool participates in Pi's file mutation queue when the platform
  *   supports it.
  * - The registered tool name is `zflow_write_plan_artifact`.
@@ -43,21 +45,15 @@
  * See `src/write-plan-artifact.ts` for the implementation contract.
  * See `src/artifact-paths.ts` for `resolvePlanArtifactPath()`.
  */
-import type { Extension } from "@earendil-works/pi-coding-agent"
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
-const extension: Extension = {
-  name: "pi-zflow-artifacts",
-  version: "0.1.0",
-  activate() {
-    // Phase 2+:
-    //   1. const registry = getZflowRegistry()
-    //   2. registry.claim({ capability: "artifacts", version: "0.1.0", provider: "pi-zflow-artifacts" })
-    //   3. Register zflow_write_plan_artifact tool
-    //   4. registry.provide("artifacts", artifactService)
-    //
-    // See src/state-index.ts, src/plan-state.ts, src/run-state.ts,
-    // src/cleanup-metadata.ts, src/write-plan-artifact.ts
-  },
+export default function activateZflowArtifactsExtension(pi: ExtensionAPI): void {
+  // Phase 2+:
+  //   1. const registry = getZflowRegistry()
+  //   2. registry.claim({ capability: "artifacts", version: "0.1.0", provider: "pi-zflow-artifacts" })
+  //   3. Register zflow_write_plan_artifact tool
+  //   4. registry.provide("artifacts", artifactService)
+  //
+  // See src/state-index.ts, src/plan-state.ts, src/run-state.ts,
+  // src/cleanup-metadata.ts, src/write-plan-artifact.ts
 }
-
-export default extension

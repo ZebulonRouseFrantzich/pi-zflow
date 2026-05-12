@@ -16,14 +16,8 @@
  *
  * Related: synthesizer agent (zflow.synthesizer) consolidates review findings.
  */
-import type { Extension } from "@earendil-works/pi-coding-agent"
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
-const extension: Extension = {
-  name: "pi-zflow-review",
-  version: "0.1.0",
-  activate() {
-    // Registration logic will be added in Phase 6
-  },
+export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
+  // Registration logic will be added in Phase 6
 }
-
-export default extension

@@ -13,14 +13,8 @@
  *   - Register `/zflow-plan`, `/zflow-plan status`, `/zflow-plan exit` commands
  *   - See state.ts, bash-policy.ts
  */
-import type { Extension } from "@earendil-works/pi-coding-agent"
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
-const extension: Extension = {
-  name: "pi-zflow-plan-mode",
-  version: "0.1.0",
-  activate() {
-    // Registration logic will be added in Phase 2
-  },
+export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
+  // Registration logic will be added in Phase 2
 }
-
-export default extension

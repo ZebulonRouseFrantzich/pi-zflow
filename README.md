@@ -37,6 +37,16 @@ The minimum Pi version has been tested against:
 - [x] Session hooks needed by `pi-zflow-compaction` / `zflow-compaction` — Pi extension docs confirm compaction events (implementation deferred to Phase 8)
 - [x] Active tool restrictions needed by `/zflow-plan` — Pi extension docs confirm `pi.setActiveTools()` support (implementation deferred to Phase 2)
 
+### Package publication status
+
+All child packages in `packages/*` are currently marked `"private": true`.
+This is intentional for local development — it prevents accidental publication
+before the Phase 1 asset skeleton is stable and tested. The modular boundaries,
+inter-package import paths, and `pi` manifest keys are designed for independent
+publishability. When the team is ready to publish, remove `"private": true`
+from the relevant child `package.json` files and publish each scoped npm
+package independently, following the staged approach in `package-split-details.md`.
+
 ### Pin policy
 
 **No floating `latest` pins.** Every dependency in the foundation stack and every child package reference must have an exact version or exact git ref. This applies to:

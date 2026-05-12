@@ -14,14 +14,8 @@
  *   - Register `/zflow-profile ...` commands
  *   - See profiles.ts, model-resolution.ts, health.ts
  */
-import type { Extension } from "@earendil-works/pi-coding-agent"
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
-const extension: Extension = {
-  name: "pi-zflow-profiles",
-  version: "0.1.0",
-  activate() {
-    // Registration logic will be added in Phase 2
-  },
+export default function activateZflowProfilesExtension(pi: ExtensionAPI): void {
+  // Registration logic will be added in Phase 2
 }
-
-export default extension
