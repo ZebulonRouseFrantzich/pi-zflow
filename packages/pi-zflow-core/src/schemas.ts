@@ -77,18 +77,20 @@ export interface ChainDefinition {
 
 /** Install manifest recording deployed agents, chains, and skills. */
 export interface InstallManifest {
-  /** Package version that was installed */
+  /** Package version that was installed (matches package.json version) */
   version: string
-  /** ISO 8601 timestamp of installation */
+  /** Source reference (npm package name, local path, or git ref) */
+  source: string
+  /** ISO 8601 timestamp of initial installation */
   installedAt: string
-  /** ISO 8601 timestamp of last update (if updated) */
-  updatedAt?: string
-  /** Paths to installed agent files */
-  agents?: string[]
-  /** Paths to installed chain files */
-  chains?: string[]
-  /** Paths to installed skill directories */
-  skills?: string[]
+  /** ISO 8601 timestamp of last update */
+  updatedAt: string
+  /** Filenames of installed agent markdown files (e.g. ["planner-frontier.md"]) */
+  installedAgents: string[]
+  /** Filenames of installed chain markdown files (e.g. ["parallel-review.chain.md"]) */
+  installedChains: string[]
+  /** Directory names of installed skill directories (e.g. ["change-doc-workflow"]) */
+  installedSkills: string[]
 }
 
 /** Descriptor for a custom tool registration. */
