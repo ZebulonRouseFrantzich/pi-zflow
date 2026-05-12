@@ -1,7 +1,6 @@
 {
   "name": "pi-zflow",
   "version": "0.1.0",
-  "private": true,
   "description": "pi-zflow — umbrella Pi package that bundles the complete modular harness customization suite",
   "type": "module",
   "main": "./src/index.ts",
@@ -10,7 +9,11 @@
     ".": "./src/index.ts",
     "./package.json": "./package.json"
   },
-  "keywords": ["pi-package", "pi-zflow", "harness"],
+  "keywords": [
+    "pi-package",
+    "pi-zflow",
+    "harness"
+  ],
   "license": "MIT",
   "dependencies": {
     "pi-zflow-core": "0.1.0",

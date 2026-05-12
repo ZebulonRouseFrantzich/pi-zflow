@@ -1,82 +1,44 @@
 {
-  "$schema": "./profiles.schema.json",
-  "description": "Baseline default profile for pi-zflow. All lanes validated against the live model registry during Phase 0 Task 0.8.",
+  "description": "Baseline default profile for pi-zflow v1. Uses logical lane names only; model/provider resolution happens at runtime via the profiles extension (Phase 2).",
 
   "profiles": {
     "default": {
-      "description": "Default profile — general-purpose planning and implementation.",
+      "description": "Default profile — general-purpose planning, implementation, and review.",
 
       "lanes": {
-        "planning-frontier": {
-          "purpose": "Strategic planning, architecture design, complex reasoning tasks",
-          "providers": [
-            {
-              "provider": "openai-codex",
-              "model": "gpt-5.4",
-              "weight": 1,
-              "thinking": "xhigh"
-            },
-            {
-              "provider": "opencode-go",
-              "model": "mimo-v2.5-pro",
-              "weight": 2,
-              "thinking": "xhigh"
-            }
-          ]
+        "economy": {
+          "purpose": "Cost-effective lane for routine tasks: implementation, verification, repo mapping, synthesis, plan validation",
+          "optional": false
         },
-
-        "worker-cheap": {
-          "purpose": "Implementation, editing, straightforward file manipulation",
-          "providers": [
-            {
-              "provider": "openai-codex",
-              "model": "gpt-5.4-mini",
-              "weight": 1,
-              "thinking": "high"
-            },
-            {
-              "provider": "opencode-go",
-              "model": "deepseek-v4-flash",
-              "weight": 2,
-              "thinking": "high"
-            }
-          ]
+        "accelerated": {
+          "purpose": "Higher-capability lane for complex work: planning, hard implementation, code review, plan review",
+          "optional": false
         },
-
-        "review-system": {
-          "purpose": "Code review, plan review, PR review — optional lane, graceful degradation if unavailable",
-          "optional": true,
-          "providers": [
-            {
-              "provider": "openai-codex",
-              "model": "gpt-5.3-codex",
-              "weight": 1,
-              "thinking": "high"
-            },
-            {
-              "provider": "opencode-go",
-              "model": "qwen3.6-plus",
-              "weight": 2,
-              "thinking": "high"
-            }
-          ]
+        "specialist": {
+          "purpose": "Specialist lane for security and system-level analysis — graceful degradation if unavailable",
+          "optional": true
         }
       },
 
-      "recommendations": {
-        "packages": [
-          {
-            "package": "@benvargas/pi-openai-verbosity",
-            "condition": "activeLaneProvider === 'openai-codex'",
-            "reason": "Reduces verbosity in OpenAI Codex responses."
-          }
-        ]
+      "agentBindings": {
+        "zflow.planner-frontier": "accelerated",
+        "zflow.plan-validator": "economy",
+        "zflow.implement-routine": "economy",
+        "zflow.implement-hard": "accelerated",
+        "zflow.verifier": "economy",
+        "zflow.plan-review-correctness": "accelerated",
+        "zflow.plan-review-integration": "accelerated",
+        "zflow.plan-review-feasibility": "accelerated",
+        "zflow.review-correctness": "accelerated",
+        "zflow.review-integration": "accelerated",
+        "zflow.review-security": "specialist",
+        "zflow.review-logic": "accelerated",
+        "zflow.review-system": "specialist",
+        "zflow.synthesizer": "economy",
+        "zflow.repo-mapper": "economy"
       },
 
-      "verbosity": {
-        "default": "normal",
-        "codex-override": "concise"
-      }
+      "verificationCommand": "npm test"
     }
   }
 }

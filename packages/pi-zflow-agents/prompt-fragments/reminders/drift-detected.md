@@ -1,0 +1,1 @@
+**Drift detected.** The implementation has deviated from the approved plan. Stop dependent execution immediately. File a structured deviation report at `<runtime-state-dir>/plans/{changeId}/deviations/{planVersion}/` describing what drifted, why, and what corrective action is needed. Do not continue implementing until the deviation is resolved or the plan is revised.

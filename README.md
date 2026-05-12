@@ -37,6 +37,16 @@ The minimum Pi version has been tested against:
 - [x] Session hooks needed by `pi-zflow-compaction` / `zflow-compaction` — Pi extension docs confirm compaction events (implementation deferred to Phase 8)
 - [x] Active tool restrictions needed by `/zflow-plan` — Pi extension docs confirm `pi.setActiveTools()` support (implementation deferred to Phase 2)
 
+### Package publication status
+
+All child packages in `packages/*` are currently marked `"private": true`.
+This is intentional for local development — it prevents accidental publication
+before the Phase 1 asset skeleton is stable and tested. The modular boundaries,
+inter-package import paths, and `pi` manifest keys are designed for independent
+publishability. When the team is ready to publish, remove `"private": true`
+from the relevant child `package.json` files and publish each scoped npm
+package independently, following the staged approach in `package-split-details.md`.
+
 ### Pin policy
 
 **No floating `latest` pins.** Every dependency in the foundation stack and every child package reference must have an exact version or exact git ref. This applies to:
@@ -198,6 +208,7 @@ If a conflict is detected, the system must fail fast with an actionable message 
 
 - All public commands **must** be namespaced: `/zflow-*`
 - All custom tools **must** be namespaced: `zflow_*`
+- Prompt templates (slash-command helpers) use `/zflow-draft-*` to avoid collision with canonical extension commands (`/zflow-change-*`, `/zflow-review-*`)
 - Short aliases (`/plan`, `/profile`, `/review-pr`, `/change-prepare`) are opt-in only
 - No child package may register short aliases by default
 - Alias registration must check for existing commands and avoid shadowing another package
@@ -352,6 +363,81 @@ Soft-blocked (severity: `warn` — allowed with diagnostic):
 dist/**, .cache/**, .next/**, ~/.config/**
 ```
 
+## Planner artifact tool: `zflow_write_plan_artifact`
+
+`zflow_write_plan_artifact` is a narrow custom tool available **only to planner
+and replan agents** (`zflow.planner-frontier`). It writes structured planning
+artifacts under a safe, deterministic path.
+
+### Purpose
+
+Allow planners to produce versioned design documents without any ability to
+modify source code. The tool is the **only write mechanism** available to
+planner agents — they cannot use `edit`, `write`, or mutation-capable `bash`.
+
+### Contract
+
+| Parameter     | Type   | Validation                                                        | Notes                                                                     |
+| ------------- | ------ | ----------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `changeId`    | string | `assertSafeChangeId()` — kebab-case, alphanumeric + hyphens only  | Uniquely identifies the change (e.g. `add-auth-flow` or `fix-cache-race`) |
+| `planVersion` | string | Must match `/^v\d+$/` (e.g. `v1`, `v2`)                           | Plans start at `v1`; replanning increments                                |
+| `artifact`    | string | One of: `design`, `execution-groups`, `standards`, `verification` | The four mandatory plan artifact types                                    |
+| `content`     | string | Markdown body (no additional validation beyond size limits)       | Full markdown content of the artifact                                     |
+
+### Destination path
+
+```
+<runtime-state-dir>/plans/{changeId}/{planVersion}/{artifact}.md
+```
+
+Example:
+
+```
+/tmp/pi-zflow-<hash>/plans/add-auth-flow/v1/design.md
+```
+
+### Safety rules
+
+| Rule                        | Enforcement                                                                                                                                                                                          |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Path confinement**        | The destination must normalise under `<runtime-state-dir>/plans/{changeId}/{planVersion}/`. Path separators in `changeId`, `..` traversal, and arbitrary directory names in `artifact` are rejected. |
+| **Artifact type allowlist** | Only the four approved artifact kinds (`design`, `execution-groups`, `standards`, `verification`) are accepted. Any other value is rejected.                                                         |
+| **Overwrite policy**        | Only approved plan artifacts may be overwritten. Non-artifact files under `<runtime-state-dir>/plans/` are protected.                                                                                |
+| **Atomic write**            | Content is written to a `.tmp` file first, then renamed to the target path. Partial writes are never visible.                                                                                        |
+| **Metadata recording**      | After a successful write, the artifact hash (SHA-256) and mtime are recorded in the plan's runtime metadata (`plan-state.json`).                                                                     |
+| **Role restriction**        | The tool answers only for planner/replan agents whose allowlisted tools include `zflow_write_plan_artifact`. Currently only `zflow.planner-frontier`.                                                |
+
+### Pseudocode
+
+```ts
+function writePlanArtifact({ changeId, planVersion, artifact, content }) {
+  assertSafeChangeId(changeId); // kebab-case only
+  assert(/^v\d+$/.test(planVersion)); // v1, v2, ...
+  assert(
+    ["design", "execution-groups", "standards", "verification"].includes(
+      artifact,
+    ),
+  );
+  const target = resolvePlanArtifactPath(changeId, planVersion, artifact);
+  atomicWrite(target, content); // write .tmp → rename
+  recordArtifactMetadata(changeId, planVersion, artifact, hash(content));
+}
+```
+
+### Implementation targets
+
+- Path resolution: `packages/pi-zflow-artifacts/src/artifact-paths.ts` — `resolvePlanArtifactPath()`
+- Tool implementation: `packages/pi-zflow-artifacts/src/write-plan-artifact.ts`
+- Tool registration: `packages/pi-zflow-artifacts/extensions/zflow-artifacts/index.ts`
+
+### Related constraints
+
+- The planner must also never use `edit`, `write`, or mutation-capable `bash`.
+  This is enforced by the agent's `tools:` frontmatter allowlist and, when plan
+  mode is active, by `pi.setActiveTools()`.
+- Implementers must never write to plan artifact paths. This is enforced by
+  the path guard (`path-guard.ts`) with `canWrite()` intent distinction.
+
 ## Worktree setup hooks
 
 Some repos need generated files, symlink hydration, env stubs, or other bootstrap inside isolated worktrees.
@@ -380,6 +466,349 @@ packages/pi-zflow-change-workflows/templates/worktree-setup-hooks/
 | `generic-pnpm-workspace.mjs` | pnpm workspace monorepos                    |
 | `generic-env-stub.sh`        | Env stub generation                         |
 | `generic-codegen.sh`         | Code generation (Prisma, GraphQL, protobuf) |
+
+## Install flow
+
+### Prerequisites
+
+- Pi agent installed and configured (minimum version 0.74.0)
+- Node.js >= 22.0.0
+
+### Install the full umbrella suite
+
+```bash
+pi install npm:pi-zflow@<PIN>
+```
+
+This installs `packages/pi-zflow` and pulls in all child packages as npm dependencies. The umbrella's `pi` manifest exposes the extensions, skills, and prompts from each child package.
+
+After installation, use `/zflow-setup-agents` to install agent and chain markdown files into Pi discovery directories (see [Agent/chains installation](#agentchains-installation) below).
+
+### Install individual child packages
+
+Each Pi-enabled child package can be installed independently. This is useful when you only need a subset of capabilities.
+
+Examples:
+
+```bash
+# Profiles only
+pi install npm:pi-zflow-profiles@<PIN>
+
+# Profiles + Plan mode
+pi install npm:pi-zflow-profiles@<PIN>
+pi install npm:pi-zflow-plan-mode@<PIN>
+
+# Agents/chains/skills only (manual orchestration)
+pi install npm:pi-zflow-agents@<PIN>
+# Then run /zflow-setup-agents to deploy agents and chains
+```
+
+`pi-zflow-core` is a library-only package and is not installed directly as a Pi package. It is pulled in as a dependency by any child package that needs it.
+
+### Package filtering
+
+Pi supports filtering which resources are loaded from an installed package. This is useful when you want the umbrella but only need specific child packages active:
+
+**Example — Pi settings.json (user scope):**
+
+```json
+{
+  "packages": [
+    {
+      "source": "npm:pi-zflow@<PIN>",
+      "extensions": [
+        "node_modules/pi-zflow-profiles/extensions",
+        "node_modules/pi-zflow-plan-mode/extensions"
+      ],
+      "skills": [],
+      "prompts": []
+    }
+  ]
+}
+```
+
+This loads only the profiles and plan-mode extensions from the umbrella. The `skills` and `prompts` arrays are explicitly set to empty to prevent loading agent skills and prompt templates.
+
+**Filtering by resource type:**
+
+| Filter key   | Effect                                    |
+| ------------ | ----------------------------------------- |
+| `extensions` | Array of extension paths to load (or all) |
+| `skills`     | Array of skill directory paths (or none)  |
+| `prompts`    | Array of prompt directory paths (or none) |
+| `themes`     | Array of theme paths (or none)            |
+
+Setting a filter key to an empty array `[]` disables loading of that resource type. Omitting the key loads all resources the package declares.
+
+### Agent/chains installation
+
+Pi does not have native `agents` or `chains` manifest keys. Agent and chain markdown files shipped by `pi-zflow-agents` must be installed into Pi subagents discovery directories.
+
+**Default install locations:**
+
+| Resource         | Directory                                 |
+| ---------------- | ----------------------------------------- |
+| Agent markdown   | `~/.pi/agent/agents/zflow/`               |
+| Chain markdown   | `~/.pi/agent/chains/zflow/`               |
+| Install manifest | `~/.pi/agent/zflow/install-manifest.json` |
+
+**Install flow:**
+
+1. Install `pi-zflow-agents` (as part of the umbrella or standalone).
+2. Run `/zflow-setup-agents` to copy agent and chain files into the Pi discovery directories.
+3. Run `/zflow-update-agents` later if the package version changes.
+
+The install commands are:
+
+- **Idempotent** — re-running does not overwrite user-local edits unless `--force` is used.
+- **Tracking** — the install manifest at `~/.pi/agent/zflow/install-manifest.json` records which version's files were deployed.
+- **Scope** — user-level by default (`~/.pi/agent/...`). Project-local `.pi/agents/` and `.pi/chains/` are opt-in only.
+
+See `packages/pi-zflow-agents/extensions/zflow-agents/install.ts` and `manifest.ts` for the implementation.
+
+## Builtin agent reuse strategy
+
+`pi-zflow` reuses Pi's builtin `scout` and `context-builder` agents **by default**
+rather than creating forked `zflow.*` copies. This avoids unnecessary duplication
+and ensures compatibility with Pi ecosystem updates.
+
+### What this means
+
+- **No `zflow.scout` or `zflow.context-builder` agent file exists** in
+  `packages/pi-zflow-agents/agents/`. The builtin agents are referenced directly
+  by runtime name (`scout`, `context-builder`) in chain definitions and
+  orchestrator workflows.
+- **Customization is done via configuration overrides**, not by forking agent
+  files. When a workflow needs a specialised scout or context-builder pass, the
+  orchestrator overrides the relevant settings (system prompt fragments,
+  tool allowlist, model, thinking level) through the subagent dispatch
+  parameters or future profile bindings.
+
+### Override points
+
+Override behaviour is applied at the dispatch level, not by copying agent
+files:
+
+| Mechanism                               | Scope           | When to use                                                                                                                                        |
+| --------------------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Subagent `task` string**              | Single dispatch | Add role-specific instructions inline when calling `scout` or `context-builder` for a specific task                                                |
+| **Profile `agentBindings`**             | Workflow-wide   | Configure model, thinking, tools for `scout` or `context-builder` per profile/lane (see `packages/pi-zflow-profiles/config/profiles.example.json`) |
+| **Future: Agent frontmatter overrides** | Package-level   | If `pi-subagents` gains override-file support, apply custom frontmatter fields without forking the agent file                                      |
+
+### When to fork (rare)
+
+Only fork `scout` or `context-builder` into `zflow.*` agents if:
+
+1. The builtin agent's system prompt cannot be sufficiently redirected via
+   dispatch-level overrides.
+2. A deterministic enforcement point (e.g., a custom tool restriction) must
+   be hardcoded in the agent's frontmatter `tools:` field.
+3. The builtin agent is removed or substantially changed in a Pi update that
+   breaks the workflow, and a local fork is the only migration path.
+
+No such fork is planned for the v1 foundation. If a fork becomes necessary,
+the forked agent must be named `zflow.scout` or `zflow.context-builder` and
+stored in `packages/pi-zflow-agents/agents/`.
+
+### Chains referencing builtin agents
+
+The following chain files reference builtin agents directly (not `zflow.*`
+variants):
+
+| Chain file                            | Builtin agent used |
+| ------------------------------------- | ------------------ |
+| `chains/scout-plan-validate.chain.md` | `scout`            |
+| `chains/plan-and-implement.chain.md`  | `scout`            |
+
+These references work because `pi-subagents` resolves agent names by searching
+discovery directories in priority order: project agents > user agents >
+builtin agents. The builtin `scout` and `context-builder` are always
+available in the lowest-priority discovery tier.
+
+## System prompt architecture
+
+The harness uses a **modular, multi-layered** system prompt delivery strategy.
+Each layer is delivered by a different mechanism and serves a distinct purpose.
+
+### Layer hierarchy
+
+| Layer             | Delivery mechanism                                            | Contents                                                                                                                                                                                           | Scope                                                 |
+| ----------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Pi default        | Built into Pi                                                 | Dynamic tool listings, guidelines, documentation paths, global rules                                                                                                                               | Every session                                         |
+| Root constitution | `APPEND_SYSTEM.md` (not `SYSTEM.md`)                          | Compact orchestrator constitution: tool discipline, truthfulness taxonomy, safety rules, workflow boundaries, context discipline, engineering judgment, platform-documentation-awareness invariant | Orchestrator and subagents that inherit system prompt |
+| Mode fragments    | Injected by extension at mode entry                           | Role-specific behaviour for `/zflow-plan`, `/zflow-change-prepare`, `/zflow-change-implement`, `/zflow-review-pr`, `/zflow-clean`                                                                  | Active during specific modes                          |
+| Runtime reminders | Injected by extension on events                               | Short factual reminders for active plan mode, approved plan loaded, drift detected, compaction handoff, tool denied, external file change, verification status                                     | On specific state transitions                         |
+| Agent prompts     | Agent markdown body (frontmatter `systemPromptMode: replace`) | Narrow role contract for each `zflow.*` agent; replaces rather than appends                                                                                                                        | The specific agent only                               |
+
+### Why `APPEND_SYSTEM.md` instead of `SYSTEM.md`
+
+- `SYSTEM.md` **replaces** Pi's default system prompt entirely. This would lose
+  Pi's dynamic tool listings, guidelines, and built-in documentation paths,
+  forcing the harness to replicate all of Pi's default behaviour.
+- `APPEND_SYSTEM.md` **appends** to Pi's default prompt. The root constitution
+  is added on top of Pi's built-in instructions, preserving tool listings and
+  documentation awareness while adding pi-zflow-specific rules.
+- When a user supplies their own `SYSTEM.md` (which fully replaces the default),
+  the `before_agent_start` extension handler backfills Pi and pi-zflow
+  documentation paths into the effective prompt.
+
+### Prompt fragments vs slash-command prompts
+
+Files under `prompt-fragments/` are **not** auto-discovered by Pi's
+`pi.prompts` manifest key. They are not slash-command prompt templates.
+Instead they are:
+
+- **Root-orchestrator fragment** (`root-orchestrator.md`) — delivered via
+  `APPEND_SYSTEM.md` as the compact constitution.
+- **Mode fragments** (`modes/` directory) — injected into the prompt by
+  the plan-mode and workflow extensions when a mode becomes active.
+- **Runtime reminders** (`reminders/` directory) — injected on specific
+  events such as plan mode entry, drift detection, or compaction handoff.
+
+This separation ensures that:
+
+- The root constitution stays compact and focused.
+- Mode-specific rules only appear when the mode is active.
+- Runtime reminders are short, factual, and state-specific.
+- No fragment accidentally becomes a user-invokable slash command.
+
+### Planner source-read-only invariant
+
+The planner agent (`zflow.planner-frontier`) is **source-read-only by design**.
+It may only use `zflow_write_plan_artifact` to write plan artifacts under
+`<runtime-state-dir>/plans/`. It must never use `edit`, `write`, or
+mutation-capable `bash`. This invariant is enforced at three levels:
+
+1. **Agent frontmatter** — the planner's `tools:` allowlist includes
+   `zflow_write_plan_artifact` but excludes `edit` and `write`.
+2. **Custom tool gating** — `zflow_write_plan_artifact` only writes to
+   approved plan-artifact paths.
+3. **Plan-mode enforcement** — when `/zflow-plan` mode is active,
+   `pi.setActiveTools()` restricts the tool set to read-only.
+
+## Skill inventory
+
+Seven focused skills live under `packages/pi-zflow-agents/skills/`. Each is
+injectable into agent frontmatter via the `skills:` field.
+
+| Skill                          | Purpose                                                                                                                                                                                   | Used by                                                                               |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `change-doc-workflow`          | Ad-hoc/non-RuneContext change docs, planning-artifact structure (design, execution-groups, standards, verification), decision-completeness expectations, artifact-first lifecycle         | `zflow.planner-frontier`, `zflow.plan-validator`, plan-review agents                  |
+| `runecontext-workflow`         | RuneContext change-document flavors, canonical precedence rules, status handling, detection paths, per-agent interaction rules                                                            | `zflow.planner-frontier`, `zflow.plan-review-correctness`                             |
+| `implementation-orchestration` | Execution-group discipline (≤7 files, ≤3 phases), task ownership, worker execution sequence, tool guidance, deviation protocol                                                            | `zflow.implement-routine`, `zflow.implement-hard`, `zflow.verifier`                   |
+| `multi-model-code-review`      | Reviewer roles (correctness, integration, security, logic, system), 4-level severity scheme, structured findings format, synthesis rules (deduplication, support/dissent, coverage notes) | All `zflow.review-*` agents, `zflow.synthesizer`                                      |
+| `code-skeleton`                | Compact module signatures and structural summaries for planning and context building without reading full source                                                                          | `zflow.implement-routine`, `zflow.implement-hard`, `zflow.plan-review-feasibility`    |
+| `plan-drift-protocol`          | Deviation detection, deviation-report structure, filing triggers, post-filing workflow, drift prevention tips                                                                             | `zflow.implement-hard`                                                                |
+| `repository-map`               | High-level repo tree overview generation, map format conventions, usage for planning/context/review                                                                                       | `zflow.repo-mapper`, `zflow.plan-review-integration`, `zflow.plan-review-feasibility` |
+
+## Agent and chain overview
+
+### Custom agents (`packages/pi-zflow-agents/agents/`)
+
+All 15 custom agents use `package: zflow` in their frontmatter, making their
+runtime names `zflow.<name>`. Each is a narrow role contract with
+`systemPromptMode: replace`, explicit `tools:` allowlists, and focused skills.
+
+| Runtime name                    | Role                       | Tools                                                                                      | Skills                                                           |
+| ------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| `zflow.planner-frontier`        | Planning artifact author   | read, grep, find, ls, bash, zflow_write_plan_artifact, web_search, fetch_content, subagent | change-doc-workflow, runecontext-workflow                        |
+| `zflow.plan-validator`          | Plan structural validation | read, grep, find, ls                                                                       | change-doc-workflow                                              |
+| `zflow.implement-routine`       | Routine implementation     | read, grep, find, ls, bash, edit, write                                                    | implementation-orchestration, code-skeleton                      |
+| `zflow.implement-hard`          | Complex implementation     | read, grep, find, ls, bash, edit, write, subagent                                          | implementation-orchestration, code-skeleton, plan-drift-protocol |
+| `zflow.verifier`                | Scoped verification        | read, grep, find, ls, bash                                                                 | implementation-orchestration                                     |
+| `zflow.plan-review-correctness` | Plan correctness review    | read, grep, find, ls                                                                       | change-doc-workflow, runecontext-workflow                        |
+| `zflow.plan-review-integration` | Plan integration review    | read, grep, find, ls                                                                       | change-doc-workflow, repository-map                              |
+| `zflow.plan-review-feasibility` | Plan feasibility review    | read, grep, find, ls, bash                                                                 | change-doc-workflow, code-skeleton, repository-map               |
+| `zflow.review-correctness`      | Code correctness review    | read, grep, find, ls                                                                       | multi-model-code-review                                          |
+| `zflow.review-integration`      | Code integration review    | read, grep, find, ls                                                                       | multi-model-code-review                                          |
+| `zflow.review-security`         | Code security review       | read, grep, find, ls                                                                       | multi-model-code-review                                          |
+| `zflow.review-logic`            | Code logic review          | read, grep, find, ls                                                                       | multi-model-code-review                                          |
+| `zflow.review-system`           | Code system review         | read, grep, find, ls                                                                       | multi-model-code-review                                          |
+| `zflow.synthesizer`             | Findings synthesis         | read, grep, find, ls                                                                       | multi-model-code-review                                          |
+| `zflow.repo-mapper`             | Repo map generation        | read, grep, find, ls, bash                                                                 | repository-map                                                   |
+
+See individual files in `packages/pi-zflow-agents/agents/` for the complete
+system prompts (role contracts).
+
+### Chain files (`packages/pi-zflow-agents/chains/`)
+
+Chain files are **reusable internal building blocks**, not the primary
+user-facing workflow UX. They are invoked by the subagent system and the
+orchestrator. The primary workflow UX is the extension command layer
+(`/zflow-*` commands).
+
+| Chain                           | Steps                                                                                                              | Purpose                                                       |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| `scout-plan-validate.chain.md`  | scout → planner → validator → plan-review-correctness → plan-review-feasibility                                    | Exploration → planning → validation → conditional plan review |
+| `plan-and-implement.chain.md`   | scout → planner → validator → implement-routine → verifier → review-correctness → review-integration → synthesizer | End-to-end artifact-first lifecycle                           |
+| `parallel-review.chain.md`      | 5 concurrent reviewers → synthesizer                                                                               | Multi-angle code review swarm                                 |
+| `implement-and-review.chain.md` | implement-routine → verifier → review-correctness → review-integration → synthesizer                               | Implementation → verification → review                        |
+| `plan-review-swarm.chain.md`    | 3 plan reviewers + plan-validator → synthesizer                                                                    | Parallel plan-review swarm with structural validation         |
+
+## Shared registry and duplicate-load behavior
+
+`pi-zflow` packages coordinate through a **global shared registry** provided
+by `pi-zflow-core`. The registry is backed by `globalThis`, so it works even
+when multiple physical copies of `pi-zflow-core` are loaded through different
+package roots.
+
+### Registry purpose
+
+The registry (`getZflowRegistry()` from `packages/pi-zflow-core/src/registry.ts`)
+prevents conflicting or duplicate registrations when:
+
+- The umbrella package and a standalone child package are both installed.
+- Multiple versions of the same child package are present in `node_modules`.
+- A user installs `pi-zflow` twice through different package sources.
+
+### Registration protocol
+
+Each Pi extension should follow this sequence on activation:
+
+```ts
+const registry = getZflowRegistry();
+
+// 1. Claim the capability — fails fast if incompatible provider already registered
+registry.claim({
+  capability: "artifacts", // namespaced capability name
+  version: "0.1.0", // semver of the capability
+  provider: "pi-zflow-artifacts", // package name
+  sourcePath: import.meta.url,
+});
+
+// 2. Register tools/commands/hooks only after claim succeeds
+// 3. Provide the service API for other packages to consume
+registry.provide("artifacts", artifactService);
+```
+
+### Load resolution outcomes
+
+| Scenario                                         | Behaviour                                                                 |
+| ------------------------------------------------ | ------------------------------------------------------------------------- |
+| Same package/capability/version loaded twice     | No-op; return existing service                                            |
+| Compatible provider already registered           | No-op; record both sources for diagnostics                                |
+| Incompatible provider/version already registered | Fail fast with diagnostic naming both packages; suggest package filtering |
+| Required capability missing                      | Command stops with actionable message naming the package to install       |
+| Optional capability missing                      | Degrade only where explicitly permitted by the phase plan                 |
+
+### Coexistence rules (from package-split-details.md)
+
+- **API-first, extension-second**: reusable logic lives in library exports;
+  extension entrypoints are thin adapters.
+- **Namespaced public surface**: commands `/zflow-*`, tools `zflow_*`,
+  events `zflow:*`.
+- **Single owner per concern**: no two packages own the same capability.
+- **No event-bus RPC**: use direct library APIs or the registry; `pi.events`
+  is only for notifications.
+- **Idempotent registration**: every extension tolerates being loaded twice.
+- **Mode-local side effects**: changes to active tools, widgets, status lines,
+  editor UI, or model/thinking settings are scoped to the active mode and
+  restored on exit.
+- **Package-filtering friendly**: each feature package makes sense when loaded
+  alone; the umbrella manifest supports include/exclude via Pi package filters.
+
+See `packages/pi-zflow-core/src/registry.ts` for the implementation.
+See `packages/pi-zflow-core/src/diagnostics.ts` for capability conflict helpers.
 
 ## License
 

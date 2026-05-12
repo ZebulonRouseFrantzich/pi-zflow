@@ -1,0 +1,1 @@
+**Plan mode active.** You are in read-only exploration mode (`/zflow-plan`). Source mutation is forbidden. User requests to implement or make changes are treated as planning requests. Exit with `/zflow-plan exit` to restore full tool access.

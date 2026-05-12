@@ -84,3 +84,82 @@ export type {
   PathGuardContext,
   CanWriteResult,
 } from "./path-guard.js"
+
+// Re-export shared capability registry
+// Also importable directly from "pi-zflow-core/registry"
+export {
+  getZflowRegistry,
+  resetZflowRegistry,
+  ZflowRegistry,
+  MissingCapabilityError,
+  IncompatibleCapabilityError,
+  areVersionsCompatible,
+} from "./registry.js"
+
+export type {
+  CapabilityClaim,
+  RegisteredCapability,
+  CapabilityChangeListener,
+  CapabilityChangeEvent,
+  RegistryDiagnostic,
+  CompatibilityMode,
+} from "./registry.js"
+
+// Re-export diagnostic helpers
+// Also importable directly from "pi-zflow-core/diagnostics"
+export {
+  formatDiagnostic,
+  printRegistryDiagnostics,
+  checkCapabilityConflict,
+  formatMissingCapability,
+  checkCommandCollision,
+  printCapabilitySummary,
+} from "./diagnostics.js"
+
+// Re-export shared config schemas (types only)
+// Also importable directly from "pi-zflow-core/schemas"
+export type {
+  LaneBinding,
+  ProfileLane,
+  Profile,
+  ProfilesConfig,
+  AgentDefinition,
+  ChainDefinition,
+  InstallManifest,
+  ToolRegistration,
+} from "./schemas.js"
+
+// Re-export namespaced identifier helpers
+// Also importable directly from "pi-zflow-core/ids"
+export {
+  COMMAND_PREFIX,
+  TOOL_PREFIX,
+  EVENT_PREFIX,
+  SESSION_ENTRY_PREFIX,
+  STATUS_KEY_PREFIX,
+  MESSAGE_TYPE_PREFIX,
+  BUILTIN_TOOLS,
+  command,
+  tool,
+  event,
+  sessionEntryType,
+  statusKey,
+  messageType,
+  checkBuiltinToolCollision,
+  checkCommandNaming,
+  checkToolNaming,
+} from "./ids.js"
+
+// Re-export platform documentation builder
+// Also importable directly from "pi-zflow-core/platform-docs"
+export {
+  buildPlatformDocsSection,
+  isPlatformDocsInjected,
+  DEFAULT_DOCS_MARKER,
+} from "./platform-docs.js"
+
+export type {
+  PiDocPaths,
+  ZflowDocPaths,
+  PlatformDocsOptions,
+} from "./platform-docs.js"

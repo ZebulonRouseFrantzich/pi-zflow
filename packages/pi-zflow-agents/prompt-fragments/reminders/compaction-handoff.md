@@ -1,0 +1,1 @@
+**Compaction handoff.** A compaction cycle has completed. Do not rely on cached or summarised state from before compaction. Reread canonical artifacts — especially plan documents, `plan-state.json`, and the approved plan — for exact decisions and current state before continuing.

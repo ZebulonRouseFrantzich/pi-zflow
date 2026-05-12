@@ -45,6 +45,32 @@ export function resolvePlanDir(
 }
 
 /**
+ * Resolve the path to a single plan artifact file.
+ *
+ * This is the destination path used by the `zflow_write_plan_artifact` tool.
+ * The path is enforced to stay under `<runtime-state-dir>/plans/{changeId}/v{version}/`.
+ *
+ * Contract (see README.md for full details):
+ * - `changeId` must be a safe kebab-case identifier (validated by `assertSafeChangeId()`).
+ * - `planVersion` must match `/^v\d+$/` (e.g. "v1", "v2").
+ * - `artifact` must be one of: "design", "execution-groups", "standards", "verification".
+ * - The result is always `<resolvePlanDir(changeId, planVersion, cwd)>/{artifact}.md`.
+ *
+ * @param changeId - Resolved safe change identifier (kebab-case)
+ * @param planVersion - Version label starting with "v" (e.g. "v1")
+ * @param artifact - Artifact kind: "design" | "execution-groups" | "standards" | "verification"
+ * @param cwd - Working directory (optional)
+ */
+export function resolvePlanArtifactPath(
+  changeId: string,
+  planVersion: string,
+  artifact: "design" | "execution-groups" | "standards" | "verification",
+  cwd?: string,
+): string {
+  return path.join(resolvePlanDir(changeId, planVersion.replace(/^v/, ""), cwd), `${artifact}.md`)
+}
+
+/**
  * Resolve the deviations directory for a specific plan version.
  *
  * Path: `<runtime-state-dir>/plans/{changeId}/deviations/{planVersion}/

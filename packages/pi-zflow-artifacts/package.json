@@ -9,9 +9,17 @@
   "exports": {
     ".": "./src/index.ts",
     "./artifact-paths": "./src/artifact-paths.ts",
+    "./state-index": "./src/state-index.ts",
+    "./plan-state": "./src/plan-state.ts",
+    "./run-state": "./src/run-state.ts",
+    "./cleanup-metadata": "./src/cleanup-metadata.ts",
+    "./write-plan-artifact": "./src/write-plan-artifact.ts",
     "./package.json": "./package.json"
   },
-  "keywords": ["pi-package", "pi-zflow"],
+  "keywords": [
+    "pi-package",
+    "pi-zflow"
+  ],
   "license": "MIT",
   "dependencies": {
     "pi-zflow-core": "0.1.0"
@@ -23,6 +31,8 @@
     "typebox": "*"
   },
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": [
+      "./extensions"
+    ]
   }
 }
