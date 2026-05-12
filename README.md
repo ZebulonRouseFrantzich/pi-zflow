@@ -261,6 +261,21 @@ Runtime state lives outside the working tree. See `docs/foundation-versions.md` 
 - `resolveInstallManifestPath()` — install manifest
 - Plus all other derived paths matching the `docs/foundation-versions.md` layout.
 
+### User-level directories (`packages/pi-zflow-core/src/user-dirs.ts`)
+
+| Directory / File | Purpose | Constant |
+|---|---|---|
+| `~/.pi/agent/agents/zflow/` | Agent markdown for `pi-subagents` | `USER_AGENTS_DIR` |
+| `~/.pi/agent/chains/zflow/` | Chain markdown for `pi-subagents` | `USER_CHAINS_DIR` |
+| `~/.pi/agent/zflow/` | State base (install manifest, active profile) | `USER_STATE_BASE` |
+| `~/.pi/agent/zflow/install-manifest.json` | Record of installed agents/chains/skills | `INSTALL_MANIFEST_PATH` |
+| `~/.pi/agent/zflow/active-profile.json` | Active profile cache | `ACTIVE_PROFILE_PATH` |
+
+**Rules**:
+- Default scope is **user-level** (`~/.pi/agent/...`).
+- Project-local `.pi/agents/` and `.pi/chains/` are **opt-in only**.
+- Directory creation is **idempotent** — `ensureUserDirs()` uses `fs.mkdir({ recursive: true })`.
+
 ### Cleanup policy
 
 | Artifact | TTL |

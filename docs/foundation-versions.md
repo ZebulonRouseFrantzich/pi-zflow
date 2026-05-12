@@ -168,11 +168,18 @@ See `packages/pi-zflow-change-workflows/` for cleanup command implementation (`/
 | Path | Resolution | Purpose | Implementation |
 |---|---|---|---|
 | `<runtime-state-dir>` | `<git-dir>/pi-zflow/` (or `os.tmpdir()/pi-zflow-<hash>` fallback) | Plan/run/review artifacts, state index | `resolveRuntimeStateDir()` in `pi-zflow-core/src/runtime-paths.ts` |
-| `<user-state-dir>` | `~/.pi/agent/zflow/` | Active profile, install manifest | `resolveUserStateDir()` in `pi-zflow-core/src/runtime-paths.ts` |
-| `~/.pi/agent/agents/zflow/` | user-level agent files | Agent markdown for `pi-subagents` | (bootstrap logic, see Task 0.7) |
-| `~/.pi/agent/chains/zflow/` | user-level chain files | Chain markdown for `pi-subagents` | (bootstrap logic, see Task 0.7) |
+| `<user-state-dir>` | `~/.pi/agent/zflow/` | Active profile cache, install manifest | `resolveUserStateDir()` in `pi-zflow-core/src/runtime-paths.ts` |
+| `~/.pi/agent/zflow/active-profile.json` | `<user-state-dir>/active-profile.json` | Active profile cache | `ACTIVE_PROFILE_PATH` in `pi-zflow-core/src/user-dirs.ts` |
+| `~/.pi/agent/zflow/install-manifest.json` | `<user-state-dir>/install-manifest.json` | Installed asset manifest | `INSTALL_MANIFEST_PATH` in `pi-zflow-core/src/user-dirs.ts` |
+| `~/.pi/agent/agents/zflow/` | `~/.pi/agent/agents/zflow/` | User-level agent markdown files | `USER_AGENTS_DIR` in `pi-zflow-core/src/user-dirs.ts` |
+| `~/.pi/agent/chains/zflow/` | `~/.pi/agent/chains/zflow/` | User-level chain markdown files | `USER_CHAINS_DIR` in `pi-zflow-core/src/user-dirs.ts` |
 
-Project-local `.pi/agents/` and `.pi/chains/` are opt-in only.
+### User-level vs project-local rule
+
+- **Default**: user-level directories (`~/.pi/agent/agents|chains|zflow/`)
+- **Project-local** (`.pi/agents/`, `.pi/chains/`): opt-in only. Created when the user explicitly passes `--local` to `/zflow-setup-agents` or when a project explicitly configures local asset paths.
+- Directory creation is **idempotent** — `ensureUserDirs()` in `pi-zflow-core/src/user-dirs.ts` uses `fs.mkdir({ recursive: true })`.
+- The `~/.pi/agent/zflow/` directory is prepared for `install-manifest.json` (agents/chains) and `active-profile.json` (profiles).
 
 ### Derived path builders
 

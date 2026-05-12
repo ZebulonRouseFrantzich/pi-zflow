@@ -30,3 +30,16 @@ export {
   resolveRuntimeStateDir,
   resolveUserStateDir,
 } from "./runtime-paths.js"
+
+// Re-export user directory bootstrap helpers
+// Also importable directly from "pi-zflow-core/user-dirs"
+export {
+  USER_STATE_BASE,
+  USER_AGENTS_DIR,
+  USER_CHAINS_DIR,
+  INSTALL_MANIFEST_PATH,
+  ACTIVE_PROFILE_PATH,
+  ensureUserDirs,
+  checkUserDirs,
+  resolveAgentInstallScope,
+} from "./user-dirs.js"

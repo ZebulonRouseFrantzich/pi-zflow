@@ -9,6 +9,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./runtime-paths": "./src/runtime-paths.ts",
+    "./user-dirs": "./src/user-dirs.ts",
     "./package.json": "./package.json"
   },
   "keywords": ["pi-package", "pi-zflow", "library"],
