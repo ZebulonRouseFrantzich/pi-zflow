@@ -1,44 +1,181 @@
 {
-  "description": "Baseline default profile for pi-zflow v1. Uses logical lane names only; model/provider resolution happens at runtime via the profiles extension (Phase 2).",
+  "default": {
+    "description": "Default profile — general-purpose planning, implementation, and review with the full lane set.",
 
-  "profiles": {
-    "default": {
-      "description": "Default profile — general-purpose planning, implementation, and review.",
-
-      "lanes": {
-        "economy": {
-          "purpose": "Cost-effective lane for routine tasks: implementation, verification, repo mapping, synthesis, plan validation",
-          "optional": false
-        },
-        "accelerated": {
-          "purpose": "Higher-capability lane for complex work: planning, hard implementation, code review, plan review",
-          "optional": false
-        },
-        "specialist": {
-          "purpose": "Specialist lane for security and system-level analysis — graceful degradation if unavailable",
-          "optional": true
-        }
+    "lanes": {
+      "scout-cheap": {
+        "required": true,
+        "thinking": "low",
+        "preferredModels": [
+          "openai/gpt-4o-mini",
+          "anthropic/claude-3-haiku",
+          "google/gemini-2.0-flash"
+        ]
       },
-
-      "agentBindings": {
-        "zflow.planner-frontier": "accelerated",
-        "zflow.plan-validator": "economy",
-        "zflow.implement-routine": "economy",
-        "zflow.implement-hard": "accelerated",
-        "zflow.verifier": "economy",
-        "zflow.plan-review-correctness": "accelerated",
-        "zflow.plan-review-integration": "accelerated",
-        "zflow.plan-review-feasibility": "accelerated",
-        "zflow.review-correctness": "accelerated",
-        "zflow.review-integration": "accelerated",
-        "zflow.review-security": "specialist",
-        "zflow.review-logic": "accelerated",
-        "zflow.review-system": "specialist",
-        "zflow.synthesizer": "economy",
-        "zflow.repo-mapper": "economy"
+      "planning-frontier": {
+        "required": true,
+        "thinking": "high",
+        "preferredModels": [
+          "openai/gpt-5.4",
+          "anthropic/claude-4-opus",
+          "google/gemini-2.5-pro"
+        ]
       },
+      "worker-cheap": {
+        "required": true,
+        "thinking": "medium",
+        "preferredModels": [
+          "openai/gpt-4o",
+          "anthropic/claude-3.5-sonnet",
+          "google/gemini-2.0-flash"
+        ]
+      },
+      "worker-strong": {
+        "required": true,
+        "thinking": "high",
+        "preferredModels": [
+          "openai/gpt-5.4-codex",
+          "anthropic/claude-4-opus",
+          "google/gemini-2.5-pro"
+        ]
+      },
+      "review-correctness": {
+        "required": true,
+        "thinking": "medium",
+        "preferredModels": [
+          "openai/gpt-5.4",
+          "anthropic/claude-4-sonnet",
+          "google/gemini-2.5-pro"
+        ]
+      },
+      "review-integration": {
+        "required": true,
+        "thinking": "medium",
+        "preferredModels": [
+          "openai/gpt-5.4",
+          "anthropic/claude-4-sonnet",
+          "google/gemini-2.5-pro"
+        ]
+      },
+      "review-security": {
+        "required": true,
+        "thinking": "high",
+        "preferredModels": [
+          "openai/gpt-5.4",
+          "anthropic/claude-4-opus",
+          "google/gemini-2.5-pro"
+        ]
+      },
+      "review-logic": {
+        "optional": true,
+        "thinking": "medium",
+        "preferredModels": ["openai/gpt-5.4", "anthropic/claude-4-sonnet"]
+      },
+      "review-system": {
+        "optional": true,
+        "thinking": "high",
+        "preferredModels": ["openai/gpt-5.4", "anthropic/claude-4-opus"]
+      },
+      "synthesis-frontier": {
+        "required": true,
+        "thinking": "high",
+        "preferredModels": [
+          "openai/gpt-5.4",
+          "anthropic/claude-4-opus",
+          "google/gemini-2.5-pro"
+        ]
+      }
+    },
 
-      "verificationCommand": "npm test"
-    }
+    "agentBindings": {
+      "scout": {
+        "lane": "scout-cheap",
+        "tools": "read, grep, find, ls, bash",
+        "maxOutput": 4000,
+        "maxSubagentDepth": 0
+      },
+      "zflow.planner-frontier": {
+        "lane": "planning-frontier",
+        "tools": "read, grep, find, ls, bash, zflow_write_plan_artifact",
+        "maxOutput": 12000,
+        "maxSubagentDepth": 1
+      },
+      "zflow.plan-validator": {
+        "lane": "worker-cheap",
+        "tools": "read, grep, find, ls",
+        "maxOutput": 6000,
+        "maxSubagentDepth": 0
+      },
+      "context-builder": {
+        "lane": "scout-cheap",
+        "tools": "read, grep, find, ls, bash",
+        "maxOutput": 4000,
+        "maxSubagentDepth": 0
+      },
+      "zflow.implement-routine": {
+        "lane": "worker-cheap",
+        "tools": "read, grep, find, ls, bash, edit, write",
+        "maxOutput": 8000,
+        "maxSubagentDepth": 0
+      },
+      "zflow.implement-hard": {
+        "lane": "worker-strong",
+        "tools": "read, grep, find, ls, bash, edit, write",
+        "maxOutput": 12000,
+        "maxSubagentDepth": 1
+      },
+      "zflow.verifier": {
+        "lane": "worker-cheap",
+        "tools": "read, grep, find, ls, bash",
+        "maxOutput": 6000,
+        "maxSubagentDepth": 0
+      },
+      "zflow.review-correctness": {
+        "lane": "review-correctness",
+        "tools": "read, grep, find, ls, code_search, fetch_content",
+        "maxOutput": 8000,
+        "maxSubagentDepth": 0
+      },
+      "zflow.review-integration": {
+        "lane": "review-integration",
+        "tools": "read, grep, find, ls, intercom",
+        "maxOutput": 8000,
+        "maxSubagentDepth": 0
+      },
+      "zflow.review-security": {
+        "lane": "review-security",
+        "tools": "read, grep, find, ls, bash, code_search",
+        "maxOutput": 10000,
+        "maxSubagentDepth": 0
+      },
+      "zflow.review-logic": {
+        "lane": "review-logic",
+        "optional": true,
+        "tools": "read, grep, find, ls, code_search",
+        "maxOutput": 8000,
+        "maxSubagentDepth": 0
+      },
+      "zflow.review-system": {
+        "lane": "review-system",
+        "optional": true,
+        "tools": "read, grep, find, ls, bash, code_search",
+        "maxOutput": 10000,
+        "maxSubagentDepth": 0
+      },
+      "zflow.synthesizer": {
+        "lane": "synthesis-frontier",
+        "tools": "read, write",
+        "maxOutput": 10000,
+        "maxSubagentDepth": 0
+      },
+      "zflow.repo-mapper": {
+        "lane": "scout-cheap",
+        "tools": "read, bash, grep, find, ls",
+        "maxOutput": 4000,
+        "maxSubagentDepth": 0
+      }
+    },
+
+    "verificationCommand": "npm test"
   }
 }
