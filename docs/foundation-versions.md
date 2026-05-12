@@ -98,37 +98,21 @@ When any child package is published to npm, update this record with the exact pu
 
 ## Ownership and overlap-avoidance policy
 
-### Single-owner mapping
+See `docs/architecture/package-ownership.md` for the canonical ownership map, explicit exclusions, and command/tool naming rules.
 
-| Concern | Owner package | Prohibited competitors |
+### Quick reference
+
+| Concern | Owner | Prohibited competitors |
 |---|---|---|
-| Orchestration (subagent runs) | `pi-subagents` | `pi-fork`, `pi-minimal-subagent`, `PiSwarm`, any other runner |
-| Compaction / output optimization | `pi-rtk-optimizer` + `pi-zflow-compaction` | none with overlapping compaction hooks |
-| External research / web access | `pi-web-access` | none in first-pass foundation |
-| Human-in-the-loop | `pi-interview` | `pi-mono-ask-user-question` (excluded) |
-| Profile / lane / model routing | `pi-zflow-profiles` | none |
-| Planning safety / read-only mode | `pi-zflow-plan-mode` | none |
-| Runtime artifacts / state | `pi-zflow-artifacts` | none |
-| Recovery / checkpoint | `pi-rewind-hook` (if enabled) | no other checkpoint package when enabled |
-| Review flows | `pi-zflow-review` | `pi-mono-review` (excluded from v1 foundation) |
-
-### Explicit exclusions from first-pass foundation
-
-- ❌ `pi-mono-review` — excluded from v1 foundation
-- ❌ `pi-mono-ask-user-question` — excluded from v1 foundation
-- ❌ any competing orchestration owner (`pi-fork`, `pi-minimal-subagent`, `PiSwarm`, etc.)
-- ❌ `codemapper` stack as indexed-navigation foundation
-- ❌ default overrides of built-in Pi tools in any `pi-zflow` child package
-- ❌ generic command aliases unless explicitly enabled by the user
-
-### Tool and command naming policy
-
-- All public commands must be namespaced: `/zflow-*`
-- Custom tools must be namespaced: `zflow_*`
-- Short aliases (`/plan`, `/profile`, `/review-pr`, `/change-prepare`) are opt-in only
-- No child package may register a short alias by default
-- Alias registration must check for existing commands and avoid shadowing another package
-- No child package may override built-in Pi tools (`read`, `bash`, `edit`, `write`, etc.)
+| Orchestration | `pi-subagents` | `pi-fork`, `pi-minimal-subagent`, `PiSwarm` |
+| Compaction | `pi-rtk-optimizer` + `pi-zflow-compaction` | overlapping compaction hooks |
+| Research | `pi-web-access` | none in foundation |
+| Human-in-the-loop | `pi-interview` | `pi-mono-ask-user-question` |
+| Profiles | `pi-zflow-profiles` | none |
+| Planning safety | `pi-zflow-plan-mode` | none |
+| Runtime artifacts | `pi-zflow-artifacts` | none |
+| Review | `pi-zflow-review` | `pi-mono-review` |
+| Recovery | runtime artifacts; `pi-rewind-hook` (opt) | other checkpoint packages when hook enabled |
 
 ---
 

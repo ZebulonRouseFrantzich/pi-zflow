@@ -85,7 +85,42 @@ Version pins are recorded in two places:
 
 ## Overlap avoidance
 
-See `docs/foundation-versions.md` for the full ownership and exclusion policy.
+**Single-owner policy.** Every concern has exactly one owner package. Do not add a second package that overlaps an owned concern.
+
+### Ownership map
+
+| Concern | Owner | Semantics |
+|---|---|---|
+| Orchestration (delegation, worktrees, background runs) | `pi-subagents` | Only subagent runner allowed. No `pi-fork`, `pi-minimal-subagent`, `PiSwarm`, or any other runner. |
+| Compaction / output optimization | `pi-rtk-optimizer` + `pi-zflow-compaction` | `pi-rtk-optimizer` owns first-pass compaction; `pi-zflow-compaction` owns session-before-compact hooks. No other package may register overlapping compaction hooks. |
+| External research / web access | `pi-web-access` | First-pass research owner. No competitor in the foundation stack. |
+| Human-in-the-loop | `pi-interview` | HITL owner. `pi-mono-ask-user-question` is explicitly excluded from the v1 foundation. |
+| Profile / lane / model routing | `pi-zflow-profiles` | Profile loading, lane resolution, active-profile cache. No other package may own profile/lane state. |
+| Planning safety / read-only mode | `pi-zflow-plan-mode` | Ad-hoc read-only planning mode, active-tool restriction. No other package may independently toggle planning safety. |
+| Runtime artifacts / state paths | `pi-zflow-artifacts` | Runtime state path resolution, plan/run/review artifact helpers, `zflow_write_plan_artifact` tool. |
+| Review flows | `pi-zflow-review` | Plan/code/PR review orchestration. `pi-mono-review` is explicitly excluded from the v1 foundation. |
+| Recovery / checkpoint | runtime artifacts; optionally `pi-rewind-hook` | If `pi-rewind-hook` is enabled, no other rewind/checkpoint package may be active by default. |
+
+### Explicit exclusions from first-pass foundation
+
+- ❌ `pi-mono-review` — excluded from v1 foundation; `pi-zflow-review` owns review
+- ❌ `pi-mono-ask-user-question` — excluded from v1 foundation; `pi-interview` owns HITL
+- ❌ Any competing orchestration owner (`pi-fork`, `pi-minimal-subagent`, `PiSwarm`, etc.)
+- ❌ `codemapper` stack as indexed-navigation foundation
+- ❌ Default overrides of built-in Pi tools (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`) in any `pi-zflow` child package
+- ❌ Generic command aliases unless explicitly enabled by the user
+
+### Command and tool naming policy
+
+- All public commands **must** be namespaced: `/zflow-*`
+- All custom tools **must** be namespaced: `zflow_*`
+- Short aliases (`/plan`, `/profile`, `/review-pr`, `/change-prepare`) are opt-in only
+- No child package may register short aliases by default
+- Alias registration must check for existing commands and avoid shadowing another package
+- No child package may override built-in Pi tools in any default configuration
+
+> See `docs/architecture/package-ownership.md` for the full canonical ownership and exclusion policy.
+> See `docs/foundation-versions.md` for version pins and the complete foundation record.
 
 ## License
 
