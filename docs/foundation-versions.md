@@ -221,3 +221,24 @@ See `docs/bootstrap-checks.md` for the full preflight check design, including:
 - Orchestrator (`runBootstrapChecks`) with conditional option flags
 - Failure handling rules for each check
 - Phase 7 integration points
+
+---
+
+## Default profile feasibility
+
+Validated in Phase 0 Task 0.8. See `docs/default-profile-feasibility.md` for full report.
+
+**Verdict**: ✅ All required lanes resolve successfully against the live model registry.
+Phase 0 does not block.
+
+**Profile fixture**: `packages/pi-zflow-profiles/config/profiles.example.json`
+
+**Resolved lanes**:
+
+| Lane | Primary | Fallback | Status |
+|---|---|---|---|
+| `planning-frontier` | `openai-codex/gpt-5.4` | `opencode-go/mimo-v2.5-pro` | ✅ resolved |
+| `worker-cheap` | `openai-codex/gpt-5.4-mini` | `opencode-go/deepseek-v4-flash` | ✅ resolved |
+| `review-system` | `openai-codex/gpt-5.3-codex` | `opencode-go/qwen3.6-plus` | ✅ resolved (optional) |
+
+**Note**: Primary lanes use `openai-codex` — consider installing `@benvargas/pi-openai-verbosity` for reduced verbosity.

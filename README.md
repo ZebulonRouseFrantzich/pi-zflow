@@ -240,6 +240,21 @@ before expensive operations:
 Failure messages are specific and actionable — each names the missing tool, provides an install hint,
 and explains what functionality is affected.
 
+## Default profile
+
+The initial baseline profile fixture is at `packages/pi-zflow-profiles/config/profiles.example.json`.
+Feasibility was validated against the live model registry — see `docs/default-profile-feasibility.md`.
+
+**Resolved lanes** (validated 2026-05-12):
+
+| Lane | Provider/model | Status |
+|---|---|---|
+| `planning-frontier` | `openai-codex/gpt-5.4` (primary), `opencode-go/mimo-v2.5-pro` (fallback) | ✅ resolved |
+| `worker-cheap` | `openai-codex/gpt-5.4-mini` (primary), `opencode-go/deepseek-v4-flash` (fallback) | ✅ resolved |
+| `review-system` | `openai-codex/gpt-5.3-codex` (primary), `opencode-go/qwen3.6-plus` (fallback) | ✅ resolved (optional) |
+
+Since primary lanes use `openai-codex`, `@benvargas/pi-openai-verbosity` is recommended (see optional package policy).
+
 ## Runtime state paths
 
 Runtime state lives outside the working tree. See `docs/foundation-versions.md` for the full path table.
