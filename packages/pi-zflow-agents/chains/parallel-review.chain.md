@@ -1,0 +1,78 @@
+---
+name: parallel-review
+package: zflow
+description: |
+  Parallel multi-angle code review swarm. Runs correctness, integration,
+  and security reviewers concurrently against the current changes, then
+  synthesises findings into a consolidated report.
+---
+
+## zflow.review-correctness
+
+output: false
+progress: false
+
+Review the current code changes for correctness: logic errors, edge
+cases, type safety, concurrency issues, regressions. Read the planning
+documents and the diff before reviewing.
+
+Use severity: critical / major / minor / nit.
+Return structured findings with file paths and line numbers.
+
+## zflow.review-integration
+
+output: false
+progress: false
+
+Review the current code changes for integration soundness: API contracts,
+cross-module coupling, data flow, pattern consistency. Read the planning
+documents and the diff before reviewing.
+
+Use severity: critical / major / minor / nit.
+Return structured findings with file paths and line numbers.
+
+## zflow.review-security
+
+output: false
+progress: false
+
+Review the current code changes for security concerns: injection vectors,
+auth/authorisation gaps, secrets exposure, input validation failures.
+Read the planning documents and the diff before reviewing.
+
+Use severity: critical / major / minor / nit.
+Return structured findings with file paths and line numbers.
+
+## zflow.review-logic
+
+output: false
+progress: false
+
+Review the current code changes for algorithmic soundness: state
+transitions, invariant preservation, off-by-one errors, termination.
+Read the planning documents and the diff before reviewing.
+
+Use severity: critical / major / minor / nit.
+Return structured findings with file paths and line numbers.
+
+## zflow.review-system
+
+output: false
+progress: false
+
+Review the current code changes for system-level concerns: performance,
+scalability, observability, resilience, resource management. Read the
+planning documents and the diff before reviewing.
+
+Use severity: critical / major / minor / nit.
+Return structured findings with file paths and line numbers.
+
+## zflow.synthesizer
+
+reads: false
+output: review-findings.md
+
+Synthesise all reviewer findings into a consolidated report.
+Deduplicate overlapping findings, record support/dissent, group by
+severity, note coverage gaps (which reviewers participated and whether
+any angles were missed), and produce a go/no-go recommendation.
