@@ -1,0 +1,29 @@
+{
+  "name": "pi-zflow-agents",
+  "version": "0.1.0",
+  "private": true,
+  "description": "pi-zflow custom agent markdown, chains, skills, prompt templates, and agent/chain setup/update commands — Pi extension",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./package.json": "./package.json"
+  },
+  "keywords": ["pi-package", "pi-zflow"],
+  "license": "MIT",
+  "dependencies": {
+    "pi-zflow-core": "0.1.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./skills"],
+    "prompts": ["./prompts"]
+  }
+}

@@ -1,0 +1,172 @@
+# Foundation Version Policy and Pin Record
+
+> **Source of truth for exact version pins and minimum Pi version.**
+> This document is the human-readable policy record. Machine-readable pins live in `package.json` manifests.
+
+## Supported Pi version
+
+| Field | Value |
+|---|---|
+| Provisional minimum before Phase 0 smoke testing | `0.74.0` |
+| Confirmed minimum after Phase 0 smoke testing | `<pending>` |
+| Last tested Pi version | `<pending>` |
+| Testing date | `<pending>` |
+
+### Smoke test checklist for Pi minimum version
+
+- [ ] Extension loading — install and load a pi-zflow child package extension
+- [ ] Chain discovery — `pi-subagents` discovers chains from `~/.pi/agent/chains/zflow/`
+- [ ] `pi-subagents` runtime — subagent subprocess runs with the correct extension context
+- [ ] Session hooks — `session_before_compact` hook fires correctly for `pi-zflow-compaction`
+- [ ] Active tool restrictions — `/zflow-plan` mode restricts tools and restores them on exit
+
+### Notes
+- If any checklist item fails, raise the minimum Pi version to the next stable release and retest.
+- Once confirmed, update this record and `README.md` with the confirmed minimum.
+
+---
+
+## Foundation package pins
+
+These are the exact versions tested and approved for the first-pass foundation stack.
+All pins must be exact — no `^`, `~`, or `latest` ranges.
+
+### Required packages
+
+| Package | Exact version/ref | Source | Status |
+|---|---|---|---|
+| `pi-subagents` | `0.24.2` | npm | Provisional — verify install and runtime |
+| `pi-rtk-optimizer` | `0.7.1` | npm | Provisional — verify install and runtime |
+| `pi-intercom` | `0.6.0` | npm | Provisional — verify install and runtime |
+
+### Recommended first-pass packages
+
+| Package | Exact version/ref | Source | Status |
+|---|---|---|---|
+| `pi-web-access` | `0.10.7` | npm | Provisional — verify install |
+| `pi-interview` | `0.8.7` | npm | Provisional — verify install |
+| `pi-mono-sentinel` | `1.11.0` | npm | Provisional — verify install |
+| `pi-mono-context-guard` | `1.7.3` | npm | Provisional — verify install |
+| `pi-mono-multi-edit` | `1.7.3` | npm | Provisional — verify install |
+| `pi-mono-auto-fix` | `0.3.1` | npm | Provisional — verify install |
+
+### Optional packages
+
+| Package | Exact version/ref | Source | Condition for install |
+|---|---|---|---|
+| `@benvargas/pi-openai-verbosity` | `<TBD>` | npm | Install when any active lane uses `openai-codex` |
+| `@benvargas/pi-synthetic-provider` | `<TBD>` | npm | Later cost/diversity optimization only |
+| `pi-rewind-hook` | `<TBD>` | npm | Optional recovery; mutually exclusive with other checkpoint packages |
+
+---
+
+## pi-zflow child package pins / local refs
+
+All child packages are currently in local development (`0.1.0`, workspace-referenced).
+When any child package is published to npm, update this record with the exact published version.
+
+| Child package | Current ref | Workspace path | Publication status |
+|---|---|---|---|
+| `pi-zflow-core` | `0.1.0` | `packages/pi-zflow-core` | Local development (workspace) |
+| `pi-zflow-artifacts` | `0.1.0` | `packages/pi-zflow-artifacts` | Local development (workspace) |
+| `pi-zflow-profiles` | `0.1.0` | `packages/pi-zflow-profiles` | Local development (workspace) |
+| `pi-zflow-plan-mode` | `0.1.0` | `packages/pi-zflow-plan-mode` | Local development (workspace) |
+| `pi-zflow-agents` | `0.1.0` | `packages/pi-zflow-agents` | Local development (workspace) |
+| `pi-zflow-review` | `0.1.0` | `packages/pi-zflow-review` | Local development (workspace) |
+| `pi-zflow-change-workflows` | `0.1.0` | `packages/pi-zflow-change-workflows` | Local development (workspace) |
+| `pi-zflow-runecontext` | `0.1.0` | `packages/pi-zflow-runecontext` | Local development (workspace) |
+| `pi-zflow-compaction` | `0.1.0` | `packages/pi-zflow-compaction` | Local development (workspace) |
+| `pi-zflow` | `0.1.0` | `packages/pi-zflow` | Local development (workspace) |
+
+---
+
+## Pin update policy
+
+1. **Before any Phase 0 smoke test**, all pins are provisional. Update pins based on test results.
+2. **After Phase 0 smoke testing**, promote pins to confirmed status in this document.
+3. **When a child package is published**, update the ref from workspace to `npm:<exact-version>`.
+4. **If a foundation package is updated**, record the old pin, the new pin, and the reason for the change.
+5. **No automation** — install or bootstrap — may use `latest` for any package in the foundation stack.
+
+### Pin change log
+
+| Date | Package | Old pin | New pin | Reason |
+|---|---|---|---|---|
+| — | — | — | — | (no changes yet) |
+
+---
+
+## Ownership and overlap-avoidance policy
+
+### Single-owner mapping
+
+| Concern | Owner package | Prohibited competitors |
+|---|---|---|
+| Orchestration (subagent runs) | `pi-subagents` | `pi-fork`, `pi-minimal-subagent`, `PiSwarm`, any other runner |
+| Compaction / output optimization | `pi-rtk-optimizer` + `pi-zflow-compaction` | none with overlapping compaction hooks |
+| External research / web access | `pi-web-access` | none in first-pass foundation |
+| Human-in-the-loop | `pi-interview` | `pi-mono-ask-user-question` (excluded) |
+| Profile / lane / model routing | `pi-zflow-profiles` | none |
+| Planning safety / read-only mode | `pi-zflow-plan-mode` | none |
+| Runtime artifacts / state | `pi-zflow-artifacts` | none |
+| Recovery / checkpoint | `pi-rewind-hook` (if enabled) | no other checkpoint package when enabled |
+| Review flows | `pi-zflow-review` | `pi-mono-review` (excluded from v1 foundation) |
+
+### Explicit exclusions from first-pass foundation
+
+- ❌ `pi-mono-review` — excluded from v1 foundation
+- ❌ `pi-mono-ask-user-question` — excluded from v1 foundation
+- ❌ any competing orchestration owner (`pi-fork`, `pi-minimal-subagent`, `PiSwarm`, etc.)
+- ❌ `codemapper` stack as indexed-navigation foundation
+- ❌ default overrides of built-in Pi tools in any `pi-zflow` child package
+- ❌ generic command aliases unless explicitly enabled by the user
+
+### Tool and command naming policy
+
+- All public commands must be namespaced: `/zflow-*`
+- Custom tools must be namespaced: `zflow_*`
+- Short aliases (`/plan`, `/profile`, `/review-pr`, `/change-prepare`) are opt-in only
+- No child package may register a short alias by default
+- Alias registration must check for existing commands and avoid shadowing another package
+- No child package may override built-in Pi tools (`read`, `bash`, `edit`, `write`, etc.)
+
+---
+
+## Cleanup policy defaults
+
+| Artifact class | Default TTL / retention | Action |
+|---|---|---|
+| Stale runtime/patch artifacts | 14 days | Auto-clean on `/zflow-clean` |
+| Failed/interrupted worktrees | 7 days | Auto-clean on `/zflow-clean` |
+| Successful temp worktrees | removed immediately after verified apply-back | Unless `--keep` or debug option used |
+
+See `packages/pi-zflow-change-workflows/` for cleanup command implementation (`/zflow-clean`).
+
+---
+
+## Runtime state paths
+
+| Path | Resolution | Purpose |
+|---|---|---|
+| `<runtime-state-dir>` | `<git-dir>/pi-zflow/` (or `os.tmpdir()/pi-zflow-<hash>` fallback) | Plan/run/review artifacts, state index |
+| `<user-state-dir>` | `~/.pi/agent/zflow/` | Active profile, install manifest |
+| `~/.pi/agent/agents/zflow/` | user-level agent files | Agent markdown for `pi-subagents` |
+| `~/.pi/agent/chains/zflow/` | user-level chain files | Chain markdown for `pi-subagents` |
+
+Project-local `.pi/agents/` and `.pi/chains/` are opt-in only.
+
+---
+
+## Bootstrap / preflight checklist
+
+Machine prerequisites for Phase 0 and beyond:
+
+| Tool | Required for | Fail action |
+|---|---|---|
+| `rtk` | Command rewriting / output compaction | Alert; does not block compaction |
+| `gh` | GitHub PR review flows (`/zflow-review-pr`) | Blocks PR submission only |
+| `glab` | GitLab MR review flows (`/zflow-review-pr`) | Blocks MR submission only |
+| `runectx` | RuneContext integration | Blocks RuneContext flows only |
+| `pi --list-models` / model registry | Default profile lane resolution | Blocks profile activation |
+
+See Phase 0 Task 0.5 for the full preflight design.

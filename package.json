@@ -1,0 +1,17 @@
+{
+  "private": true,
+  "name": "pi-zflow-workspace",
+  "version": "0.1.0",
+  "description": "pi-zflow — modular Pi harness customization suite — monorepo workspace",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "clean": "git clean -fdX packages/",
+    "bootstrap": "npm install --workspaces"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}

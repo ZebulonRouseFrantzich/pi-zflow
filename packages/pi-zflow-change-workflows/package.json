@@ -1,0 +1,27 @@
+{
+  "name": "pi-zflow-change-workflows",
+  "version": "0.1.0",
+  "private": true,
+  "description": "pi-zflow formal prepare/implement orchestration, plan lifecycle, worktree execution, cleanup — Pi extension",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./package.json": "./package.json"
+  },
+  "keywords": ["pi-package", "pi-zflow"],
+  "license": "MIT",
+  "dependencies": {
+    "pi-zflow-core": "0.1.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": ["./extensions"]
+  }
+}
