@@ -149,3 +149,17 @@ export {
   checkCommandNaming,
   checkToolNaming,
 } from "./ids.js"
+
+// Re-export platform documentation builder
+// Also importable directly from "pi-zflow-core/platform-docs"
+export {
+  buildPlatformDocsSection,
+  isPlatformDocsInjected,
+  DEFAULT_DOCS_MARKER,
+} from "./platform-docs.js"
+
+export type {
+  PiDocPaths,
+  ZflowDocPaths,
+  PlatformDocsOptions,
+} from "./platform-docs.js"

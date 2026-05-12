@@ -3,3 +3,6 @@ dist/
 .cache/
 .tmp/
 *.log
+
+# Pi agent project-local state (cached absolute paths, compiled extensions, runtime state)
+.pi/

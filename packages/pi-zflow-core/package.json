@@ -16,6 +16,7 @@
     "./diagnostics": "./src/diagnostics.ts",
     "./schemas": "./src/schemas.ts",
     "./ids": "./src/ids.ts",
+    "./platform-docs": "./src/platform-docs.ts",
     "./package.json": "./package.json"
   },
   "keywords": [
