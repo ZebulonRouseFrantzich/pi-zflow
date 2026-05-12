@@ -32,6 +32,32 @@ versioned, decision-complete planning artifacts for a requested change.
   exists with `status: active` or `status: planning`, treat its decisions as
   canonical input. Do not override them.
 
+## The `zflow_write_plan_artifact` tool
+
+This is your **only write tool**. It has a strict contract:
+
+| Parameter     | Value                                                             | Notes                                        |
+| ------------- | ----------------------------------------------------------------- | -------------------------------------------- |
+| `changeId`    | Short kebab-case label (e.g. `add-auth-flow`)                     | Use alphanumeric characters and hyphens only |
+| `planVersion` | `v1`, `v2`, etc.                                                  | Always starts with `v` followed by a number  |
+| `artifact`    | One of: `design`, `execution-groups`, `standards`, `verification` | The four mandatory plan artifacts            |
+| `content`     | Full markdown body                                                | The content of the artifact                  |
+
+The tool writes to: `<runtime-state-dir>/plans/{changeId}/{planVersion}/{artifact}.md`
+
+**Safety rules enforced by the tool:**
+
+- The changeId must be safe (kebab-case, no path separators, no `..`).
+- The planVersion must match `v{N}`.
+- Only the four approved artifact types are accepted.
+- Writes are atomic (temp file + rename) — partial writes never appear.
+- After writing, the artifact's hash and mtime are recorded for drift detection.
+
+**Important:** This is the ONLY write mechanism you have. You cannot use `edit`,
+`write`, or mutation-capable `bash`. If you need to revise a plan artifact,
+call `zflow_write_plan_artifact` again with the same `changeId`/`planVersion`/`artifact`
+and updated `content`.
+
 ## Planning workflow
 
 1. **Explore the codebase.** Read relevant files, search for patterns, run

@@ -352,6 +352,81 @@ Soft-blocked (severity: `warn` — allowed with diagnostic):
 dist/**, .cache/**, .next/**, ~/.config/**
 ```
 
+## Planner artifact tool: `zflow_write_plan_artifact`
+
+`zflow_write_plan_artifact` is a narrow custom tool available **only to planner
+and replan agents** (`zflow.planner-frontier`). It writes structured planning
+artifacts under a safe, deterministic path.
+
+### Purpose
+
+Allow planners to produce versioned design documents without any ability to
+modify source code. The tool is the **only write mechanism** available to
+planner agents — they cannot use `edit`, `write`, or mutation-capable `bash`.
+
+### Contract
+
+| Parameter     | Type   | Validation                                                        | Notes                                                                     |
+| ------------- | ------ | ----------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `changeId`    | string | `assertSafeChangeId()` — kebab-case, alphanumeric + hyphens only  | Uniquely identifies the change (e.g. `add-auth-flow` or `fix-cache-race`) |
+| `planVersion` | string | Must match `/^v\d+$/` (e.g. `v1`, `v2`)                           | Plans start at `v1`; replanning increments                                |
+| `artifact`    | string | One of: `design`, `execution-groups`, `standards`, `verification` | The four mandatory plan artifact types                                    |
+| `content`     | string | Markdown body (no additional validation beyond size limits)       | Full markdown content of the artifact                                     |
+
+### Destination path
+
+```
+<runtime-state-dir>/plans/{changeId}/{planVersion}/{artifact}.md
+```
+
+Example:
+
+```
+/tmp/pi-zflow-<hash>/plans/add-auth-flow/v1/design.md
+```
+
+### Safety rules
+
+| Rule                        | Enforcement                                                                                                                                                                                          |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Path confinement**        | The destination must normalise under `<runtime-state-dir>/plans/{changeId}/{planVersion}/`. Path separators in `changeId`, `..` traversal, and arbitrary directory names in `artifact` are rejected. |
+| **Artifact type allowlist** | Only the four approved artifact kinds (`design`, `execution-groups`, `standards`, `verification`) are accepted. Any other value is rejected.                                                         |
+| **Overwrite policy**        | Only approved plan artifacts may be overwritten. Non-artifact files under `<runtime-state-dir>/plans/` are protected.                                                                                |
+| **Atomic write**            | Content is written to a `.tmp` file first, then renamed to the target path. Partial writes are never visible.                                                                                        |
+| **Metadata recording**      | After a successful write, the artifact hash (SHA-256) and mtime are recorded in the plan's runtime metadata (`plan-state.json`).                                                                     |
+| **Role restriction**        | The tool answers only for planner/replan agents whose allowlisted tools include `zflow_write_plan_artifact`. Currently only `zflow.planner-frontier`.                                                |
+
+### Pseudocode
+
+```ts
+function writePlanArtifact({ changeId, planVersion, artifact, content }) {
+  assertSafeChangeId(changeId); // kebab-case only
+  assert(/^v\d+$/.test(planVersion)); // v1, v2, ...
+  assert(
+    ["design", "execution-groups", "standards", "verification"].includes(
+      artifact,
+    ),
+  );
+  const target = resolvePlanArtifactPath(changeId, planVersion, artifact);
+  atomicWrite(target, content); // write .tmp → rename
+  recordArtifactMetadata(changeId, planVersion, artifact, hash(content));
+}
+```
+
+### Implementation targets
+
+- Path resolution: `packages/pi-zflow-artifacts/src/artifact-paths.ts` — `resolvePlanArtifactPath()`
+- Tool implementation: `packages/pi-zflow-artifacts/src/write-plan-artifact.ts`
+- Tool registration: `packages/pi-zflow-artifacts/extensions/zflow-artifacts/index.ts`
+
+### Related constraints
+
+- The planner must also never use `edit`, `write`, or mutation-capable `bash`.
+  This is enforced by the agent's `tools:` frontmatter allowlist and, when plan
+  mode is active, by `pi.setActiveTools()`.
+- Implementers must never write to plan artifact paths. This is enforced by
+  the path guard (`path-guard.ts`) with `canWrite()` intent distinction.
+
 ## Worktree setup hooks
 
 Some repos need generated files, symlink hydration, env stubs, or other bootstrap inside isolated worktrees.
