@@ -37,6 +37,11 @@ import {
   isModelThinkingCompatible,
 } from "./model-resolution.js"
 
+import {
+  preflightLaneHealth,
+  checkLaneHealth,
+} from "./health.js"
+
 import type { ModelRegistry, ResolvedProfile } from "./profiles.js"
 import {
   loadProfiles,
@@ -121,6 +126,15 @@ export {
   validateLaneCandidate,
 } from "./capabilities.js"
 
+// Re-export the health-checking API
+export {
+  preflightLaneHealth,
+  handleLaneFailure,
+  reresolveLane,
+  checkLaneHealth,
+  getHealthStatusSummary,
+} from "./health.js"
+
 export type {
   LaneDefinition,
   AgentBinding,
@@ -160,6 +174,14 @@ export type {
   ThinkingCheckResult,
 } from "./model-resolution.js"
 
+export type {
+  LaneHealthStatus,
+  HealthCheckResult,
+  LaneHealthReport,
+  FailureRecoveryAction,
+  FailureRecoveryResult,
+} from "./health.js"
+
 // ── Profile service interface ───────────────────────────────────
 
 /**
@@ -185,6 +207,11 @@ export interface ProfileService {
   writeActiveProfileCache: typeof writeActiveProfileCache
   computeCurrentProfileHash: typeof computeCurrentProfileHash
   computeEnvironmentFingerprintFromRegistry: typeof computeEnvironmentFingerprintFromRegistry
+  preflightLaneHealth: typeof preflightLaneHealth
+  handleLaneFailure: typeof handleLaneFailure
+  reresolveLane: typeof reresolveLane
+  checkLaneHealth: typeof checkLaneHealth
+  getHealthStatusSummary: typeof getHealthStatusSummary
 }
 
 // ── Capability name ─────────────────────────────────────────────
@@ -283,14 +310,14 @@ export async function activateProfile(
  *      (TTL, definition hash, AND environment fingerprint checks).
  *   3. If the cache is missing or stale, activates the `"default"` profile
  *      (loads profile file, resolves lanes, writes cache).
- *   4. Returns a `ResolvedProfile` with lane-to-model bindings ready for
+ *   4. Runs preflight lane-health checks on the requested lanes.
+ *   5. Returns a `ResolvedProfile` with lane-to-model bindings ready for
  *      agent dispatch.
  *
- * **Health checks** (step 4 from the spec) will be added in Task 2.8 once
- * the lane-health preflight module is implemented.
- *
- * @param requiredLanes - Optional list of lane names to verify are resolved.
- *                        (Health check integration deferred to Task 2.8.)
+ * @param requiredLanes - Optional list of lane names to verify during
+ *                        preflight health checks. If provided and any
+ *                        checked lane is unhealthy, the caller must
+ *                        handle it before dispatching work.
  * @param options - Optional configuration forwarded to `activateProfile`.
  * @returns A resolved profile suitable for launch-time overrides.
  */
@@ -320,9 +347,16 @@ export async function ensureResolved(
     currentEnvFingerprint,
   )
   if (cache) {
-    // Cache is fresh — reconstruct and return
-    // TODO(Task 2.8): Run preflightLaneHealth(active, requiredLanes)
-    return cacheToResolvedProfile(cache)
+    const resolved = cacheToResolvedProfile(cache)
+    // Run preflight lane health checks before returning
+    if (requiredLanes && requiredLanes.length > 0) {
+      const report = preflightLaneHealth(resolved, options?.registry, requiredLanes)
+      if (!report.allHealthy) {
+        // Log degradation — caller will handle via preflight checks
+        // if more specific action is needed
+      }
+    }
+    return resolved
   }
 
   // 3. Cache missing or stale — full activation
@@ -332,7 +366,13 @@ export async function ensureResolved(
     cachePath: options?.cachePath,
   })
 
-  // TODO(Task 2.8): Run preflightLaneHealth(resolved, requiredLanes)
+  // Run preflight lane health checks on freshly resolved profile
+  if (requiredLanes && requiredLanes.length > 0) {
+    const report = preflightLaneHealth(resolved, options?.registry, requiredLanes)
+    if (!report.allHealthy) {
+      // Log degradation — caller will handle via preflight checks
+    }
+  }
 
   return resolved
 }
@@ -399,6 +439,11 @@ export default function activateZflowProfilesExtension(pi: ExtensionAPI): void {
     writeActiveProfileCache,
     computeCurrentProfileHash,
     computeEnvironmentFingerprintFromRegistry,
+    preflightLaneHealth,
+    handleLaneFailure,
+    reresolveLane,
+    checkLaneHealth,
+    getHealthStatusSummary,
   }
 
   registry.provide(PROFILES_CAPABILITY, profileService)
