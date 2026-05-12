@@ -1,0 +1,1 @@
+**External file change detected.** Files have changed outside this session — likely user edits, linter formatting, or code generation. Treat these as intentional external work. Do not revert unless the approved plan explicitly calls for it. If the changes conflict with planned work, flag the conflict to the user rather than silently overwriting.

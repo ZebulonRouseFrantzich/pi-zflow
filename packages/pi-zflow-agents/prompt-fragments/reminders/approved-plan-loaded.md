@@ -1,0 +1,1 @@
+**Approved plan loaded.** An approved plan version is loaded as the implementation contract. Execute only the changes specified in that plan version. If you discover a better approach during implementation, file a deviation report — do not deviate from the approved scope. The plan document is at `<runtime-state-dir>/plans/{changeId}/v{version}/`.

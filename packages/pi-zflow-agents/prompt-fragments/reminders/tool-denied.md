@@ -1,0 +1,1 @@
+**Tool denied.** A tool call was denied or failed. Adjust your approach — do not retry the same operation verbatim. If the denied tool was `bash`, the command likely attempted a write during a read-only restricted mode, or targeted a blocked path (`.git/`, `node_modules/`, etc.). Switch to an allowed approach or explain the constraint to the user.

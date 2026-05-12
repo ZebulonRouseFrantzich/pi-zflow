@@ -1,0 +1,1 @@
+**Verification status.** Distinguish between release-gating verification (blocking: must pass before the change can proceed) and advisory review status (non-blocking: recommendations for future improvement). Release-gating failures stop the workflow. Advisory findings are recorded for follow-up but do not block progress.
