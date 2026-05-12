@@ -1,0 +1,140 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "pi-zflow-sentinel-policy-schema",
+  "title": "SentinelPolicy",
+  "description": "Sentinel policy configuration for pi-zflow path-guard and mutation safety.",
+  "type": "object",
+  "properties": {
+    "description": {
+      "description": "Human-readable description of this policy (for diagnostics).",
+      "type": "string"
+    },
+    "allowedRoots": {
+      "description": "Allowlist of directories where mutations are permitted.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/AllowedRoot"
+      }
+    },
+    "blockedPatterns": {
+      "description": "Glob-like patterns that are always denied, even inside allowed roots.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/BlockedPattern"
+      }
+    },
+    "symlinkSafety": {
+      "description": "Symlink / traversal safety configuration.",
+      "$ref": "#/definitions/SymlinkSafetyConfig"
+    },
+    "plannerArtifactPolicy": {
+      "description": "Planner artifact write policy.",
+      "$ref": "#/definitions/PlannerArtifactPolicy"
+    }
+  },
+  "required": [
+    "allowedRoots",
+    "blockedPatterns",
+    "symlinkSafety",
+    "plannerArtifactPolicy"
+  ],
+  "additionalProperties": false,
+
+  "definitions": {
+    "AllowedRoot": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Absolute or project-root-relative path to the allowed root.",
+          "type": "string",
+          "examples": [".", "worktrees", "/tmp/pi-zflow-*"]
+        },
+        "label": {
+          "description": "Optional label for diagnostics.",
+          "type": "string"
+        },
+        "glob": {
+          "description": "If true, the path is interpreted as a glob pattern.",
+          "type": "boolean",
+          "default": false
+        },
+        "allowIntent": {
+          "description": "Restriction on what write intent is allowed in this root.",
+          "type": "string",
+          "enum": ["any", "planner-artifact"],
+          "default": "any"
+        }
+      },
+      "required": ["path"],
+      "additionalProperties": false
+    },
+
+    "BlockedPattern": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "description": "Glob pattern relative to the allowed root, or absolute.",
+          "type": "string",
+          "examples": [".git/**", "node_modules/**", ".env*"]
+        },
+        "reason": {
+          "description": "Human-readable reason shown when a write is blocked.",
+          "type": "string"
+        },
+        "severity": {
+          "description": "Severity: 'error' blocks the write; 'warn' allows it with a diagnostic.",
+          "type": "string",
+          "enum": ["error", "warn"],
+          "default": "error"
+        },
+        "exclude": {
+          "description": "Glob patterns that exclude certain paths from this blocked pattern.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "examples": ["<runtime-state-dir>/**"]
+          }
+        }
+      },
+      "required": ["pattern", "reason"],
+      "additionalProperties": false
+    },
+
+    "SymlinkSafetyConfig": {
+      "type": "object",
+      "properties": {
+        "resolveSymlinks": {
+          "description": "If true, symlinks are followed and checked against the allowlist.",
+          "type": "boolean",
+          "default": true
+        },
+        "preventTraversal": {
+          "description": "If true, '..' traversal components are resolved and checked.",
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "required": ["resolveSymlinks", "preventTraversal"],
+      "additionalProperties": false
+    },
+
+    "PlannerArtifactPolicy": {
+      "type": "object",
+      "properties": {
+        "allowedArtifactDirs": {
+          "description": "Glob patterns for directories where planner artifact writes are permitted.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "examples": [
+              "<runtime-state-dir>/plans/**",
+              "<runtime-state-dir>/review/**"
+            ]
+          }
+        }
+      },
+      "required": ["allowedArtifactDirs"],
+      "additionalProperties": false
+    }
+  }
+}

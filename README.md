@@ -308,6 +308,40 @@ Runtime state lives outside the working tree. See `docs/foundation-versions.md` 
 | Failed/interrupted worktrees  | 7 days (`/zflow-clean`)                                |
 | Successful temp worktrees     | removed immediately after apply-back (unless `--keep`) |
 
+## Path guard / sentinel policy
+
+pi-zflow uses an **allowlist-first** mutation safety model. Every write is gated
+by `canWrite()`, which checks the target against configured allowed roots and
+denied patterns. See the full policy document at `docs/path-guard-policy.md`.
+
+**Key design points**:
+
+- **Allowlist-first**: Nothing is writable by default. Every write target must be
+  explicitly approved.
+- **Intent distinction**: Planner artifact writes (`<runtime-state-dir>/plans/**`)
+  are separate from implementation writes (source code). The planner must never
+  modify source code; implementers must never trample plan state.
+- **Denied by default**: `.git/`, `node_modules/`, `.env*`, home dotfiles,
+  secret/credential files, and build outputs are blocked.
+- **Symlink escape prevention**: Symlinks that resolve outside allowed roots are
+  rejected. `..` traversal is detected and blocked.
+
+The shared contract is defined in `packages/pi-zflow-core/src/path-guard.ts` with
+the default policy at `packages/pi-zflow-core/config/sentinel-policy.default.json`.
+
+Default blocked patterns (severity: `error`):
+
+```
+.git/**, node_modules/**, .env*, **/*.pem, **/*.key,
+**/credentials*, **/secrets/**, ~/.ssh/**, ~/.aws/**, ~/.pi/**
+```
+
+Soft-blocked (severity: `warn` — allowed with diagnostic):
+
+```
+dist/**, .cache/**, .next/**, ~/.config/**
+```
+
 ## Worktree setup hooks
 
 Some repos need generated files, symlink hydration, env stubs, or other bootstrap inside isolated worktrees.

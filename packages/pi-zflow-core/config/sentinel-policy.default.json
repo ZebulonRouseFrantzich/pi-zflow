@@ -1,0 +1,116 @@
+{
+  "$schema": "./sentinel-policy.schema.json",
+  "description": "pi-zflow default sentinel policy — allowlist-first mutation safety.",
+
+  "allowedRoots": [
+    {
+      "path": ".",
+      "label": "project root",
+      "allowIntent": "implementation"
+    }
+  ],
+
+  "blockedPatterns": [
+    {
+      "pattern": ".git/**",
+      "reason": "Git metadata must not be modified by automation",
+      "severity": "error",
+      "exclude": ["<runtime-state-dir>/**"]
+    },
+    {
+      "pattern": ".gitignore",
+      "reason": "Gitignore must not be modified without explicit user intent",
+      "severity": "error"
+    },
+    {
+      "pattern": ".gitattributes",
+      "reason": "Gitattributes must not be modified without explicit user intent",
+      "severity": "error"
+    },
+    {
+      "pattern": ".gitmodules",
+      "reason": "Gitmodules must not be modified without explicit user intent",
+      "severity": "error"
+    },
+    {
+      "pattern": "node_modules/**",
+      "reason": "node_modules is managed by package manager",
+      "severity": "error"
+    },
+    {
+      "pattern": ".env*",
+      "reason": "Environment/secret files must not be modified by automation",
+      "severity": "error"
+    },
+    {
+      "pattern": "**/*.pem",
+      "reason": "Private key files must not be modified by automation",
+      "severity": "error"
+    },
+    {
+      "pattern": "**/*.key",
+      "reason": "Private key files must not be modified by automation",
+      "severity": "error"
+    },
+    {
+      "pattern": "**/credentials*",
+      "reason": "Credential files must not be modified by automation",
+      "severity": "error"
+    },
+    {
+      "pattern": "**/secrets/**",
+      "reason": "Secrets directory must not be modified by automation",
+      "severity": "error"
+    },
+    {
+      "pattern": "~/.ssh/**",
+      "reason": "SSH config must not be modified by automation",
+      "severity": "error"
+    },
+    {
+      "pattern": "~/.aws/**",
+      "reason": "AWS config must not be modified by automation",
+      "severity": "error"
+    },
+    {
+      "pattern": "~/.config/**",
+      "reason": "User config must not be modified by automation",
+      "severity": "warn"
+    },
+    {
+      "pattern": "~/.pi/**",
+      "reason": "Pi config must not be modified without explicit user intent",
+      "severity": "error"
+    },
+    {
+      "pattern": "dist/**",
+      "reason": "Build output is generated; modify source instead",
+      "severity": "warn"
+    },
+    {
+      "pattern": ".cache/**",
+      "reason": "Cache directory should not be modified by automation",
+      "severity": "warn"
+    },
+    {
+      "pattern": ".next/**",
+      "reason": "Next.js build output is generated; modify source instead",
+      "severity": "warn"
+    }
+  ],
+
+  "symlinkSafety": {
+    "resolveSymlinks": true,
+    "preventTraversal": true
+  },
+
+  "plannerArtifactPolicy": {
+    "allowedArtifactDirs": [
+      "<runtime-state-dir>/plans/**",
+      "<runtime-state-dir>/review/**",
+      "<runtime-state-dir>/reconnaissance.md",
+      "<runtime-state-dir>/repo-map.md",
+      "<runtime-state-dir>/state-index.json"
+    ]
+  }
+}

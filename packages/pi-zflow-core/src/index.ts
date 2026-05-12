@@ -59,3 +59,28 @@ export type {
   WorktreeSetupHookConfig,
   RepoClass,
 } from "./worktree-setup-hook.js"
+
+// Re-export path guard types, policy types, and core functions
+// Also importable directly from "pi-zflow-core/path-guard"
+export {
+  DEFAULT_ALLOWED_ROOTS,
+  DEFAULT_BLOCKED_PATTERNS,
+  DEFAULT_SYMLINK_SAFETY,
+  defaultPlannerArtifactPolicy,
+  realpathSafe,
+  isWithinAllowedRoots,
+  matchesBlockedPatterns,
+  canWrite,
+  resolveSentinelPolicy,
+} from "./path-guard.js"
+
+export type {
+  SentinelPolicy,
+  AllowedRoot,
+  BlockedPattern,
+  SymlinkSafetyConfig,
+  PlannerArtifactPolicy,
+  WriteIntent,
+  PathGuardContext,
+  CanWriteResult,
+} from "./path-guard.js"
