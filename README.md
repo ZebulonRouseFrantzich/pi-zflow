@@ -555,6 +555,65 @@ The install commands are:
 
 See `packages/pi-zflow-agents/extensions/zflow-agents/install.ts` and `manifest.ts` for the implementation.
 
+## Builtin agent reuse strategy
+
+`pi-zflow` reuses Pi's builtin `scout` and `context-builder` agents **by default**
+rather than creating forked `zflow.*` copies. This avoids unnecessary duplication
+and ensures compatibility with Pi ecosystem updates.
+
+### What this means
+
+- **No `zflow.scout` or `zflow.context-builder` agent file exists** in
+  `packages/pi-zflow-agents/agents/`. The builtin agents are referenced directly
+  by runtime name (`scout`, `context-builder`) in chain definitions and
+  orchestrator workflows.
+- **Customization is done via configuration overrides**, not by forking agent
+  files. When a workflow needs a specialised scout or context-builder pass, the
+  orchestrator overrides the relevant settings (system prompt fragments,
+  tool allowlist, model, thinking level) through the subagent dispatch
+  parameters or future profile bindings.
+
+### Override points
+
+Override behaviour is applied at the dispatch level, not by copying agent
+files:
+
+| Mechanism                               | Scope           | When to use                                                                                                                                        |
+| --------------------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Subagent `task` string**              | Single dispatch | Add role-specific instructions inline when calling `scout` or `context-builder` for a specific task                                                |
+| **Profile `agentBindings`**             | Workflow-wide   | Configure model, thinking, tools for `scout` or `context-builder` per profile/lane (see `packages/pi-zflow-profiles/config/profiles.example.json`) |
+| **Future: Agent frontmatter overrides** | Package-level   | If `pi-subagents` gains override-file support, apply custom frontmatter fields without forking the agent file                                      |
+
+### When to fork (rare)
+
+Only fork `scout` or `context-builder` into `zflow.*` agents if:
+
+1. The builtin agent's system prompt cannot be sufficiently redirected via
+   dispatch-level overrides.
+2. A deterministic enforcement point (e.g., a custom tool restriction) must
+   be hardcoded in the agent's frontmatter `tools:` field.
+3. The builtin agent is removed or substantially changed in a Pi update that
+   breaks the workflow, and a local fork is the only migration path.
+
+No such fork is planned for the v1 foundation. If a fork becomes necessary,
+the forked agent must be named `zflow.scout` or `zflow.context-builder` and
+stored in `packages/pi-zflow-agents/agents/`.
+
+### Chains referencing builtin agents
+
+The following chain files reference builtin agents directly (not `zflow.*`
+variants):
+
+| Chain file                            | Builtin agent used |
+| ------------------------------------- | ------------------ |
+| `chains/scout-plan-validate.chain.md` | `scout`            |
+| `chains/plan-and-implement.chain.md`  | `scout`            |
+
+These references work because `pi-subagents` resolves agent names by searching
+discovery directories in priority order: project agents > user agents >
+builtin agents. The builtin `scout` and `context-builder` are always
+available in the lowest-priority discovery tier.
+
 ## License
 
 MIT
