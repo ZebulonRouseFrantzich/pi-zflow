@@ -96,18 +96,92 @@ Rules for alias registration:
 - No child package may replace Pi's built-in implementations of these tools.
 - Future packages that intentionally override a built-in tool must be opt-in, documented as incompatible, and separated from the default umbrella install.
 
-## Extension coexistence rules
+## Optional package policy
 
-1. **API-first, extension-second.** Reusable logic lives in library exports (from `pi-zflow-core` or the feature package). Pi extension entry points are thin adapters.
-2. **No default built-in overrides.** (Repeated for emphasis.)
-3. **Separate rendering from execution.** Renderer packages own visuals only; they must not own tool execution.
-4. **Namespaced public surface.** Commands, custom tools, custom message types, status keys, widget keys, event names, and session entry types use `zflow` prefixes.
-5. **Single owner per concern.** No two packages may own the same concern. Use the ownership map above to determine the canonical owner.
-6. **No event-bus RPC.** Use direct library APIs or the shared registry. `pi.events` is for notifications only.
-7. **Idempotent registration.** Every extension must tolerate being loaded twice and no-op when an equivalent compatible capability is already registered.
-8. **Capability conflict detection.** If an incompatible capability is already claimed, fail fast with a clear message naming both packages and suggesting package filtering or removal.
-9. **Mode-local side effects.** Changes to active tools, widgets, status lines, or model/thinking settings must be scoped to the active command/mode and restored when the mode exits.
-10. **Package filtering friendly.** Each child Pi package should work when loaded alone. The umbrella manifest must make it possible to include/exclude resources with Pi package filters.
+### Overview
+
+Three packages are designated as optional/selective in the first-pass foundation.
+Each has explicit conditions for installation. These rules must be enforced when
+profile resolution, bootstrap, or configuration processing triggers package recommendations.
+
+### Conditional installation rules
+
+#### `@benvargas/pi-openai-verbosity`
+
+**Condition**: recommend installation when any active lane in the resolved default profile
+uses `openai-codex` as its provider.
+
+**Rationale**: OpenAI Codex responses can be verbose. This package reduces verbosity
+in tool output, making it more concise and readable when Codex is the active provider.
+
+**Detection**: profile/lane resolution in `pi-zflow-profiles` should inspect all resolved
+lanes for `openai-codex` providers. If found, emit a recommendation advisory.
+
+```ts
+// Pseudocode for implementation
+function maybeRecommendOpenaiVerbosity(profile: ResolvedProfile): void {
+  const usesCodex = Object.values(profile.lanes).some(
+    lane => lane.provider === "openai-codex"
+  )
+  if (usesCodex) {
+    logger.info("Recommend installing @benvargas/pi-openai-verbosity for reduced verbosity")
+  }
+}
+```
+
+#### `@benvargas/pi-synthetic-provider`
+
+**Condition**: later cost/diversity optimization only. Excluded from first-pass foundation.
+
+**Rationale**: Synthetic provider support is useful for cost optimization and model diversity
+in multi-model workflows, but is not required for the initial implementation.
+
+**Installation guard**: no automated recommendation or installation logic should be added
+in Phase 0 or Phase 1. Revisit when cost optimization or diversity routing becomes a
+concrete requirement.
+
+#### `pi-rewind-hook`
+
+**Condition**: install only when the user explicitly enables recovery/checkpoint functionality
+in their configuration (`config.enableRewindHook` or equivalent).
+
+**Rationale**: Optional recovery layer that provides rewind/checkpoint capability for
+failed or interrupted operations. Not all users need recovery hooks.
+
+**Exclusivity rule (enforced)**:
+
+If `pi-rewind-hook` is enabled, **no other rewind or checkpoint package may be active**
+in the same Pi configuration. This prohibition covers:
+
+- Any package that registers `session_before_compact` hooks for checkpointing purposes
+- Competing undo/redo or recovery systems
+- Alternative checkpoint mechanisms not owned by `pi-rewind-hook`
+
+```ts
+// Pseudocode for enforcement
+function installRewindHook(config: Config): void {
+  if (!config.enableRewindHook) return
+
+  const conflict = detectActiveCheckpointPackages()
+  if (conflict) {
+    throw new Error(
+      `Cannot enable pi-rewind-hook: ${conflict.name} is already active. ` +
+      `Remove or disable ${conflict.name} before enabling rewind/checkpoint support.`
+    )
+  }
+
+  install("pi-rewind-hook")
+}
+```
+
+Detection must happen before installation. If a conflict is found, the system must fail fast
+with an actionable message naming both the requesting and conflicting packages, and
+suggesting package filtering or removal.
+
+### Related
+
+- `docs/foundation-versions.md` — version pin records for optional packages
+- `README.md` — condensed optional package conditions
 
 ## Registry contract
 

@@ -83,6 +83,74 @@ Version pins are recorded in two places:
 | `@benvargas/pi-synthetic-provider` | `<TBD>` | later cost/diversity optimization only |
 | `pi-rewind-hook` | `<TBD>` | optional recovery layer; if enabled, no other rewind/checkpoint package may be active |
 
+## Optional package policy
+
+### Conditional installation rules
+
+#### `@benvargas/pi-openai-verbosity`
+
+**Condition**: recommend installation when any active lane in the resolved default profile uses `openai-codex` as its provider.
+
+**Purpose**: Reduces verbosity in OpenAI Codex responses, making tool output more concise and readable.
+
+**Implementation logic**:
+```ts
+// In pi-zflow-profiles or bootstrap:
+if (profileUsesCodexLanes(activeProfile)) {
+  recommendInstall("@benvargas/pi-openai-verbosity")
+  // recommendation is advisory only — user decides whether to install
+}
+```
+
+**Notes**:
+- Detection happens at profile resolution time (when `pi-zflow-profiles` resolves the active profile).
+- If no `openai-codex` lanes are in use, the package is not needed.
+- Installation remains user-optional even when recommended.
+
+#### `@benvargas/pi-synthetic-provider`
+
+**Condition**: later cost/diversity optimization only. Not for the first-pass foundation.
+
+**Purpose**: Provides synthetic provider support for cost optimization and model diversity in multi-model workflows.
+
+**Implementation logic**:
+```ts
+// Deferred — no install logic in Phase 0 or Phase 1.
+// When implemented: evaluate if cost optimization or diversity routing is needed
+// before automatically recommending.
+```
+
+**Notes**:
+- Excluded from the first-pass foundation intentionally.
+- Should be revisited when cost optimization or model diversity routing becomes a requirement.
+
+#### `pi-rewind-hook`
+
+**Condition**: install only when the user explicitly enables recovery/checkpoint functionality in their configuration.
+
+**Purpose**: Optional recovery layer that provides rewind/checkpoint capability for failed or interrupted operations.
+
+**Exclusivity rule (enforced)**:
+```ts
+if (config.enableRewindHook) {
+  assertNoOtherCheckpointPackagesEnabled()
+  // Fail fast with an actionable message naming the conflicting package
+  install("pi-rewind-hook")
+}
+```
+
+**Rewind exclusivity rule**: If `pi-rewind-hook` is enabled, **no other rewind or checkpoint package may be active** in the same Pi configuration. This includes:
+- Any package that registers `session_before_compact` hooks for checkpointing
+- Competing undo/redo or recovery systems
+- Alternative checkpoint mechanisms not owned by `pi-rewind-hook`
+
+If a conflict is detected, the system must fail fast with an actionable message naming both the requesting and conflicting packages, and suggesting package filtering or removal.
+
+### Pin update policy for optional packages
+
+- Pins remain `<TBD>` until smoke-tested alongside the foundation stack.
+- Before first recommendation or automated install, set the exact version pin and update this record.
+
 ## Overlap avoidance
 
 **Single-owner policy.** Every concern has exactly one owner package. Do not add a second package that overlaps an owned concern.

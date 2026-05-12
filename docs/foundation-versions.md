@@ -55,8 +55,41 @@ All pins must be exact — no `^`, `~`, or `latest` ranges.
 | Package | Exact version/ref | Source | Condition for install |
 |---|---|---|---|
 | `@benvargas/pi-openai-verbosity` | `<TBD>` | npm | Install when any active lane uses `openai-codex` |
-| `@benvargas/pi-synthetic-provider` | `<TBD>` | npm | Later cost/diversity optimization only |
+| `@benvargas/pi-synthetic-provider` | `<TBD>` | npm | Later cost/diversity optimization only — deferred |
 | `pi-rewind-hook` | `<TBD>` | npm | Optional recovery; mutually exclusive with other checkpoint packages |
+
+### Optional package policy
+
+#### `@benvargas/pi-openai-verbosity`
+
+- **Condition**: recommend installation when profile resolution detects `openai-codex` lanes.
+- **Scope**: recommendation only; never force-install.
+- **Timing**: evaluated at profile/lane resolution time by `pi-zflow-profiles`.
+- **Version pin**: `<TBD>` — set after smoke testing with Codex provider.
+
+#### `@benvargas/pi-synthetic-provider`
+
+- **Condition**: deferred until cost optimization or diversity routing is a concrete requirement.
+- **Scope**: not part of first-pass foundation; no install or recommendation logic in Phase 0/1.
+- **Version pin**: `<TBD>` — set when implementation begins.
+
+#### `pi-rewind-hook`
+
+- **Condition**: install only on explicit user opt-in (`config.enableRewindHook` or equivalent).
+- **Exclusivity rule**: if enabled, no other checkpoint/rewind package may be active.
+  - Conflict detection must happen **before** installation.
+  - On conflict, fail fast with an actionable message naming the conflicting package.
+- **Version pin**: `<TBD>` — set after smoke testing recovery hooks.
+
+#### Rewind exclusivity — enforcement rules
+
+1. Before installing `pi-rewind-hook`, scan all active packages for checkpoint-capable hooks.
+2. If any are found, abort installation with a message:
+   > "Cannot enable pi-rewind-hook: `<name>` is already active. Remove or disable `<name>` before enabling rewind/checkpoint support."
+3. The exclusivity check must cover `session_before_compact` hooks and any package registering checkpoint/undo/redo functionality.
+4. If `pi-rewind-hook` is later disabled, the exclusivity constraint is lifted.
+
+See `docs/architecture/package-ownership.md` for the full optional package policy and pseudocode.
 
 ---
 
