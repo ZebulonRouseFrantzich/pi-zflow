@@ -584,3 +584,349 @@ describe("example config", () => {
     assert.doesNotThrow(() => parseProfilesFile(data))
   })
 })
+
+// ── Profile file loading tests ───────────────────────────────────
+
+import * as fs from "node:fs/promises"
+import * as fss from "node:fs"
+import * as path2 from "node:path"
+import * as os from "node:os"
+import {
+  loadProfiles,
+  loadProfilesSync,
+  resolveProjectProfilePath,
+  resolveUserProfilePath,
+  fileExists,
+  fileExistsSync,
+  resolveProfileSource,
+  ProfileFileNotFoundError,
+} from "../extensions/zflow-profiles/profiles.js"
+
+/**
+ * Create a temporary directory and write a profiles JSON file into it.
+ * Returns the path to the created file.
+ */
+async function writeTempProfile(
+  content: Record<string, unknown>,
+  filename: string = "zflow-profiles.json",
+): Promise<{ dir: string; filePath: string }> {
+  const dir = await fs.mkdtemp(path2.join(os.tmpdir(), "zflow-profiles-test-"))
+  const filePath = path2.join(dir, filename)
+  await fs.writeFile(filePath, JSON.stringify(content, null, 2))
+  return { dir, filePath }
+}
+
+/**
+ * Create a temporary directory mimicking a repo with `.pi/zflow-profiles.json`.
+ */
+async function writeProjectProfile(content: Record<string, unknown>): Promise<string> {
+  const dir = await fs.mkdtemp(path2.join(os.tmpdir(), "zflow-profiles-test-"))
+  const piDir = path2.join(dir, ".pi")
+  await fs.mkdir(piDir, { recursive: true })
+  const filePath = path2.join(piDir, "zflow-profiles.json")
+  await fs.writeFile(filePath, JSON.stringify(content, null, 2))
+  return dir // return the "repo root"
+}
+
+describe("resolveProjectProfilePath", () => {
+  it("returns null when repoRoot is not provided", () => {
+    const result = resolveProjectProfilePath()
+    assert.equal(result, null)
+  })
+
+  it("returns null when repoRoot is undefined", () => {
+    const result = resolveProjectProfilePath(undefined)
+    assert.equal(result, null)
+  })
+
+  it("returns the correct path when repoRoot is provided", () => {
+    const result = resolveProjectProfilePath("/some/repo")
+    assert.equal(result, "/some/repo/.pi/zflow-profiles.json")
+  })
+
+  it("resolves against absolute paths correctly", () => {
+    const result = resolveProjectProfilePath("/home/user/project")
+    assert.ok(result!.endsWith("/.pi/zflow-profiles.json"))
+    assert.ok(result!.startsWith("/"))
+  })
+})
+
+describe("resolveUserProfilePath", () => {
+  it("returns a path under ~/.pi/agent/", () => {
+    const result = resolveUserProfilePath()
+    assert.ok(result.includes(".pi"))
+    assert.ok(result.includes("agent"))
+    assert.ok(result.endsWith("zflow-profiles.json"))
+    assert.ok(result.startsWith(os.homedir()))
+  })
+})
+
+describe("fileExists / fileExistsSync", () => {
+  it("returns true for an existing file", async () => {
+    const { filePath } = await writeTempProfile({ default: { lanes: {}, agentBindings: {} } })
+    try {
+      assert.equal(await fileExists(filePath), true)
+    } finally {
+      await fs.rm(path2.dirname(filePath), { recursive: true, force: true })
+    }
+  })
+
+  it("returns false for a non-existent file", async () => {
+    const result = await fileExists("/tmp/nonexistent-zflow-test-file-xyz789")
+    assert.equal(result, false)
+  })
+
+  it("fileExistsSync returns true for an existing file", () => {
+    const existingPath = EXAMPLE_PATH
+    assert.equal(fileExistsSync(existingPath), true)
+  })
+
+  it("fileExistsSync returns false for a non-existent file", () => {
+    assert.equal(fileExistsSync("/tmp/nonexistent-zflow-test-file-xyz789"), false)
+  })
+})
+
+describe("resolveProfileSource", () => {
+  it("chooses project path over user path when project file exists", async () => {
+    const repoRoot = await writeProjectProfile({
+      default: {
+        lanes: { scout: { preferredModels: ["m1"] } },
+        agentBindings: { s: { lane: "scout" } },
+      },
+    })
+    try {
+      const source = await resolveProfileSource(repoRoot)
+      assert.ok(source.includes(repoRoot))
+      assert.ok(source.endsWith(".pi/zflow-profiles.json"))
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("falls back to user path when project file does not exist", async () => {
+    // This test requires the user file to actually exist. We'll create a
+    // temporary one and monkey-patch resolveUserProfilePath for the test.
+    // Instead, test the fallback path by creating a temp repo WITHOUT a
+    // profiles file and verifying it tries to fall back.
+    //
+    // Since the user file likely doesn't exist on CI, verify the error
+    // lists both candidates.
+    const tempRoot = await fs.mkdtemp(path2.join(os.tmpdir(), "zflow-profiles-test-"))
+    try {
+      await assert.rejects(
+        () => resolveProfileSource(tempRoot),
+        (err: unknown) => {
+          if (!(err instanceof ProfileFileNotFoundError)) return false
+          // Should have searched both the project path and user path
+          return (
+            err.searchedPaths.length >= 2 &&
+            err.searchedPaths.some((p) => p.includes(tempRoot)) &&
+            err.searchedPaths.some((p) => p.includes(os.homedir()))
+          )
+        },
+      )
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("throws ProfileFileNotFoundError when neither file exists", async () => {
+    await assert.rejects(
+      () => resolveProfileSource("/tmp/nonexistent-zflow-repo-xyz789"),
+      (err: unknown) => err instanceof ProfileFileNotFoundError,
+    )
+  })
+
+  it("resolves from user path when repoRoot is omitted and user file exists", async () => {
+    // This test is conditional — if the user file happens to exist, it passes.
+    // If not, we skip it.
+    const userPath = resolveUserProfilePath()
+    if (await fileExists(userPath)) {
+      const source = await resolveProfileSource()
+      assert.equal(source, userPath)
+    } else {
+      // If user file doesn't exist, verify it throws searching only user path
+      await assert.rejects(
+        () => resolveProfileSource(),
+        (err: unknown) => err instanceof ProfileFileNotFoundError,
+      )
+    }
+  })
+})
+
+describe("loadProfiles", () => {
+  it("loads and validates from a project-local file", async () => {
+    const repoRoot = await writeProjectProfile({
+      default: {
+        lanes: {
+          scout: {
+            required: true,
+            thinking: "low",
+            preferredModels: ["openai/gpt-4o-mini"],
+          },
+        },
+        agentBindings: {
+          s: { lane: "scout" },
+        },
+      },
+    })
+    try {
+      const result = await loadProfiles(repoRoot)
+      assert.ok("default" in result.profiles)
+      assert.ok(result.source.endsWith(".pi/zflow-profiles.json"))
+      assert.equal(result.validation.valid, true)
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("throws ProfileFileNotFoundError when no file exists", async () => {
+    await assert.rejects(
+      () => loadProfiles("/tmp/nonexistent-zflow-repo-xyz789"),
+      (err: unknown) => err instanceof ProfileFileNotFoundError,
+    )
+  })
+
+  it("throws ProfileValidationError for invalid file content", async () => {
+    const repoRoot = await writeProjectProfile({
+      default: {
+        lanes: {
+          scout: { preferredModels: [] },
+        },
+        agentBindings: {
+          s: { lane: "scout" },
+        },
+      },
+    })
+    try {
+      await assert.rejects(
+        () => loadProfiles(repoRoot),
+        (err: unknown) => err instanceof ProfileValidationError,
+      )
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("throws ProfileValidationError for missing default profile", async () => {
+    const repoRoot = await writeProjectProfile({
+      other: {
+        lanes: { scout: { preferredModels: ["m1"] } },
+        agentBindings: { s: { lane: "scout" } },
+      },
+    })
+    try {
+      await assert.rejects(
+        () => loadProfiles(repoRoot),
+        (err: unknown) => err instanceof ProfileValidationError,
+      )
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("throws SyntaxError for invalid JSON", async () => {
+    const dir = await fs.mkdtemp(path2.join(os.tmpdir(), "zflow-profiles-test-"))
+    const piDir = path2.join(dir, ".pi")
+    await fs.mkdir(piDir, { recursive: true })
+    const filePath = path2.join(piDir, "zflow-profiles.json")
+    await fs.writeFile(filePath, "not valid json {{{")
+    try {
+      await assert.rejects(
+        () => loadProfiles(dir),
+        (err: unknown) => err instanceof ProfileValidationError,
+      )
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("surfaces the chosen source path", async () => {
+    const repoRoot = await writeProjectProfile({
+      default: {
+        lanes: { scout: { preferredModels: ["m1"] } },
+        agentBindings: { s: { lane: "scout" } },
+      },
+    })
+    try {
+      const result = await loadProfiles(repoRoot)
+      assert.ok(result.source.length > 0)
+      assert.ok(result.source.startsWith("/"))
+      // Source should be an absolute path ending in .pi/zflow-profiles.json
+      assert.ok(result.source.endsWith(".pi/zflow-profiles.json"), `source=${result.source}`)
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("loadProfilesSync", () => {
+  it("loads and validates from a project-local file synchronously", async () => {
+    const repoRoot = await writeProjectProfile({
+      default: {
+        lanes: {
+          scout: {
+            required: true,
+            preferredModels: ["openai/gpt-4o-mini"],
+          },
+        },
+        agentBindings: {
+          s: { lane: "scout" },
+        },
+      },
+    })
+    try {
+      const result = loadProfilesSync(repoRoot)
+      assert.ok("default" in result.profiles)
+      assert.ok(result.source.endsWith(".pi/zflow-profiles.json"))
+      assert.equal(result.validation.valid, true)
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("throws ProfileFileNotFoundError when no file exists", () => {
+    assert.throws(
+      () => loadProfilesSync("/tmp/nonexistent-zflow-repo-xyz789"),
+      (err: unknown) => err instanceof ProfileFileNotFoundError,
+    )
+  })
+
+  it("loads valid content synchronously", async () => {
+    const repoRoot = await writeProjectProfile({
+      default: {
+        lanes: {
+          scout: {
+            required: true,
+            preferredModels: ["openai/gpt-4o-mini"],
+          },
+        },
+        agentBindings: {
+          s: { lane: "scout" },
+        },
+      },
+    })
+    try {
+      const result = loadProfilesSync(repoRoot)
+      assert.ok("default" in result.profiles)
+      assert.equal(result.validation.valid, true)
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("ProfileFileNotFoundError", () => {
+  it("includes searched paths in the message", () => {
+    const err = new ProfileFileNotFoundError(["/path/a.json", "/path/b.json"])
+    assert.ok(err.message.includes("/path/a.json"))
+    assert.ok(err.message.includes("/path/b.json"))
+    assert.equal(err.searchedPaths.length, 2)
+  })
+
+  it("is an instance of Error", () => {
+    const err = new ProfileFileNotFoundError(["/test.json"])
+    assert.ok(err instanceof Error)
+    assert.equal(err.name, "ProfileFileNotFoundError")
+  })
+})

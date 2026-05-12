@@ -641,3 +641,188 @@ export function parseProfilesFileJson(json: string): {
   }
   return parseProfilesFile(parsed)
 }
+
+// ── Profile file loading ────────────────────────────────────────
+
+import * as fs from "node:fs/promises"
+import * as fss from "node:fs"
+import * as path from "node:path"
+import * as os from "node:os"
+
+/**
+ * Result of a successful profile file load.
+ */
+export interface LoadedProfiles {
+  /** Absolute path to the source file that was loaded. */
+  source: string
+  /** Parsed, validated, and normalized profile definitions. */
+  profiles: NormalizedProfilesFile
+  /** Validation result (valid is guaranteed true here). */
+  validation: ValidationResult
+}
+
+/**
+ * Resolve the project-local profile definition path.
+ *
+ * @param repoRoot - The repository root directory.
+ * @returns The absolute path to `.pi/zflow-profiles.json` within the repo,
+ *          or `null` if `repoRoot` is not provided.
+ */
+export function resolveProjectProfilePath(repoRoot?: string): string | null {
+  if (!repoRoot) return null
+  return path.resolve(repoRoot, ".pi", "zflow-profiles.json")
+}
+
+/**
+ * Resolve the user-global profile definition path.
+ *
+ * Always returns `~/.pi/agent/zflow-profiles.json`.
+ */
+export function resolveUserProfilePath(): string {
+  return path.join(os.homedir(), ".pi", "agent", "zflow-profiles.json")
+}
+
+/**
+ * Async check whether a file exists at the given path.
+ */
+export async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath, fs.constants.F_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Sync check whether a file exists at the given path.
+ */
+export function fileExistsSync(filePath: string): boolean {
+  try {
+    fss.accessSync(filePath, fss.constants.F_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Determine the profile source path using project-local override with
+ * user-global fallback.
+ *
+ * Resolution order:
+ *   1. `.pi/zflow-profiles.json` in the active repo (if `repoRoot` provided)
+ *   2. `~/.pi/agent/zflow-profiles.json` as fallback
+ *
+ * If `repoRoot` is omitted, only the user-global path is considered.
+ *
+ * @param repoRoot - Optional repository root directory.
+ * @returns The absolute path of the chosen source file.
+ * @throws If neither path exists and is readable.
+ */
+export async function resolveProfileSource(repoRoot?: string): Promise<string> {
+  const projectPath = resolveProjectProfilePath(repoRoot)
+  const userPath = resolveUserProfilePath()
+
+  // Check project path first
+  if (projectPath && (await fileExists(projectPath))) {
+    return projectPath
+  }
+
+  // Check user path
+  if (await fileExists(userPath)) {
+    return userPath
+  }
+
+  // Neither exists — build an actionable error
+  const candidates: string[] = []
+  if (projectPath) candidates.push(projectPath)
+  candidates.push(userPath)
+
+  throw new ProfileFileNotFoundError(candidates)
+}
+
+/**
+ * Error thrown when no profile definition file can be found at any
+ * of the expected locations.
+ */
+export class ProfileFileNotFoundError extends Error {
+  /** Paths that were checked and did not exist. */
+  public readonly searchedPaths: string[]
+
+  constructor(searchedPaths: string[]) {
+    const paths = searchedPaths.map((p) => `  - ${p}`).join("\n")
+    super(
+      "No profile definition file found. Searched:\n" +
+        paths +
+        "\n\n" +
+        'Create a ".pi/zflow-profiles.json" in your project or ' +
+        '"~/.pi/agent/zflow-profiles.json" in your home directory. ' +
+        "You can copy the example from the pi-zflow-profiles package.",
+    )
+    this.name = "ProfileFileNotFoundError"
+    this.searchedPaths = searchedPaths
+  }
+}
+
+/**
+ * Load profile definitions from the filesystem.
+ *
+ * Resolution order:
+ *   1. `.pi/zflow-profiles.json` in the active repo (project-local override)
+ *   2. `~/.pi/agent/zflow-profiles.json` (user-global fallback)
+ *
+ * The chosen source path is recorded in the return value and can be
+ * surfaced in `/zflow-profile show` output.
+ *
+ * @param repoRoot - Optional repository root directory. When provided,
+ *                   the project-local path is checked first.
+ * @returns The loaded, validated, and normalized profiles with source path.
+ * @throws {ProfileFileNotFoundError} If no profile file exists at any
+ *         expected location.
+ * @throws {ProfileValidationError} If the file content fails validation.
+ * @throws {SyntaxError} If the file content is not valid JSON.
+ */
+export async function loadProfiles(repoRoot?: string): Promise<LoadedProfiles> {
+  const source = await resolveProfileSource(repoRoot)
+  const raw = await fs.readFile(source, "utf8")
+  const { profiles, validation } = parseProfilesFileJson(raw)
+  return { source, profiles, validation }
+}
+
+/**
+ * Synchronous version of `loadProfiles()`.
+ *
+ * Resolution order:
+ *   1. `.pi/zflow-profiles.json` in the active repo (project-local override)
+ *   2. `~/.pi/agent/zflow-profiles.json` (user-global fallback)
+ *
+ * @param repoRoot - Optional repository root directory.
+ * @returns The loaded, validated, and normalized profiles with source path.
+ * @throws {ProfileFileNotFoundError} If no profile file exists.
+ * @throws {ProfileValidationError} If the file content fails validation.
+ * @throws {SyntaxError} If the file content is not valid JSON.
+ */
+export function loadProfilesSync(repoRoot?: string): LoadedProfiles {
+  const projectPath = resolveProjectProfilePath(repoRoot)
+  const userPath = resolveUserProfilePath()
+
+  // Determine source path
+  let source: string | null = null
+  if (projectPath && fileExistsSync(projectPath)) {
+    source = projectPath
+  } else if (fileExistsSync(userPath)) {
+    source = userPath
+  }
+
+  if (!source) {
+    const candidates: string[] = []
+    if (projectPath) candidates.push(projectPath)
+    candidates.push(userPath)
+    throw new ProfileFileNotFoundError(candidates)
+  }
+
+  const raw = fss.readFileSync(source, "utf8")
+  const { profiles, validation } = parseProfilesFileJson(raw)
+  return { source, profiles, validation }
+}
