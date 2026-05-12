@@ -221,6 +221,9 @@ export interface ProfileService {
   reresolveLane: typeof reresolveLane
   checkLaneHealth: typeof checkLaneHealth
   getHealthStatusSummary: typeof getHealthStatusSummary
+  buildAgentOverrides: typeof buildAgentOverrides
+  syncProfileToSettings: typeof syncProfileToSettings
+  formatSyncSummary: typeof formatSyncSummary
 }
 
 // ── Capability name ─────────────────────────────────────────────
@@ -709,20 +712,191 @@ async function handleRefresh(ui: {
 
 /**
  * Settings overrides entry for a single agent binding.
+ * Written to `.pi/settings.json` as part of `subagents.agentOverrides`.
  */
 export interface SettingsAgentOverride {
+  /** Resolved model identifier for this agent. */
   model: string
+  /** Comma-separated tools the agent is allowed to use. */
   tools?: string
+  /** Maximum total output tokens for this agent. */
   maxOutput?: number
+  /** Maximum depth of subagent nesting. */
+  maxSubagentDepth?: number
+}
+
+/**
+ * Result of a sync-to-settings operation.
+ */
+export interface SyncSettingsResult {
+  /** Number of agent overrides written. */
+  count: number
+  /** Absolute path to the settings file that was written. */
+  settingsPath: string
+  /** List of agent names whose overrides were written. */
+  agents: string[]
+}
+
+/**
+ * Build agent overrides from an active profile cache.
+ *
+ * Iterates the cache's `agentBindings` and creates a mapping of
+ * agent name → override entry for every binding that has a resolved
+ * model. Skip entries with no resolved model (unresolved lanes).
+ *
+ * This is a pure function — it does no I/O and can be tested in
+ * isolation.
+ *
+ * @param cache - The active profile cache with resolved agent bindings.
+ * @returns A record of agent name to override settings, keyed for
+ *          insertion into `subagents.agentOverrides`.
+ */
+export function buildAgentOverrides(
+  cache: ActiveProfileCache,
+): Record<string, SettingsAgentOverride> {
+  const overrides: Record<string, SettingsAgentOverride> = {}
+
+  for (const [agentName, binding] of Object.entries(cache.agentBindings)) {
+    if (binding.resolvedModel) {
+      const entry: SettingsAgentOverride = {
+        model: binding.resolvedModel,
+      }
+      if (binding.tools) entry.tools = binding.tools
+      if (binding.maxOutput) entry.maxOutput = binding.maxOutput
+      if (binding.maxSubagentDepth !== undefined) {
+        entry.maxSubagentDepth = binding.maxSubagentDepth
+      }
+      overrides[agentName] = entry
+    }
+  }
+
+  return overrides
+}
+
+/**
+ * Format a human-readable summary of the agent overrides that would
+ * be written, suitable for display in a confirmation dialog or log.
+ *
+ * @param overrides - The agent overrides to summarise.
+ * @param settingsPath - The path where the overrides would be written.
+ * @returns An array of text lines (without trailing newlines).
+ */
+export function formatSyncSummary(
+  overrides: Record<string, SettingsAgentOverride>,
+  settingsPath: string,
+): string[] {
+  const lines: string[] = [
+    "The following agent overrides will be written to:",
+    `  ${settingsPath}`,
+    "",
+  ]
+
+  const agentNames = Object.keys(overrides).sort()
+  for (const agent of agentNames) {
+    const override = overrides[agent]
+    lines.push(`  ${agent}:`)
+    lines.push(`    model: ${override.model}`)
+    if (override.tools) lines.push(`    tools: ${override.tools}`)
+    if (override.maxOutput) lines.push(`    maxOutput: ${override.maxOutput}`)
+    if (override.maxSubagentDepth !== undefined) {
+      lines.push(`    maxSubagentDepth: ${override.maxSubagentDepth}`)
+    }
+  }
+  lines.push("")
+  lines.push("This will modify your project settings. Continue?")
+
+  return lines
+}
+
+/**
+ * Synchronise the resolved active profile to `.pi/settings.json`.
+ *
+ * Writes a `subagents.agentOverrides` block based on the currently
+ * resolved active profile cache. This is a narrow, explicit operation:
+ *
+ * - Only writes the `subagents.agentOverrides` key.
+ * - Preserves all other keys in `settings.json` (e.g. existing
+ *   `subagents` config that is not `agentOverrides`).
+ * - Does NOT run as part of normal activation (`activateProfile` /
+ *   `ensureResolved` never calls this).
+ * - Requires an explicit opt-in (via `/zflow-profile sync-project`).
+ *
+ * The settings file is read, updated, and written atomically (via
+ * write-then-rename). If the file does not exist, it is created.
+ *
+ * @param cache - The active profile cache with resolved agent bindings.
+ * @param settingsPath - Absolute path to `.pi/settings.json`.
+ * @returns A `SyncSettingsResult` describing what was written.
+ * @throws {Error} If the file cannot be written (permissions, disk full).
+ */
+export async function syncProfileToSettings(
+  cache: ActiveProfileCache,
+  settingsPath: string,
+): Promise<SyncSettingsResult> {
+  // 1. Build agent overrides from the cache
+  const agentOverrides = buildAgentOverrides(cache)
+  const agentNames = Object.keys(agentOverrides)
+
+  if (agentNames.length === 0) {
+    return {
+      count: 0,
+      settingsPath,
+      agents: [],
+    }
+  }
+
+  // 2. Read existing settings or start fresh
+  let settings: Record<string, unknown> = {}
+  try {
+    const existing = await fs.readFile(settingsPath, "utf8")
+    settings = JSON.parse(existing) as Record<string, unknown>
+  } catch {
+    // File doesn't exist or is invalid JSON — start fresh
+    settings = {}
+  }
+
+  // 3. Merge subagents.agentOverrides without destroying unrelated keys
+  //    Preserve any existing subagents config that isn't agentOverrides
+  const existingSubagents = settings.subagents as
+    | Record<string, unknown>
+    | undefined
+  settings.subagents = {
+    ...(existingSubagents ?? {}),
+    agentOverrides,
+  }
+
+  // 4. Ensure parent directory exists
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true })
+
+  // 5. Write atomically using temp-file-then-rename
+  const tmpPath = settingsPath + ".tmp"
+  try {
+    await fs.writeFile(tmpPath, JSON.stringify(settings, null, 2), "utf8")
+    await fs.rename(tmpPath, settingsPath)
+  } catch (err) {
+    // Clean up temp file on failure
+    try {
+      await fs.unlink(tmpPath)
+    } catch {
+      // Ignore cleanup errors
+    }
+    throw err
+  }
+
+  return {
+    count: agentNames.length,
+    settingsPath,
+    agents: agentNames,
+  }
 }
 
 /**
  * Handler for `/zflow-profile sync-project` — write resolved overrides
  * into `.pi/settings.json`.
  *
- * This is an explicit opt-in operation that writes a `subagents.agentOverrides`
- * block based on the currently resolved active profile. It never silently
- * modifies unrelated settings.
+ * This is an explicit opt-in operation. It shows a confirmation dialog
+ * with a summary of what will be written, then delegates to
+ * `syncProfileToSettings()`.
  */
 async function handleSyncProject(ui: {
   notify: (message: string, type?: "info" | "warning" | "error") => void
@@ -747,20 +921,11 @@ async function handleSyncProject(ui: {
 
   const settingsPath = path.join(repoRoot, ".pi", "settings.json")
 
-  // Build agent overrides from resolved cache
-  const agentOverrides: Record<string, SettingsAgentOverride> = {}
+  // Build agent overrides (preview for confirmation)
+  const agentOverrides = buildAgentOverrides(cache)
+  const agentNames = Object.keys(agentOverrides)
 
-  for (const [agentName, binding] of Object.entries(cache.agentBindings)) {
-    if (binding.resolvedModel) {
-      agentOverrides[agentName] = {
-        model: binding.resolvedModel,
-        tools: binding.tools,
-        maxOutput: binding.maxOutput,
-      }
-    }
-  }
-
-  if (Object.keys(agentOverrides).length === 0) {
+  if (agentNames.length === 0) {
     ui.notify(
       "No resolved agent bindings to sync. Ensure the profile has resolved lanes with models.",
     )
@@ -768,52 +933,29 @@ async function handleSyncProject(ui: {
   }
 
   // Show a summary before writing
-  const summaryLines: string[] = [
-    "The following agent overrides will be written to:",
-    `  ${settingsPath}`,
-    "",
-  ]
-  for (const [agent, override] of Object.entries(agentOverrides)) {
-    summaryLines.push(`  ${agent}:`)
-    summaryLines.push(`    model: ${override.model}`)
-    if (override.tools) summaryLines.push(`    tools: ${override.tools}`)
-    if (override.maxOutput) summaryLines.push(`    maxOutput: ${override.maxOutput}`)
-  }
-  summaryLines.push("")
-  summaryLines.push("This will modify your project settings. Continue?")
-
-  const confirmed = await ui.confirm("Sync Profile to Settings", summaryLines.join("\n"))
+  const summaryLines = formatSyncSummary(agentOverrides, settingsPath)
+  const confirmed = await ui.confirm(
+    "Sync Profile to Settings",
+    summaryLines.join("\n"),
+  )
   if (!confirmed) {
     ui.notify("Sync cancelled.")
     return
   }
 
-  // Read existing settings or start fresh
-  let settings: Record<string, unknown> = {}
+  // Perform the write
   try {
-    const existing = await fs.readFile(settingsPath, "utf8")
-    settings = JSON.parse(existing) as Record<string, unknown>
-  } catch {
-    // File doesn't exist or is invalid — start fresh
-    settings = {}
+    const result = await syncProfileToSettings(cache, settingsPath)
+    ui.notify(
+      `Wrote ${result.count} agent override(s) to:\n` +
+        `  ${result.settingsPath}\n\n` +
+        `Run /zflow-profile refresh and then /zflow-profile sync-project again\n` +
+        `to update the overrides after changing your profile.`,
+    )
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    ui.notify(`Failed to write settings: ${message}`, "error")
   }
-
-  // Write the subagents.agentOverrides block without destroying other settings
-  settings.subagents = {
-    ...(settings.subagents as Record<string, unknown> | undefined),
-    agentOverrides,
-  }
-
-  // Ensure parent directory exists
-  await fs.mkdir(path.dirname(settingsPath), { recursive: true })
-  await fs.writeFile(settingsPath, JSON.stringify(settings, null, 2), "utf8")
-
-  ui.notify(
-    `Wrote ${Object.keys(agentOverrides).length} agent override(s) to:\n` +
-      `  ${settingsPath}\n\n` +
-      `Run /zflow-profile refresh and then /zflow-profile sync-project again\n` +
-      `to update the overrides after changing your profile.`,
-  )
 }
 
 /**
@@ -933,6 +1075,9 @@ export default function activateZflowProfilesExtension(pi: ExtensionAPI): void {
     reresolveLane,
     checkLaneHealth,
     getHealthStatusSummary,
+    buildAgentOverrides,
+    syncProfileToSettings,
+    formatSyncSummary,
   }
 
   registry.provide(PROFILES_CAPABILITY, profileService)
