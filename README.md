@@ -381,6 +381,105 @@ packages/pi-zflow-change-workflows/templates/worktree-setup-hooks/
 | `generic-env-stub.sh`        | Env stub generation                         |
 | `generic-codegen.sh`         | Code generation (Prisma, GraphQL, protobuf) |
 
+## Install flow
+
+### Prerequisites
+
+- Pi agent installed and configured (minimum version 0.74.0)
+- Node.js >= 22.0.0
+
+### Install the full umbrella suite
+
+```bash
+pi install npm:pi-zflow@<PIN>
+```
+
+This installs `packages/pi-zflow` and pulls in all child packages as npm dependencies. The umbrella's `pi` manifest exposes the extensions, skills, and prompts from each child package.
+
+After installation, use `/zflow-setup-agents` to install agent and chain markdown files into Pi discovery directories (see [Agent/chains installation](#agentchains-installation) below).
+
+### Install individual child packages
+
+Each Pi-enabled child package can be installed independently. This is useful when you only need a subset of capabilities.
+
+Examples:
+
+```bash
+# Profiles only
+pi install npm:pi-zflow-profiles@<PIN>
+
+# Profiles + Plan mode
+pi install npm:pi-zflow-profiles@<PIN>
+pi install npm:pi-zflow-plan-mode@<PIN>
+
+# Agents/chains/skills only (manual orchestration)
+pi install npm:pi-zflow-agents@<PIN>
+# Then run /zflow-setup-agents to deploy agents and chains
+```
+
+`pi-zflow-core` is a library-only package and is not installed directly as a Pi package. It is pulled in as a dependency by any child package that needs it.
+
+### Package filtering
+
+Pi supports filtering which resources are loaded from an installed package. This is useful when you want the umbrella but only need specific child packages active:
+
+**Example — Pi settings.json (user scope):**
+
+```json
+{
+  "packages": [
+    {
+      "source": "npm:pi-zflow@<PIN>",
+      "extensions": [
+        "node_modules/pi-zflow-profiles/extensions",
+        "node_modules/pi-zflow-plan-mode/extensions"
+      ],
+      "skills": [],
+      "prompts": []
+    }
+  ]
+}
+```
+
+This loads only the profiles and plan-mode extensions from the umbrella. The `skills` and `prompts` arrays are explicitly set to empty to prevent loading agent skills and prompt templates.
+
+**Filtering by resource type:**
+
+| Filter key   | Effect                                    |
+| ------------ | ----------------------------------------- |
+| `extensions` | Array of extension paths to load (or all) |
+| `skills`     | Array of skill directory paths (or none)  |
+| `prompts`    | Array of prompt directory paths (or none) |
+| `themes`     | Array of theme paths (or none)            |
+
+Setting a filter key to an empty array `[]` disables loading of that resource type. Omitting the key loads all resources the package declares.
+
+### Agent/chains installation
+
+Pi does not have native `agents` or `chains` manifest keys. Agent and chain markdown files shipped by `pi-zflow-agents` must be installed into Pi subagents discovery directories.
+
+**Default install locations:**
+
+| Resource         | Directory                                 |
+| ---------------- | ----------------------------------------- |
+| Agent markdown   | `~/.pi/agent/agents/zflow/`               |
+| Chain markdown   | `~/.pi/agent/chains/zflow/`               |
+| Install manifest | `~/.pi/agent/zflow/install-manifest.json` |
+
+**Install flow:**
+
+1. Install `pi-zflow-agents` (as part of the umbrella or standalone).
+2. Run `/zflow-setup-agents` to copy agent and chain files into the Pi discovery directories.
+3. Run `/zflow-update-agents` later if the package version changes.
+
+The install commands are:
+
+- **Idempotent** — re-running does not overwrite user-local edits unless `--force` is used.
+- **Tracking** — the install manifest at `~/.pi/agent/zflow/install-manifest.json` records which version's files were deployed.
+- **Scope** — user-level by default (`~/.pi/agent/...`). Project-local `.pi/agents/` and `.pi/chains/` are opt-in only.
+
+See `packages/pi-zflow-agents/extensions/zflow-agents/install.ts` and `manifest.ts` for the implementation.
+
 ## License
 
 MIT
