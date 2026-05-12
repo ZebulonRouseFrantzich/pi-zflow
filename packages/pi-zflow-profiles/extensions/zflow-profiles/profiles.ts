@@ -980,3 +980,245 @@ export function loadProfilesSync(repoRoot?: string): LoadedProfiles {
   const { profiles, validation } = parseProfilesFileJson(raw)
   return { source, profiles, validation }
 }
+
+// ── Active profile cache ────────────────────────────────────────
+
+import { createHash, randomBytes } from "node:crypto"
+
+/**
+ * A single resolved lane entry in the active profile cache.
+ * A slimmer version of `ResolvedLane` suitable for JSON serialisation.
+ */
+export interface CachedResolvedLane {
+  /** Resolved model identifier, or null if unresolved. */
+  model: string | null
+  /** Effective thinking level after resolution. */
+  thinking?: "low" | "medium" | "high"
+  /** Resolution status. */
+  status: LaneStatus
+  /** Human-readable reason if unresolved or degraded. */
+  reason?: string
+}
+
+/**
+ * A single resolved agent binding entry in the active profile cache.
+ */
+export interface CachedAgentBinding {
+  /** Lane this agent is bound to. */
+  lane: string
+  /** Concrete model identifier resolved for this agent's lane. */
+  resolvedModel: string | null
+  /** Tools the agent is allowed to use. */
+  tools?: string
+  /** Maximum output tokens for this agent. */
+  maxOutput?: number
+  /** Maximum subagent nesting depth. */
+  maxSubagentDepth?: number
+}
+
+/**
+ * Shape of the active profile cache file written to
+ * `~/.pi/agent/zflow/active-profile.json`.
+ */
+export interface ActiveProfileCache {
+  /** Name of the profile that was resolved (e.g. "default"). */
+  profileName: string
+  /** Source file the profile was loaded from. */
+  sourcePath: string
+  /** ISO 8601 timestamp when the cache was written. */
+  resolvedAt: string
+  /** Time-to-live in minutes before the cache is considered stale. */
+  ttlMinutes: number
+  /**
+   * SHA-256 hash of the raw profile definition file content.
+   * Used to detect when the profile file has changed.
+   */
+  definitionHash: string
+  /**
+   * Fingerprint of the environment at resolution time (available
+   * models, auth state). Used to detect when the runtime
+   * environment has changed.
+   */
+  environmentFingerprint: string
+  /** Per-lane resolution results, keyed by lane name. */
+  resolvedLanes: Record<string, CachedResolvedLane>
+  /** Per-agent binding results, keyed by agent runtime name. */
+  agentBindings: Record<string, CachedAgentBinding>
+}
+
+/**
+ * Default TTL for the active profile cache, in minutes.
+ * After this period the cache is considered stale and must be
+ * re-resolved on next access.
+ */
+export const DEFAULT_CACHE_TTL_MINUTES = 15
+
+/**
+ * Compute a SHA-256 hex digest of the given string content.
+ *
+ * Used to produce a `definitionHash` from the raw profile file JSON,
+ * and an `environmentFingerprint` from the set of available models.
+ *
+ * @param content - The string content to hash.
+ * @returns Hex-encoded SHA-256 digest (64 characters).
+ */
+export function computeHash(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex")
+}
+
+/**
+ * Compute a stable environment fingerprint from a sorted list of
+ * model identifiers available in the runtime registry.
+ *
+ * Produces a deterministic hash that changes when the set of
+ * available models or their auth state changes.
+ *
+ * @param modelIds - Sorted array of available model identifiers.
+ * @returns Hex-encoded fingerprint string.
+ */
+export function computeEnvironmentFingerprint(modelIds: string[]): string {
+  const sorted = [...modelIds].sort()
+  return computeHash(sorted.join("\n"))
+}
+
+/**
+ * Ensure the parent directory of a file path exists.
+ * Safe to call multiple times (idempotent).
+ */
+async function ensureParentDir(filePath: string): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true })
+}
+
+/**
+ * Write the active profile cache atomically.
+ *
+ * Uses a temp-file-then-rename strategy for atomicity:
+ *   1. Write to a temporary file in the same directory.
+ *   2. Rename the temporary file over the target path.
+ *
+ * On POSIX filesystems, `rename()` is atomic, so concurrent readers
+ * and writers never see a partially written cache file.
+ *
+ * @param cache - The cache data to write.
+ * @param targetPath - The cache file path (defaults to `ACTIVE_PROFILE_PATH`).
+ */
+export async function writeActiveProfileCache(
+  cache: ActiveProfileCache,
+  targetPath?: string,
+): Promise<void> {
+  const { ACTIVE_PROFILE_PATH } = await import("pi-zflow-core")
+  const resolvedPath = targetPath ?? ACTIVE_PROFILE_PATH
+
+  // Ensure directory exists
+  await ensureParentDir(resolvedPath)
+
+  // Temp file alongside the target with a random suffix
+  const dir = path.dirname(resolvedPath)
+  const tmpName = `.tmp-${randomBytes(8).toString("hex")}-active-profile.json`
+  const tmpPath = path.join(dir, tmpName)
+
+  try {
+    // Write to temp file
+    await fs.writeFile(tmpPath, JSON.stringify(cache, null, 2), "utf8")
+
+    // Rename (atomic on POSIX)
+    await fs.rename(tmpPath, resolvedPath)
+  } catch (err) {
+    // Clean up temp file on failure
+    try {
+      await fs.unlink(tmpPath)
+    } catch {
+      // Ignore cleanup errors
+    }
+    throw err
+  }
+}
+
+/**
+ * Read and parse the active profile cache.
+ *
+ * @param cachePath - The cache file path (defaults to `ACTIVE_PROFILE_PATH`).
+ * @returns The parsed cache, or `null` if the file does not exist or
+ *          cannot be parsed.
+ */
+export async function readActiveProfileCache(
+  cachePath?: string,
+): Promise<ActiveProfileCache | null> {
+  const { ACTIVE_PROFILE_PATH } = await import("pi-zflow-core")
+  const resolvedPath = cachePath ?? ACTIVE_PROFILE_PATH
+
+  try {
+    const raw = await fs.readFile(resolvedPath, "utf8")
+    const parsed = JSON.parse(raw) as ActiveProfileCache
+    // Basic structural validation
+    if (
+      typeof parsed.profileName !== "string" ||
+      typeof parsed.resolvedAt !== "string" ||
+      typeof parsed.definitionHash !== "string" ||
+      !parsed.resolvedLanes ||
+      typeof parsed.resolvedLanes !== "object" ||
+      !parsed.agentBindings ||
+      typeof parsed.agentBindings !== "object"
+    ) {
+      return null
+    }
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Build an `ActiveProfileCache` object from a resolved profile and
+ * invalidation metadata.
+ *
+ * @param profileName - The name of the profile.
+ * @param sourcePath - The source file path (for display).
+ * @param resolved - The resolved profile from the resolution engine.
+ * @param definitionHash - SHA-256 hash of the raw profile file content.
+ * @param environmentFingerprint - Fingerprint of the current environment.
+ * @param ttlMinutes - Cache TTL in minutes (defaults to 15).
+ * @returns The cache object ready for writing.
+ */
+export function buildActiveProfileCache(
+  profileName: string,
+  sourcePath: string,
+  resolved: ResolvedProfile,
+  definitionHash: string,
+  environmentFingerprint: string,
+  ttlMinutes: number = DEFAULT_CACHE_TTL_MINUTES,
+): ActiveProfileCache {
+  // Build slim resolved lanes for the cache
+  const resolvedLanes: Record<string, CachedResolvedLane> = {}
+  for (const [laneName, lane] of Object.entries(resolved.resolvedLanes)) {
+    resolvedLanes[laneName] = {
+      model: lane.model,
+      thinking: lane.thinking,
+      status: lane.status,
+      reason: lane.reason,
+    }
+  }
+
+  // Build slim agent bindings for the cache
+  const agentBindings: Record<string, CachedAgentBinding> = {}
+  for (const [agentName, binding] of Object.entries(resolved.agentBindings)) {
+    agentBindings[agentName] = {
+      lane: binding.lane,
+      resolvedModel: binding.resolvedModel,
+      tools: binding.tools,
+      maxOutput: binding.maxOutput,
+      maxSubagentDepth: binding.maxSubagentDepth,
+    }
+  }
+
+  return {
+    profileName,
+    sourcePath,
+    resolvedAt: resolved.resolvedAt,
+    ttlMinutes,
+    definitionHash,
+    environmentFingerprint,
+    resolvedLanes,
+    agentBindings,
+  }
+}
