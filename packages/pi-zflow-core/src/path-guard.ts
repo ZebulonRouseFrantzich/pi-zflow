@@ -380,18 +380,23 @@ export function defaultPlannerArtifactPolicy(runtimeStateDir: string): PlannerAr
 
 /**
  * Safely resolve a path to its real location, rejecting symlink escape
- * and `..` traversal outside the project root.
+ * and `..` traversal.
+ *
+ * **Traversal detection (relative paths only):**
+ * Relative paths are anchored to `projectRoot`. If the resolved path
+ * would escape the project root via `..` components, it is rejected.
+ * Absolute paths cannot be anchored to `projectRoot` and instead resolve
+ * based on their own root (e.g. `/tmp/pi-zflow/...`); they are checked
+ * against the sentinel policy's allowed roots by `canWrite()`.
  *
  * **Symlink escape detection:**
- * If the resolved real path is not within any allowed root, the path is
- * rejected.
- *
- * **Traversal detection:**
- * If the input path contains `..` components that would place the resolved
- * path outside the project root, the path is rejected.
+ * Symlinks are resolved and the real path is returned. The caller
+ * (`canWrite()`) is responsible for checking the real path against
+ * allowed roots. This function only ensures the path can be resolved
+ * without filesystem errors.
  *
  * @param targetPath  The path to resolve (may be relative).
- * @param projectRoot Absolute project root used as the anchor for relative paths.
+ * @param projectRoot Absolute project root used as anchor for relative paths.
  * @param config      Symlink safety configuration.
  * @returns The resolved real absolute path, or `null` if the path is unsafe.
  */
@@ -400,11 +405,21 @@ export function realpathSafe(
   projectRoot: string,
   config: SymlinkSafetyConfig = DEFAULT_SYMLINK_SAFETY,
 ): string | null {
-  // Resolve to absolute
-  const absPath = path.isAbsolute(targetPath) ? targetPath : path.resolve(projectRoot, targetPath)
+  const isRelative = !path.isAbsolute(targetPath)
 
-  // --- Traversal detection ---
-  if (config.preventTraversal) {
+  // Resolve to absolute
+  const absPath = isRelative ? path.resolve(projectRoot, targetPath) : path.resolve(targetPath)
+
+  // --- Traversal detection (relative paths only) ---
+  //
+  // Relative paths are anchored to projectRoot.  A relative path like
+  // "src/../../etc/passwd" would resolve outside the project root and
+  // must be rejected.
+  //
+  // Absolute paths (e.g. "/tmp/pi-zflow-abc123/...") are not anchored to
+  // projectRoot and cannot "escape" via ".." in a meaningful way. They
+  // are checked against the sentinel policy's allowed roots in canWrite().
+  if (config.preventTraversal && isRelative) {
     const normalized = path.normalize(absPath)
     const rel = path.relative(projectRoot, normalized)
     if (rel.startsWith("..") || path.isAbsolute(rel)) {
@@ -416,15 +431,15 @@ export function realpathSafe(
   if (config.resolveSymlinks) {
     try {
       const real = fs.realpathSync(absPath)
-      // Check that real path is within the project root
-      const rel = path.relative(projectRoot, real)
-      if (rel.startsWith("..") || path.isAbsolute(rel)) {
-        return null  // symlink escaped outside project root
-      }
+      // Return the resolved real path. The caller (canWrite) will check
+      // it against allowed roots — there is no separate project-root
+      // check here because legitimate paths routinely sit outside the
+      // working tree (e.g. <git-dir>/pi-zflow/ for runtime state,
+      // /tmp/pi-zflow-<hash>/ for fallback, or active worktree roots).
       return real
     } catch {
       // Path may not exist yet (e.g., about to create a file)
-      // Fall through — validate directory parent instead
+      // Fall through — return the absolute unresolved path
     }
   }
 
@@ -452,12 +467,14 @@ export function isWithinAllowedRoots(
     const rootAbs = path.isAbsolute(root.path) ? root.path : path.resolve(projectRoot, root.path)
 
     if (root.glob) {
-      // Glob matching — basic support for ** and * at end of pattern
+      // Glob matching — basic support for ** and * at end of pattern.
+      // Use path-relative containment rather than raw startsWith so
+      // /tmp/root-other does not match /tmp/root.
       const pattern = rootAbs.endsWith("/**") ? rootAbs.slice(0, -3) : rootAbs
-      if (resolvedPath.startsWith(pattern)) return true
+      if (isSameOrWithin(resolvedPath, pattern)) return true
     } else {
-      // Exact directory match
-      if (resolvedPath.startsWith(rootAbs)) return true
+      // Directory/file containment match.
+      if (isSameOrWithin(resolvedPath, rootAbs)) return true
     }
   }
   return false
@@ -603,6 +620,17 @@ export function canWrite(
 // ---------------------------------------------------------------------------
 
 /**
+ * Return true when `candidate` is exactly `root` or is contained beneath it.
+ *
+ * This avoids raw string prefix checks, where `/tmp/project-other` would
+ * otherwise incorrectly match `/tmp/project`.
+ */
+function isSameOrWithin(candidate: string, root: string): boolean {
+  const rel = path.relative(root, candidate)
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))
+}
+
+/**
  * Simple glob matching.
  *
  * Supports `**` (match any number of directories), `*` (match within a single
@@ -667,6 +695,14 @@ function isWithinArtifactDir(resolvedPath: string, context: PathGuardContext): b
  * overrides (if any).  The runtime state directory is substituted into
  * planner-artifact patterns at this point.
  *
+ * In addition to the overridden/ default allowed roots, the resolved
+ * policy automatically includes the runtime state directory sub-paths
+ * (from the planner artifact policy) as allowed roots with
+ * `allowIntent: "planner-artifact"` so that planner writes to
+ * `<runtime-state-dir>/plans/`, `<runtime-state-dir>/review/`, etc.
+ * are permitted even when the runtime state directory sits outside the
+ * project root (e.g. the OS temp fallback).
+ *
  * @param overrides       Partial policy overrides (may be empty).
  * @param projectRoot     Resolved project root.
  * @param runtimeStateDir Resolved runtime state directory.
@@ -703,15 +739,43 @@ export function resolveSentinelPolicy(
     }),
   }))
 
+  // Resolve planner artifact dirs
+  const resolvedArtifactDirs = plannerArtifactPolicy.allowedArtifactDirs.map(
+    (d) => d.replace("<runtime-state-dir>", runtimeStateDir),
+  )
+
+  // Merge the runtime state dir and its sub-paths into the allowed roots so
+  // that planner-artifact writes are always permitted, even when the runtime
+  // state dir falls outside the project root (temp fallback).
+  const runtimeStateRoots: AllowedRoot[] = resolvedArtifactDirs.map((dir) => ({
+    path: dir.endsWith("/**") ? dir.slice(0, -3) : dir,
+    label: `runtime-state: ${dir}`,
+    glob: dir.endsWith("/**"),
+    allowIntent: "any" as const,
+  }))
+  // Also add the bare runtime state dir root so writes to the state index etc. work
+  runtimeStateRoots.push({
+    path: runtimeStateDir,
+    label: "runtime-state-root",
+    allowIntent: "any",
+  })
+
+  // Merge — deduplicate by path (in-order, so user roots win on collision)
+  const seen = new Set(resolvedRoots.map((r) => r.path))
+  for (const r of runtimeStateRoots) {
+    if (!seen.has(r.path)) {
+      resolvedRoots.push(r)
+      seen.add(r.path)
+    }
+  }
+
   return {
     description: overrides.description ?? "pi-zflow default sentinel policy",
     allowedRoots: resolvedRoots,
     blockedPatterns: resolvedBlocked,
     symlinkSafety,
     plannerArtifactPolicy: {
-      allowedArtifactDirs: plannerArtifactPolicy.allowedArtifactDirs.map(
-        (d) => d.replace("<runtime-state-dir>", runtimeStateDir),
-      ),
+      allowedArtifactDirs: resolvedArtifactDirs,
     },
   }
 }

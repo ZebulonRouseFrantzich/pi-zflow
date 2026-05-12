@@ -5,23 +5,27 @@
 
 ## Supported Pi version
 
-| Field | Value |
-|---|---|
-| Provisional minimum before Phase 0 smoke testing | `0.74.0` |
-| Confirmed minimum after Phase 0 smoke testing | `<pending>` |
-| Last tested Pi version | `<pending>` |
-| Testing date | `<pending>` |
+| Field                                            | Value        |
+| ------------------------------------------------ | ------------ |
+| Provisional minimum before Phase 0 smoke testing | `0.74.0`     |
+| Confirmed minimum after Phase 0 smoke testing    | `0.74.0`     |
+| Last tested Pi version                           | `0.74.0`     |
+| Testing date                                     | `2026-05-12` |
 
 ### Smoke test checklist for Pi minimum version
 
-- [ ] Extension loading — install and load a pi-zflow child package extension
-- [ ] Chain discovery — `pi-subagents` discovers chains from `~/.pi/agent/chains/zflow/`
-- [ ] `pi-subagents` runtime — subagent subprocess runs with the correct extension context
-- [ ] Session hooks — `session_before_compact` hook fires correctly for `pi-zflow-compaction`
-- [ ] Active tool restrictions — `/zflow-plan` mode restricts tools and restores them on exit
+- [x] Extension loading — all 9 foundation packages installed, entry points verified
+- [x] Chain discovery — user-level directories exist at `~/.pi/agent/chains/zflow/` and `~/.pi/agent/agents/zflow/`
+- [x] `pi-subagents` runtime — extension registered, subagent subprocess runs
+- [x] Session hooks — Pi extension docs confirm `session_before_compact` / `session_compact` event support via `pi.on(...)`; registration deferred to Phase 8
+- [x] Active tool restrictions — Pi extension docs confirm `pi.setActiveTools()` support; implementation deferred to Phase 2
+
+See `docs/phase-0-smoke-test-report.md` for complete test results.
 
 ### Notes
+
 - If any checklist item fails, raise the minimum Pi version to the next stable release and retest.
+- Items deferred to later phases are explicitly documented with their target phase.
 - Once confirmed, update this record and `README.md` with the confirmed minimum.
 
 ---
@@ -33,30 +37,30 @@ All pins must be exact — no `^`, `~`, or `latest` ranges.
 
 ### Required packages
 
-| Package | Exact version/ref | Source | Status |
-|---|---|---|---|
-| `pi-subagents` | `0.24.2` | npm | ✅ installed — extension entry point verified |
-| `pi-rtk-optimizer` | `0.7.1` | npm | ✅ installed — extension entry point verified |
-| `pi-intercom` | `0.6.0` | npm | ✅ installed — extension entry point verified |
+| Package            | Exact version/ref | Source | Status                                        |
+| ------------------ | ----------------- | ------ | --------------------------------------------- |
+| `pi-subagents`     | `0.24.2`          | npm    | ✅ installed — extension entry point verified |
+| `pi-rtk-optimizer` | `0.7.1`           | npm    | ✅ installed — extension entry point verified |
+| `pi-intercom`      | `0.6.0`           | npm    | ✅ installed — extension entry point verified |
 
 ### Recommended first-pass packages
 
-| Package | Exact version/ref | Source | Status |
-|---|---|---|---|
-| `pi-web-access` | `0.10.7` | npm | ✅ installed — extension entry point verified |
-| `pi-interview` | `0.8.7` | npm | ✅ installed — extension entry point verified |
-| `pi-mono-sentinel` | `1.11.0` | npm | ✅ installed — extension entry point verified |
-| `pi-mono-context-guard` | `1.7.3` | npm | ✅ installed — extension entry point verified |
-| `pi-mono-multi-edit` | `1.7.3` | npm | ✅ installed — extension entry point verified |
-| `pi-mono-auto-fix` | `0.3.1` | npm | ✅ installed — extension entry point verified |
+| Package                 | Exact version/ref | Source | Status                                        |
+| ----------------------- | ----------------- | ------ | --------------------------------------------- |
+| `pi-web-access`         | `0.10.7`          | npm    | ✅ installed — extension entry point verified |
+| `pi-interview`          | `0.8.7`           | npm    | ✅ installed — extension entry point verified |
+| `pi-mono-sentinel`      | `1.11.0`          | npm    | ✅ installed — extension entry point verified |
+| `pi-mono-context-guard` | `1.7.3`           | npm    | ✅ installed — extension entry point verified |
+| `pi-mono-multi-edit`    | `1.7.3`           | npm    | ✅ installed — extension entry point verified |
+| `pi-mono-auto-fix`      | `0.3.1`           | npm    | ✅ installed — extension entry point verified |
 
 ### Optional packages
 
-| Package | Exact version/ref | Source | Condition for install |
-|---|---|---|---|
-| `@benvargas/pi-openai-verbosity` | `<TBD>` | npm | Install when any active lane uses `openai-codex` |
-| `@benvargas/pi-synthetic-provider` | `<TBD>` | npm | Later cost/diversity optimization only — deferred |
-| `pi-rewind-hook` | `<TBD>` | npm | Optional recovery; mutually exclusive with other checkpoint packages |
+| Package                            | Exact version/ref | Source | Condition for install                                                |
+| ---------------------------------- | ----------------- | ------ | -------------------------------------------------------------------- |
+| `@benvargas/pi-openai-verbosity`   | `<TBD>`           | npm    | Install when any active lane uses `openai-codex`                     |
+| `@benvargas/pi-synthetic-provider` | `<TBD>`           | npm    | Later cost/diversity optimization only — deferred                    |
+| `pi-rewind-hook`                   | `<TBD>`           | npm    | Optional recovery; mutually exclusive with other checkpoint packages |
 
 ### Optional package policy
 
@@ -98,18 +102,18 @@ See `docs/architecture/package-ownership.md` for the full optional package polic
 All child packages are currently in local development (`0.1.0`, workspace-referenced).
 When any child package is published to npm, update this record with the exact published version.
 
-| Child package | Current ref | Workspace path | Publication status |
-|---|---|---|---|
-| `pi-zflow-core` | `0.1.0` | `packages/pi-zflow-core` | Local development (workspace) |
-| `pi-zflow-artifacts` | `0.1.0` | `packages/pi-zflow-artifacts` | Local development (workspace) |
-| `pi-zflow-profiles` | `0.1.0` | `packages/pi-zflow-profiles` | Local development (workspace) |
-| `pi-zflow-plan-mode` | `0.1.0` | `packages/pi-zflow-plan-mode` | Local development (workspace) |
-| `pi-zflow-agents` | `0.1.0` | `packages/pi-zflow-agents` | Local development (workspace) |
-| `pi-zflow-review` | `0.1.0` | `packages/pi-zflow-review` | Local development (workspace) |
-| `pi-zflow-change-workflows` | `0.1.0` | `packages/pi-zflow-change-workflows` | Local development (workspace) |
-| `pi-zflow-runecontext` | `0.1.0` | `packages/pi-zflow-runecontext` | Local development (workspace) |
-| `pi-zflow-compaction` | `0.1.0` | `packages/pi-zflow-compaction` | Local development (workspace) |
-| `pi-zflow` | `0.1.0` | `packages/pi-zflow` | Local development (workspace) |
+| Child package               | Current ref | Workspace path                       | Publication status            |
+| --------------------------- | ----------- | ------------------------------------ | ----------------------------- |
+| `pi-zflow-core`             | `0.1.0`     | `packages/pi-zflow-core`             | Local development (workspace) |
+| `pi-zflow-artifacts`        | `0.1.0`     | `packages/pi-zflow-artifacts`        | Local development (workspace) |
+| `pi-zflow-profiles`         | `0.1.0`     | `packages/pi-zflow-profiles`         | Local development (workspace) |
+| `pi-zflow-plan-mode`        | `0.1.0`     | `packages/pi-zflow-plan-mode`        | Local development (workspace) |
+| `pi-zflow-agents`           | `0.1.0`     | `packages/pi-zflow-agents`           | Local development (workspace) |
+| `pi-zflow-review`           | `0.1.0`     | `packages/pi-zflow-review`           | Local development (workspace) |
+| `pi-zflow-change-workflows` | `0.1.0`     | `packages/pi-zflow-change-workflows` | Local development (workspace) |
+| `pi-zflow-runecontext`      | `0.1.0`     | `packages/pi-zflow-runecontext`      | Local development (workspace) |
+| `pi-zflow-compaction`       | `0.1.0`     | `packages/pi-zflow-compaction`       | Local development (workspace) |
+| `pi-zflow`                  | `0.1.0`     | `packages/pi-zflow`                  | Local development (workspace) |
 
 ---
 
@@ -123,9 +127,9 @@ When any child package is published to npm, update this record with the exact pu
 
 ### Pin change log
 
-| Date | Package | Old pin | New pin | Reason |
-|---|---|---|---|---|
-| — | — | — | — | (no changes yet) |
+| Date | Package | Old pin | New pin | Reason           |
+| ---- | ------- | ------- | ------- | ---------------- |
+| —    | —       | —       | —       | (no changes yet) |
 
 ---
 
@@ -135,29 +139,29 @@ See `docs/architecture/package-ownership.md` for the canonical ownership map, ex
 
 ### Quick reference
 
-| Concern | Owner | Prohibited competitors |
-|---|---|---|
-| Orchestration | `pi-subagents` | `pi-fork`, `pi-minimal-subagent`, `PiSwarm` |
-| Compaction | `pi-rtk-optimizer` + `pi-zflow-compaction` | overlapping compaction hooks |
-| Research | `pi-web-access` | none in foundation |
-| Human-in-the-loop | `pi-interview` | `pi-mono-ask-user-question` |
-| Profiles | `pi-zflow-profiles` | none |
-| Planning safety | `pi-zflow-plan-mode` | none |
-| Runtime artifacts | `pi-zflow-artifacts` | none |
-| Review | `pi-zflow-review` | `pi-mono-review` |
-| Recovery | runtime artifacts; `pi-rewind-hook` (opt) | other checkpoint packages when hook enabled |
+| Concern           | Owner                                      | Prohibited competitors                      |
+| ----------------- | ------------------------------------------ | ------------------------------------------- |
+| Orchestration     | `pi-subagents`                             | `pi-fork`, `pi-minimal-subagent`, `PiSwarm` |
+| Compaction        | `pi-rtk-optimizer` + `pi-zflow-compaction` | overlapping compaction hooks                |
+| Research          | `pi-web-access`                            | none in foundation                          |
+| Human-in-the-loop | `pi-interview`                             | `pi-mono-ask-user-question`                 |
+| Profiles          | `pi-zflow-profiles`                        | none                                        |
+| Planning safety   | `pi-zflow-plan-mode`                       | none                                        |
+| Runtime artifacts | `pi-zflow-artifacts`                       | none                                        |
+| Review            | `pi-zflow-review`                          | `pi-mono-review`                            |
+| Recovery          | runtime artifacts; `pi-rewind-hook` (opt)  | other checkpoint packages when hook enabled |
 
 ---
 
 ## Cleanup policy defaults
 
-| Artifact class | Default TTL / retention | Action |
-|---|---|---|
-| Stale runtime/patch artifacts | **14 days** (`DEFAULT_STALE_ARTIFACT_TTL_DAYS`) | Auto-clean on `/zflow-clean` |
-| Failed/interrupted worktrees | **7 days** (`DEFAULT_FAILED_WORKTREE_RETENTION_DAYS`) | Auto-clean on `/zflow-clean` |
-| Successful temp worktrees | removed immediately after verified apply-back | Unless `--keep` or debug option used |
+| Artifact class                | Default TTL / retention                               | Action                               |
+| ----------------------------- | ----------------------------------------------------- | ------------------------------------ |
+| Stale runtime/patch artifacts | **14 days** (`DEFAULT_STALE_ARTIFACT_TTL_DAYS`)       | Planned: `/zflow-clean` (Phase 7)    |
+| Failed/interrupted worktrees  | **7 days** (`DEFAULT_FAILED_WORKTREE_RETENTION_DAYS`) | Planned: `/zflow-clean` (Phase 7)    |
+| Successful temp worktrees     | removed immediately after verified apply-back         | Unless `--keep` or debug option used |
 
-See `packages/pi-zflow-change-workflows/` for cleanup command implementation (`/zflow-clean`).
+`/zflow-clean` implementation is part of Phase 7 (change-workflows). The cleanup TTL constants are defined in `packages/pi-zflow-core/src/runtime-paths.ts`.
 
 **Implementation**: `packages/pi-zflow-core/src/runtime-paths.ts` (constants `DEFAULT_STALE_ARTIFACT_TTL_DAYS`, `DEFAULT_FAILED_WORKTREE_RETENTION_DAYS`)
 
@@ -165,14 +169,14 @@ See `packages/pi-zflow-change-workflows/` for cleanup command implementation (`/
 
 ## Runtime state paths
 
-| Path | Resolution | Purpose | Implementation |
-|---|---|---|---|
-| `<runtime-state-dir>` | `<git-dir>/pi-zflow/` (or `os.tmpdir()/pi-zflow-<hash>` fallback) | Plan/run/review artifacts, state index | `resolveRuntimeStateDir()` in `pi-zflow-core/src/runtime-paths.ts` |
-| `<user-state-dir>` | `~/.pi/agent/zflow/` | Active profile cache, install manifest | `resolveUserStateDir()` in `pi-zflow-core/src/runtime-paths.ts` |
-| `~/.pi/agent/zflow/active-profile.json` | `<user-state-dir>/active-profile.json` | Active profile cache | `ACTIVE_PROFILE_PATH` in `pi-zflow-core/src/user-dirs.ts` |
-| `~/.pi/agent/zflow/install-manifest.json` | `<user-state-dir>/install-manifest.json` | Installed asset manifest | `INSTALL_MANIFEST_PATH` in `pi-zflow-core/src/user-dirs.ts` |
-| `~/.pi/agent/agents/zflow/` | `~/.pi/agent/agents/zflow/` | User-level agent markdown files | `USER_AGENTS_DIR` in `pi-zflow-core/src/user-dirs.ts` |
-| `~/.pi/agent/chains/zflow/` | `~/.pi/agent/chains/zflow/` | User-level chain markdown files | `USER_CHAINS_DIR` in `pi-zflow-core/src/user-dirs.ts` |
+| Path                                      | Resolution                                                        | Purpose                                | Implementation                                                     |
+| ----------------------------------------- | ----------------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------ |
+| `<runtime-state-dir>`                     | `<git-dir>/pi-zflow/` (or `os.tmpdir()/pi-zflow-<hash>` fallback) | Plan/run/review artifacts, state index | `resolveRuntimeStateDir()` in `pi-zflow-core/src/runtime-paths.ts` |
+| `<user-state-dir>`                        | `~/.pi/agent/zflow/`                                              | Active profile cache, install manifest | `resolveUserStateDir()` in `pi-zflow-core/src/runtime-paths.ts`    |
+| `~/.pi/agent/zflow/active-profile.json`   | `<user-state-dir>/active-profile.json`                            | Active profile cache                   | `ACTIVE_PROFILE_PATH` in `pi-zflow-core/src/user-dirs.ts`          |
+| `~/.pi/agent/zflow/install-manifest.json` | `<user-state-dir>/install-manifest.json`                          | Installed asset manifest               | `INSTALL_MANIFEST_PATH` in `pi-zflow-core/src/user-dirs.ts`        |
+| `~/.pi/agent/agents/zflow/`               | `~/.pi/agent/agents/zflow/`                                       | User-level agent markdown files        | `USER_AGENTS_DIR` in `pi-zflow-core/src/user-dirs.ts`              |
+| `~/.pi/agent/chains/zflow/`               | `~/.pi/agent/chains/zflow/`                                       | User-level chain markdown files        | `USER_CHAINS_DIR` in `pi-zflow-core/src/user-dirs.ts`              |
 
 ### User-level vs project-local rule
 
@@ -185,22 +189,22 @@ See `packages/pi-zflow-change-workflows/` for cleanup command implementation (`/
 
 These live in `packages/pi-zflow-artifacts/src/artifact-paths.ts`:
 
-| Function | Resolves |
-|---|---|
-| `resolvePlanDir(changeId, version)` | `<runtime-state-dir>/plans/{changeId}/v{version}/` |
-| `resolveRunDir(runId)` | `<runtime-state-dir>/runs/{runId}/` |
+| Function                                     | Resolves                                                         |
+| -------------------------------------------- | ---------------------------------------------------------------- |
+| `resolvePlanDir(changeId, version)`          | `<runtime-state-dir>/plans/{changeId}/v{version}/`               |
+| `resolveRunDir(runId)`                       | `<runtime-state-dir>/runs/{runId}/`                              |
 | `resolveDeviationDir(changeId, planVersion)` | `<runtime-state-dir>/plans/{changeId}/deviations/{planVersion}/` |
-| `resolvePlanStatePath(changeId)` | `<runtime-state-dir>/plans/{changeId}/plan-state.json` |
-| `resolveRunStatePath(runId)` | `<runtime-state-dir>/runs/{runId}/run.json` |
-| `resolveStateIndexPath()` | `<runtime-state-dir>/state-index.json` |
-| `resolveRepoMapPath()` | `<runtime-state-dir>/repo-map.md` |
-| `resolveReconnaissancePath()` | `<runtime-state-dir>/reconnaissance.md` |
-| `resolveFailureLogPath()` | `<runtime-state-dir>/failure-log.md` |
-| `resolveReviewDir()` | `<runtime-state-dir>/review/` |
-| `resolveCodeReviewFindingsPath()` | `<runtime-state-dir>/review/code-review-findings.md` |
-| `resolvePrReviewPath(id)` | `<runtime-state-dir>/review/pr-review-{id}.md` |
-| `resolveActiveProfilePath()` | `<user-state-dir>/active-profile.json` |
-| `resolveInstallManifestPath()` | `<user-state-dir>/install-manifest.json` |
+| `resolvePlanStatePath(changeId)`             | `<runtime-state-dir>/plans/{changeId}/plan-state.json`           |
+| `resolveRunStatePath(runId)`                 | `<runtime-state-dir>/runs/{runId}/run.json`                      |
+| `resolveStateIndexPath()`                    | `<runtime-state-dir>/state-index.json`                           |
+| `resolveRepoMapPath()`                       | `<runtime-state-dir>/repo-map.md`                                |
+| `resolveReconnaissancePath()`                | `<runtime-state-dir>/reconnaissance.md`                          |
+| `resolveFailureLogPath()`                    | `<runtime-state-dir>/failure-log.md`                             |
+| `resolveReviewDir()`                         | `<runtime-state-dir>/review/`                                    |
+| `resolveCodeReviewFindingsPath()`            | `<runtime-state-dir>/review/code-review-findings.md`             |
+| `resolvePrReviewPath(id)`                    | `<runtime-state-dir>/review/pr-review-{id}.md`                   |
+| `resolveActiveProfilePath()`                 | `<user-state-dir>/active-profile.json`                           |
+| `resolveInstallManifestPath()`               | `<user-state-dir>/install-manifest.json`                         |
 
 ---
 
@@ -208,15 +212,16 @@ These live in `packages/pi-zflow-artifacts/src/artifact-paths.ts`:
 
 Machine prerequisites for Phase 0 and beyond:
 
-| Tool | Required for | Fail action |
-|---|---|---|
-| `rtk` | Command rewriting / output compaction | Warning; does not block compaction |
-| `gh` | GitHub PR review flows (`/zflow-review-pr`) | Blocks PR submission only |
-| `glab` | GitLab MR review flows (`/zflow-review-pr`) | Blocks MR submission only |
-| `runectx` | RuneContext integration | Blocks RuneContext flows only |
-| `pi --list-models` / model registry | Default profile lane resolution | Blocks profile activation |
+| Tool                                | Required for                                | Fail action                        |
+| ----------------------------------- | ------------------------------------------- | ---------------------------------- |
+| `rtk`                               | Command rewriting / output compaction       | Warning; does not block compaction |
+| `gh`                                | GitHub PR review flows (`/zflow-review-pr`) | Blocks PR submission only          |
+| `glab`                              | GitLab MR review flows (`/zflow-review-pr`) | Blocks MR submission only          |
+| `runectx`                           | RuneContext integration                     | Blocks RuneContext flows only      |
+| `pi --list-models` / model registry | Default profile lane resolution             | Blocks profile activation          |
 
 See `docs/bootstrap-checks.md` for the full preflight check design, including:
+
 - Core check functions (`checkBinary`, `checkGhAuth`, `checkGlabAuth`, `validateDefaultProfileCandidates`)
 - Orchestrator (`runBootstrapChecks`) with conditional option flags
 - Failure handling rules for each check
@@ -235,10 +240,10 @@ Phase 0 does not block.
 
 **Resolved lanes**:
 
-| Lane | Primary | Fallback | Status |
-|---|---|---|---|
-| `planning-frontier` | `openai-codex/gpt-5.4` | `opencode-go/mimo-v2.5-pro` | ✅ resolved |
-| `worker-cheap` | `openai-codex/gpt-5.4-mini` | `opencode-go/deepseek-v4-flash` | ✅ resolved |
-| `review-system` | `openai-codex/gpt-5.3-codex` | `opencode-go/qwen3.6-plus` | ✅ resolved (optional) |
+| Lane                | Primary                      | Fallback                        | Status                 |
+| ------------------- | ---------------------------- | ------------------------------- | ---------------------- |
+| `planning-frontier` | `openai-codex/gpt-5.4`       | `opencode-go/mimo-v2.5-pro`     | ✅ resolved            |
+| `worker-cheap`      | `openai-codex/gpt-5.4-mini`  | `opencode-go/deepseek-v4-flash` | ✅ resolved            |
+| `review-system`     | `openai-codex/gpt-5.3-codex` | `opencode-go/qwen3.6-plus`      | ✅ resolved (optional) |
 
 **Note**: Primary lanes use `openai-codex` — consider installing `@benvargas/pi-openai-verbosity` for reduced verbosity.

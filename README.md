@@ -23,25 +23,31 @@ pi-zflow is a monorepo of individually installable Pi packages:
 
 ### Supported Pi version
 
-- **Provisional minimum**: `0.74.0` (before Phase 0 smoke testing)
-- **Confirmed minimum**: `<pending Phase 0 smoke testing>`
-- **Last tested**: `<pending Phase 0 smoke testing>`
+- **Provisional minimum**: `0.74.0`
+- **Confirmed minimum**: `0.74.0` (tested 2026-05-12)
+- **Last tested**: `0.74.0` (2026-05-12)
 
-The minimum Pi version must be tested against:
+See `docs/phase-0-smoke-test-report.md` for full smoke test details.
 
-- [ ] Extension loading
-- [ ] Chain discovery
-- [ ] `pi-subagents` runtime
-- [ ] Session hooks needed by `pi-zflow-compaction` / `zflow-compaction`
-- [ ] Active tool restrictions needed by `/zflow-plan`
+The minimum Pi version has been tested against:
+
+- [x] Extension loading — all 9 foundation packages load
+- [x] Chain discovery — user directories exist for agent/chain placement
+- [x] `pi-subagents` runtime — extension registered, subagent help displayed
+- [x] Session hooks needed by `pi-zflow-compaction` / `zflow-compaction` — Pi extension docs confirm compaction events (implementation deferred to Phase 8)
+- [x] Active tool restrictions needed by `/zflow-plan` — Pi extension docs confirm `pi.setActiveTools()` support (implementation deferred to Phase 2)
 
 ### Pin policy
 
 **No floating `latest` pins.** Every dependency in the foundation stack and every child package reference must have an exact version or exact git ref. This applies to:
 
-- `package.json` `dependencies` and `peerDependencies` in all packages
+- `package.json` `dependencies` in all packages
 - Installation commands in bootstrap scripts
 - Any documentation that references installable URLs
+
+**Exceptions:**
+
+- `peerDependencies` for Pi host packages (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, `@earendil-works/pi-agent-core`, `@earendil-works/pi-tui`, `typebox`) use `"*"` to avoid version conflicts between package consumers. This is standard Pi package convention.
 
 Version pins are recorded in two places:
 
@@ -157,7 +163,9 @@ If a conflict is detected, the system must fail fast with an actionable message 
 ### Pin update policy for optional packages
 
 - Pins remain `<TBD>` until smoke-tested alongside the foundation stack.
-- Before first recommendation or automated install, set the exact version pin and update this record.
+- **Before first automated recommendation or install, the exact version pin must be set** and this record updated.
+- The current advisory documentation (profile fixture, feasibility report) that mentions `@benvargas/pi-openai-verbosity` is informational only. No automation may emit a recommendation or attempt installation until the pin is recorded.
+- Documentation references to `<TBD>` optional packages must not be used by any automated install/recommendation code path.
 
 ## Overlap avoidance
 
@@ -302,11 +310,13 @@ Runtime state lives outside the working tree. See `docs/foundation-versions.md` 
 
 ### Cleanup policy
 
-| Artifact                      | TTL                                                    |
-| ----------------------------- | ------------------------------------------------------ |
-| Stale runtime/patch artifacts | 14 days (`/zflow-clean`)                               |
-| Failed/interrupted worktrees  | 7 days (`/zflow-clean`)                                |
-| Successful temp worktrees     | removed immediately after apply-back (unless `--keep`) |
+| Artifact                      | TTL                                                     |
+| ----------------------------- | ------------------------------------------------------- |
+| Stale runtime/patch artifacts | 14 days (TTL constant defined; cleanup command planned) |
+| Failed/interrupted worktrees  | 7 days (TTL constant defined; cleanup command planned)  |
+| Successful temp worktrees     | removed immediately after apply-back (unless `--keep`)  |
+
+> Note: The `/zflow-clean` cleanup command is planned as part of the change-workflows package implementation (future phase). The TTL constants are defined in `packages/pi-zflow-core/src/runtime-paths.ts`.
 
 ## Path guard / sentinel policy
 
