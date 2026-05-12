@@ -994,6 +994,10 @@ export interface CachedResolvedLane {
   model: string | null
   /** Effective thinking level after resolution. */
   thinking?: "low" | "medium" | "high"
+  /** Whether this lane was required. */
+  required: boolean
+  /** Whether this lane was optional. */
+  optional: boolean
   /** Resolution status. */
   status: LaneStatus
   /** Human-readable reason if unresolved or degraded. */
@@ -1194,6 +1198,8 @@ export function buildActiveProfileCache(
     resolvedLanes[laneName] = {
       model: lane.model,
       thinking: lane.thinking,
+      required: lane.required,
+      optional: lane.optional,
       status: lane.status,
       reason: lane.reason,
     }
@@ -1218,6 +1224,95 @@ export function buildActiveProfileCache(
     ttlMinutes,
     definitionHash,
     environmentFingerprint,
+    resolvedLanes,
+    agentBindings,
+  }
+}
+
+// ── Cache freshness and reconstruction ──────────────────────────
+
+/**
+ * Check whether an active profile cache is still fresh based on TTL.
+ *
+ * For now, only TTL expiry is checked. In Task 2.7, this will also
+ * compare `definitionHash` against the current file content and
+ * `environmentFingerprint` against the current runtime state.
+ *
+ * @param cache - The cache to check.
+ * @returns `true` if the cache is still considered fresh.
+ */
+export function isActiveProfileCacheFresh(cache: ActiveProfileCache): boolean {
+  const age = Date.now() - new Date(cache.resolvedAt).getTime()
+  return age <= cache.ttlMinutes * 60 * 1000
+}
+
+/**
+ * Read the active profile cache and return it only if it is still
+ * fresh (TTL not expired).
+ *
+ * Returns `null` if the cache file does not exist, cannot be parsed,
+ * or has expired.
+ *
+ * @param cachePath - Optional override for the cache file path.
+ * @returns The fresh cache, or `null`.
+ */
+export async function readActiveProfileCacheIfFresh(
+  cachePath?: string,
+): Promise<ActiveProfileCache | null> {
+  const cache = await readActiveProfileCache(cachePath)
+  if (!cache) return null
+  if (!isActiveProfileCacheFresh(cache)) return null
+  return cache
+}
+
+/**
+ * Convert an `ActiveProfileCache` back into a `ResolvedProfile` for
+ * use by callers that expect the full resolved type.
+ *
+ * This allows workflows to use the cache as a fast path while still
+ * working with the standard `ResolvedProfile` interface.
+ *
+ * @param cache - The cached profile data.
+ * @returns A reconstructed `ResolvedProfile`.
+ */
+export function cacheToResolvedProfile(
+  cache: ActiveProfileCache,
+): ResolvedProfile {
+  // Reconstruct resolved lanes
+  const resolvedLanes: Record<string, ResolvedLane> = {}
+  for (const [laneName, cachedLane] of Object.entries(cache.resolvedLanes)) {
+    resolvedLanes[laneName] = {
+      lane: laneName,
+      model: cachedLane.model,
+      required: cachedLane.required,
+      optional: cachedLane.optional,
+      thinking: cachedLane.thinking,
+      status: cachedLane.status,
+      reason: cachedLane.reason,
+    }
+  }
+
+  // Reconstruct agent bindings
+  const agentBindings: Record<string, ResolvedAgentBinding> = {}
+  for (const [agentName, cachedBinding] of Object.entries(cache.agentBindings)) {
+    const laneResult = resolvedLanes[cachedBinding.lane]
+    agentBindings[agentName] = {
+      agent: agentName,
+      lane: cachedBinding.lane,
+      resolvedModel: cachedBinding.resolvedModel,
+      optional: laneResult?.optional ?? false,
+      tools: cachedBinding.tools,
+      maxOutput: cachedBinding.maxOutput,
+      maxSubagentDepth: cachedBinding.maxSubagentDepth,
+      status: laneResult?.status ?? (cachedBinding.resolvedModel ? "resolved" : "unresolved-required"),
+      reason: laneResult?.reason,
+    }
+  }
+
+  return {
+    profileName: cache.profileName,
+    sourcePath: cache.sourcePath,
+    resolvedAt: cache.resolvedAt,
     resolvedLanes,
     agentBindings,
   }

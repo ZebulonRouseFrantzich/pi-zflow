@@ -22,11 +22,17 @@ import {
   computeEnvironmentFingerprint,
   writeActiveProfileCache,
   readActiveProfileCache,
+  readActiveProfileCacheIfFresh,
+  isActiveProfileCacheFresh,
+  cacheToResolvedProfile,
   buildActiveProfileCache,
   DEFAULT_CACHE_TTL_MINUTES,
 } from "../extensions/zflow-profiles/profiles.js"
 
-import { activateProfile } from "../extensions/zflow-profiles/index.js"
+import {
+  activateProfile,
+  ensureResolved,
+} from "../extensions/zflow-profiles/index.js"
 
 import type {
   ActiveProfileCache,
@@ -130,8 +136,8 @@ describe("writeActiveProfileCache / readActiveProfileCache", () => {
     definitionHash: "abc123",
     environmentFingerprint: "def456",
     resolvedLanes: {
-      scout: { model: "m1", thinking: "low", status: "resolved" },
-      optional: { model: null, status: "disabled-optional", reason: "no model" },
+      scout: { model: "m1", thinking: "low", required: true, optional: false, status: "resolved" },
+      optional: { model: null, required: false, optional: true, status: "disabled-optional", reason: "no model" },
     },
     agentBindings: {
       s: { lane: "scout", resolvedModel: "m1", tools: "read" },
@@ -271,11 +277,15 @@ describe("buildActiveProfileCache", () => {
     assert.equal(cache.resolvedLanes.scout.model, "m1")
     assert.equal(cache.resolvedLanes.scout.thinking, "low")
     assert.equal(cache.resolvedLanes.scout.status, "resolved")
+    assert.equal(cache.resolvedLanes.scout.required, true)
+    assert.equal(cache.resolvedLanes.scout.optional, false)
 
     // Disabled-optional lane recorded explicitly
     assert.equal(cache.resolvedLanes.optional.model, null)
     assert.equal(cache.resolvedLanes.optional.status, "disabled-optional")
     assert.equal(cache.resolvedLanes.optional.reason, "no matching model")
+    assert.equal(cache.resolvedLanes.optional.required, false)
+    assert.equal(cache.resolvedLanes.optional.optional, true)
 
     // Agent binding
     assert.equal(cache.agentBindings.s.lane, "scout")
@@ -424,6 +434,317 @@ describe("activateProfile", () => {
       }
     } finally {
       await fs.rm(repoRoot, { recursive: true, force: true })
+    }
+  })
+})
+
+// ── Cache freshness and reconstruction tests ────────────────────
+
+describe("isActiveProfileCacheFresh", () => {
+  it("returns true for a just-written cache", () => {
+    const cache: ActiveProfileCache = {
+      profileName: "default",
+      sourcePath: "/s.json",
+      resolvedAt: new Date().toISOString(),
+      ttlMinutes: 15,
+      definitionHash: "h",
+      environmentFingerprint: "f",
+      resolvedLanes: {},
+      agentBindings: {},
+    }
+    assert.equal(isActiveProfileCacheFresh(cache), true)
+  })
+
+  it("returns false for an expired cache", () => {
+    const past = new Date(Date.now() - 20 * 60 * 1000) // 20 min ago
+    const cache: ActiveProfileCache = {
+      profileName: "default",
+      sourcePath: "/s.json",
+      resolvedAt: past.toISOString(),
+      ttlMinutes: 15,
+      definitionHash: "h",
+      environmentFingerprint: "f",
+      resolvedLanes: {},
+      agentBindings: {},
+    }
+    assert.equal(isActiveProfileCacheFresh(cache), false)
+  })
+
+  it("returns true for cache at exact TTL boundary", () => {
+    const past = new Date(Date.now() - 15 * 60 * 1000) // exactly 15 min ago
+    const cache: ActiveProfileCache = {
+      profileName: "default",
+      sourcePath: "/s.json",
+      resolvedAt: past.toISOString(),
+      ttlMinutes: 15,
+      definitionHash: "h",
+      environmentFingerprint: "f",
+      resolvedLanes: {},
+      agentBindings: {},
+    }
+    assert.equal(isActiveProfileCacheFresh(cache), true)
+  })
+})
+
+describe("readActiveProfileCacheIfFresh", () => {
+  it("returns cache when fresh", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-cache-test-"))
+    const cachePath = path.join(dir, "active-profile.json")
+    try {
+      const cache: ActiveProfileCache = {
+        profileName: "default",
+        sourcePath: "/s.json",
+        resolvedAt: new Date().toISOString(),
+        ttlMinutes: 15,
+        definitionHash: "h",
+        environmentFingerprint: "f",
+        resolvedLanes: {},
+        agentBindings: {},
+      }
+      await writeActiveProfileCache(cache, cachePath)
+      const result = await readActiveProfileCacheIfFresh(cachePath)
+      assert.notEqual(result, null)
+      assert.equal(result!.profileName, "default")
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("returns null for expired cache", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-cache-test-"))
+    const cachePath = path.join(dir, "active-profile.json")
+    try {
+      const past = new Date(Date.now() - 30 * 60 * 1000).toISOString()
+      const cache: ActiveProfileCache = {
+        profileName: "stale",
+        sourcePath: "/s.json",
+        resolvedAt: past,
+        ttlMinutes: 15,
+        definitionHash: "h",
+        environmentFingerprint: "f",
+        resolvedLanes: {},
+        agentBindings: {},
+      }
+      await writeActiveProfileCache(cache, cachePath)
+      const result = await readActiveProfileCacheIfFresh(cachePath)
+      assert.equal(result, null)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("returns null when cache file does not exist", async () => {
+    const result = await readActiveProfileCacheIfFresh("/tmp/nonexistent-cache-xyz.json")
+    assert.equal(result, null)
+  })
+})
+
+describe("cacheToResolvedProfile", () => {
+  it("reconstructs a full ResolvedProfile from cache", () => {
+    const cache: ActiveProfileCache = {
+      profileName: "default",
+      sourcePath: "/source.json",
+      resolvedAt: "2026-05-12T00:00:00.000Z",
+      ttlMinutes: 15,
+      definitionHash: "h1",
+      environmentFingerprint: "f1",
+      resolvedLanes: {
+        scout: {
+          model: "openai/gpt-4o-mini",
+          thinking: "low",
+          required: true,
+          optional: false,
+          status: "resolved",
+        },
+        optional: {
+          model: null,
+          required: false,
+          optional: true,
+          status: "disabled-optional",
+          reason: "no model",
+        },
+      },
+      agentBindings: {
+        s: {
+          lane: "scout",
+          resolvedModel: "openai/gpt-4o-mini",
+          tools: "read, grep",
+          maxOutput: 4000,
+          maxSubagentDepth: 0,
+        },
+      },
+    }
+
+    const resolved = cacheToResolvedProfile(cache)
+    assert.equal(resolved.profileName, "default")
+    assert.equal(resolved.sourcePath, "/source.json")
+    assert.equal(resolved.resolvedAt, "2026-05-12T00:00:00.000Z")
+
+    // Resolved lane
+    assert.equal(resolved.resolvedLanes.scout.model, "openai/gpt-4o-mini")
+    assert.equal(resolved.resolvedLanes.scout.thinking, "low")
+    assert.equal(resolved.resolvedLanes.scout.status, "resolved")
+    assert.equal(resolved.resolvedLanes.scout.required, true)
+    assert.equal(resolved.resolvedLanes.scout.optional, false)
+    assert.equal(resolved.resolvedLanes.scout.lane, "scout")
+
+    // Disabled optional lane
+    assert.equal(resolved.resolvedLanes.optional.model, null)
+    assert.equal(resolved.resolvedLanes.optional.status, "disabled-optional")
+    assert.equal(resolved.resolvedLanes.optional.required, false)
+    assert.equal(resolved.resolvedLanes.optional.optional, true)
+    assert.equal(resolved.resolvedLanes.optional.reason, "no model")
+
+    // Agent binding
+    assert.equal(resolved.agentBindings.s.lane, "scout")
+    assert.equal(resolved.agentBindings.s.resolvedModel, "openai/gpt-4o-mini")
+    assert.equal(resolved.agentBindings.s.tools, "read, grep")
+    assert.equal(resolved.agentBindings.s.maxOutput, 4000)
+    assert.equal(resolved.agentBindings.s.maxSubagentDepth, 0)
+  })
+
+  it("handles empty cache gracefully", () => {
+    const cache: ActiveProfileCache = {
+      profileName: "default",
+      sourcePath: "/s.json",
+      resolvedAt: new Date().toISOString(),
+      ttlMinutes: 15,
+      definitionHash: "h",
+      environmentFingerprint: "f",
+      resolvedLanes: {},
+      agentBindings: {},
+    }
+    const resolved = cacheToResolvedProfile(cache)
+    assert.equal(resolved.profileName, "default")
+    assert.equal(Object.keys(resolved.resolvedLanes).length, 0)
+    assert.equal(Object.keys(resolved.agentBindings).length, 0)
+  })
+})
+
+describe("ensureResolved", () => {
+  it("activates default profile when no cache exists", async () => {
+    const { repoRoot } = await setupProfileFile({
+      default: {
+        lanes: {
+          scout: { required: true, thinking: "low", preferredModels: ["m1"] },
+        },
+        agentBindings: { s: { lane: "scout" } },
+      },
+    })
+
+    const registry = makeRegistry([model("m1", { thinkingCapability: "low" })])
+    const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-test-cache-"))
+    const cachePath = path.join(cacheDir, "active-profile.json")
+
+    try {
+      const resolved = await ensureResolved(undefined, { repoRoot, registry, cachePath })
+      assert.equal(resolved.profileName, "default")
+      assert.equal(resolved.resolvedLanes.scout.model, "m1")
+      assert.equal(resolved.resolvedLanes.scout.status, "resolved")
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+      await fs.rm(cacheDir, { recursive: true, force: true })
+    }
+  })
+
+  it("uses cached profile when cache is fresh", async () => {
+    const { repoRoot } = await setupProfileFile({
+      default: {
+        lanes: {
+          scout: { required: true, preferredModels: ["m1"] },
+        },
+        agentBindings: { s: { lane: "scout" } },
+      },
+    })
+
+    const registry = makeRegistry([model("m1")])
+    const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-test-cache-"))
+    const cachePath = path.join(cacheDir, "active-profile.json")
+
+    try {
+      // First call: activates and writes cache
+      const first = await ensureResolved(undefined, { repoRoot, registry, cachePath })
+      assert.equal(first.resolvedLanes.scout.model, "m1")
+
+      // Second call: should use fresh cache
+      const second = await ensureResolved(undefined, { repoRoot, registry, cachePath })
+      assert.equal(second.resolvedLanes.scout.model, "m1")
+      assert.equal(second.profileName, "default")
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+      await fs.rm(cacheDir, { recursive: true, force: true })
+    }
+  })
+
+  it("re-activates when cache is stale", async () => {
+    const { repoRoot } = await setupProfileFile({
+      default: {
+        lanes: {
+          scout: { required: true, preferredModels: ["m1"] },
+        },
+        agentBindings: { s: { lane: "scout" } },
+      },
+    })
+
+    const registry = makeRegistry([model("m1")])
+    const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-test-cache-"))
+    const cachePath = path.join(cacheDir, "active-profile.json")
+
+    try {
+      // First call: activates and writes cache
+      await ensureResolved(undefined, { repoRoot, registry, cachePath })
+
+      // Manually age the cache by rewriting with an old timestamp
+      const oldCache: ActiveProfileCache = {
+        profileName: "default",
+        sourcePath: "/stale.json",
+        resolvedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(), // 1 hour ago
+        ttlMinutes: 15,
+        definitionHash: "old",
+        environmentFingerprint: "old",
+        resolvedLanes: {
+          scout: { model: null, required: true, optional: false, status: "unresolved-required", reason: "stale" },
+        },
+        agentBindings: {},
+      }
+      await writeActiveProfileCache(oldCache, cachePath)
+
+      // Second call: cache is stale, should re-activate
+      const second = await ensureResolved(undefined, { repoRoot, registry, cachePath })
+      assert.equal(second.resolvedLanes.scout.model, "m1")
+      assert.equal(second.resolvedLanes.scout.status, "resolved")
+      assert.equal(second.profileName, "default")
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+      await fs.rm(cacheDir, { recursive: true, force: true })
+    }
+  })
+
+  it("returns a complete ResolvedProfile with agentBindings", async () => {
+    const { repoRoot } = await setupProfileFile({
+      default: {
+        lanes: {
+          scout: { required: true, preferredModels: ["m1"] },
+        },
+        agentBindings: {
+          s: { lane: "scout", tools: "read,write", maxOutput: 4000 },
+        },
+      },
+    })
+
+    const registry = makeRegistry([model("m1")])
+    const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-test-cache-"))
+    const cachePath = path.join(cacheDir, "active-profile.json")
+
+    try {
+      const resolved = await ensureResolved(undefined, { repoRoot, registry, cachePath })
+      assert.equal(resolved.agentBindings.s.resolvedModel, "m1")
+      assert.equal(resolved.agentBindings.s.tools, "read,write")
+      assert.equal(resolved.agentBindings.s.maxOutput, 4000)
+      assert.equal(resolved.agentBindings.s.status, "resolved")
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+      await fs.rm(cacheDir, { recursive: true, force: true })
     }
   })
 })

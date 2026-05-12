@@ -57,6 +57,8 @@ import {
   ProfileFileNotFoundError,
   writeActiveProfileCache,
   readActiveProfileCache,
+  readActiveProfileCacheIfFresh,
+  cacheToResolvedProfile,
   buildActiveProfileCache,
   computeHash,
   computeEnvironmentFingerprint,
@@ -86,6 +88,8 @@ export {
   ProfileFileNotFoundError,
   writeActiveProfileCache,
   readActiveProfileCache,
+  readActiveProfileCacheIfFresh,
+  cacheToResolvedProfile,
   buildActiveProfileCache,
   computeHash,
   computeEnvironmentFingerprint,
@@ -171,6 +175,7 @@ export interface ProfileService {
   validateLaneCandidate: typeof validateLaneCandidate
   checkCapabilityRequirements: typeof checkCapabilityRequirements
   activateProfile: typeof activateProfile
+  ensureResolved: typeof ensureResolved
   readActiveProfileCache: typeof readActiveProfileCache
   writeActiveProfileCache: typeof writeActiveProfileCache
 }
@@ -261,6 +266,55 @@ export async function activateProfile(
 }
 
 /**
+ * Ensure that a profile is resolved and ready for use.
+ *
+ * This is the primary bootstrap function that later workflow phases
+ * (4, 6, 7) call before executing expensive operations. It:
+ *
+ *   1. Reads the current active profile cache if present and fresh (TTL check).
+ *   2. If the cache is missing or stale, activates the `"default"` profile
+ *      (loads profile file, resolves lanes, writes cache).
+ *   3. Returns a `ResolvedProfile` with lane-to-model bindings ready for
+ *      agent dispatch.
+ *
+ * **Health checks** (step 4 from the spec) will be added in Task 2.8 once
+ * the lane-health preflight module is implemented.
+ *
+ * @param requiredLanes - Optional list of lane names to verify are resolved.
+ *                        (Health check integration deferred to Task 2.8.)
+ * @param options - Optional configuration forwarded to `activateProfile`.
+ * @returns A resolved profile suitable for launch-time overrides.
+ */
+export async function ensureResolved(
+  requiredLanes?: string[],
+  options?: {
+    repoRoot?: string
+    registry?: ModelRegistry
+    cachePath?: string
+  },
+): Promise<ResolvedProfile> {
+  // 1. Try reading fresh cache (TTL check only; hash/fingerprint checks
+  //    will be added in Task 2.7)
+  const cache = await readActiveProfileCacheIfFresh(options?.cachePath)
+  if (cache) {
+    // Cache is fresh — reconstruct and return
+    // TODO(Task 2.8): Run preflightLaneHealth(active, requiredLanes)
+    return cacheToResolvedProfile(cache)
+  }
+
+  // 2. Cache missing or stale — full activation
+  const resolved = await activateProfile("default", {
+    repoRoot: options?.repoRoot,
+    registry: options?.registry,
+    cachePath: options?.cachePath,
+  })
+
+  // TODO(Task 2.8): Run preflightLaneHealth(resolved, requiredLanes)
+
+  return resolved
+}
+
+/**
  * Create an empty model registry (no models available).
  * Used as default when no registry is provided.
  */
@@ -345,6 +399,7 @@ export default function activateZflowProfilesExtension(pi: ExtensionAPI): void {
     validateLaneCandidate,
     checkCapabilityRequirements,
     activateProfile,
+    ensureResolved,
     readActiveProfileCache,
     writeActiveProfileCache,
   }
