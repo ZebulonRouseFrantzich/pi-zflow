@@ -176,6 +176,105 @@ export interface NormalizedProfilesFile {
   [profileName: string]: NormalizedProfileDefinition
 }
 
+// ── Lane resolution types ───────────────────────────────────────
+
+/** Possible resolved status for a lane. */
+export type LaneStatus = "resolved" | "disabled-optional" | "unresolved-required"
+
+/**
+ * Result of resolving a single logical lane to a concrete model.
+ */
+export interface ResolvedLane {
+  /** Lane name (e.g. "planning-frontier"). */
+  lane: string
+  /** Resolved model identifier, or null if the lane could not be resolved. */
+  model: string | null
+  /** Whether this lane is required for activation. */
+  required: boolean
+  /** Whether this lane is optional (nice-to-have). */
+  optional: boolean
+  /** Effective thinking level after resolution (may be clamped). */
+  thinking?: "low" | "medium" | "high"
+  /** Resolution status. */
+  status: LaneStatus
+  /** Human-readable explanation for failures, skips, or changes. */
+  reason?: string
+}
+
+/**
+ * Resolved agent binding with concrete model resolved from its lane.
+ */
+export interface ResolvedAgentBinding {
+  /** Agent runtime name (e.g. "zflow.planner-frontier"). */
+  agent: string
+  /** Lane this agent is bound to. */
+  lane: string
+  /** Concrete model identifier resolved for this agent's lane. */
+  resolvedModel: string | null
+  /** Whether this binding is optional. */
+  optional: boolean
+  /** Tools the agent is allowed to use. */
+  tools?: string
+  /** Maximum output tokens for this agent. */
+  maxOutput?: number
+  /** Maximum subagent nesting depth. */
+  maxSubagentDepth?: number
+  /** Resolution status of the underlying lane. */
+  status: LaneStatus
+  /** Reason if unresolved or degraded. */
+  reason?: string
+}
+
+/**
+ * A fully resolved profile: all lanes resolved and all agent bindings
+ * mapped to concrete models.
+ */
+export interface ResolvedProfile {
+  /** Name of the profile that was resolved (e.g. "default"). */
+  profileName: string
+  /** Source file the profile was loaded from. */
+  sourcePath: string
+  /** Timestamp when resolution was performed. */
+  resolvedAt: string
+  /** Per-lane resolution results. */
+  resolvedLanes: Record<string, ResolvedLane>
+  /** Per-agent binding resolution results. */
+  agentBindings: Record<string, ResolvedAgentBinding>
+}
+
+// ── Model registry interface ───────────────────────────────────
+
+/**
+ * Information about a model available in the runtime environment.
+ */
+export interface ModelInfo {
+  /** Full model identifier (e.g. "openai/gpt-5.4", "github-copilot/gpt-5.4-codex"). */
+  id: string
+  /** Whether this model supports tool calling. */
+  supportsTools: boolean
+  /** Whether this model supports text input/output. */
+  supportsText: boolean
+  /** The model's maximum available thinking/reasoning capability. */
+  thinkingCapability: "low" | "medium" | "high"
+  /** Whether the user is authenticated and the model is available for use. */
+  authenticated: boolean
+}
+
+/**
+ * Abstract interface for querying model availability and capabilities.
+ *
+ * Implementations connect this to the actual Pi runtime model registry
+ * (e.g., via `pi --list-models` or the Pi AI SDK). This interface
+ * keeps the resolution engine testable without a live Pi environment.
+ */
+export interface ModelRegistry {
+  /**
+   * Look up a model by its identifier.
+   * Returns `undefined` if the model is not known to the runtime.
+   */
+  getModel(modelId: string): ModelInfo | undefined
+}
+
 // ── Validation result types ─────────────────────────────────────
 
 /**

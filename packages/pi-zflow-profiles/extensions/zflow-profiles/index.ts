@@ -46,6 +46,18 @@ export {
   ProfileFileNotFoundError,
 } from "./profiles.js"
 
+// Re-export the lane resolution API
+export {
+  resolveLane,
+  resolveProfileLanes,
+  resolveAgentBindings,
+  resolveProfile,
+  hasUnresolvedRequiredLanes,
+  getLaneStatusSummary,
+  isModelThinkingCompatible,
+  CONSERVATIVE_LANES,
+} from "./model-resolution.js"
+
 export type {
   LaneDefinition,
   AgentBinding,
@@ -60,7 +72,17 @@ export type {
   ValidationSeverity,
   ParsedProfilesFile,
   LoadedProfiles,
+  ModelInfo,
+  ModelRegistry,
+  ResolvedLane,
+  ResolvedAgentBinding,
+  ResolvedProfile,
+  LaneStatus,
 } from "./profiles.js"
+
+export type {
+  ThinkingCheckResult,
+} from "./model-resolution.js"
 
 // ── Profile service interface ───────────────────────────────────
 
@@ -73,6 +95,12 @@ export interface ProfileService {
   loadProfiles(repoRoot?: string): ReturnType<typeof loadProfiles>
   loadProfilesSync(repoRoot?: string): ReturnType<typeof loadProfilesSync>
   resolveProfileSource(repoRoot?: string): ReturnType<typeof resolveProfileSource>
+  resolveLane: typeof resolveLane
+  resolveProfileLanes: typeof resolveProfileLanes
+  resolveAgentBindings: typeof resolveAgentBindings
+  resolveProfile: typeof resolveProfile
+  hasUnresolvedRequiredLanes: typeof hasUnresolvedRequiredLanes
+  getLaneStatusSummary: typeof getLaneStatusSummary
 }
 
 // ── Capability name ─────────────────────────────────────────────
@@ -120,6 +148,12 @@ export default function activateZflowProfilesExtension(pi: ExtensionAPI): void {
     loadProfiles,
     loadProfilesSync,
     resolveProfileSource,
+    resolveLane,
+    resolveProfileLanes,
+    resolveAgentBindings,
+    resolveProfile,
+    hasUnresolvedRequiredLanes,
+    getLaneStatusSummary,
   }
 
   registry.provide(PROFILES_CAPABILITY, profileService)
