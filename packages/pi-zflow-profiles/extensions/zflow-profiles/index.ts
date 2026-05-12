@@ -62,6 +62,8 @@ import {
   buildActiveProfileCache,
   computeHash,
   computeEnvironmentFingerprint,
+  computeEnvironmentFingerprintFromRegistry,
+  computeCurrentProfileHash,
   DEFAULT_CACHE_TTL_MINUTES,
 } from "./profiles.js"
 
@@ -93,6 +95,8 @@ export {
   buildActiveProfileCache,
   computeHash,
   computeEnvironmentFingerprint,
+  computeEnvironmentFingerprintFromRegistry,
+  computeCurrentProfileHash,
   DEFAULT_CACHE_TTL_MINUTES,
 } from "./profiles.js"
 
@@ -142,6 +146,7 @@ export type {
   ActiveProfileCache,
   CachedResolvedLane,
   CachedAgentBinding,
+  EnvironmentSnapshot,
 } from "./profiles.js"
 
 export type {
@@ -178,6 +183,8 @@ export interface ProfileService {
   ensureResolved: typeof ensureResolved
   readActiveProfileCache: typeof readActiveProfileCache
   writeActiveProfileCache: typeof writeActiveProfileCache
+  computeCurrentProfileHash: typeof computeCurrentProfileHash
+  computeEnvironmentFingerprintFromRegistry: typeof computeEnvironmentFingerprintFromRegistry
 }
 
 // ── Capability name ─────────────────────────────────────────────
@@ -248,8 +255,7 @@ export async function activateProfile(
   const resolved = resolveProfile(profileName, profileDef, source, registry)
 
   // 6. Compute environment fingerprint from the registry
-  const modelIds = extractModelIdsFromRegistry(registry)
-  const environmentFingerprint = computeEnvironmentFingerprint(modelIds)
+  const environmentFingerprint = computeEnvironmentFingerprintFromRegistry(registry)
 
   // 7. Build and write cache
   const cache = buildActiveProfileCache(
@@ -271,10 +277,13 @@ export async function activateProfile(
  * This is the primary bootstrap function that later workflow phases
  * (4, 6, 7) call before executing expensive operations. It:
  *
- *   1. Reads the current active profile cache if present and fresh (TTL check).
- *   2. If the cache is missing or stale, activates the `"default"` profile
+ *   1. Computes the current environment state (profile file hash and
+ *      registry fingerprint) for cache validation.
+ *   2. Reads the current active profile cache if present and fresh
+ *      (TTL, definition hash, AND environment fingerprint checks).
+ *   3. If the cache is missing or stale, activates the `"default"` profile
  *      (loads profile file, resolves lanes, writes cache).
- *   3. Returns a `ResolvedProfile` with lane-to-model bindings ready for
+ *   4. Returns a `ResolvedProfile` with lane-to-model bindings ready for
  *      agent dispatch.
  *
  * **Health checks** (step 4 from the spec) will be added in Task 2.8 once
@@ -293,16 +302,30 @@ export async function ensureResolved(
     cachePath?: string
   },
 ): Promise<ResolvedProfile> {
-  // 1. Try reading fresh cache (TTL check only; hash/fingerprint checks
-  //    will be added in Task 2.7)
-  const cache = await readActiveProfileCacheIfFresh(options?.cachePath)
+  // 1. Compute current environment state for cache validation.
+  //    We use Promise.allSettled so that partial failures (e.g., profile
+  //    file not found) don't crash — they simply force a re-activation.
+  const [currentDefinitionHash, currentEnvFingerprint] = await Promise.all([
+    computeCurrentProfileHash(options?.repoRoot).catch(() => undefined),
+    options?.registry
+      ? computeEnvironmentFingerprintFromRegistry(options.registry)
+      : undefined,
+  ])
+
+  // 2. Try reading fresh cache (with full invalidation checks:
+  //    TTL, definition hash, AND environment fingerprint)
+  const cache = await readActiveProfileCacheIfFresh(
+    options?.cachePath,
+    currentDefinitionHash,
+    currentEnvFingerprint,
+  )
   if (cache) {
     // Cache is fresh — reconstruct and return
     // TODO(Task 2.8): Run preflightLaneHealth(active, requiredLanes)
     return cacheToResolvedProfile(cache)
   }
 
-  // 2. Cache missing or stale — full activation
+  // 3. Cache missing or stale — full activation
   const resolved = await activateProfile("default", {
     repoRoot: options?.repoRoot,
     registry: options?.registry,
@@ -320,34 +343,6 @@ export async function ensureResolved(
  */
 function createEmptyRegistry(): ModelRegistry {
   return { getModel: () => undefined }
-}
-
-/**
- * Extract all known model IDs from a registry for fingerprinting.
- * Iterates by trying common model IDs — for a real registry this
- * should use a proper `listModels()` API.
- *
- * For fingerprinting purposes, we rely on the caller providing a
- * registry that supports listing. If the registry has a `listModels`
- * method (not required by the interface), use it; otherwise return
- * an empty array.
- */
-function extractModelIdsFromRegistry(registry: ModelRegistry): string[] {
-  // Dynamically detect if the registry exposes a way to list models.
-  // The standard ModelRegistry interface only has getModel(), but
-  // real implementations may also have listModels() or enumerate().
-  const r = registry as Record<string, unknown>
-  if (typeof r.listModels === "function") {
-    try {
-      const ids = (r as any).listModels() as string[]
-      return Array.isArray(ids) ? ids : []
-    } catch {
-      return []
-    }
-  }
-  // Fallback: return empty array — caller should provide a registry
-  // with listModels support for meaningful fingerprints.
-  return []
 }
 
 // ── Extension activation ────────────────────────────────────────
@@ -402,6 +397,8 @@ export default function activateZflowProfilesExtension(pi: ExtensionAPI): void {
     ensureResolved,
     readActiveProfileCache,
     writeActiveProfileCache,
+    computeCurrentProfileHash,
+    computeEnvironmentFingerprintFromRegistry,
   }
 
   registry.provide(PROFILES_CAPABILITY, profileService)

@@ -1229,39 +1229,181 @@ export function buildActiveProfileCache(
   }
 }
 
+// ── Environment snapshot for cache validation ───────────────────
+
+/**
+ * A snapshot of the current environment state used to determine
+ * whether an active profile cache is still valid.
+ *
+ * Invalidation signals:
+ * - `definitionHash` — changes when the profile definition file is modified
+ * - `environmentFingerprint` — changes when the provider/model registry or
+ *   auth configuration changes
+ */
+export interface EnvironmentSnapshot {
+  /** SHA-256 hash of the current profile definition file content. */
+  definitionHash: string
+  /**
+   * Fingerprint of the current runtime environment (available models,
+   * auth state, provider config). Must match the cache's
+   * `environmentFingerprint` for the cache to be considered valid.
+   */
+  environmentFingerprint: string
+}
+
+/**
+ * Compute the SHA-256 hash of the current profile definition file
+ * content that the profile loader would resolve.
+ *
+ * This supports cache invalidation on profile file changes: if the
+ * file content changes, the hash differs from the cached value and
+ * triggers a re-resolution.
+ *
+ * @param repoRoot - Optional repository root for project-local profile lookup.
+ * @returns The hex-encoded SHA-256 hash of the profile file content.
+ * @throws {ProfileFileNotFoundError} If no profile file exists at any
+ *         expected location.
+ */
+export async function computeCurrentProfileHash(
+  repoRoot?: string,
+): Promise<string> {
+  const source = await resolveProfileSource(repoRoot)
+  const raw = await fs.readFile(source, "utf8")
+  return computeHash(raw)
+}
+
+/**
+ * Compute an environment fingerprint from a model registry, including
+ * both model availability and authentication state.
+ *
+ * This produces a hash that changes when:
+ * - The set of available models changes (model added/removed)
+ * - Authentication state changes (model becomes authenticated or
+ *   loses auth)
+ *
+ * The fingerprint is computed from the model IDs and their
+ * authenticated status, sorted for determinism.
+ *
+ * If the registry does not expose a `listModels()` method, the
+ * fingerprint is computed from an empty set — meaning it will never
+ * match a cache written by `activateProfile()` (which always includes
+ * model info). This is safe: it simply forces a re-resolution.
+ *
+ * @param registry - The model registry to fingerprint.
+ * @returns Hex-encoded fingerprint string.
+ */
+export function computeEnvironmentFingerprintFromRegistry(
+  registry: ModelRegistry,
+): string {
+  // Try to enumerate models from the registry
+  const r = registry as Record<string, unknown>
+  let entries: Array<{ id: string; authenticated: boolean }> = []
+
+  if (typeof r.listModels === "function") {
+    try {
+      const ids = (r as any).listModels() as string[]
+      entries = ids.map((id: string) => {
+        const info = registry.getModel(id)
+        return { id, authenticated: info?.authenticated ?? false }
+      })
+    } catch {
+      entries = []
+    }
+  }
+
+  // Sort deterministically and encode id + auth state
+  const sorted = [...entries].sort((a, b) => a.id.localeCompare(b.id))
+  const canonical = sorted
+    .map((e) => `${e.id}:${e.authenticated}`)
+    .join("\n")
+  return computeHash(canonical)
+}
+
 // ── Cache freshness and reconstruction ──────────────────────────
 
 /**
- * Check whether an active profile cache is still fresh based on TTL.
+ * Check whether an active profile cache is still fresh.
  *
- * For now, only TTL expiry is checked. In Task 2.7, this will also
- * compare `definitionHash` against the current file content and
- * `environmentFingerprint` against the current runtime state.
+ * Compares the cache's metadata against the current environment:
+ *   1. TTL — cache must not be older than its configured TTL
+ *   2. definition hash — the profile file content must not have changed
+ *   3. environment fingerprint — the runtime model registry/auth state
+ *      must not have changed
+ *
+ * When the current state parameters are not provided, only the TTL
+ * check is performed (backward compatible behaviour for callers that
+ * do not have access to the full environment state).
  *
  * @param cache - The cache to check.
+ * @param currentDefinitionHash - Optional SHA-256 hash of the current
+ *        profile file content. When provided, compared against
+ *        `cache.definitionHash` — a mismatch invalidates the cache.
+ * @param currentEnvironmentFingerprint - Optional fingerprint of the
+ *        current runtime environment. When provided, compared against
+ *        `cache.environmentFingerprint` — a mismatch invalidates.
  * @returns `true` if the cache is still considered fresh.
  */
-export function isActiveProfileCacheFresh(cache: ActiveProfileCache): boolean {
+export function isActiveProfileCacheFresh(
+  cache: ActiveProfileCache,
+  currentDefinitionHash?: string,
+  currentEnvironmentFingerprint?: string,
+): boolean {
+  // 1. TTL check — cache must not be expired
   const age = Date.now() - new Date(cache.resolvedAt).getTime()
-  return age <= cache.ttlMinutes * 60 * 1000
+  if (age > cache.ttlMinutes * 60 * 1000) return false
+
+  // 2. Definition hash check — profile file must not have changed
+  if (
+    currentDefinitionHash !== undefined &&
+    cache.definitionHash !== currentDefinitionHash
+  ) {
+    return false
+  }
+
+  // 3. Environment fingerprint check — registry/auth must not have changed
+  if (
+    currentEnvironmentFingerprint !== undefined &&
+    cache.environmentFingerprint !== currentEnvironmentFingerprint
+  ) {
+    return false
+  }
+
+  return true
 }
 
 /**
  * Read the active profile cache and return it only if it is still
- * fresh (TTL not expired).
+ * fresh (TTL, definition hash, and environment fingerprint all match
+ * the current state).
  *
  * Returns `null` if the cache file does not exist, cannot be parsed,
- * or has expired.
+ * has expired, or the current environment no longer matches the
+ * cached metadata.
  *
  * @param cachePath - Optional override for the cache file path.
+ * @param currentDefinitionHash - Optional hash of the current profile file
+ *        content. When provided and mismatched, cache is invalidated.
+ * @param currentEnvironmentFingerprint - Optional fingerprint of the
+ *        current runtime environment. When provided and mismatched,
+ *        cache is invalidated.
  * @returns The fresh cache, or `null`.
  */
 export async function readActiveProfileCacheIfFresh(
   cachePath?: string,
+  currentDefinitionHash?: string,
+  currentEnvironmentFingerprint?: string,
 ): Promise<ActiveProfileCache | null> {
   const cache = await readActiveProfileCache(cachePath)
   if (!cache) return null
-  if (!isActiveProfileCacheFresh(cache)) return null
+  if (
+    !isActiveProfileCacheFresh(
+      cache,
+      currentDefinitionHash,
+      currentEnvironmentFingerprint,
+    )
+  ) {
+    return null
+  }
   return cache
 }
 
