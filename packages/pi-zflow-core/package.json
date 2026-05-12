@@ -12,6 +12,10 @@
     "./user-dirs": "./src/user-dirs.ts",
     "./worktree-setup-hook": "./src/worktree-setup-hook.ts",
     "./path-guard": "./src/path-guard.ts",
+    "./registry": "./src/registry.ts",
+    "./diagnostics": "./src/diagnostics.ts",
+    "./schemas": "./src/schemas.ts",
+    "./ids": "./src/ids.ts",
     "./package.json": "./package.json"
   },
   "keywords": [
