@@ -1,0 +1,82 @@
+{
+  "$schema": "./profiles.schema.json",
+  "description": "Baseline default profile for pi-zflow. All lanes validated against the live model registry during Phase 0 Task 0.8.",
+
+  "profiles": {
+    "default": {
+      "description": "Default profile — general-purpose planning and implementation.",
+
+      "lanes": {
+        "planning-frontier": {
+          "purpose": "Strategic planning, architecture design, complex reasoning tasks",
+          "providers": [
+            {
+              "provider": "openai-codex",
+              "model": "gpt-5.4",
+              "weight": 1,
+              "thinking": "xhigh"
+            },
+            {
+              "provider": "opencode-go",
+              "model": "mimo-v2.5-pro",
+              "weight": 2,
+              "thinking": "xhigh"
+            }
+          ]
+        },
+
+        "worker-cheap": {
+          "purpose": "Implementation, editing, straightforward file manipulation",
+          "providers": [
+            {
+              "provider": "openai-codex",
+              "model": "gpt-5.4-mini",
+              "weight": 1,
+              "thinking": "high"
+            },
+            {
+              "provider": "opencode-go",
+              "model": "deepseek-v4-flash",
+              "weight": 2,
+              "thinking": "high"
+            }
+          ]
+        },
+
+        "review-system": {
+          "purpose": "Code review, plan review, PR review — optional lane, graceful degradation if unavailable",
+          "optional": true,
+          "providers": [
+            {
+              "provider": "openai-codex",
+              "model": "gpt-5.3-codex",
+              "weight": 1,
+              "thinking": "high"
+            },
+            {
+              "provider": "opencode-go",
+              "model": "qwen3.6-plus",
+              "weight": 2,
+              "thinking": "high"
+            }
+          ]
+        }
+      },
+
+      "recommendations": {
+        "packages": [
+          {
+            "package": "@benvargas/pi-openai-verbosity",
+            "condition": "activeLaneProvider === 'openai-codex'",
+            "reason": "Reduces verbosity in OpenAI Codex responses."
+          }
+        ]
+      },
+
+      "verbosity": {
+        "default": "normal",
+        "codex-override": "concise"
+      }
+    }
+  }
+}

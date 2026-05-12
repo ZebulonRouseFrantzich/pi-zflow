@@ -8,9 +8,17 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./runtime-paths": "./src/runtime-paths.ts",
+    "./user-dirs": "./src/user-dirs.ts",
+    "./worktree-setup-hook": "./src/worktree-setup-hook.ts",
+    "./path-guard": "./src/path-guard.ts",
     "./package.json": "./package.json"
   },
-  "keywords": ["pi-package", "pi-zflow", "library"],
+  "keywords": [
+    "pi-package",
+    "pi-zflow",
+    "library"
+  ],
   "license": "MIT",
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
