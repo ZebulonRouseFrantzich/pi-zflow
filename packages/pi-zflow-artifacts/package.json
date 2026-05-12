@@ -8,6 +8,7 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./artifact-paths": "./src/artifact-paths.ts",
     "./package.json": "./package.json"
   },
   "keywords": ["pi-package", "pi-zflow"],

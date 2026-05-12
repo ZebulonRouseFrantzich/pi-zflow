@@ -19,3 +19,14 @@ export const PI_ZFLOW_COMPACTION_VERSION = "0.1.0" as const
 
 // Minimum supported Pi version (provisional until Phase 0 smoke testing)
 export const PI_MINIMUM_VERSION = "0.74.0" as const
+
+// Re-export runtime path resolvers and cleanup defaults
+// These are also importable directly from "pi-zflow-core/runtime-paths"
+export {
+  DEFAULT_STALE_ARTIFACT_TTL_DAYS,
+  DEFAULT_FAILED_WORKTREE_RETENTION_DAYS,
+  resolveGitDir,
+  inGitRepo,
+  resolveRuntimeStateDir,
+  resolveUserStateDir,
+} from "./runtime-paths.js"

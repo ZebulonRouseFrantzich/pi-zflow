@@ -153,24 +153,47 @@ See `docs/architecture/package-ownership.md` for the canonical ownership map, ex
 
 | Artifact class | Default TTL / retention | Action |
 |---|---|---|
-| Stale runtime/patch artifacts | 14 days | Auto-clean on `/zflow-clean` |
-| Failed/interrupted worktrees | 7 days | Auto-clean on `/zflow-clean` |
+| Stale runtime/patch artifacts | **14 days** (`DEFAULT_STALE_ARTIFACT_TTL_DAYS`) | Auto-clean on `/zflow-clean` |
+| Failed/interrupted worktrees | **7 days** (`DEFAULT_FAILED_WORKTREE_RETENTION_DAYS`) | Auto-clean on `/zflow-clean` |
 | Successful temp worktrees | removed immediately after verified apply-back | Unless `--keep` or debug option used |
 
 See `packages/pi-zflow-change-workflows/` for cleanup command implementation (`/zflow-clean`).
+
+**Implementation**: `packages/pi-zflow-core/src/runtime-paths.ts` (constants `DEFAULT_STALE_ARTIFACT_TTL_DAYS`, `DEFAULT_FAILED_WORKTREE_RETENTION_DAYS`)
 
 ---
 
 ## Runtime state paths
 
-| Path | Resolution | Purpose |
-|---|---|---|
-| `<runtime-state-dir>` | `<git-dir>/pi-zflow/` (or `os.tmpdir()/pi-zflow-<hash>` fallback) | Plan/run/review artifacts, state index |
-| `<user-state-dir>` | `~/.pi/agent/zflow/` | Active profile, install manifest |
-| `~/.pi/agent/agents/zflow/` | user-level agent files | Agent markdown for `pi-subagents` |
-| `~/.pi/agent/chains/zflow/` | user-level chain files | Chain markdown for `pi-subagents` |
+| Path | Resolution | Purpose | Implementation |
+|---|---|---|---|
+| `<runtime-state-dir>` | `<git-dir>/pi-zflow/` (or `os.tmpdir()/pi-zflow-<hash>` fallback) | Plan/run/review artifacts, state index | `resolveRuntimeStateDir()` in `pi-zflow-core/src/runtime-paths.ts` |
+| `<user-state-dir>` | `~/.pi/agent/zflow/` | Active profile, install manifest | `resolveUserStateDir()` in `pi-zflow-core/src/runtime-paths.ts` |
+| `~/.pi/agent/agents/zflow/` | user-level agent files | Agent markdown for `pi-subagents` | (bootstrap logic, see Task 0.7) |
+| `~/.pi/agent/chains/zflow/` | user-level chain files | Chain markdown for `pi-subagents` | (bootstrap logic, see Task 0.7) |
 
 Project-local `.pi/agents/` and `.pi/chains/` are opt-in only.
+
+### Derived path builders
+
+These live in `packages/pi-zflow-artifacts/src/artifact-paths.ts`:
+
+| Function | Resolves |
+|---|---|
+| `resolvePlanDir(changeId, version)` | `<runtime-state-dir>/plans/{changeId}/v{version}/` |
+| `resolveRunDir(runId)` | `<runtime-state-dir>/runs/{runId}/` |
+| `resolveDeviationDir(changeId, planVersion)` | `<runtime-state-dir>/plans/{changeId}/deviations/{planVersion}/` |
+| `resolvePlanStatePath(changeId)` | `<runtime-state-dir>/plans/{changeId}/plan-state.json` |
+| `resolveRunStatePath(runId)` | `<runtime-state-dir>/runs/{runId}/run.json` |
+| `resolveStateIndexPath()` | `<runtime-state-dir>/state-index.json` |
+| `resolveRepoMapPath()` | `<runtime-state-dir>/repo-map.md` |
+| `resolveReconnaissancePath()` | `<runtime-state-dir>/reconnaissance.md` |
+| `resolveFailureLogPath()` | `<runtime-state-dir>/failure-log.md` |
+| `resolveReviewDir()` | `<runtime-state-dir>/review/` |
+| `resolveCodeReviewFindingsPath()` | `<runtime-state-dir>/review/code-review-findings.md` |
+| `resolvePrReviewPath(id)` | `<runtime-state-dir>/review/pr-review-{id}.md` |
+| `resolveActiveProfilePath()` | `<user-state-dir>/active-profile.json` |
+| `resolveInstallManifestPath()` | `<user-state-dir>/install-manifest.json` |
 
 ---
 

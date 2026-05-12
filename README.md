@@ -240,6 +240,35 @@ before expensive operations:
 Failure messages are specific and actionable — each names the missing tool, provides an install hint,
 and explains what functionality is affected.
 
+## Runtime state paths
+
+Runtime state lives outside the working tree. See `docs/foundation-versions.md` for the full path table.
+
+### Core resolvers (`packages/pi-zflow-core/src/runtime-paths.ts`)
+
+- `resolveRuntimeStateDir(cwd?)` → `<git-dir>/pi-zflow/` or `os.tmpdir()/pi-zflow-<hash>/` fallback
+- `resolveUserStateDir()` → `~/.pi/agent/zflow/`
+- `DEFAULT_STALE_ARTIFACT_TTL_DAYS` = 14 days
+- `DEFAULT_FAILED_WORKTREE_RETENTION_DAYS` = 7 days
+
+### Artifact path builders (`packages/pi-zflow-artifacts/src/artifact-paths.ts`)
+
+- `resolvePlanDir(changeId, version)` — plan version directory
+- `resolveRunDir(runId)` — run directory
+- `resolveStateIndexPath()` — state-index.json
+- `resolveReviewDir()` — review directory
+- `resolveActiveProfilePath()` — active profile cache
+- `resolveInstallManifestPath()` — install manifest
+- Plus all other derived paths matching the `docs/foundation-versions.md` layout.
+
+### Cleanup policy
+
+| Artifact | TTL |
+|---|---|
+| Stale runtime/patch artifacts | 14 days (`/zflow-clean`) |
+| Failed/interrupted worktrees | 7 days (`/zflow-clean`) |
+| Successful temp worktrees | removed immediately after apply-back (unless `--keep`) |
+
 ## License
 
 MIT
