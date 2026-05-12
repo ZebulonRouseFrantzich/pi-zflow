@@ -174,16 +174,20 @@ Project-local `.pi/agents/` and `.pi/chains/` are opt-in only.
 
 ---
 
-## Bootstrap / preflight checklist
+## Bootstrap / preflight checks
 
 Machine prerequisites for Phase 0 and beyond:
 
 | Tool | Required for | Fail action |
 |---|---|---|
-| `rtk` | Command rewriting / output compaction | Alert; does not block compaction |
+| `rtk` | Command rewriting / output compaction | Warning; does not block compaction |
 | `gh` | GitHub PR review flows (`/zflow-review-pr`) | Blocks PR submission only |
 | `glab` | GitLab MR review flows (`/zflow-review-pr`) | Blocks MR submission only |
 | `runectx` | RuneContext integration | Blocks RuneContext flows only |
 | `pi --list-models` / model registry | Default profile lane resolution | Blocks profile activation |
 
-See Phase 0 Task 0.5 for the full preflight design.
+See `docs/bootstrap-checks.md` for the full preflight check design, including:
+- Core check functions (`checkBinary`, `checkGhAuth`, `checkGlabAuth`, `validateDefaultProfileCandidates`)
+- Orchestrator (`runBootstrapChecks`) with conditional option flags
+- Failure handling rules for each check
+- Phase 7 integration points

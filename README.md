@@ -222,6 +222,24 @@ Installed by Phase 0 Task 0.3 on 2026-05-12. All packages are at user scope (no 
 - **Known issue**: running multiple `pi install` commands concurrently may cause some packages to be installed at the npm level but not registered in Pi `settings.json`. If a package appears in `npm root -g` but not in `pi list`, re-run `pi uninstall <pkg>` followed by `pi install <pkg>` for that package.
 - Deprecation warnings encountered for `@mariozechner/*` packages (used by transitive dependencies); these are informational only.
 
+## Machine prerequisite checks
+
+See `docs/bootstrap-checks.md` for the full preflight check design. The following checks are required
+before expensive operations:
+
+| Tool / check | Scope | Effect if missing |
+|---|---|---|
+| `rtk --version` | Always | Warning (output compaction unavailable) |
+| `gh --version` | PR review (GitHub) | Blocks PR submission |
+| `glab --version` | PR review (GitLab) | Blocks MR submission |
+| `gh auth status` | Inline GitHub comments | Blocks comment submission |
+| `glab auth status` | Inline GitLab comments | Blocks comment submission |
+| `runectx status` | RuneContext mode | Blocks RuneContext flows |
+| `pi --list-models` | Profile activation | Blocks profile activation |
+
+Failure messages are specific and actionable — each names the missing tool, provides an install hint,
+and explains what functionality is affected.
+
 ## License
 
 MIT
