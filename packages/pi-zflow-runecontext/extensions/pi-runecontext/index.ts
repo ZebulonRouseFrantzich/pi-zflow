@@ -104,6 +104,15 @@ export {
   getForbiddenArtifacts,
 } from "./guards.js"
 
+// Re-export custom error classes (Task 3.10)
+export {
+  RuneContextError,
+  MissingRequiredFileError,
+  ChangeResolutionError,
+  AmbiguousStatusError,
+  DetectionConflictError,
+} from "./errors.js"
+
 /** Well-known capability name for RuneContext support. */
 export const RUNECONTEXT_CAPABILITY = "runecontext" as const
 

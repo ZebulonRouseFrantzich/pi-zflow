@@ -96,11 +96,28 @@ function parseYaml(yamlString: string): RuneStatus {
   const parsed = yaml.parse(yamlString)
 
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    // The YAML content is not a mapping (e.g. it's a scalar or array).
+    // This is an unrecognized/ambiguous status schema — fall back to
+    // "unknown" rather than throwing, so downstream consumers can still
+    // operate with degraded visibility.
+    console.warn(
+      `[pi-zflow-runecontext] Ambiguous status.yaml: expected a mapping, ` +
+        `got ${typeof parsed === "object" ? "array" : typeof parsed}. ` +
+        `Falling back to status: "unknown".`,
+    )
     return { status: "unknown" }
   }
 
   // Ensure `status` field exists — the RuneContext spec requires it.
+  // If the field is missing or not a string, the schema is ambiguous.
+  // We fall back to "unknown" rather than failing, keeping the rest of
+  // the parsed data available for inspection.
   if (typeof (parsed as Record<string, unknown>).status !== "string") {
+    console.warn(
+      `[pi-zflow-runecontext] Ambiguous status.yaml: "status" field is ` +
+        `missing or not a string. Falling back to status: "unknown". ` +
+        `Parsed content keys: ${Object.keys(parsed as Record<string, unknown>).join(", ")}.`,
+    )
     ;(parsed as Record<string, unknown>).status = "unknown"
   }
 

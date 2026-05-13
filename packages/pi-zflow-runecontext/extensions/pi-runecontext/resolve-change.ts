@@ -19,6 +19,10 @@
 
 import * as path from "node:path"
 import { fileExists } from "./detect.js"
+import {
+  MissingRequiredFileError,
+  ChangeResolutionError,
+} from "./errors.js"
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -155,10 +159,7 @@ async function validateFiles(
   for (const file of requiredFiles) {
     const filePath = path.join(changePath, file)
     if (!(await fileExists(filePath))) {
-      throw new Error(
-        `Missing required RuneContext change file: "${file}" ` +
-          `(expected at ${filePath})`,
-      )
+      throw new MissingRequiredFileError(file, filePath)
     }
   }
 }
@@ -216,7 +217,7 @@ export async function resolveRuneChange(
     const found = await findChangeFolder(cwd, root)
 
     if (found === null) {
-      throw new Error(
+      throw new ChangeResolutionError(
         `Cannot resolve RuneContext change folder: no change folder found ` +
           `from current directory (${cwd}) up to repo root (${root}). ` +
           `Provide an explicit change-path argument, or change into a RuneContext ` +
@@ -229,7 +230,7 @@ export async function resolveRuneChange(
 
   // ── Step 2: Verify the resolved path is a valid change folder ──
   if (!(await isChangeFolder(absChangePath))) {
-    throw new Error(
+    throw new ChangeResolutionError(
       `The given path does not appear to be a RuneContext change folder: ` +
         `${absChangePath} (no ${MARKER_FILE} found).`,
     )
