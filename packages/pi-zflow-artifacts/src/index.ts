@@ -28,17 +28,49 @@ export {
 
 export type { ArtifactCleanupMeta } from "./artifact-paths.js"
 
-// Re-export state index helpers (Phase 2+ implementation)
+// Re-export state index helpers
 // Also importable directly from "pi-zflow-artifacts/state-index"
-export {} from "./state-index.js"
+export {
+  loadStateIndex,
+  saveStateIndex,
+  addStateIndexEntry,
+  updateStateIndexEntry,
+  listStateIndexEntries,
+  removeStateIndexEntry,
+} from "./state-index.js"
+
+export type {
+  StateIndex,
+  StateIndexEntry,
+} from "./state-index.js"
 
 // Re-export plan state helpers (Phase 2+ implementation)
 // Also importable directly from "pi-zflow-artifacts/plan-state"
 export {} from "./plan-state.js"
 
-// Re-export run state helpers (Phase 2+ implementation)
+// Re-export run state helpers
 // Also importable directly from "pi-zflow-artifacts/run-state"
-export {} from "./run-state.js"
+export {
+  createRun,
+  readRun,
+  updateRun,
+  addGroupToRun,
+  addRetainedArtifact,
+  setRunPhase,
+  createRecoveryRef,
+  removeRecoveryRef,
+  resetToPreApplySnapshot,
+} from "./run-state.js"
+
+export type {
+  RunPhase,
+  RunJson,
+  PreApplySnapshot,
+  ApplyBackStatus,
+  VerificationStatus,
+  GroupRunMetadata,
+  RetainedArtifact,
+} from "./run-state.js"
 
 // Re-export cleanup metadata helpers (Phase 7+ implementation)
 // Also importable directly from "pi-zflow-artifacts/cleanup-metadata"

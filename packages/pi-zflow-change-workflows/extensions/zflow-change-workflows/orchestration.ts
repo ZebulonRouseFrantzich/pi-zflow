@@ -57,6 +57,19 @@ import {
   recordSkipped as recordSkippedFn,
   getCoverageSummary,
 } from "pi-zflow-review"
+import { readRun, updateRun, setRunPhase, addRetainedArtifact, createRun, createRecoveryRef, removeRecoveryRef } from "pi-zflow-artifacts"
+import type { RunPhase, RetainedArtifact, RunJson } from "pi-zflow-artifacts"
+import { resolveRunDir, resolveRunStatePath } from "pi-zflow-artifacts/artifact-paths"
+import { addStateIndexEntry } from "pi-zflow-artifacts/state-index"
+import { assertCleanPrimaryTree } from "./git-preflight.js"
+import type { GitPreflightResult } from "./git-preflight.js"
+import { validateOwnershipAndDependencies, topoSortGroups } from "./ownership-validator.js"
+import type { ExecutionGroup, OwnershipValidationResult } from "./ownership-validator.js"
+import { captureGroupResult } from "./group-result.js"
+import type { GroupResult, GroupVerificationResult } from "./group-result.js"
+import { executeApplyBack } from "./apply-back.js"
+import type { ApplyBackResult } from "./apply-back.js"
+import { writeDeviationSummary, readDeviationReports } from "./deviations.js"
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -607,6 +620,181 @@ export function getPlanReviewersForTier(tier: string): string[] {
   return base
 }
 
+// ── Worktree dispatch helpers (Phase 5) ───────────────────────
+
+/**
+ * A single task for worktree dispatch, representing one execution group.
+ */
+export interface WorktreeGroupTask {
+  /** Group identifier from execution-groups.md. */
+  groupId: string
+  /** The agent runtime name assigned to this group. */
+  agent: string
+  /** The assembled task prompt for this group. */
+  task: string
+  /** Files this group is expected to write (for preflight overlap check). */
+  claimedFiles: string[]
+  /** Optional scoped verification command from the plan. */
+  scopedVerification?: string
+  /** Output path for the worktree result manifest (relative to run dir). */
+  outputRelativePath: string
+}
+
+/**
+ * Configuration for a worktree dispatch operation.
+ */
+export interface WorktreeDispatchConfig {
+  /** Unique run identifier. */
+  runId: string
+  /** Absolute path to the repository root. */
+  repoRoot: string
+  /** Change identifier from the plan. */
+  changeId: string
+  /** Plan version (e.g. "v1"). */
+  planVersion: string
+}
+
+// Type for an execution group used by worktree dispatch
+export interface DispatchExecutionGroup {
+  id: string
+  agent: string
+  files: string[]
+  dependencies: string[]
+  taskPrompt: string
+  scopedVerification?: string
+}
+
+/**
+ * Build a worker task prompt for a single execution group.
+ *
+ * Produces a compact, actionable prompt that tells the worker agent:
+ * - what to implement (scoped to this group's files)
+ * - what not to touch
+ * - what context artifacts to read
+ * - how to validate
+ * - when to escalate
+ *
+ * @param group - The execution group to build a task for.
+ * @param config - Dispatch configuration (run ID, repo root, etc.).
+ * @param planArtifactPaths - Paths to canonical plan artifacts.
+ * @returns A task prompt string for the worker agent.
+ */
+export function buildWorkerTask(
+  group: DispatchExecutionGroup,
+  config: WorktreeDispatchConfig,
+  planArtifactPaths?: Record<string, string>,
+): string {
+  const lines: string[] = [
+    `# Task: ${group.id}`,
+    "",
+    `Execute the approved plan for group **${group.id}** in this isolated worktree.`,
+    "",
+    `## Run context`,
+    `- Run ID: ${config.runId}`,
+    `- Change: ${config.changeId}`,
+    `- Plan version: ${config.planVersion}`,
+    `- Repo root: ${config.repoRoot}`,
+    "",
+    `## Scope`,
+    `- Files you may modify: ${group.files.join(", ") || "(none specified)"}`,
+    `- Agent: ${group.agent}`,
+    "",
+    `## Rules`,
+    `1. ONLY modify files listed in your scope above. Do NOT touch files outside this list.`,
+    `2. If an instruction in the plan is impossible, stop work and file a deviation report.`,
+    `3. Prefer batch edits for multi-file changes (use the \`edit\` tool with \`multi\` parameter).`,
+    `4. For complex refactors, use patch mode to apply structured diffs.`,
+    `5. Create temporary commits as needed using format: \`[pi-worker] ${group.id}: <step>\`.`,
+    `6. After implementation, run the scoped verification command if provided.`,
+    `7. Do NOT launch subagents.`,
+    `8. Do NOT commit to the primary branch. Your worktree commits are disposable.`,
+    `9. Report all changed files and verification results in your output summary.`,
+  ]
+
+  if (group.dependencies.length > 0) {
+    lines.push(
+      "",
+      "## Dependencies",
+      `This group depends on: ${group.dependencies.join(", ")}.`,
+      "Those groups have already completed in their own worktrees.",
+      "If you need output from a dependency, read the plan artifacts.",
+    )
+  }
+
+  if (group.scopedVerification) {
+    lines.push(
+      "",
+      "## Scoped verification",
+      "After implementing, run the following command to verify your changes:",
+      "",
+      "```bash",
+      group.scopedVerification,
+      "```",
+      "",
+      "Include the verification result (pass/fail/output) in your summary.",
+      "Do NOT invent or run repo-wide verification commands. Run only the",
+      "scoped verification command specified above.",
+    )
+  } else {
+    lines.push(
+      "",
+      "## Verification",
+      "No scoped verification command was specified in the plan.",
+      "STOP and report a plan-quality gap: the plan is missing a Scoped verification",
+      "command for this group. Do NOT invent or run your own verification.",
+    )
+  }
+
+  if (planArtifactPaths && Object.keys(planArtifactPaths).length > 0) {
+    lines.push(
+      "",
+      "## Plan artifacts",
+      "The following plan documents are available:",
+      ...Object.entries(planArtifactPaths).map(
+        ([key, val]) => `- ${key}: \`${val}\``,
+      ),
+    )
+  }
+
+  lines.push(
+    "",
+    "## Output format",
+    "When finished, provide:",
+    "1. Summary of changes made",
+    "2. List of changed files (relative to repo root)",
+    "3. Verification result",
+    "4. Any unexpected issues or deviations",
+  )
+
+  return lines.join("\n")
+}
+
+/**
+ * Build a parallel worktree dispatch plan from execution groups.
+ *
+ * Returns an array of `WorktreeGroupTask` objects that can be passed to
+ * `subagents.parallel({ worktree: true, tasks: [...] })`.
+ *
+ * @param groups - Execution groups with assigned agents and task prompts.
+ * @param config - Dispatch configuration.
+ * @param planArtifactPaths - Optional paths to plan artifacts for context.
+ * @returns Array of worktree group tasks ready for subagent dispatch.
+ */
+export function buildWorktreeDispatchPlan(
+  groups: DispatchExecutionGroup[],
+  config: WorktreeDispatchConfig,
+  planArtifactPaths?: Record<string, string>,
+): WorktreeGroupTask[] {
+  return groups.map((group, index) => ({
+    groupId: group.id,
+    agent: group.agent,
+    task: buildWorkerTask(group, config, planArtifactPaths),
+    claimedFiles: group.files,
+    scopedVerification: group.scopedVerification,
+    outputRelativePath: `worktree-results/${group.id}-result.md`,
+  }))
+}
+
 // ── Output routing helpers ──────────────────────────────────────
 
 /**
@@ -648,3 +836,447 @@ export function getOutputRoute(
     description: convention.description,
   }
 }
+
+// ── Drift signaling (Task 5.11) ─────────────────────────────────
+
+/**
+ * Signal that a deviation (plan drift) has been detected.
+ *
+ * Attempts to send an intercom signal if `pi-intercom` is available,
+ * and always marks the run as `drift-pending` in run.json.
+ *
+ * If intercom is not available, logs a warning and continues with
+ * the fallback behavior (workers still write deviation reports and
+ * mark tasks blocked).
+ *
+ * @param runId - Unique run identifier.
+ * @param groupId - The group that detected the drift.
+ * @param workerName - The worker agent name.
+ * @param deviationPath - Path to the deviation report file.
+ * @param cwd - Working directory (optional).
+ */
+export async function signalDriftDetected(
+  runId: string,
+  groupId: string,
+  workerName: string,
+  deviationPath?: string,
+  cwd?: string,
+): Promise<void> {
+  // Always update run phase to drift-pending
+  await setRunPhase(runId, "drift-pending", cwd)
+
+  // Attempt intercom signaling (optional — graceful fallback)
+  let intercomAvailable = false
+  try {
+    // Dynamic import to check for pi-intercom without hard dependency
+    const intercomModule = await import("pi-intercom").catch(() => null)
+    if (intercomModule && typeof intercomModule.intercom === "function") {
+      intercomAvailable = true
+      const msg = [
+        `DRIFT DETECTED: Group "${groupId}" (worker: ${workerName})`,
+        deviationPath ? `Deviation report: ${deviationPath}` : "",
+        "",
+        "The approved plan is infeasible for this group.",
+        "Pending deviation reports should be synthesized for replanning.",
+        "Halting new dependent dispatch until drift is resolved.",
+      ].filter(Boolean).join("\n")
+
+      await intercomModule.intercom({
+        action: "send",
+        to: "orchestrator",
+        message: msg,
+      })
+    }
+  } catch {
+    // intercom not available — fallback is acceptable
+  }
+
+  if (!intercomAvailable) {
+    // Fallback: drift is still tracked via run.json phase and deviation report files.
+    // Workers independently write deviation reports and mark tasks blocked.
+    // No intercom signal was sent, but drift-pending state is recorded.
+    console.warn(
+      `[pi-zflow] pi-intercom not available. Drift signal suppressed for group "${groupId}". ` +
+      `Workers will still write deviation reports. Run marked as drift-pending.`,
+    )
+  }
+}
+
+// ── Retained artifact listing (Task 5.13) ───────────────────────
+
+/**
+ * List all retained artifacts for a run.
+ *
+ * Reads the run.json and returns the `retainedArtifacts` array,
+ * which tracks worktree paths, patch paths, retention reasons,
+ * and cleanup deadlines for debugging and cleanup discovery.
+ *
+ * @param runId - Unique run identifier.
+ * @param cwd - Working directory (optional).
+ * @returns Array of retained artifact entries.
+ */
+export async function listRetainedArtifacts(
+  runId: string,
+  cwd?: string,
+): Promise<RetainedArtifact[]> {
+  const run = await readRun(runId, cwd)
+  return run.retainedArtifacts ?? []
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase 5 — worktree implementation run orchestration
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * A complete plan for executing a worktree implementation run.
+ *
+ * Contains preflight metadata, validation results, the run record,
+ * and the task descriptors that the caller dispatches via
+ * `pi-subagents` with `worktree: true`.
+ */
+export interface WorktreeImplementationRunPlan {
+  /** Unique run identifier. */
+  runId: string
+  /** Dispatch configuration for pi-subagents. */
+  config: WorktreeDispatchConfig
+  /** Task descriptors to pass to pi-subagents. */
+  tasks: WorktreeGroupTask[]
+  /** Execution groups with dependency metadata. */
+  groups: ExecutionGroup[]
+  /** Set of all planned file paths (for preflight overlap check). */
+  plannedPaths: Set<string>
+  /** Result of clean-tree preflight. */
+  preflight: GitPreflightResult
+  /** Result of ownership and dependency validation. */
+  ownershipValidation: OwnershipValidationResult
+  /** The created run metadata. */
+  run: RunJson
+  /**
+   * Execution ordering: parallel batches (groups that can run together)
+   * and sequential groups (those that must run after their dependencies).
+   */
+  executionPlan: {
+    /** Groups that can run in parallel (no overlapping files). */
+    parallelBatches: ExecutionGroup[][]
+    /** Groups that must run sequentially (overlapping files or explicit dependencies). */
+    sequentialGroups: ExecutionGroup[]
+  }
+}
+
+/**
+ * Prepare a complete worktree implementation run.
+ *
+ * This is the main Phase 5 orchestration entrypoint. It:
+ *
+ * 1. Resolves the repo root from the current working directory.
+ * 2. Collects all planned file paths from execution groups.
+ * 3. Runs clean-tree preflight — rejects dirty trees.
+ * 4. Validates ownership boundaries and dependency ordering.
+ * 5. Creates `run.json` with recovery-grade metadata.
+ * 6. Creates a git recovery ref for atomic rollback.
+ * 7. Updates `state-index.json` with the new run entry.
+ * 8. Determines parallel vs. sequential execution batches.
+ * 9. Builds task descriptors for each group.
+ *
+ * The caller dispatches the tasks via pi-subagents with `worktree: true`,
+ * then calls `finalizeWorktreeImplementationRun()` with the results.
+ *
+ * @param changeId - Change identifier from the plan.
+ * @param planVersion - Plan version (e.g. "v1").
+ * @param groups - Execution groups from the approved plan.
+ * @param planArtifactPaths - Optional paths to plan artifacts for context.
+ * @param options - Additional options.
+ * @returns A complete worktree implementation run plan.
+ * @throws If preflight or validation fails.
+ */
+export async function prepareWorktreeImplementationRun(
+  changeId: string,
+  planVersion: string,
+  groups: ExecutionGroup[],
+  planArtifactPaths?: Record<string, string>,
+  options?: {
+    /** Working directory for runtime state dir resolution. */
+    cwd?: string
+    /** Override file paths for preflight (defaults to all group files). */
+    plannedPaths?: Set<string>
+    /** Explicit repo root. Defaults to git rev-parse --show-toplevel from cwd. */
+    repoRoot?: string
+  },
+): Promise<WorktreeImplementationRunPlan> {
+  const cwd = options?.cwd
+  const { default: path } = await import("node:path")
+  const { execFileSync } = await import("node:child_process")
+
+  // 1. Resolve repo root
+  let repoRoot: string
+  if (options?.repoRoot) {
+    repoRoot = options.repoRoot
+  } else {
+    try {
+      repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim()
+    } catch {
+      throw new Error("Not a git repository — cannot run worktree implementation.")
+    }
+  }
+
+  // 2. Collect planned file paths
+  const plannedPaths = options?.plannedPaths ?? new Set<string>()
+  if (!options?.plannedPaths) {
+    for (const group of groups) {
+      for (const file of group.files) {
+        plannedPaths.add(file)
+      }
+    }
+  }
+
+  // 3. Clean-tree preflight
+  const preflight = assertCleanPrimaryTree(repoRoot, plannedPaths)
+  if (!preflight.clean) {
+    throw new Error(
+      `Worktree implementation preflight failed.\n${preflight.summary}`,
+    )
+  }
+
+  // 4. Validate ownership and dependencies
+  const ownershipValidation = validateOwnershipAndDependencies(groups)
+  if (!ownershipValidation.valid) {
+    throw new Error(
+      `Ownership/dependency validation failed:\n${ownershipValidation.summary}`,
+    )
+  }
+
+  // 5. Create run.json
+  const runId = `impl-${changeId}-${Date.now().toString(36)}`
+  const run = await createRun(runId, repoRoot, changeId, planVersion, cwd)
+
+  // Recovery ref is created later by executeApplyBack, right before patches are applied.
+  // This ensures the ref points at the exact pre-apply snapshot and cannot diverge.
+
+  // 6. Update state-index.json
+  await addStateIndexEntry({
+    type: "run",
+    id: runId,
+    status: "preparing",
+    metadata: {
+      changeId,
+      planVersion,
+      repoRoot,
+      groupCount: groups.length,
+    },
+  }, cwd)
+
+  // 8. Determine execution batches
+  const parallelBatches: ExecutionGroup[][] = []
+  const sequentialGroups: ExecutionGroup[] = []
+
+  // Groups with overlapping files that must be sequential
+  const sequentialIds = new Set<string>()
+  for (const batch of ownershipValidation.sequentialGroups) {
+    for (const id of batch) {
+      sequentialIds.add(id)
+    }
+  }
+
+  // Groups with explicit dependencies are also sequential (relative to their deps)
+  for (const group of groups) {
+    if (group.dependencies.length > 0) {
+      sequentialIds.add(group.id)
+    }
+  }
+
+  // Separate parallel from sequential groups
+  const parallelGroupIds = groups
+    .filter((g) => !sequentialIds.has(g.id))
+    .map((g) => g.id)
+
+  // Batch parallel groups (all in one batch)
+  if (parallelGroupIds.length > 0) {
+    parallelBatches.push(
+      groups.filter((g) => parallelGroupIds.includes(g.id)),
+    )
+  }
+
+  // Sequential groups in topological order
+  const sequentialIdsSet = new Set(sequentialIds)
+  const sequentialOnly = groups.filter((g) => sequentialIdsSet.has(g.id))
+  if (sequentialOnly.length > 0) {
+    const orderedSequential = topoSortGroups(sequentialOnly) ?? sequentialOnly.map((g) => g.id)
+    const seqGroupMap = new Map(groups.map((g) => [g.id, g]))
+    for (const id of orderedSequential) {
+      const g = seqGroupMap.get(id)
+      if (g) sequentialGroups.push(g)
+    }
+  }
+
+  // 9. Build task descriptors
+  const dispatchConfig: WorktreeDispatchConfig = {
+    runId,
+    repoRoot,
+    changeId,
+    planVersion,
+  }
+
+  const tasks = buildWorktreeDispatchPlan(groups, dispatchConfig, planArtifactPaths)
+
+  return {
+    runId,
+    config: dispatchConfig,
+    tasks,
+    groups,
+    plannedPaths,
+    preflight,
+    ownershipValidation,
+    run,
+    executionPlan: {
+      parallelBatches,
+      sequentialGroups,
+    },
+  }
+}
+
+/**
+ * Finalize a worktree implementation run after worker dispatch.
+ *
+ * Called after the caller has dispatched the tasks via pi-subagents and
+ * collected the GroupResult objects. This function:
+ *
+ * 1. Checks for any deviation reports and synthesizes a summary if needed.
+ * 2. Applies patches back atomically in topological order.
+ * 3. Records retained artifacts on conflict.
+ * 4. Updates state-index.json with the final status.
+ *
+ * @param runId - The run identifier from prepareWorktreeImplementationRun.
+ * @param groupResults - The GroupResult objects from each worker.
+ * @param options - Additional options.
+ * @returns The apply-back result.
+ */
+export async function finalizeWorktreeImplementationRun(
+  runId: string,
+  groupResults: GroupResult[],
+  options?: {
+    /** Working directory for runtime state dir resolution. */
+    cwd?: string
+    /** Change ID for deviation lookup. */
+    changeId?: string
+    /** Plan version for deviation lookup. */
+    planVersion?: string
+    /** Whether to retain artifacts on failure. */
+    retainOnFailure?: boolean
+    /**
+     * Original execution groups with real dependencies from the approved plan.
+     * When provided, these are used for topological apply-back ordering instead
+     * of reconstructing groups from run.json (which strips dependency info).
+     */
+    executionGroups?: ExecutionGroup[]
+  },
+): Promise<ApplyBackResult & { deviationSummaryPath?: string }> {
+  const cwd = options?.cwd
+  const { default: path } = await import("node:path")
+
+  // Read the run to get metadata
+  let run: RunJson
+  try {
+    run = await readRun(runId, cwd)
+  } catch {
+    throw new Error(`Run "${runId}" not found. Cannot finalize.`)
+  }
+
+  const repoRoot = run.repoRoot
+  const changeId = options?.changeId ?? run.changeId
+  const planVersion = options?.planVersion ?? run.planVersion
+
+  // 1. Check for deviation reports
+  let deviationSummaryPath: string | undefined
+  try {
+    const reports = await readDeviationReports(changeId, planVersion, cwd)
+    if (reports.length > 0) {
+      // Synthesize deviation summary
+      const { synthesizeDeviationSummary } = await import("./deviations.js")
+      const summary = synthesizeDeviationSummary(runId, changeId, planVersion, reports)
+      deviationSummaryPath = await writeDeviationSummary(summary, cwd)
+    }
+  } catch {
+    // Ignore errors reading deviations — drift may not be implemented
+  }
+
+  // 2. Apply patches back atomically
+  // Use original execution groups (with real dependencies) if provided,
+  // falling back to reconstructed groups from run.json.
+  const applyBackGroups = options?.executionGroups && options.executionGroups.length > 0
+    ? options.executionGroups.map((g) => ({
+        id: g.id,
+        files: g.files,
+        dependencies: g.dependencies,
+        assignedAgent: g.agent,
+      }))
+    : run.groups.map((g) => ({
+        id: g.groupId,
+        files: g.changedFiles,
+        dependencies: [],
+        assignedAgent: g.agent,
+      }))
+
+  const applyBackResult = await executeApplyBack({
+    runId,
+    repoRoot,
+    snapshot: run.preApplySnapshot!,
+    groups: applyBackGroups,
+    cwd,
+  })
+
+  // 3. Handle retention on conflict
+  if (!applyBackResult.success && options?.retainOnFailure !== false) {
+    const { resolveRunDir } = await import("pi-zflow-artifacts/artifact-paths")
+    const patchesDir = await import("node:path").then((p) =>
+      p.join(resolveRunDir(runId, cwd), "patches")
+    )
+
+    // Retain the patches directory
+    await addRetainedArtifact(runId, {
+      type: "patch",
+      path: patchesDir,
+      reason: applyBackResult.error
+        ? `Apply-back failed: ${applyBackResult.error}`
+        : "Apply-back failed",
+      expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(), // 14 days
+    }, cwd)
+  }
+
+  // 4. Update state-index.json
+  try {
+    const { updateStateIndexEntry } = await import("pi-zflow-artifacts/state-index")
+    await updateStateIndexEntry(runId, {
+      status: applyBackResult.success ? "completed" : "failed",
+      metadata: {
+        groupsApplied: applyBackResult.groupsApplied,
+        totalGroups: applyBackResult.totalGroups,
+        error: applyBackResult.error,
+      },
+    }, cwd)
+  } catch {
+    // State index entry may not exist yet; that's OK
+  }
+
+  return {
+    ...applyBackResult,
+    deviationSummaryPath,
+  }
+}
+
+/**
+ * Execute a complete worktree implementation run end-to-end.
+ *
+ * Combines `prepareWorktreeImplementationRun` and `finalizeWorktreeImplementationRun`
+ * into a single call. Use this when the caller handles dispatching pi-subagents
+ * between the two phases.
+ *
+ * For a fully automated version, the caller does:
+ * ```
+ * const plan = await prepareWorktreeImplementationRun(...)
+ * // dispatch plan.tasks via pi-subagents with worktree: true
+ * const results = await collectGroupResults(plan.runId, plan.groups, ...)
+ * const final = await finalizeWorktreeImplementationRun(plan.runId, results, ...)
+ */

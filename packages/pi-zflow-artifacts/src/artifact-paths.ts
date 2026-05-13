@@ -118,7 +118,7 @@ export function resolveRunDir(runId: string, cwd?: string): string {
  * Path: `<runtime-state-dir>/runs/{runId}/run.json
  */
 export function resolveRunStatePath(runId: string, cwd?: string): string {
-  return path.join(resolveRunDir(runId), "run.json")
+  return path.join(resolveRunDir(runId, cwd), "run.json")
 }
 
 // ---------------------------------------------------------------------------

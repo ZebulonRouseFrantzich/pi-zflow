@@ -17,6 +17,7 @@
   "license": "MIT",
   "dependencies": {
     "pi-zflow-agents": "0.1.0",
+    "pi-zflow-artifacts": "0.1.0",
     "pi-zflow-core": "0.1.0",
     "pi-zflow-profiles": "0.1.0",
     "pi-zflow-review": "0.1.0"
