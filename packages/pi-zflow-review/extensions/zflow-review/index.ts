@@ -237,6 +237,21 @@ export type {
   PatchLineNumbers,
 } from "./chunking.js"
 
+// ── Re-export triage helpers ──────────────────────────────────
+
+export {
+  getDefaultAction,
+  buildTriageQuestions,
+  processTriageResponses,
+  formatTriageSummary,
+} from "./triage.js"
+
+export type {
+  TriageAction,
+  TriageResult,
+  TriageQuestion,
+} from "./triage.js"
+
 // ── Extension activation ───────────────────────────────────────
 
 export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
