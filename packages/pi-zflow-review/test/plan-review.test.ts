@@ -602,7 +602,7 @@ void describe("runPlanReview — reviewer failures", () => {
     assert.equal(result.manifest.failedReviewers[0].name, "correctness")
   })
 
-  it("should still approve when only one reviewer fails with no findings", async () => {
+  it("should return needs-zeb when required reviewer fails", async () => {
     const runner: ReviewerRunner = async (name) => {
       if (name === "correctness") {
         throw new Error("correctness: crashed")
@@ -615,7 +615,26 @@ void describe("runPlanReview — reviewer failures", () => {
     })
 
     const result = await runPlanReview(input, runner)
+    assert.equal(result.action, "needs-zeb")
+    assert.ok(result.needsZebReason?.includes("correctness"), "should mention the failed reviewer")
+  })
+
+  it("should still approve when optional (feasibility) reviewer fails with no findings", async () => {
+    const runner: ReviewerRunner = async (name) => {
+      if (name === "feasibility") {
+        throw new Error("feasibility: not available")
+      }
+      return { findings: [], rawOutput: "" }
+    }
+
+    const input = makeInput({
+      executionGroups: [{ reviewTags: "system" }],
+    })
+
+    const result = await runPlanReview(input, runner)
     assert.equal(result.action, "approve")
+    // feasibility is optional, so plan can still be approved
+    assert.ok(result.coverageNotes.some(n => n.includes("feasibility")))
   })
 })
 

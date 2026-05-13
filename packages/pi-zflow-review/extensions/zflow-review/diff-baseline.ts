@@ -91,16 +91,16 @@ export function resolveDiffBaseline(input: DiffBaselineInput = {}): ResolvedBase
     return {
       baseRef,
       resolution: "explicit",
-      diffCommand: buildDiffCommand(baseRef, "HEAD"),
+      diffCommand: buildDiffCommand(baseRef, "HEAD", { threeDot: false }),
     }
   }
 
-  // Priority 2: HEAD
+  // Priority 2: HEAD (compare worktree/index against HEAD)
   if (useHead === true) {
     return {
       baseRef: "HEAD",
       resolution: "head",
-      diffCommand: buildDiffCommand("HEAD", "HEAD"),
+      diffCommand: "git diff HEAD",
     }
   }
 
@@ -144,7 +144,12 @@ export function buildDiffCommand(
   headRef: string = "HEAD",
   options?: DiffCommandOptions,
 ): string {
-  const separator = options?.threeDot === true ? "..." : "..."
+  // Use three-dot notation (... ) by default, which shows changes on
+  // headRef since its divergence from baseline (merge-base diff).
+  // When threeDot is explicitly false, use two-dot (..) which shows
+  // changes between the two refs directly.
+  const useThreeDot = options?.threeDot !== false
+  const separator = useThreeDot ? "..." : ".."
   return `git diff ${baseline}${separator}${headRef}`
 }
 

@@ -163,12 +163,31 @@ export function getPlanAdherenceInstruction(): string {
 
 /**
  * Default diff-only/no-execution instruction for external PR/MR review.
+ *
+ * This is the `review-pr` mode fragment from `prompt-fragments/modes/review-pr.md`
+ * inlined so the extension does not need a filesystem dependency.
  */
 const DEFAULT_DIFF_ONLY_INSTRUCTION =
-  "## Review mode: Diff-only\n\n" +
-  "This is a diff-only review. Do not execute, check out, or run " +
-  "untrusted PR code. Base your findings entirely on static analysis " +
-  "of the supplied diff hunks."
+  "# Mode: /zflow-review-pr\n\n" +
+  "## Behaviour\n\n" +
+  "External PR/MR diff review mode.\n\n" +
+  "- **Diff-only review.** The review is based on the diff content fetched " +
+  "from the PR/MR URL. Do not execute, check out, or run untrusted PR code " +
+  "unless explicitly instructed by the user.\n" +
+  "- **Never execute untrusted PR code by default.** If the user explicitly " +
+  "requests execution (e.g. \"test this PR\"), treat it as a separate action " +
+  "with appropriate safety warnings.\n" +
+  "- **Findings must state verification limits.** Every finding should indicate " +
+  "whether it was determined by static analysis, logical reasoning, observed " +
+  "behaviour, or is an advisory opinion. Do not claim runtime verification for " +
+  "static findings.\n\n" +
+  "## Severity scheme\n\n" +
+  "Use the following severity levels:\n" +
+  "- **critical** — blocks approval; must be resolved\n" +
+  "- **major** — should be resolved before merging\n" +
+  "- **minor** — nice to fix, not blocking\n" +
+  "- **nit** — optional suggestion\n" +
+  "Do not use severity levels outside this scheme."
 
 // ── Internal review prompt assembly ────────────────────────────
 

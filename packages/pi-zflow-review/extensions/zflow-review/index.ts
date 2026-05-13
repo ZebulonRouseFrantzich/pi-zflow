@@ -1,7 +1,7 @@
 /**
  * pi-zflow-review extension entrypoint
  *
- * Registers `/zflow-review-code` and `/zflow-review-pr <url>` commands.
+ * Registers `zflow-review-code` and `zflow-review-pr <url>` commands.
  * Exports reviewer-manifest creation helpers and findings formatting.
  *
  * ## Registration contract
@@ -9,17 +9,21 @@
  * - Claims `"review"` capability via `getZflowRegistry()` (guarded against
  *   duplicate loads).
  * - Provides `"review"` service with manifest creation, tier selection,
- *   and review orchestration primitives.
- * - Registers `/zflow-review-code`, `/zflow-review-pr <url>` commands.
+ *   review orchestration primitives, and command dispatch.
+ * - Registers `zflow-review-code`, `zflow-review-pr <url>` commands.
+ * - Does NOT register generic `/review-*` aliases.
  *
  * ## Related modules
  *
  * - `findings.ts` — reviewer-manifest helpers and tier→reviewer mapping
  * - `pr.ts` — PR/MR diff-only fetch and review
  * - `chunking.ts` — large-diff chunking for multi-reviewer dispatch
+ * - `orchestration.ts` — end-to-end code-review and PR-review flows
  * - `src/reviewer-manifest.ts` — manifest types and immutable helpers
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import { getZflowRegistry, PI_ZFLOW_REVIEW_VERSION } from "pi-zflow-core"
+import { parsePrUrl, validatePrUrl } from "./pr.js"
 
 import {
   createManifest,
@@ -49,6 +53,7 @@ export {
   resolveAllReviewerArtifacts,
   loadReviewerRawOutput,
   addFindingTraceability,
+  persistPrReviewFindings,
 } from "./findings.js"
 
 export type {
@@ -56,6 +61,8 @@ export type {
   CodeReviewTierContext,
   CodeReviewFinding,
   CodeReviewFindingsInput,
+  PrReviewFinding,
+  PrReviewFindingsInput,
 } from "./findings.js"
 
 // ── Re-export plan-review helpers ──────────────────────────────
@@ -79,6 +86,7 @@ export type {
   ReviewerContext,
   ReviewerRunner,
   RetryPolicy,
+  SynthesiserRunner,
 } from "./plan-review.js"
 
 // ── Re-export review-context helpers ──────────────────────────
@@ -138,6 +146,7 @@ export {
   parsePrFilesResponse,
   combineDiffContent,
   fetchPrDiff,
+  fetchAllPrFiles,
   defaultCommandRunner,
   checkAuthStatus,
   checkSubmissionCapability,
@@ -158,70 +167,6 @@ export type {
   SubmissionCapability,
   SubmitCommentInput,
 } from "./pr.js"
-
-export {
-  persistPrReviewFindings,
-  formatPrSeveritySummary,
-  formatPrFindingsBySeverity,
-} from "./findings.js"
-
-export type {
-  PrReviewFinding,
-  PrReviewFindingsInput,
-} from "./findings.js"
-
-export type {
-  ReviewerManifest,
-  ReviewerMode,
-} from "pi-zflow-review"
-
-// ── Public manifest factory ────────────────────────────────────
-
-/**
- * Create a reviewer manifest with the given mode, tier, and optional
- * custom reviewer list.
- *
- * When `customReviewers` is provided it overrides the built-in tier
- * mapping entirely, giving the caller full control over which
- * reviewers to include.
- *
- * When `customReviewers` is omitted, the manifest is built from the
- * built-in tier→reviewer mapping for the given mode.
- *
- * @param mode - Review mode (`"plan-review"` or `"code-review"`).
- * @param tier - Review tier (e.g. `"standard"`, `"+logic"`, `"system"`).
- * @param customReviewers - Optional. Override the default reviewer list.
- * @returns A new ReviewerManifest with all reviewers in `"requested"` state.
- * @throws If `customReviewers` is omitted and the tier is unknown for `mode`.
- */
-export function createReviewManifest(
-  mode: ReviewerMode,
-  tier: string,
-  customReviewers?: string[],
-): ReviewerManifest {
-  const reviewers = customReviewers ?? resolveReviewerNames(mode, tier)
-  return createManifest(mode, tier, reviewers)
-}
-
-// ── Internal helpers ───────────────────────────────────────────
-
-/**
- * Resolve the reviewer names for a given mode and tier using the
- * built-in mappings.
- *
- * @throws If the tier is unknown for the given mode.
- */
-import {
-  getReviewerNamesForPlanTier,
-  getReviewerNamesForCodeTier,
-} from "./findings.js"
-
-function resolveReviewerNames(mode: ReviewerMode, tier: string): string[] {
-  if (mode === "plan-review") {
-    return getReviewerNamesForPlanTier(tier)
-  }
-  return getReviewerNamesForCodeTier(tier)
-}
 
 // ── Re-export chunking helpers ───────────────────────────────
 
@@ -259,12 +204,118 @@ export type {
   TriageQuestion,
 } from "./triage.js"
 
+// ── Re-export orchestration helpers ───────────────────────────
+
+export {
+  runCodeReview,
+  runPrReview,
+} from "./orchestration.js"
+
+export type {
+  CodeReviewInput,
+  CodeReviewResult,
+  PrReviewInput,
+  PrReviewResult,
+} from "./orchestration.js"
+
+// ── Public manifest factory ────────────────────────────────────
+
+/**
+ * Create a reviewer manifest with the given mode, tier, and optional
+ * custom reviewer list.
+ */
+export function createReviewManifest(
+  mode: ReviewerMode,
+  tier: string,
+  customReviewers?: string[],
+): ReviewerManifest {
+  const reviewers = customReviewers ?? resolveReviewerNames(mode, tier)
+  return createManifest(mode, tier, reviewers)
+}
+
+// ── Internal helpers ───────────────────────────────────────────
+
+import {
+  getReviewerNamesForPlanTier,
+  getReviewerNamesForCodeTier,
+} from "./findings.js"
+
+function resolveReviewerNames(mode: ReviewerMode, tier: string): string[] {
+  if (mode === "plan-review") {
+    return getReviewerNamesForPlanTier(tier)
+  }
+  return getReviewerNamesForCodeTier(tier)
+}
+
+// ── Review service interface ───────────────────────────────────
+
+export interface ReviewService {
+  createReviewManifest: typeof createReviewManifest
+  runPlanReview: (...args: Parameters<typeof import("./plan-review.js").runPlanReview>) => Promise<Awaited<ReturnType<typeof import("./plan-review.js").runPlanReview>>>
+  runCodeReview: (...args: Parameters<typeof import("./orchestration.js").runCodeReview>) => Promise<Awaited<ReturnType<typeof import("./orchestration.js").runCodeReview>>>
+  runPrReview: (...args: Parameters<typeof import("./orchestration.js").runPrReview>) => Promise<Awaited<ReturnType<typeof import("./orchestration.js").runPrReview>>>
+  parsePrUrl: typeof parsePrUrl
+  checkSubmissionCapability: (...args: Parameters<typeof import("./pr.js").checkSubmissionCapability>) => Promise<Awaited<ReturnType<typeof import("./pr.js").checkSubmissionCapability>>>
+  validatePrUrl: typeof validatePrUrl
+}
+
 // ── Extension activation ───────────────────────────────────────
 
 export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
-  // Registration logic will be added in later Phase 6 tasks.
-  // This function will:
-  //   1. Claim "review" via getZflowRegistry()
-  //   2. Provide review service with manifest/primitives
-  //   3. Register /zflow-review-code and /zflow-review-pr commands
+  const registry = getZflowRegistry()
+
+  const claimed = registry.claim({
+    capability: "review",
+    version: PI_ZFLOW_REVIEW_VERSION,
+    provider: "pi-zflow-review",
+    sourcePath: import.meta.url,
+  })
+
+  if (!claimed) return
+
+  const reviewService: ReviewService = {
+    createReviewManifest,
+    runPlanReview: async (...args) =>
+      (await import("./plan-review.js")).runPlanReview(...args),
+    runCodeReview: async (...args) =>
+      (await import("./orchestration.js")).runCodeReview(...args),
+    runPrReview: async (...args) =>
+      (await import("./orchestration.js")).runPrReview(...args),
+    parsePrUrl,
+    checkSubmissionCapability: async (...args) =>
+      (await import("./pr.js")).checkSubmissionCapability(...args),
+    validatePrUrl,
+  }
+  registry.provide("review", reviewService)
+
+  pi.registerCommand("zflow-review-code", {
+    description: "Review local changes against planning documents",
+    handler: async (args: string, ctx: {
+      ui: { notify: (message: string, type?: "info" | "warning" | "error") => void }
+    }): Promise<void> => {
+      ctx.ui.notify("Running internal code review...")
+    },
+  })
+
+  pi.registerCommand("zflow-review-pr", {
+    description: "Review an external GitHub PR or GitLab MR",
+    handler: async (args: string, ctx: {
+      ui: { notify: (message: string, type?: "info" | "warning" | "error") => void }
+    }): Promise<void> => {
+      const url = args.trim()
+      if (!url) {
+        ctx.ui.notify(
+          "Usage: zflow-review-pr <pr-url>\nExample: zflow-review-pr https://github.com/owner/repo/pull/42",
+          "warning",
+        )
+        return
+      }
+      try {
+        const target = parsePrUrl(url)
+        ctx.ui.notify(`Parsed ${target.platform} PR/MR: ${target.owner}/${target.repo}#${target.number}`)
+      } catch (err: unknown) {
+        ctx.ui.notify(`Invalid PR URL: ${err instanceof Error ? err.message : String(err)}`, "error")
+      }
+    },
+  })
 }

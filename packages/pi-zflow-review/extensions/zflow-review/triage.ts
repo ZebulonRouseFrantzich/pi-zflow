@@ -20,10 +20,27 @@ import type { PrReviewFinding } from "./findings.js"
 // ── Core types ─────────────────────────────────────────────────
 
 /**
+ * Generate a stable finding ID from an index.
+ *
+ * Uses a short alphanumeric prefix + index for deterministic
+ * identification even when finding titles are duplicated.
+ */
+function makeFindingId(index: number): string {
+  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+  const id = []
+  let n = index
+  do {
+    id.push(alphabet[n % alphabet.length])
+    n = Math.floor(n / alphabet.length)
+  } while (n > 0)
+  return `f-${id.reverse().join("")}`
+}
+
+/**
  * A triage action chosen by the user for a single finding.
  */
 export interface TriageAction {
-  /** The finding this action applies to (matching PrReviewFinding.title). */
+  /** The finding this action applies to (matches TriageQuestion.findingId). */
   findingId: string
   /** The action to take. */
   action: "submit" | "dismiss" | "edit"
@@ -49,7 +66,7 @@ export interface TriageResult {
  * A triage question prepared for pi-interview.
  */
 export interface TriageQuestion {
-  /** Unique identifier matching the finding (its title). */
+  /** Stable unique identifier for the finding. */
   findingId: string
   /** Finding title, used as the question prompt. */
   title: string
@@ -104,8 +121,8 @@ export function getDefaultAction(
 export function buildTriageQuestions(
   findings: PrReviewFinding[],
 ): TriageQuestion[] {
-  return findings.map((f) => ({
-    findingId: f.title,
+  return findings.map((f, idx) => ({
+    findingId: makeFindingId(idx),
     title: f.title,
     severity: f.severity,
     file: f.file,
@@ -135,18 +152,31 @@ export function processTriageResponses(
   findings: PrReviewFinding[],
   responses: TriageAction[],
 ): TriageResult {
-  // Build a lookup map from responses by findingId
+  // Build a lookup map from findingId to TriageAction
   const responseMap = new Map<string, TriageAction>()
   for (const r of responses) {
     responseMap.set(r.findingId, r)
+  }
+
+  // Build a mapping from index to findingId (same algorithm as buildTriageQuestions)
+  const indexToFindingId = new Map<number, string>()
+  for (let i = 0; i < findings.length; i++) {
+    indexToFindingId.set(i, makeFindingId(i))
+  }
+  // Build reverse mapping from findingId to index
+  const findingIdToIndex = new Map<string, number>()
+  for (const [idx, fid] of indexToFindingId) {
+    findingIdToIndex.set(fid, idx)
   }
 
   const submitFindings: PrReviewFinding[] = []
   const dismissedFindings: PrReviewFinding[] = []
   let hadEdits = false
 
-  for (const finding of findings) {
-    const response = responseMap.get(finding.title)
+  for (let i = 0; i < findings.length; i++) {
+    const finding = findings[i]
+    const fid = makeFindingId(i)
+    const response = responseMap.get(fid)
 
     if (!response) {
       // No triage response for this finding → dismiss by default

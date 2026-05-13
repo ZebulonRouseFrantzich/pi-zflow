@@ -76,14 +76,14 @@ void describe("buildTriageQuestions", () => {
     assert.equal(questions.length, 2)
 
     // First finding
-    assert.equal(questions[0].findingId, "Missing null guard")
+    assert.equal(questions[0].findingId, "f-a")
     assert.equal(questions[0].title, "Missing null guard")
     assert.equal(questions[0].severity, "critical")
     assert.equal(questions[0].file, "src/webhook.ts")
     assert.equal(questions[0].lines, "120-127")
 
     // Second finding
-    assert.equal(questions[1].findingId, "Unused import")
+    assert.equal(questions[1].findingId, "f-b")
     assert.equal(questions[1].severity, "nit")
     assert.equal(questions[1].file, "src/util.ts")
   })
@@ -119,7 +119,7 @@ void describe("processTriageResponses", () => {
     ]
 
     const responses: TriageAction[] = [
-      { findingId: "Missing guard", action: "submit" },
+      { findingId: "f-a", action: "submit" },
     ]
 
     const result = processTriageResponses(findings, responses)
@@ -138,7 +138,7 @@ void describe("processTriageResponses", () => {
     ]
 
     const responses: TriageAction[] = [
-      { findingId: "Style nit", action: "dismiss" },
+      { findingId: "f-a", action: "dismiss" },
     ]
 
     const result = processTriageResponses(findings, responses)
@@ -156,7 +156,7 @@ void describe("processTriageResponses", () => {
     ]
 
     const responses: TriageAction[] = [
-      { findingId: "Missing guard", action: "edit", editedBody: "Please add input validation here because..." },
+      { findingId: "f-a", action: "edit", editedBody: "Please add input validation here because..." },
     ]
 
     const result = processTriageResponses(findings, responses)
@@ -177,9 +177,9 @@ void describe("processTriageResponses", () => {
     ]
 
     const responses: TriageAction[] = [
-      { findingId: "Critical bug", action: "submit" },
-      { findingId: "Minor style", action: "dismiss" },
-      { findingId: "Edit me", action: "edit", editedBody: "Reworded" },
+      { findingId: "f-a", action: "submit" },
+      { findingId: "f-b", action: "dismiss" },
+      { findingId: "f-c", action: "edit", editedBody: "Reworded" },
     ]
 
     const result = processTriageResponses(findings, responses)
@@ -200,9 +200,9 @@ void describe("processTriageResponses", () => {
       makeFinding({ title: "Bug B", severity: "major" }),
     ]
 
-    // Only respond to Bug A
+    // Only respond to Bug A (findingId f-a)
     const responses: TriageAction[] = [
-      { findingId: "Bug A", action: "submit" },
+      { findingId: "f-a", action: "submit" },
     ]
 
     const result = processTriageResponses(findings, responses)

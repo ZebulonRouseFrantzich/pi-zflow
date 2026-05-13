@@ -375,7 +375,7 @@ export function formatSynthesisPrompt(input: SynthesisInput): string {
   lines.push("### Core rules")
   lines.push("1. **Synthesise only.** Do not add new findings, modify code, or change plan artifacts.")
   lines.push("2. **Reason over the actual reviewer set.** Note coverage gaps where a reviewer was not invoked, skipped, or failed.")
-  lines.push("3. **Do not reduce severity** of individual findings. Reclassification is the author's prerogative.")
+  lines.push("3. **You may downgrade weak single-reviewer observations.** A finding raised by only one reviewer with thin evidence (no concrete file/line reference, speculative concern) may be downgraded one severity level. A finding raised by multiple reviewers or a single reviewer with strong evidence must not be downgraded. Downgrade decisions must be explicitly noted.")
   lines.push("")
   lines.push("### Deduplication rules")
   lines.push("- Same file + same concern + same root cause = deduplicate, credit both reviewers.")

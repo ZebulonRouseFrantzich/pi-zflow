@@ -40,14 +40,14 @@ void describe("resolveDiffBaseline", () => {
     const result = resolveDiffBaseline({ baseRef: "origin/stable-v2" })
     assert.equal(result.baseRef, "origin/stable-v2")
     assert.equal(result.resolution, "explicit")
-    assert.equal(result.diffCommand, "git diff origin/stable-v2...HEAD")
+    assert.equal(result.diffCommand, "git diff origin/stable-v2..HEAD")
   })
 
   it("should return 'HEAD' with 'head' resolution when useHead is true", () => {
     const result = resolveDiffBaseline({ useHead: true })
     assert.equal(result.baseRef, "HEAD")
     assert.equal(result.resolution, "head")
-    assert.equal(result.diffCommand, "git diff HEAD...HEAD")
+    assert.equal(result.diffCommand, "git diff HEAD")
   })
 
   it("should return 'main' with 'merge-base' resolution when useMergeBase is true", () => {

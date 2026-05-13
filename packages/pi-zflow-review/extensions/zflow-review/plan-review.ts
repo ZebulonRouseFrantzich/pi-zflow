@@ -49,6 +49,19 @@ import {
   getCoverageSummary,
 } from "pi-zflow-review"
 
+import {
+  persistReviewerRawOutput,
+  resolveAllReviewerArtifacts,
+} from "./findings.js"
+
+import {
+  prepareSynthesisInput,
+  formatSynthesisPrompt,
+  evaluateRecommendation,
+  buildSynthesisResult,
+  type SynthesisInput,
+} from "./synthesizer.js"
+
 import type {
   ReviewerManifest,
   CoverageSummary,
@@ -91,6 +104,27 @@ export interface PlanReviewInput {
    * When omitted, the default policy (one retry, no delay) is used.
    */
   retryPolicy?: RetryPolicy
+  /**
+   * Optional lane re-resolution hook.
+   *
+   * When a required reviewer fails and is retried without success, the
+   * flow calls `laneReresolver(reviewerName)` before the final retry
+   * attempt. If the lane re-resolution succeeds, the reviewer is retried.
+   * If the lane re-resolution fails or the final retry fails, the flow
+   * returns with action `"needs-zeb"`.
+   *
+   * When omitted, required reviewer failure after retry also returns
+   * `"needs-zeb"` without attempting lane re-resolution.
+   */
+  laneReresolver?: (reviewerName: string) => Promise<boolean>
+  /**
+   * Optional synthesizer runner.
+   *
+   * When provided, the flow invokes this function with the reviewer manifest
+   * and all raw outputs, expecting a structured synthesis result. When omitted,
+   * the flow falls back to the local `synthesiseFindings` helper.
+   */
+  synthesizerRunner?: SynthesiserRunner
 }
 
 /**
@@ -104,9 +138,11 @@ export interface PlanReviewResult {
   /** Aggregated severity counts from synthesised findings. */
   severity: { critical: number; major: number; minor: number; nit: number }
   /** Gating decision. */
-  action: "approve" | "revise-plan"
-  /** When action is "revise-plan", the suggested next version label. */
+  action: "approve" | "revise-plan" | "needs-zeb"
+  /** When action is "revise-plan" or "needs-zeb", suggested or last version label. */
   nextVersion?: string
+  /** Human-readable reason for "needs-zeb" action, if applicable. */
+  needsZebReason?: string
   /** Absolute path to the persisted findings file. */
   findingsPath: string
   /** Human-readable coverage notes about the review. */
@@ -154,6 +190,31 @@ export type ReviewerRunner = (
   reviewerName: string,
   context: ReviewerContext,
 ) => Promise<ReviewerOutput>
+
+/**
+ * Signature for a synthesizer runner function.
+ *
+ * Implementations may call agent chains, LLM calls, or return stubs.
+ * The function receives the reviewer manifest and a record of raw
+ * reviewer outputs keyed by reviewer name.
+ */
+export type SynthesiserRunner = (
+  manifest: ReviewerManifest,
+  reviewerOutputs: Record<string, ReviewerOutput>,
+  runner: ReviewerRunner,
+  context: ReviewerContext,
+) => Promise<{
+  severity: { critical: number; major: number; minor: number; nit: number }
+  entries: Array<{
+    severity: "critical" | "major" | "minor" | "nit"
+    title: string
+    description: string
+    evidence?: string
+    reviewers: string[]
+    dissentingReviewers: string[]
+  }>
+  coverageNotes: string[]
+}>
 
 // ── Retry policy ───────────────────────────────────────────────
 
@@ -266,6 +327,76 @@ export async function runReviewerWithRetry(
   throw new Error(
     `Unreachable: runReviewerWithRetry completed without returning for ${reviewerName}`,
   )
+}
+
+/**
+ * Default synthesizer runner that produces a synthesis result using
+ * the synthesizer module helpers and local merge logic.
+ *
+ * This serves as the built-in default when no external synthesizer
+ * runner is injected. It uses `prepareSynthesisInput` to structure
+ * the input, formats a synthesis prompt (for agent dispatch), and
+ * falls back to local dedup/merge via `synthesiseFindings`.
+ */
+export async function defaultSynthesizerRunner(
+  manifest: ReviewerManifest,
+  reviewerOutputs: Record<string, ReviewerOutput>,
+  _runner: ReviewerRunner,
+  _context: ReviewerContext,
+): Promise<{
+  severity: { critical: number; major: number; minor: number; nit: number }
+  entries: Array<{
+    severity: "critical" | "major" | "minor" | "nit"
+    title: string
+    description: string
+    evidence?: string
+    reviewers: string[]
+    dissentingReviewers: string[]
+  }>
+  coverageNotes: string[]
+}> {
+  const mode = manifest.mode
+
+  // Convert ReviewerOutput to the format expected by prepareSynthesisInput
+  const converted: Record<string, { findings: Array<{ severity: "critical" | "major" | "minor" | "nit"; title: string; description: string; evidence?: string }>; rawOutput: string }> = {}
+  for (const [name, output] of Object.entries(reviewerOutputs)) {
+    converted[name] = {
+      findings: output.findings.map(f => ({
+        severity: f.severity,
+        title: f.title,
+        description: f.description,
+        evidence: f.evidence,
+      })),
+      rawOutput: output.rawOutput,
+    }
+  }
+
+  const synthesisInput = prepareSynthesisInput(manifest, converted, mode)
+  const prompt = formatSynthesisPrompt(synthesisInput)
+
+  // Collect all findings for local merge
+  const allFindings: Array<{ reviewerName: string; finding: Finding }> = []
+  for (const [name, output] of Object.entries(reviewerOutputs)) {
+    for (const finding of output.findings) {
+      allFindings.push({ reviewerName: name, finding })
+    }
+  }
+
+  // Use local synthesis fallback for deterministic output
+  // In production, the prompt would be sent to the zflow.synthesizer agent
+  const local = synthesiseFindings(allFindings, getCoverageSummary(manifest), manifest.tier)
+
+  const coverageNotes: string[] = [
+    `Synthesis performed via defaultSynthesizerRunner.`,
+    `Synthesis prompt generated (${prompt.length} chars).`,
+    `Coverage: ${getCoverageSummary(manifest).executed}/${getCoverageSummary(manifest).total} reviewers executed.`,
+  ]
+
+  return {
+    severity: local.severity,
+    entries: local.entries,
+    coverageNotes,
+  }
 }
 
 // ── Default stub runner ────────────────────────────────────────
@@ -418,15 +549,15 @@ export async function runPlanReview(
     }),
   )
 
-  // ── Step 5: Record manifest state ───────────────────────────
+  // ── Step 5: Record manifest state & detect required failures ──
   const allFindings: Array<{ reviewerName: string; finding: Finding }> = []
-  const synthesizerInputs: string[] = []
+  const reviewerOutputs: Record<string, ReviewerOutput> = {}
+  const requiredFailures: string[] = []
 
   for (const result of settledResults) {
     if (result.status === "fulfilled") {
       const value = result.value
       if (value.skipped) {
-        // Optional reviewer failed after retry — recorded as skipped
         manifest = recordSkipped(manifest, value.name, value.reason)
         coverageNotes.push(
           `Reviewer "${value.name}" skipped after retry: ${value.reason}`,
@@ -434,41 +565,150 @@ export async function runPlanReview(
       } else {
         const { name, output } = value
         manifest = recordExecuted(manifest, name)
+        reviewerOutputs[name] = output
 
         for (const finding of output.findings) {
           allFindings.push({ reviewerName: name, finding })
-        }
-
-        if (output.rawOutput) {
-          synthesizerInputs.push(
-            `## ${name}\n\n${output.rawOutput}`,
-          )
         }
       }
     } else if (result.status === "rejected") {
       const name = extractRejectedReviewerName(result.reason, reviewerNames)
       manifest = recordFailed(manifest, name, String(result.reason))
+      if (isRequiredReviewer(name, "plan-review")) {
+        requiredFailures.push(name)
+      }
       coverageNotes.push(
         `Reviewer "${name}" failed after retry: ${String(result.reason)}`,
       )
     }
   }
 
+  // ── Step 5b: Handle required reviewer failures ──────────────
+  if (requiredFailures.length > 0) {
+    // Attempt lane re-resolution for each failed required reviewer
+    let allResolved = true
+    for (const name of requiredFailures) {
+      if (input.laneReresolver) {
+        try {
+          const laneOk = await input.laneReresolver(name)
+          if (!laneOk) {
+            allResolved = false
+            break
+          }
+          // Re-run the reviewer after lane re-resolution
+          const isRequired = true
+          const rerunResult = await runReviewerWithRetry(
+            name,
+            isRequired,
+            runner,
+            context,
+            retryPolicy,
+          )
+          if (rerunResult.status === "success") {
+            manifest = recordExecuted(manifest, name)
+            // Remove from failedReviewers by recreating manifest entries
+            const failedIdx = manifest.failedReviewers.findIndex(f => f.name === name)
+            if (failedIdx >= 0) {
+              manifest = {
+                ...manifest,
+                failedReviewers: manifest.failedReviewers.filter((_, i) => i !== failedIdx),
+              }
+            }
+            reviewerOutputs[name] = rerunResult.output
+            for (const finding of rerunResult.output.findings) {
+              allFindings.push({ reviewerName: name, finding })
+            }
+          } else {
+            // Rerun was skipped (shouldn't happen for required) — treat as still failed
+            allResolved = false
+            coverageNotes.push(
+              `Reviewer "${name}" still failed after lane re-resolution.`,
+            )
+          }
+        } catch {
+          allResolved = false
+          coverageNotes.push(
+            `Reviewer "${name}" lane re-resolution failed.`,
+          )
+        }
+      } else {
+        allResolved = false
+      }
+    }
+
+    if (!allResolved) {
+      // Required reviewer(s) could not recover — ask Zeb
+      const failedNames = requiredFailures.join(", ")
+      const result: PlanReviewResult = {
+        tier,
+        manifest,
+        severity: { critical: 0, major: 0, minor: 0, nit: 0 },
+        action: "needs-zeb",
+        needsZebReason:
+          `Required reviewer(s) [${failedNames}] failed after retry and lane re-resolution. ` +
+          `Review cannot proceed without manual intervention from Zeb.`,
+        findingsPath,
+        coverageNotes: [
+          ...coverageNotes,
+          `Required reviewer(s) [${failedNames}] failed and needs Zeb intervention.`,
+        ],
+      }
+      // Persist findings noting the failure
+      await persistPlanReviewFindings(
+        result as any,
+        input,
+        findingsPath,
+      )
+      return result
+    }
+  }
+
   // ── Step 6: Synthesise ──────────────────────────────────────
-  const synthesised = synthesiseFindings(
-    allFindings,
-    getCoverageSummary(manifest),
-    tier,
-  )
+  let synthesised: {
+    severity: { critical: number; major: number; minor: number; nit: number }
+    entries: Array<{
+      severity: "critical" | "major" | "minor" | "nit"
+      title: string
+      description: string
+      evidence?: string
+      reviewers: string[]
+      dissentingReviewers: string[]
+    }>
+  }
+
+  // Preserve raw outputs to artifact directory
+  for (const [name, output] of Object.entries(reviewerOutputs)) {
+    await persistReviewerRawOutput(manifest.runId, name, output.rawOutput, cwd)
+  }
+
+  if (input.synthesizerRunner) {
+    const synthResult = await input.synthesizerRunner(
+      manifest,
+      reviewerOutputs,
+      runner,
+      context,
+    )
+    synthesised = synthResult
+    for (const note of synthResult.coverageNotes) {
+      coverageNotes.push(`[synthesizer] ${note}`)
+    }
+  } else {
+    // Use default synthesizer that leverages synthesizer.ts helpers
+    const defaultResult = await defaultSynthesizerRunner(
+      manifest,
+      reviewerOutputs,
+      runner,
+      context,
+    )
+    synthesised = defaultResult
+    for (const note of defaultResult.coverageNotes) {
+      coverageNotes.push(`[synthesizer] ${note}`)
+    }
+  }
 
   const { severity, entries } = synthesised
 
-  // Build raw-output section for the findings file
-  const rawOutputSection = synthesizerInputs.length > 0
-    ? synthesizerInputs.join("\n\n")
-    : "No reviewer raw outputs recorded."
-
-  // Build coverage notes
+  // Build coverage notes summary
   if (getCoverageSummary(manifest).skipped > 0) {
     for (const sr of manifest.skippedReviewers) {
       coverageNotes.push(
@@ -491,7 +731,6 @@ export async function runPlanReview(
       severity,
       coverageNotes,
       entries,
-      rawOutputSection,
     },
     input,
     findingsPath,
@@ -657,7 +896,8 @@ interface FindingsFileData {
   severity: { critical: number; major: number; minor: number; nit: number }
   coverageNotes: string[]
   entries?: SynthesisedEntry[]
-  rawOutputSection?: string
+  action?: "approve" | "revise-plan" | "needs-zeb"
+  needsZebReason?: string
 }
 
 /**
@@ -671,7 +911,7 @@ interface FindingsFileData {
  * @param findingsPath - Pre-computed findings file path.
  */
 export async function persistPlanReviewFindings(
-  data: FindingsFileData | Omit<FindingsFileData, "entries" | "rawOutputSection">,
+  data: FindingsFileData,
   input: PlanReviewInput,
   findingsPath?: string,
 ): Promise<string> {
@@ -694,12 +934,10 @@ export async function persistPlanReviewFindings(
  * Build the markdown content for the findings file.
  */
 function buildFindingsMarkdown(
-  data: FindingsFileData | Omit<FindingsFileData, "entries" | "rawOutputSection">,
+  data: FindingsFileData,
   input: PlanReviewInput,
 ): string {
-  const { tier, manifest, severity, coverageNotes } = data
-  const entries = "entries" in data ? data.entries : undefined
-  const rawOutputSection = "rawOutputSection" in data ? data.rawOutputSection : undefined
+  const { tier, manifest, severity, coverageNotes, entries, action, needsZebReason } = data
 
   const lines: string[] = []
 
@@ -710,7 +948,10 @@ function buildFindingsMarkdown(
   lines.push(`**Review tier:** ${tier}`)
   lines.push(`**Run ID:** ${manifest.runId}`)
   lines.push(`**Generated:** ${manifest.createdAt}`)
-  lines.push(`**Action:** ${severity.critical > 0 || severity.major > 0 ? "REVISE-PLAN" : "APPROVE"}`)
+  lines.push(`**Action:** ${action === "needs-zeb" ? "NEEDS-ZEB" : severity.critical > 0 || severity.major > 0 ? "REVISE-PLAN" : "APPROVE"}`)
+  if (needsZebReason) {
+    lines.push(`**Needs Zeb reason:** ${needsZebReason}`)
+  }
   lines.push(``)
 
   // ── Coverage notes ──────────────────────────────────────────
@@ -780,13 +1021,12 @@ function buildFindingsMarkdown(
     lines.push(``)
   }
 
-  // ── Raw reviewer outputs ────────────────────────────────────
-  if (rawOutputSection) {
-    lines.push(`## Raw reviewer outputs`)
-    lines.push(``)
-    lines.push(rawOutputSection)
-    lines.push(``)
-  }
+  // ── Artifact reference ─────────────────────────────────────
+  lines.push(`## Raw reviewer outputs`)
+  lines.push(``)
+  lines.push(`Raw reviewer outputs are preserved in the run artifact directory:`)
+  lines.push(`\`<runtime-state-dir>/runs/${manifest.runId}/review-artifacts/\``)
+  lines.push(``)
 
   return lines.join("\n")
 }

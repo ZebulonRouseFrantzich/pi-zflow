@@ -581,6 +581,10 @@ void describe("fetchPrDiff", () => {
 
     const mockRunner = async (cmd: string): Promise<string> => {
       if (cmd.includes("/changes")) {
+        // Return empty for pagination pages beyond the first
+        if (cmd.includes("&page=")) {
+          return JSON.stringify({ changes: [] })
+        }
         return JSON.stringify({
           changes: [
             {
@@ -813,8 +817,12 @@ void describe("buildSubmitCommentCommand", () => {
 
     assert.ok(cmd.startsWith("glab api"))
     assert.ok(cmd.includes("my-group%2Fmy-project"))
-    assert.ok(cmd.includes("merge_requests/7/notes"))
+    assert.ok(cmd.includes("merge_requests/7/discussions"))
     assert.ok(cmd.includes("Please fix this issue"))
+    // GitLab discussions API requires position SHA fields for inline comments
+    assert.ok(cmd.includes("position[base_sha]"))
+    assert.ok(cmd.includes("position[start_sha]"))
+    assert.ok(cmd.includes("position[head_sha]"))
   })
 
   it("should escape special characters in body", () => {

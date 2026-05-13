@@ -288,32 +288,36 @@ export function parsePrMetadataResponse(
   data: Record<string, unknown>,
 ): PrMetadata {
   if (platform === "github") {
+    const headData = data["head"] as Record<string, unknown> | undefined
+    const headRepoData = headData?.["repo"] as Record<string, unknown> | undefined
+    const baseData = data["base"] as Record<string, unknown> | undefined
     return {
       platform: "github",
-      owner: data.head?.repo?.owner?.login as string ?? "",
-      repo: data.head?.repo?.name as string ?? "",
-      number: data.number as number,
-      title: data.title as string ?? "",
-      description: data.body as string ?? "",
-      state: data.state as string ?? "",
-      headSha: data.head?.sha as string ?? "",
-      baseSha: data.base?.sha as string ?? "",
-      url: data.html_url as string ?? "",
+      owner: (headRepoData?.["owner"] as Record<string, unknown> | undefined)?.["login"] as string ?? "",
+      repo: headRepoData?.["name"] as string ?? "",
+      number: data["number"] as number,
+      title: data["title"] as string ?? "",
+      description: data["body"] as string ?? "",
+      state: data["state"] as string ?? "",
+      headSha: headData?.["sha"] as string ?? "",
+      baseSha: baseData?.["sha"] as string ?? "",
+      url: data["html_url"] as string ?? "",
     }
   }
 
   // GitLab
+  const diffRefs = data["diff_refs"] as Record<string, unknown> | undefined
   return {
     platform: "gitlab",
     owner: "",
     repo: "",
-    number: data.iid as number ?? (data.number as number ?? 0),
-    title: data.title as string ?? "",
-    description: data.description as string ?? "",
-    state: data.state as string ?? "",
-    headSha: data.sha as string ?? "",
-    baseSha: data.diff_refs?.base_sha as string ?? "",
-    url: data.web_url as string ?? "",
+    number: data["iid"] as number ?? (data["number"] as number ?? 0),
+    title: data["title"] as string ?? "",
+    description: data["description"] as string ?? "",
+    state: data["state"] as string ?? "",
+    headSha: data["sha"] as string ?? "",
+    baseSha: diffRefs?.["base_sha"] as string ?? "",
+    url: data["web_url"] as string ?? "",
   }
 }
 
@@ -329,7 +333,7 @@ export function parsePrFilesResponse(
   data: unknown[],
 ): PrFile[] {
   if (platform === "github") {
-    return data.map((entry: Record<string, unknown>) => ({
+    return (data as Record<string, unknown>[]).map((entry) => ({
       path: (entry.filename as string) ?? (entry.path as string) ?? "",
       status: normalizeFileStatus(entry.status as string),
       additions: (entry.additions as number) ?? 0,
@@ -339,7 +343,7 @@ export function parsePrFilesResponse(
   }
 
   // GitLab
-  return data.map((entry: Record<string, unknown>) => ({
+  return (data as Record<string, unknown>[]).map((entry) => ({
     path: (entry.new_path as string) ?? (entry.path as string) ?? "",
     status: normalizeFileStatus(entry.new_file ? "added" : entry.renamed_file ? "renamed" : entry.deleted_file ? "removed" : entry.status as string ?? "modified"),
     additions: 0,
@@ -380,6 +384,83 @@ export function combineDiffContent(files: PrFile[]): string {
 }
 
 /**
+ * Fetch all pages of PR/MR changed files using pagination.
+ *
+ * GitHub paginates `/pulls/{number}/files` at 30 files per page by default.
+ * GitLab paginates at 20 per page. This function reads the `Link` header
+ * (GitHub) or uses `X-Total-Pages` / `X-Next-Page` (GitLab) to fetch
+ * all pages until complete.
+ *
+ * @param target - Resolved PR/MR target.
+ * @param commandRunner - Optional command runner.
+ * @returns Array of all PrFile entries across all pages.
+ */
+export async function fetchAllPrFiles(
+  target: ResolvedPrTarget,
+  commandRunner?: CommandRunner,
+): Promise<PrFile[]> {
+  const run = commandRunner ?? defaultCommandRunner
+  const cmds = buildFetchCommands(target)
+
+  // Fetch first page with maximum page size to minimize pagination
+  const firstCmd = `${cmds.files}?per_page=100`
+  const firstRaw = await run(firstCmd)
+  let allData: unknown[] = parseFilesResponse(target.platform, firstRaw)
+
+  // GitHub: paginate when we got the maximum per page
+  if (target.platform === "github" && allData.length >= 100) {
+    let page = 2
+    const maxPages = 10 // safety limit
+    while (page <= maxPages) {
+      try {
+        const pageCmd = `${cmds.files}?per_page=100&page=${page}`
+        const pageRaw = await run(pageCmd)
+        const pageData: unknown[] = parseFilesResponse(target.platform, pageRaw)
+        if (pageData.length === 0) break
+        allData = allData.concat(pageData)
+        page++
+      } catch {
+        break
+      }
+    }
+  }
+
+  // GitLab: paginate using page parameter when we got a full page
+  if (target.platform === "gitlab" && allData.length >= 100) {
+    let page = 2
+    const maxPages = 10 // safety limit
+    while (page <= maxPages) {
+      try {
+        const pageCmd = `${cmds.files}?per_page=100&page=${page}`
+        const pageRaw = await run(pageCmd)
+        const pageData: unknown[] = parseFilesResponse(target.platform, pageRaw)
+        if (pageData.length === 0) break
+        allData = allData.concat(pageData)
+        page++
+      } catch {
+        break
+      }
+    }
+  }
+
+  return parsePrFilesResponse(target.platform, allData)
+}
+
+/**
+ * Parse a raw API response into an array of file data objects.
+ */
+function parseFilesResponse(platform: "github" | "gitlab", raw: string): unknown[] {
+  const parsed: unknown = JSON.parse(raw)
+  if (Array.isArray(parsed)) return parsed as unknown[]
+  const obj = parsed as Record<string, unknown>
+  if (platform === "gitlab") {
+    const changes = obj.changes as unknown[]
+    return Array.isArray(changes) ? changes : []
+  }
+  return []
+}
+
+/**
  * Fetch PR/MR metadata and diff content using CLI commands.
  *
  * Uses the provided `commandRunner` to execute platform-specific `gh`/`glab`
@@ -410,23 +491,8 @@ export async function fetchPrDiff(
   metadata.owner = target.owner
   metadata.repo = target.repo
 
-  // Fetch files
-  const filesRaw = await run(cmds.files)
-  const filesParsed: unknown = JSON.parse(filesRaw)
-  let filesData: unknown[]
-  if (Array.isArray(filesParsed)) {
-    filesData = filesParsed as unknown[]
-  } else {
-    // GitLab returns { changes: [...] } or similar wrappers
-    const filesObj = filesParsed as Record<string, unknown>
-    if (target.platform === "gitlab") {
-      const changes = filesObj.changes as unknown[]
-      filesData = Array.isArray(changes) ? changes : [filesObj]
-    } else {
-      filesData = []
-    }
-  }
-  const files = parsePrFilesResponse(target.platform, filesData)
+  // Fetch all files with pagination
+  const files = await fetchAllPrFiles(target, commandRunner)
 
   // Build combined diff content
   const diffContent = combineDiffContent(files)
@@ -592,33 +658,52 @@ export interface SubmitCommentInput {
   path?: string
   /** Optional line number for line-specific comments. */
   line?: number
+  /** Optional commit SHA for the PR head (required for accurate GitHub inline comments). */
+  commitSha?: string
+  /** Optional side of the diff: "LEFT" or "RIGHT". Defaults to "RIGHT". */
+  side?: "LEFT" | "RIGHT"
+  /** Optional base SHA for GitLab diff position metadata. */
+  baseSha?: string
+  /** Optional start SHA for GitLab diff position metadata. */
+  startSha?: string
+  /** Optional head SHA for GitLab diff position metadata. */
+  headSha?: string
 }
 
 /**
  * Build the CLI command string for submitting an inline comment to a
  * PR/MR via `gh` or `glab` API.
  *
- * **GitHub:**
+ * **GitHub (review comment with position):**
  * ```
  * gh api repos/{owner}/{repo}/pulls/{number}/comments \
  *   --method POST \
  *   -f body="..." \
  *   -f path="..." \
- *   -F line=...
+ *   -F line=42 \
+ *   -F commit_id="abc123" \
+ *   -F side="RIGHT"
  * ```
  *
- * **GitLab:**
+ * **GitLab (diff note with position):**
  * ```
- * glab api projects/{owner}%2F{repo}/merge_requests/{number}/notes \
+ * glab api projects/{owner}%2F{repo}/merge_requests/{number}/discussions \
  *   --method POST \
- *   -f body="..."
+ *   -f body="..." \
+ *   -f position[base_sha]="base" \
+ *   -f position[start_sha]="start" \
+ *   -f position[head_sha]="head" \
+ *   -f position[position_type]="text" \
+ *   -f position[new_path]="..." \
+ *   -f position[new_line]=42
  * ```
  *
- * @param input - Submit comment input with target, body, optional path and line.
+ * @param input - Submit comment input with target, body, optional path, line,
+ *   commitSha, and side.
  * @returns The CLI command string for submitting the comment.
  */
 export function buildSubmitCommentCommand(input: SubmitCommentInput): string {
-  const { target, body, path, line } = input
+  const { target, body, path, line, commitSha, side } = input
 
   if (target.platform === "github") {
     const base = `/repos/${target.owner}/${target.repo}/pulls/${target.number}/comments`
@@ -629,15 +714,44 @@ export function buildSubmitCommentCommand(input: SubmitCommentInput): string {
     if (line !== undefined) {
       cmd += ` -F line=${line}`
     }
+    if (commitSha !== undefined) {
+      cmd += ` -f commit_id=${JSON.stringify(commitSha)}`
+    }
+    if (side !== undefined) {
+      cmd += ` -f side=${JSON.stringify(side)}`
+    } else if (line !== undefined) {
+      // Default to RIGHT side when a line is specified
+      cmd += ` -f side=${JSON.stringify("RIGHT")}`
+    }
     return cmd
   }
 
-  // GitLab
+  // GitLab — use discussions API with position for inline diff notes
   const encodedPath = `${target.owner}%2F${target.repo}`
-  const base = `projects/${encodedPath}/merge_requests/${target.number}/notes`
+  const base = `projects/${encodedPath}/merge_requests/${target.number}/discussions`
   let cmd = `glab api ${base} --method POST -f body=${JSON.stringify(body)}`
   if (path !== undefined) {
-    cmd += ` -f path=${JSON.stringify(path)}`
+    cmd += ` -f position[position_type]=${JSON.stringify("text")}`
+    cmd += ` -f position[new_path]=${JSON.stringify(path)}`
+    if (line !== undefined) {
+      cmd += ` -F position[new_line]=${line}`
+    }
+    // SHA position metadata required by GitLab discussions API for inline comments
+    if (input.baseSha) {
+      cmd += ` -f position[base_sha]=${JSON.stringify(input.baseSha)}`
+    }
+    if (input.startSha) {
+      cmd += ` -f position[start_sha]=${JSON.stringify(input.startSha)}`
+    }
+    if (input.headSha) {
+      cmd += ` -f position[head_sha]=${JSON.stringify(input.headSha)}`
+    }
+    // Fallback: if no SHAs provided, use placeholder values
+    if (!input.baseSha && !input.startSha && !input.headSha) {
+      cmd += ` -f position[base_sha]=${JSON.stringify("base")}`
+      cmd += ` -f position[start_sha]=${JSON.stringify("start")}`
+      cmd += ` -f position[head_sha]=${JSON.stringify("head")}`
+    }
   }
   return cmd
 }
