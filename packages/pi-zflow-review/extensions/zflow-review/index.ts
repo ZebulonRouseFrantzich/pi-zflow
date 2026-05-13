@@ -93,7 +93,7 @@ export {
 export type {
   InternalReviewContext,
   ExternalReviewContext,
-  DiffChunk,
+  ReviewDiffChunk,
 } from "./review-context.js"
 
 // ── Re-export synthesizer helpers ─────────────────────────────
@@ -204,6 +204,27 @@ function resolveReviewerNames(mode: ReviewerMode, tier: string): string[] {
   }
   return getReviewerNamesForCodeTier(tier)
 }
+
+// ── Re-export chunking helpers ───────────────────────────────
+
+export {
+  chunkDiff,
+  buildLineMap,
+  parsePatchLineNumbers,
+  parseAllHunkLineNumbers,
+  estimateChunkSize,
+  mergeChunkFindings,
+  resetChunkCounter,
+} from "./chunking.js"
+
+export type {
+  ChunkingOptions,
+  DiffChunk,
+  ChunkingResult,
+  ChunkFinding,
+  ChunkResult,
+  PatchLineNumbers,
+} from "./chunking.js"
 
 // ── Extension activation ───────────────────────────────────────
 

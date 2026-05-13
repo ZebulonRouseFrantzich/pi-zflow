@@ -26,7 +26,7 @@ import {
 import type {
   InternalReviewContext,
   ExternalReviewContext,
-  DiffChunk,
+  ReviewDiffChunk,
 } from "../extensions/zflow-review/review-context.js"
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -339,7 +339,7 @@ void describe("buildExternalReviewPrompt", () => {
     description: "This PR fixes an important issue.",
   }
 
-  const diffChunks: DiffChunk[] = [
+  const diffChunks: ReviewDiffChunk[] = [
     {
       chunkId: "chunk-1",
       files: [

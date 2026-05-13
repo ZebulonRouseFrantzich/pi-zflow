@@ -57,7 +57,7 @@ export interface InternalReviewContext {
 /**
  * A single chunk of a large diff for dispatch to a reviewer agent.
  */
-export interface DiffChunk {
+export interface ReviewDiffChunk {
   /** Unique chunk identifier (e.g. "chunk-1") */
   chunkId: string
   /** Files in this chunk */
@@ -79,7 +79,7 @@ export interface DiffChunk {
  */
 export interface ExternalReviewContext {
   /** Diff chunks from the PR/MR */
-  diffChunks: DiffChunk[]
+  diffChunks: ReviewDiffChunk[]
   /** PR/MR metadata */
   prMetadata: PrMetadata
   /** Explicit diff-only instruction text (overrides default) */
