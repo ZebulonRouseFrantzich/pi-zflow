@@ -400,6 +400,72 @@ function createEmptyRegistry(): ModelRegistry {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+//  Footer/status integration (Task 2.12)
+// ═══════════════════════════════════════════════════════════════════
+
+/** Well-known status key for the profile footer indicator. */
+export const PROFILE_STATUS_KEY = "zflow-profile" as const
+
+/**
+ * Format a concise profile status string for the Pi footer/status bar.
+ *
+ * Examples:
+ *   "Profile: default"
+ *   "Profile: default (1 optional lane disabled)"
+ *   "Profile: default ⚠ (1 required lane unresolved)"
+ *   "Profile: default ⚠ (1 optional disabled, 1 required unresolved)"
+ *
+ * When there are both unresolved required lanes AND disabled optional
+ * lanes, only the required lanes are shown (they take priority since
+ * they block functionality).
+ *
+ * @param cache - The active profile cache with resolved lane info.
+ * @returns A concise status string suitable for the footer.
+ */
+export function formatProfileFooterStatus(cache: ActiveProfileCache): string {
+  let status = `Profile: ${cache.profileName}`
+
+  const resolvedLanes = Object.values(cache.resolvedLanes)
+  const unresolvedRequired = resolvedLanes.filter(
+    (l) => l.status === "unresolved-required",
+  ).length
+  const optionalDisabled = resolvedLanes.filter(
+    (l) => l.status === "disabled-optional",
+  ).length
+
+  if (unresolvedRequired > 0 && optionalDisabled > 0) {
+    status += ` ⚠ (${optionalDisabled} optional disabled, ${unresolvedRequired} required unresolved)`
+  } else if (unresolvedRequired > 0) {
+    status += ` ⚠ (${unresolvedRequired} required lane${unresolvedRequired > 1 ? "s" : ""} unresolved)`
+  } else if (optionalDisabled > 0) {
+    status += ` (${optionalDisabled} optional lane${optionalDisabled > 1 ? "s" : ""} disabled)`
+  }
+
+  return status
+}
+
+/**
+ * Read the active profile cache and update the Pi footer/status bar
+ * with a concise profile status string.
+ *
+ * If no cache exists, the status is cleared.
+ *
+ * @param ui - The ExtensionUIContext for status bar access.
+ */
+export async function updateProfileFooterStatus(ui: {
+  setStatus: (key: string, text: string | undefined) => void
+}): Promise<void> {
+  const cache = await readActiveProfileCache().catch(() => null)
+
+  if (!cache) {
+    ui.setStatus(PROFILE_STATUS_KEY, undefined)
+    return
+  }
+
+  ui.setStatus(PROFILE_STATUS_KEY, formatProfileFooterStatus(cache))
+}
+
+// ═══════════════════════════════════════════════════════════════════
 //  Shared lane lookup API (Task 2.11)
 // ═══════════════════════════════════════════════════════════════════
 
@@ -672,7 +738,7 @@ async function handleDefault(ui: {
 
     const summary = formatProfileSummary(resolved)
     ui.notify(`Default profile activated.\n\n${summary}`)
-    ui.setStatus("zflow-profile", `Profile: ${resolved.profileName}`)
+    await updateProfileFooterStatus(ui)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     ui.notify(`Failed to activate default profile:\n${message}`, "error")
@@ -787,7 +853,7 @@ async function handleRefresh(ui: {
 
     const summary = formatProfileSummary(resolved)
     ui.notify(`Profile refreshed.\n\n${summary}`)
-    ui.setStatus("zflow-profile", `Profile: ${resolved.profileName}`)
+    await updateProfileFooterStatus(ui)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     ui.notify(`Failed to refresh profile:\n${message}`, "error")
@@ -1183,5 +1249,17 @@ export default function activateZflowProfilesExtension(pi: ExtensionAPI): void {
     }): Promise<void> => {
       await handleProfileCommand(args, ctx)
     },
+  })
+
+  // ── Subscribe to session_start for footer status ──────────────
+  // On startup, reload, resume, or fork, read the active profile
+  // cache and set the footer status so the user sees the profile
+  // name without running a command.
+  pi.on("session_start", async (_event: { type: string; reason: string }, ctx: {
+    ui: {
+      setStatus: (key: string, text: string | undefined) => void
+    }
+  }): Promise<void> => {
+    await updateProfileFooterStatus(ctx.ui)
   })
 }
