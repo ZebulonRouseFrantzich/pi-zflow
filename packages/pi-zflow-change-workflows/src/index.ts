@@ -24,3 +24,17 @@ export type {
   WorkflowStep,
   ReviewSwarmConfig,
 } from "./extensions/zflow-change-workflows/orchestration.js"
+
+// Git preflight (Phase 5 — clean-tree and untracked-overlap checks)
+export {
+  gitPorcelain,
+  getCurrentBranch,
+  getHeadSha,
+  assertCleanPrimaryTree,
+  resolveRepoRoot,
+} from "./extensions/zflow-change-workflows/git-preflight.js"
+
+export type {
+  GitPorcelainResult,
+  GitPreflightResult,
+} from "./extensions/zflow-change-workflows/git-preflight.js"
