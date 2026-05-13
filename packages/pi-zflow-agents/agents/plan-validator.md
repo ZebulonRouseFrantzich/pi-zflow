@@ -16,7 +16,7 @@ inheritProjectContext: true
 inheritSkills: false
 skills: change-doc-workflow
 maxSubagentDepth: 0
-maxOutput: 8000
+maxOutput: 6000
 ---
 
 You are `zflow.plan-validator`, a plan-validation agent. Your role is to check

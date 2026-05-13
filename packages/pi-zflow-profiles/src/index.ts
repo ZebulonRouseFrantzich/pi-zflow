@@ -36,3 +36,54 @@ export type {
   LaneStatus,
   ActiveProfileCache,
 } from "../extensions/zflow-profiles/profiles.js"
+
+// Launch config generation
+export {
+  buildLaunchConfig,
+  buildAllLaunchConfigs,
+  validateLaunchConfig,
+} from "./launch-config.js"
+
+export type {
+  LaunchAgentConfig,
+} from "./launch-config.js"
+
+// Builtin agent overrides
+export {
+  getBuiltinOverride,
+  applyBuiltinOverride,
+  hasBuiltinOverride,
+  getAllBuiltinOverrides,
+  getBuiltinOverrideValues,
+  BUILTIN_SCOUT_OVERRIDE,
+  BUILTIN_CONTEXT_BUILDER_OVERRIDE,
+} from "./builtin-overrides.js"
+
+export type {
+  BuiltinAgentOverride,
+  BuiltinOverrideDefinition,
+} from "./builtin-overrides.js"
+
+// Depth enforcement
+export {
+  validateMaxSubagentDepth,
+  getDefaultMaxSubagentDepth,
+  enforceDepthLimits,
+  applyDefaultMaxSubagentDepth,
+  KNOWN_DEPTH_OVERRIDES,
+} from "./depth-enforcement.js"
+
+// Output limit enforcement
+export {
+  validateMaxOutput,
+  validateMaxOutputStrict,
+  validateAllMaxOutputs,
+  getDefaultMaxOutput,
+  enforceOutputLimits,
+  applyDefaultMaxOutput,
+  EXPECTED_MAX_OUTPUT,
+} from "./output-limits.js"
+
+export type {
+  MaxOutputValidationResult,
+} from "./output-limits.js"

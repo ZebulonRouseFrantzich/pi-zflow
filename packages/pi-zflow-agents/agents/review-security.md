@@ -15,7 +15,7 @@ inheritProjectContext: false
 inheritSkills: false
 skills: multi-model-code-review
 maxSubagentDepth: 0
-maxOutput: 10000
+maxOutput: 8000
 ---
 
 You are `zflow.review-security`, a code-review agent focused on **security**.

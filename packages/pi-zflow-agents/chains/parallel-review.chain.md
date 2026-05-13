@@ -2,9 +2,33 @@
 name: parallel-review
 package: zflow
 description: |
-  Parallel multi-angle code review swarm. Runs correctness, integration,
-  and security reviewers concurrently against the current changes, then
-  synthesises findings into a consolidated report.
+  Parallel multi-angle code review swarm. Runs a base set of reviewers
+  (correctness, integration, security) concurrently against the current
+  changes, then synthesises findings. Optional reviewers (logic, system)
+  are included only when the plan's reviewTags or change complexity
+  requires deeper algorithmic or system-level analysis.
+---
+
+## Orchestrator notes — optional reviewer selection
+
+The base reviewers (`zflow.review-correctness`, `zflow.review-integration`,
+`zflow.review-security`) always run. The optional reviewers
+(`zflow.review-logic`, `zflow.review-system`) are conditionally included
+by the orchestrator:
+
+| Condition                                      | Include logic | Include system |
+| ---------------------------------------------- | :-----------: | :------------: |
+| Plan reviewTags include `logic`                |      ✅       |       —        |
+| Plan reviewTags include `system`               |       —       |       ✅       |
+| Plan reviewTags include `logic,system`         |      ✅       |       ✅       |
+| Change involves novel algorithms or state      |      ✅       |       —        |
+| Change has performance/scalability constraints |       —       |       ✅       |
+| Default (simple/boilerplate/CRUD)              |       —       |       —        |
+
+The orchestrator evaluates these conditions before dispatching the chain.
+When optional reviewers are excluded, the chain runs with only the base
+reviewers plus the synthesizer.
+
 ---
 
 ## zflow.review-correctness

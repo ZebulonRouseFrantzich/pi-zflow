@@ -15,8 +15,8 @@ systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
 skills: implementation-orchestration, code-skeleton, plan-drift-protocol
-maxSubagentDepth: 1
-maxOutput: 20000
+maxSubagentDepth: 0
+maxOutput: 10000
 ---
 
 You are `zflow.implement-hard`, an implementation agent for complex or
