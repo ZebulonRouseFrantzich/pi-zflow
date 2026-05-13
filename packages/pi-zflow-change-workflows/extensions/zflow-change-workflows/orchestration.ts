@@ -57,6 +57,9 @@ import {
   recordSkipped as recordSkippedFn,
   getCoverageSummary,
 } from "pi-zflow-review"
+import { readRun, updateRun, setRunPhase, addRetainedArtifact } from "pi-zflow-artifacts"
+import type { RunPhase, RetainedArtifact } from "pi-zflow-artifacts"
+import { resolveRunDir, resolveRunStatePath } from "pi-zflow-artifacts/artifact-paths"
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -689,11 +692,12 @@ export function buildWorkerTask(
     `## Rules`,
     `1. ONLY modify files listed in your scope above. Do NOT touch files outside this list.`,
     `2. If an instruction in the plan is impossible, stop work and file a deviation report.`,
-    `3. Create temporary commits as needed using format: \`[pi-worker] ${group.id}: <step>\``,
-    `4. After implementation, run the scoped verification command if provided.`,
-    `5. Do NOT launch subagents.`,
-    `6. Do NOT commit to the primary branch. Your worktree commits are disposable.`,
-    `7. Report all changed files and verification results in your output summary.`,
+    `3. Prefer batch edits for multi-file changes (use the \`edit\` tool with \`multi\` parameter).`,
+    `4. For complex refactors, use patch mode to apply structured diffs.`,
+    `5. Create temporary commits as needed using format: \`[pi-worker] ${group.id}: <step>\`.`, `6. After implementation, run the scoped verification command if provided.`,
+    `7. Do NOT launch subagents.`,
+    `8. Do NOT commit to the primary branch. Your worktree commits are disposable.`,
+    `9. Report all changed files and verification results in your output summary.`,
   ]
 
   if (group.dependencies.length > 0) {
@@ -820,4 +824,90 @@ export function getOutputRoute(
     relativePath: routeMap[agentRole] ?? `output/${agentName}/${workflowId}.md`,
     description: convention.description,
   }
+}
+
+// ── Drift signaling (Task 5.11) ─────────────────────────────────
+
+/**
+ * Signal that a deviation (plan drift) has been detected.
+ *
+ * Attempts to send an intercom signal if `pi-intercom` is available,
+ * and always marks the run as `drift-pending` in run.json.
+ *
+ * If intercom is not available, logs a warning and continues with
+ * the fallback behavior (workers still write deviation reports and
+ * mark tasks blocked).
+ *
+ * @param runId - Unique run identifier.
+ * @param groupId - The group that detected the drift.
+ * @param workerName - The worker agent name.
+ * @param deviationPath - Path to the deviation report file.
+ * @param cwd - Working directory (optional).
+ */
+export async function signalDriftDetected(
+  runId: string,
+  groupId: string,
+  workerName: string,
+  deviationPath?: string,
+  cwd?: string,
+): Promise<void> {
+  // Always update run phase to drift-pending
+  await setRunPhase(runId, "drift-pending", cwd)
+
+  // Attempt intercom signaling (optional — graceful fallback)
+  let intercomAvailable = false
+  try {
+    // Dynamic import to check for pi-intercom without hard dependency
+    const intercomModule = await import("pi-intercom").catch(() => null)
+    if (intercomModule && typeof intercomModule.intercom === "function") {
+      intercomAvailable = true
+      const msg = [
+        `DRIFT DETECTED: Group "${groupId}" (worker: ${workerName})`,
+        deviationPath ? `Deviation report: ${deviationPath}` : "",
+        "",
+        "The approved plan is infeasible for this group.",
+        "Pending deviation reports should be synthesized for replanning.",
+        "Halting new dependent dispatch until drift is resolved.",
+      ].filter(Boolean).join("\n")
+
+      await intercomModule.intercom({
+        action: "send",
+        to: "orchestrator",
+        message: msg,
+      })
+    }
+  } catch {
+    // intercom not available — fallback is acceptable
+  }
+
+  if (!intercomAvailable) {
+    // Fallback: drift is still tracked via run.json phase and deviation report files.
+    // Workers independently write deviation reports and mark tasks blocked.
+    // No intercom signal was sent, but drift-pending state is recorded.
+    console.warn(
+      `[pi-zflow] pi-intercom not available. Drift signal suppressed for group "${groupId}". ` +
+      `Workers will still write deviation reports. Run marked as drift-pending.`,
+    )
+  }
+}
+
+// ── Retained artifact listing (Task 5.13) ───────────────────────
+
+/**
+ * List all retained artifacts for a run.
+ *
+ * Reads the run.json and returns the `retainedArtifacts` array,
+ * which tracks worktree paths, patch paths, retention reasons,
+ * and cleanup deadlines for debugging and cleanup discovery.
+ *
+ * @param runId - Unique run identifier.
+ * @param cwd - Working directory (optional).
+ * @returns Array of retained artifact entries.
+ */
+export async function listRetainedArtifacts(
+  runId: string,
+  cwd?: string,
+): Promise<RetainedArtifact[]> {
+  const run = await readRun(runId, cwd)
+  return run.retainedArtifacts ?? []
 }

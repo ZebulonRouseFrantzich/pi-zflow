@@ -22,7 +22,7 @@
 
 import * as path from "node:path"
 import { execFileSync } from "node:child_process"
-import { readRun, updateRun, resetToPreApplySnapshot } from "pi-zflow-artifacts/run-state"
+import { readRun, updateRun, resetToPreApplySnapshot, setRunPhase } from "pi-zflow-artifacts/run-state"
 import type { PreApplySnapshot } from "pi-zflow-artifacts/run-state"
 import { resolveRunDir } from "pi-zflow-artifacts/artifact-paths"
 import { topoSortGroups } from "./ownership-validator.js"
@@ -313,4 +313,213 @@ export async function executeApplyBack(
   }, cwd)
 
   return result
+}
+
+// ── Recovery and resume support (Task 5.15) ─────────────────────
+
+/**
+ * Options for the apply-back recovery operation.
+ */
+export interface RecoveryOptions {
+  /**
+   * Recommended next actions for the caller.
+   * - `resume`: Retry the apply-back from scratch (after restoring pre-apply snapshot).
+   * - `abandon`: Give up on this run; no recovery attempted.
+   * - `inspect`: Review retained artifacts before deciding.
+   * - `cleanup`: Remove orphaned worktrees/patches without retrying.
+   */
+  recommendations: Array<"resume" | "abandon" | "inspect" | "cleanup">
+  /** Whether the primary tree was restored to the pre-apply snapshot. */
+  primaryTreeRestored: boolean
+  /** Orphaned worktree paths from previous failures. */
+  orphanedWorktreePaths: string[]
+  /** The current apply-back status from run.json. */
+  currentStatus: string
+  /** Human-readable summary. */
+  summary: string
+}
+
+/**
+ * Get the current apply-back status from run.json.
+ *
+ * @param runId - Unique run identifier.
+ * @param cwd - Working directory (optional).
+ * @returns The apply-back status object, or null if the run doesn't exist.
+ */
+export async function getApplyBackStatus(
+  runId: string,
+  cwd?: string,
+): Promise<{
+  status: string
+  startedAt?: string
+  completedAt?: string
+  failingGroup?: string
+  error?: string
+} | null> {
+  try {
+    const run = await readRun(runId, cwd)
+    return {
+      status: run.applyBack.status,
+      startedAt: run.applyBack.startedAt,
+      completedAt: run.applyBack.completedAt,
+      failingGroup: run.applyBack.failingGroup,
+      error: run.applyBack.error,
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Recover from an interrupted or incomplete apply-back.
+ *
+ * Reads run.json to check the current apply-back status. If the status
+ * is unknown or incomplete, restores the primary worktree to the
+ * pre-apply snapshot and returns recovery options.
+ *
+ * This function does NOT automatically retry. The caller receives
+ * recommendations and must decide the next action.
+ *
+ * @param runId - Unique run identifier.
+ * @param repoRoot - Absolute path to the repository root.
+ * @param cwd - Working directory (optional).
+ * @returns Recovery options with recommendations.
+ */
+export async function recoverFromApplyBack(
+  runId: string,
+  repoRoot: string,
+  cwd?: string,
+): Promise<RecoveryOptions> {
+  const run = await readRun(runId, cwd).catch(() => null)
+
+  if (!run) {
+    return {
+      recommendations: ["abandon"],
+      primaryTreeRestored: false,
+      orphanedWorktreePaths: [],
+      currentStatus: "unknown",
+      summary: `Run "${runId}" not found. Cannot recover. Recommend abandoning this run.`,
+    }
+  }
+
+  const currentStatus = run.applyBack.status
+  const snapshot = run.preApplySnapshot
+  const orphanedWorktreePaths: string[] = []
+
+  // Collect orphaned worktree paths from retained artifacts
+  if (run.retainedArtifacts) {
+    for (const artifact of run.retainedArtifacts) {
+      if (artifact.type === "worktree") {
+        orphanedWorktreePaths.push(artifact.path)
+      }
+    }
+  }
+
+  // Also collect from group metadata
+  if (run.groups) {
+    for (const group of run.groups) {
+      if (group.worktreePath && !orphanedWorktreePaths.includes(group.worktreePath)) {
+        // Check if the worktree path still exists on disk
+        try {
+          await import("node:fs/promises").then((fs) => fs.access(group.worktreePath))
+          orphanedWorktreePaths.push(group.worktreePath)
+        } catch {
+          // Worktree no longer exists
+        }
+      }
+    }
+  }
+
+  // Determine recovery action based on status
+  let primaryTreeRestored = false
+  let recommendations: RecoveryOptions["recommendations"] = []
+  let summary: string
+
+  switch (currentStatus) {
+    case "pending":
+    case "in-progress": {
+      // Apply-back was interrupted — restore pre-apply snapshot and recommend resume
+      if (snapshot) {
+        try {
+          resetToPreApplySnapshot(runId, repoRoot, snapshot)
+          primaryTreeRestored = true
+        } catch {
+          // Recovery ref may not exist; try hard reset to recorded head
+          try {
+            execFileSync("git", ["reset", "--hard", snapshot.head], {
+              cwd: repoRoot,
+              stdio: ["ignore", "pipe", "pipe"],
+            })
+            execFileSync("git", ["clean", "-fd"], {
+              cwd: repoRoot,
+              stdio: ["ignore", "pipe", "pipe"],
+            })
+            primaryTreeRestored = true
+          } catch {
+            primaryTreeRestored = false
+          }
+        }
+      }
+
+      await setRunPhase(runId, "failed", cwd)
+      await updateRun(runId, {
+        applyBack: { status: "rolled-back" },
+      }, cwd)
+
+      recommendations = primaryTreeRestored
+        ? ["resume", "inspect", "cleanup"]
+        : ["inspect", "abandon"]
+
+      summary = primaryTreeRestored
+        ? `Apply-back was interrupted (status: ${currentStatus}). ` +
+          `Primary worktree restored to pre-apply snapshot. ` +
+          `Recommend retrying apply-back after inspecting retained artifacts.`
+        : `Apply-back was interrupted (status: ${currentStatus}). ` +
+          `Could NOT restore primary worktree. Inspect retained artifacts manually.`
+      break
+    }
+
+    case "conflicted": {
+      // Apply-back failed with conflict — tree was already rolled back
+      primaryTreeRestored = true
+
+      recommendations = ["inspect", "resume"]
+      summary = `Apply-back conflicted at group "${run.applyBack.failingGroup ?? "unknown"}". ` +
+        `Primary worktree was already rolled back. ` +
+        `Inspect the deviation report and retained artifacts, then retry.`
+      break
+    }
+
+    case "rolled-back": {
+      // Already rolled back — safe to retry
+      primaryTreeRestored = true
+
+      recommendations = ["resume", "inspect", "abandon"]
+      summary = `Apply-back was previously rolled back. ` +
+        `Primary worktree is clean. Resume with a fresh apply-back attempt.`
+      break
+    }
+
+    case "completed": {
+      // Already completed — nothing to recover
+      recommendations = ["cleanup"]
+      summary = `Apply-back completed successfully. No recovery needed. ` +
+        `Orphaned worktrees may still need cleanup.`
+      break
+    }
+
+    default: {
+      recommendations = ["abandon", "inspect"]
+      summary = `Unknown apply-back status "${currentStatus}". ` +
+        `Inspect run.json manually for details.`
+    }
+  }
+
+  return {
+    recommendations,
+    primaryTreeRestored,
+    orphanedWorktreePaths,
+    currentStatus,
+    summary,
+  }
 }

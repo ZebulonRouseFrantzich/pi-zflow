@@ -112,10 +112,19 @@ export type {
 export {
   executeApplyBack,
   PatchReplayStrategy,
+  getApplyBackStatus,
+  recoverFromApplyBack,
 } from "./extensions/zflow-change-workflows/apply-back.js"
 
 export type {
   ApplyBackStrategy,
   ApplyBackResult,
   ApplyBackOptions,
+  RecoveryOptions,
 } from "./extensions/zflow-change-workflows/apply-back.js"
+
+// Drift signaling (Phase 5 — pi-intercom integration for drift reporting)
+export {
+  signalDriftDetected,
+  listRetainedArtifacts,
+} from "./extensions/zflow-change-workflows/orchestration.js"
