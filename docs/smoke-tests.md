@@ -285,6 +285,7 @@ pi --subagent run zflow.synthesizer \
 Run the exploration → planning → validation → plan review pipeline.
 
 **Prerequisites:**
+
 - Agents installed and profile active (see above)
 - All lanes for the required agents must be resolvable:
   - `scout` (builtin, lane: `scout-cheap`)
