@@ -72,3 +72,18 @@ export {
   applyDefaultMaxSubagentDepth,
   KNOWN_DEPTH_OVERRIDES,
 } from "./depth-enforcement.js"
+
+// Output limit enforcement
+export {
+  validateMaxOutput,
+  validateMaxOutputStrict,
+  validateAllMaxOutputs,
+  getDefaultMaxOutput,
+  enforceOutputLimits,
+  applyDefaultMaxOutput,
+  EXPECTED_MAX_OUTPUT,
+} from "./output-limits.js"
+
+export type {
+  MaxOutputValidationResult,
+} from "./output-limits.js"

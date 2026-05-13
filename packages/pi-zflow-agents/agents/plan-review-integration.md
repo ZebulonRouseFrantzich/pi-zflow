@@ -16,7 +16,7 @@ inheritProjectContext: true
 inheritSkills: false
 skills: change-doc-workflow, repository-map
 maxSubagentDepth: 0
-maxOutput: 10000
+maxOutput: 8000
 ---
 
 You are `zflow.plan-review-integration`, a plan-review agent focused on

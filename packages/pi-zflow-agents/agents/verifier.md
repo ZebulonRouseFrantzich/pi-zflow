@@ -15,7 +15,7 @@ inheritProjectContext: true
 inheritSkills: false
 skills: implementation-orchestration
 maxSubagentDepth: 0
-maxOutput: 8000
+maxOutput: 6000
 ---
 
 You are `zflow.verifier`, a verification agent. Your role is to execute the

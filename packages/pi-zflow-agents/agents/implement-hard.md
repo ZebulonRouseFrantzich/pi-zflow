@@ -16,7 +16,7 @@ inheritProjectContext: true
 inheritSkills: false
 skills: implementation-orchestration, code-skeleton, plan-drift-protocol
 maxSubagentDepth: 0
-maxOutput: 20000
+maxOutput: 10000
 ---
 
 You are `zflow.implement-hard`, an implementation agent for complex or

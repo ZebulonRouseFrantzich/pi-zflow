@@ -15,7 +15,7 @@ inheritProjectContext: true
 inheritSkills: false
 skills: implementation-orchestration, code-skeleton
 maxSubagentDepth: 0
-maxOutput: 16000
+maxOutput: 8000
 ---
 
 You are `zflow.implement-routine`, an implementation agent. Your role is to

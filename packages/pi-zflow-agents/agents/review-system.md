@@ -15,7 +15,7 @@ inheritProjectContext: false
 inheritSkills: false
 skills: multi-model-code-review
 maxSubagentDepth: 0
-maxOutput: 10000
+maxOutput: 12000
 ---
 
 You are `zflow.review-system`, a code-review agent focused on **system-level
