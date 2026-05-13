@@ -91,6 +91,29 @@ export const BUILTIN_SCOUT_OVERRIDE: BuiltinOverrideDefinition = {
 }
 
 /**
+ * Builtin `context-builder` override configuration.
+ *
+ * The context-builder provides analogous code examples for worker
+ * preparation. It runs cheap and fast with read-only tools.
+ *
+ * - lane: `scout-cheap` — maps to a cheap/fast model lane
+ * - tools: read, grep, find, ls — exploration tools only (no bash)
+ * - maxOutput: 6000 — bounded output for focused example extraction
+ * - returns 2–3 analogous code examples with signatures/snippets, not full file dumps
+ */
+export const BUILTIN_CONTEXT_BUILDER_OVERRIDE: BuiltinOverrideDefinition = {
+  name: "builtin-context-builder",
+  description:
+    "Builtin context-builder reused via override. Lane: scout-cheap, " +
+    "tools: read/grep/find/ls, maxOutput: 6000.",
+  override: {
+    lane: "scout-cheap",
+    tools: "read, grep, find, ls",
+    maxOutput: 6000,
+  },
+}
+
+/**
  * Registry of all builtin agent overrides.
  *
  * Keyed by the pi-subagents builtin agent name (e.g. "scout", "context-builder").
@@ -98,6 +121,7 @@ export const BUILTIN_SCOUT_OVERRIDE: BuiltinOverrideDefinition = {
  */
 const BUILTIN_OVERRIDE_REGISTRY: Record<string, BuiltinOverrideDefinition> = {
   scout: BUILTIN_SCOUT_OVERRIDE,
+  "context-builder": BUILTIN_CONTEXT_BUILDER_OVERRIDE,
 }
 
 // ── Public helpers ──────────────────────────────────────────────

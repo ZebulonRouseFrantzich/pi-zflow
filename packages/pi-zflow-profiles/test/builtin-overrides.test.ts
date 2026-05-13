@@ -21,6 +21,7 @@ import {
   getAllBuiltinOverrides,
   getBuiltinOverrideValues,
   BUILTIN_SCOUT_OVERRIDE,
+  BUILTIN_CONTEXT_BUILDER_OVERRIDE,
 } from "../src/builtin-overrides.js"
 import type { LaunchAgentConfig } from "../src/launch-config.js"
 
@@ -230,5 +231,135 @@ describe("getBuiltinOverrideValues", () => {
     // Original should be unchanged
     const original = BUILTIN_SCOUT_OVERRIDE.override
     assert.equal(original.maxOutput, 6000)
+  })
+})
+
+// ── Context-builder override tests ──────────────────────────────
+
+describe("BUILTIN_CONTEXT_BUILDER_OVERRIDE", () => {
+  it("has the correct name", () => {
+    assert.equal(BUILTIN_CONTEXT_BUILDER_OVERRIDE.name, "builtin-context-builder")
+  })
+
+  it("has the correct lane", () => {
+    assert.equal(BUILTIN_CONTEXT_BUILDER_OVERRIDE.override.lane, "scout-cheap")
+  })
+
+  it("has the correct tools (no bash)", () => {
+    assert.equal(
+      BUILTIN_CONTEXT_BUILDER_OVERRIDE.override.tools,
+      "read, grep, find, ls",
+    )
+  })
+
+  it("has maxOutput of 6000", () => {
+    assert.equal(BUILTIN_CONTEXT_BUILDER_OVERRIDE.override.maxOutput, 6000)
+  })
+
+  it("does not set maxSubagentDepth (relies on default)", () => {
+    assert.equal(
+      BUILTIN_CONTEXT_BUILDER_OVERRIDE.override.maxSubagentDepth,
+      undefined,
+    )
+  })
+})
+
+describe("getBuiltinOverride — context-builder", () => {
+  it("returns context-builder override for 'context-builder'", () => {
+    const result = getBuiltinOverride("context-builder")
+    assert.notEqual(result, null)
+    assert.equal(result!.name, "builtin-context-builder")
+  })
+
+  it("returns correct tools from context-builder override", () => {
+    const result = getBuiltinOverride("context-builder")!
+    assert.equal(result.override.tools, "read, grep, find, ls")
+  })
+
+  it("returns correct maxOutput from context-builder override", () => {
+    const result = getBuiltinOverride("context-builder")!
+    assert.equal(result.override.maxOutput, 6000)
+  })
+})
+
+describe("hasBuiltinOverride — context-builder", () => {
+  it("returns true for 'context-builder'", () => {
+    assert.equal(hasBuiltinOverride("context-builder"), true)
+  })
+})
+
+describe("applyBuiltinOverride — context-builder", () => {
+  it("fills missing tools from context-builder override", () => {
+    const base: LaunchAgentConfig = {
+      agent: "context-builder",
+      model: "openai/gpt-5.4-mini",
+    }
+    const override = getBuiltinOverride("context-builder")!
+    const result = applyBuiltinOverride(base, override)
+
+    assert.equal(result.agent, "context-builder")
+    assert.equal(result.model, "openai/gpt-5.4-mini")
+    assert.equal(result.tools, "read, grep, find, ls")
+    assert.equal(result.maxOutput, 6000)
+  })
+
+  it("preserves base config tools when context-builder override also has tools", () => {
+    const base: LaunchAgentConfig = {
+      agent: "context-builder",
+      model: "openai/gpt-5.4-mini",
+      tools: "read, grep, find, ls, web_search",
+    }
+    const override = getBuiltinOverride("context-builder")!
+    const result = applyBuiltinOverride(base, override)
+
+    // Base takes precedence per design
+    assert.equal(result.tools, "read, grep, find, ls, web_search")
+  })
+
+  it("fills missing maxOutput from context-builder override", () => {
+    const base: LaunchAgentConfig = {
+      agent: "context-builder",
+      model: "openai/gpt-5.4-mini",
+      maxOutput: undefined,
+    }
+    const override = getBuiltinOverride("context-builder")!
+    const result = applyBuiltinOverride(base, override)
+
+    assert.equal(result.maxOutput, 6000)
+  })
+
+  it("returns a new object (does not mutate base)", () => {
+    const base: LaunchAgentConfig = {
+      agent: "context-builder",
+      model: "openai/gpt-5.4-mini",
+    }
+    const override = getBuiltinOverride("context-builder")!
+    const result = applyBuiltinOverride(base, override)
+
+    assert.notEqual(result, base)
+  })
+})
+
+describe("getAllBuiltinOverrides — includes context-builder", () => {
+  it("returns a record with both scout and context-builder", () => {
+    const all = getAllBuiltinOverrides()
+    assert.ok("scout" in all)
+    assert.ok("context-builder" in all)
+    assert.equal(all["context-builder"].name, "builtin-context-builder")
+  })
+})
+
+describe("getBuiltinOverrideValues — context-builder", () => {
+  it("returns override values for context-builder", () => {
+    const values = getBuiltinOverrideValues("context-builder")
+    assert.notEqual(values, null)
+    assert.equal(values!.lane, "scout-cheap")
+    assert.equal(values!.tools, "read, grep, find, ls")
+    assert.equal(values!.maxOutput, 6000)
+  })
+
+  it("returns null for unknown builtin", () => {
+    const values = getBuiltinOverrideValues("unknown")
+    assert.equal(values, null)
   })
 })

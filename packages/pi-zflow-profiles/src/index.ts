@@ -56,6 +56,7 @@ export {
   getAllBuiltinOverrides,
   getBuiltinOverrideValues,
   BUILTIN_SCOUT_OVERRIDE,
+  BUILTIN_CONTEXT_BUILDER_OVERRIDE,
 } from "./builtin-overrides.js"
 
 export type {
