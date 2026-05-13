@@ -28,9 +28,21 @@ export {
 
 export type { ArtifactCleanupMeta } from "./artifact-paths.js"
 
-// Re-export state index helpers (Phase 2+ implementation)
+// Re-export state index helpers
 // Also importable directly from "pi-zflow-artifacts/state-index"
-export {} from "./state-index.js"
+export {
+  loadStateIndex,
+  saveStateIndex,
+  addStateIndexEntry,
+  updateStateIndexEntry,
+  listStateIndexEntries,
+  removeStateIndexEntry,
+} from "./state-index.js"
+
+export type {
+  StateIndex,
+  StateIndexEntry,
+} from "./state-index.js"
 
 // Re-export plan state helpers (Phase 2+ implementation)
 // Also importable directly from "pi-zflow-artifacts/plan-state"
