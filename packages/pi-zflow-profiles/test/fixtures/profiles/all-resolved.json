@@ -1,0 +1,21 @@
+{
+  "default": {
+    "description": "All lanes resolve because all preferred models are available in the registry.",
+    "lanes": {
+      "scout-cheap": {
+        "required": true,
+        "thinking": "low",
+        "preferredModels": ["available-model"]
+      },
+      "worker-strong": {
+        "required": true,
+        "thinking": "high",
+        "preferredModels": ["available-model-hi"]
+      }
+    },
+    "agentBindings": {
+      "scout": { "lane": "scout-cheap" },
+      "implement": { "lane": "worker-strong" }
+    }
+  }
+}

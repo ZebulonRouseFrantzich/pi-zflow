@@ -1,0 +1,142 @@
+{
+  "default": {
+    "description": "Valid full profile — all required lanes resolve when models are available.",
+    "lanes": {
+      "scout-cheap": {
+        "required": true,
+        "thinking": "low",
+        "preferredModels": ["openai/gpt-4o-mini"]
+      },
+      "planning-frontier": {
+        "required": true,
+        "thinking": "high",
+        "preferredModels": ["openai/gpt-5.4"]
+      },
+      "worker-cheap": {
+        "required": true,
+        "thinking": "medium",
+        "preferredModels": ["openai/gpt-4o"]
+      },
+      "worker-strong": {
+        "required": true,
+        "thinking": "high",
+        "preferredModels": ["openai/gpt-5.4-codex"]
+      },
+      "review-correctness": {
+        "required": true,
+        "thinking": "medium",
+        "preferredModels": ["openai/gpt-5.4"]
+      },
+      "review-integration": {
+        "required": true,
+        "thinking": "medium",
+        "preferredModels": ["openai/gpt-5.4"]
+      },
+      "review-security": {
+        "required": true,
+        "thinking": "high",
+        "preferredModels": ["openai/gpt-5.4"]
+      },
+      "review-logic": {
+        "optional": true,
+        "thinking": "medium",
+        "preferredModels": ["openai/gpt-5.4"]
+      },
+      "review-system": {
+        "optional": true,
+        "thinking": "high",
+        "preferredModels": ["openai/gpt-5.4"]
+      },
+      "synthesis-frontier": {
+        "required": true,
+        "thinking": "high",
+        "preferredModels": ["openai/gpt-5.4"]
+      }
+    },
+    "agentBindings": {
+      "scout": {
+        "lane": "scout-cheap",
+        "tools": "read, grep, find, ls, bash",
+        "maxOutput": 4000,
+        "maxSubagentDepth": 0
+      },
+      "zflow.planner-frontier": {
+        "lane": "planning-frontier",
+        "tools": "read, grep, find, ls, bash, zflow_write_plan_artifact",
+        "maxOutput": 12000,
+        "maxSubagentDepth": 1
+      },
+      "zflow.plan-validator": {
+        "lane": "worker-cheap",
+        "tools": "read, grep, find, ls",
+        "maxOutput": 6000,
+        "maxSubagentDepth": 0
+      },
+      "context-builder": {
+        "lane": "scout-cheap",
+        "tools": "read, grep, find, ls, bash",
+        "maxOutput": 4000,
+        "maxSubagentDepth": 0
+      },
+      "zflow.implement-routine": {
+        "lane": "worker-cheap",
+        "tools": "read, grep, find, ls, bash, edit, write",
+        "maxOutput": 8000,
+        "maxSubagentDepth": 0
+      },
+      "zflow.implement-hard": {
+        "lane": "worker-strong",
+        "tools": "read, grep, find, ls, bash, edit, write",
+        "maxOutput": 12000,
+        "maxSubagentDepth": 1
+      },
+      "zflow.verifier": {
+        "lane": "worker-cheap",
+        "tools": "read, grep, find, ls, bash",
+        "maxOutput": 12000,
+        "maxSubagentDepth": 1
+      },
+      "zflow.review-correctness": {
+        "lane": "review-correctness",
+        "tools": "read, grep, find, ls",
+        "maxOutput": 10000
+      },
+      "zflow.review-integration": {
+        "lane": "review-integration",
+        "tools": "read, grep, find, ls, bash",
+        "maxOutput": 10000,
+        "maxSubagentDepth": 0
+      },
+      "zflow.review-security": {
+        "lane": "review-security",
+        "tools": "read, grep, find, ls",
+        "maxOutput": 10000,
+        "maxSubagentDepth": 1
+      },
+      "zflow.review-logic": {
+        "lane": "review-logic",
+        "optional": true,
+        "tools": "read, grep, find, ls",
+        "maxOutput": 10000
+      },
+      "zflow.review-system": {
+        "lane": "review-system",
+        "optional": true,
+        "tools": "read, grep, find, ls",
+        "maxOutput": 8000
+      },
+      "zflow.synthesizer": {
+        "lane": "synthesis-frontier",
+        "tools": "read, grep, find, ls, bash, edit, write",
+        "maxOutput": 12000,
+        "maxSubagentDepth": 1
+      },
+      "zflow.repo-mapper": {
+        "lane": "scout-cheap",
+        "tools": "read, grep, find, ls, bash",
+        "maxOutput": 4000,
+        "maxSubagentDepth": 0
+      }
+    }
+  }
+}
