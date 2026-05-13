@@ -1,0 +1,16 @@
+{
+  "default": {
+    "description": "Agent binding references a lane not defined in `lanes` — validation must reject.",
+    "lanes": {
+      "scout-cheap": {
+        "required": true,
+        "thinking": "low",
+        "preferredModels": ["openai/gpt-4o-mini"]
+      }
+    },
+    "agentBindings": {
+      "scout": { "lane": "scout-cheap" },
+      "zflow.planner-frontier": { "lane": "nonexistent-lane" }
+    }
+  }
+}

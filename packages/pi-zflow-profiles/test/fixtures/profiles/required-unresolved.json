@@ -1,0 +1,15 @@
+{
+  "default": {
+    "description": "Required lane cannot resolve (no models available) — activation must fail.",
+    "lanes": {
+      "scout-cheap": {
+        "required": true,
+        "thinking": "low",
+        "preferredModels": ["missing-model"]
+      }
+    },
+    "agentBindings": {
+      "scout": { "lane": "scout-cheap" }
+    }
+  }
+}

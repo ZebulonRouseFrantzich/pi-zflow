@@ -1,0 +1,15 @@
+{
+  "other": {
+    "description": "Profile file with no 'default' profile — validation must reject this.",
+    "lanes": {
+      "scout-cheap": {
+        "required": true,
+        "thinking": "low",
+        "preferredModels": ["openai/gpt-4o-mini"]
+      }
+    },
+    "agentBindings": {
+      "scout": { "lane": "scout-cheap" }
+    }
+  }
+}

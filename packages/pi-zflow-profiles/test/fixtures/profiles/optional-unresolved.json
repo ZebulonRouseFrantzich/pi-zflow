@@ -1,0 +1,21 @@
+{
+  "default": {
+    "description": "Optional lane cannot resolve (missing model) — lane must be disabled, not fail activation.",
+    "lanes": {
+      "scout-cheap": {
+        "required": true,
+        "thinking": "low",
+        "preferredModels": ["available-model"]
+      },
+      "review-logic": {
+        "optional": true,
+        "thinking": "medium",
+        "preferredModels": ["missing-model"]
+      }
+    },
+    "agentBindings": {
+      "scout": { "lane": "scout-cheap" },
+      "zflow.review-logic": { "lane": "review-logic", "optional": true }
+    }
+  }
+}

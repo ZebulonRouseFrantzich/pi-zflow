@@ -2,20 +2,1485 @@
  * pi-zflow-profiles extension entrypoint
  *
  * Registers `/zflow-profile` commands and profile/lane resolution services.
+ * Provides the `activateProfile()` entrypoint for persisting resolved profile
+ * state to the user-local cache (`~/.pi/agent/zflow/active-profile.json`).
  *
- * TODO(phase-2): Implement profile management.
- *   - claim("profiles", ...) via getZflowRegistry()
- *   - provide("profiles", profileService) with:
- *     - profile loading from `.pi/zflow-profiles.json` and `~/.pi/agent/zflow-profiles.json`
- *     - lane resolution to provider/model bindings
- *     - active profile cache at `<user-state-dir>/active-profile.json`
- *     - lane health checks
- *   - Guard against duplicate loads: check registry.has("profiles") before claiming
- *   - Register `/zflow-profile ...` commands
- *   - See profiles.ts, model-resolution.ts, health.ts
+ * ## Phase 2 — Profile loading and activation
+ *
+ * On activation, the extension:
+ *   1. Claims the "profiles" capability via `getZflowRegistry()`.
+ *   2. Provides a profile service with `loadProfiles()`, `activateProfile()`,
+ *      resolution, and capability-checking helpers.
+ *   3. Guards against duplicate loads — if "profiles" is already claimed
+ *      by a compatible provider, it no-ops.
+ *   4. Exposes the profile service for sibling packages via the registry.
+ *
+ * @module pi-zflow-profiles/index
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import { getZflowRegistry, type CapabilityClaim, resolveGitDir } from "pi-zflow-core"
+import { PI_ZFLOW_PROFILES_VERSION } from "pi-zflow-core"
+
+import {
+  validateLaneCandidate,
+  checkCapabilityRequirements,
+} from "./capabilities.js"
+
+import {
+  resolveProfile,
+  resolveLane,
+  resolveProfileLanes,
+  resolveAgentBindings,
+  hasUnresolvedRequiredLanes,
+  getLaneStatusSummary,
+  isModelThinkingCompatible,
+} from "./model-resolution.js"
+
+import {
+  preflightLaneHealth,
+  checkLaneHealth,
+  handleLaneFailure,
+  reresolveLane,
+  getHealthStatusSummary,
+} from "./health.js"
+
+import type { ModelRegistry, ResolvedProfile } from "./profiles.js"
+import type {
+  ResolvedLane,
+  ActiveProfileCache,
+  LoadedProfiles,
+} from "./profiles.js"
+import {
+  loadProfiles,
+  loadProfilesSync,
+  resolveProfileSource,
+  resolveProjectProfilePath,
+  resolveUserProfilePath,
+  fileExists,
+  fileExistsSync,
+  validateProfilesFile,
+  parseProfilesFile,
+  parseProfilesFileJson,
+  normalizeLaneDefinition,
+  normalizeAgentBinding,
+  normalizeProfileDefinition,
+  normalizeProfilesFile,
+  ProfileValidationError,
+  ProfileFileNotFoundError,
+  writeActiveProfileCache,
+  readActiveProfileCache,
+  readActiveProfileCacheIfFresh,
+  cacheToResolvedProfile,
+  buildActiveProfileCache,
+  computeHash,
+  computeEnvironmentFingerprint,
+  computeEnvironmentFingerprintFromRegistry,
+  computeCurrentProfileHash,
+  DEFAULT_CACHE_TTL_MINUTES,
+} from "./profiles.js"
+
+import * as fs from "node:fs/promises"
+import * as path from "node:path"
+
+import { createPiModelRegistryAdapter } from "./pi-registry-adapter.js"
+
+// Re-export the public profile API so sibling packages or extensions
+// can import from "pi-zflow-profiles" directly.
+export {
+  loadProfiles,
+  loadProfilesSync,
+  resolveProfileSource,
+  resolveProjectProfilePath,
+  resolveUserProfilePath,
+  fileExists,
+  fileExistsSync,
+  validateProfilesFile,
+  parseProfilesFile,
+  parseProfilesFileJson,
+  normalizeLaneDefinition,
+  normalizeAgentBinding,
+  normalizeProfileDefinition,
+  normalizeProfilesFile,
+  ProfileValidationError,
+  ProfileFileNotFoundError,
+  writeActiveProfileCache,
+  readActiveProfileCache,
+  readActiveProfileCacheIfFresh,
+  cacheToResolvedProfile,
+  buildActiveProfileCache,
+  computeHash,
+  computeEnvironmentFingerprint,
+  computeEnvironmentFingerprintFromRegistry,
+  computeCurrentProfileHash,
+  DEFAULT_CACHE_TTL_MINUTES,
+} from "./profiles.js"
+
+// Re-export the lane resolution API
+export {
+  resolveLane,
+  resolveProfileLanes,
+  resolveAgentBindings,
+  resolveProfile,
+  hasUnresolvedRequiredLanes,
+  getLaneStatusSummary,
+  isModelThinkingCompatible,
+  CONSERVATIVE_LANES,
+} from "./model-resolution.js"
+
+// Re-export the capability checking API
+export {
+  checkThinkingCompatibility,
+  checkOutputWindowSufficiency,
+  checkContextWindowSufficiency,
+  checkCapabilityRequirements,
+  validateLaneCandidate,
+} from "./capabilities.js"
+
+// Re-export the health-checking API
+export {
+  preflightLaneHealth,
+  handleLaneFailure,
+  reresolveLane,
+  checkLaneHealth,
+  getHealthStatusSummary,
+} from "./health.js"
+
+export type {
+  LaneDefinition,
+  AgentBinding,
+  ProfileDefinition,
+  ProfilesFile,
+  NormalizedLaneDefinition,
+  NormalizedAgentBinding,
+  NormalizedProfileDefinition,
+  NormalizedProfilesFile,
+  ValidationResult,
+  ValidationMessage,
+  ValidationSeverity,
+  ParsedProfilesFile,
+  LoadedProfiles,
+  ModelInfo,
+  ModelRegistry,
+  ModelCapabilityProfile,
+  CapabilityRequirements,
+  ResolvedLane,
+  ResolvedAgentBinding,
+  ResolvedProfile,
+  LaneStatus,
+  ActiveProfileCache,
+  CachedResolvedLane,
+  CachedAgentBinding,
+  EnvironmentSnapshot,
+} from "./profiles.js"
+
+export type {
+  ThinkingCompatibilityResult,
+  OutputWindowResult,
+  ContextWindowResult,
+  CapabilityCheckResult,
+} from "./capabilities.js"
+
+
+export type {
+  LaneHealthStatus,
+  HealthCheckResult,
+  LaneHealthReport,
+  FailureRecoveryAction,
+  FailureRecoveryResult,
+} from "./health.js"
+
+// ── Profile service interface ───────────────────────────────────
+
+/**
+ * Service interface exposed through the zflow registry for sibling
+ * packages that need profile loading without importing the profiles
+ * module directly.
+ */
+export interface ProfileService {
+  loadProfiles(repoRoot?: string): ReturnType<typeof loadProfiles>
+  loadProfilesSync(repoRoot?: string): ReturnType<typeof loadProfilesSync>
+  resolveProfileSource(repoRoot?: string): ReturnType<typeof resolveProfileSource>
+  resolveLane: typeof resolveLane
+  resolveProfileLanes: typeof resolveProfileLanes
+  resolveAgentBindings: typeof resolveAgentBindings
+  resolveProfile: typeof resolveProfile
+  hasUnresolvedRequiredLanes: typeof hasUnresolvedRequiredLanes
+  getLaneStatusSummary: typeof getLaneStatusSummary
+  validateLaneCandidate: typeof validateLaneCandidate
+  checkCapabilityRequirements: typeof checkCapabilityRequirements
+  activateProfile: typeof activateProfile
+  ensureResolved: typeof ensureResolved
+  readActiveProfileCache: typeof readActiveProfileCache
+  writeActiveProfileCache: typeof writeActiveProfileCache
+  computeCurrentProfileHash: typeof computeCurrentProfileHash
+  computeEnvironmentFingerprintFromRegistry: typeof computeEnvironmentFingerprintFromRegistry
+  preflightLaneHealth: typeof preflightLaneHealth
+  handleLaneFailure: typeof handleLaneFailure
+  reresolveLane: typeof reresolveLane
+  checkLaneHealth: typeof checkLaneHealth
+  getHealthStatusSummary: typeof getHealthStatusSummary
+  buildAgentOverrides: typeof buildAgentOverrides
+  syncProfileToSettings: typeof syncProfileToSettings
+  formatSyncSummary: typeof formatSyncSummary
+  getResolvedAgentBinding: typeof getResolvedAgentBinding
+  getResolvedLane: typeof getResolvedLane
+}
+
+// ── Capability name ─────────────────────────────────────────────
+
+/** Well-known capability name for profile services. */
+export const PROFILES_CAPABILITY = "profiles" as const
+
+// ── Active profile activation ───────────────────────────────────
+
+/**
+ * Activate a named profile: load, resolve, cache, and return.
+ *
+ * This is the primary entrypoint for making a profile operational.
+ * It:
+ *   1. Resolves the profile source file (project-local or user fallback).
+ *   2. Reads the raw file content and computes a `definitionHash` for
+ *      cache invalidation.
+ *   3. Parses and validates the profile definitions.
+ *   4. Looks up the requested profile by name.
+ *   5. Resolves all lanes and agent bindings against the given model
+ *      registry.
+ *   6. Computes an `environmentFingerprint` from the registry.
+ *   7. Writes the complete cache atomically to
+ *      `~/.pi/agent/zflow/active-profile.json`.
+ *   8. Returns the resolved profile for immediate use.
+ *
+ * @param profileName - The name of the profile to activate (e.g. "default").
+ * @param options - Optional configuration.
+ * @param options.repoRoot - Repository root for project-local profile lookup.
+ * @param options.registry - Model registry for lane resolution.
+ * @param options.cachePath - Override cache file path.
+ * @param options.ttlMinutes - Cache TTL in minutes (defaults to 15).
+ * @returns The fully resolved profile.
+ * @throws {ProfileFileNotFoundError} If no profile file is found.
+ * @throws {ProfileValidationError} If the profile file is invalid.
+ * @throws {Error} If the named profile does not exist.
+ */
+export async function activateProfile(
+  profileName: string,
+  options?: {
+    repoRoot?: string
+    registry?: ModelRegistry
+    cachePath?: string
+    ttlMinutes?: number
+  },
+): Promise<ResolvedProfile> {
+  // 1. Resolve the source path
+  const source = await resolveProfileSource(options?.repoRoot)
+
+  // 2. Read raw content and compute definition hash
+  const rawContent = await fs.readFile(source, "utf8")
+  const definitionHash = computeHash(rawContent)
+
+  // 3. Parse and validate
+  const { profiles } = parseProfilesFileJson(rawContent)
+
+  // 4. Get the named profile
+  const profileDef = profiles[profileName]
+  if (!profileDef) {
+    throw new Error(
+      `Profile "${profileName}" not found in ${source}. ` +
+        `Available profiles: ${Object.keys(profiles).join(", ")}`,
+    )
+  }
+
+  // 5. Resolve all lanes
+  const registry = options?.registry ?? createEmptyRegistry()
+  const resolved = resolveProfile(profileName, profileDef, source, registry)
+
+  // 5a. Fail if any required lane is unresolved (must-preserve decision 7)
+  if (hasUnresolvedRequiredLanes(resolved)) {
+    const failedLanes = Object.values(resolved.resolvedLanes)
+      .filter((l) => l.status === "unresolved-required")
+      .map((l) => `  - ${l.lane}: ${l.reason ?? "no reason"}`)
+    const errorMsg =
+      `Profile "${profileName}" has unresolved required lanes and cannot be activated:\n` +
+      failedLanes.join("\n") +
+      `\n\n` +
+      `Check that the model registry has at least one matching model for each required lane. ` +
+      `Run \`/zflow-profile show\` for details or \`/zflow-profile refresh\` to re-resolve.`
+    throw new Error(errorMsg)
+  }
+
+  // 6. Compute environment fingerprint from the registry
+  const environmentFingerprint = computeEnvironmentFingerprintFromRegistry(registry)
+
+  // 7. Build and write cache
+  const cache = buildActiveProfileCache(
+    profileName,
+    source,
+    resolved,
+    definitionHash,
+    environmentFingerprint,
+    options?.ttlMinutes ?? DEFAULT_CACHE_TTL_MINUTES,
+  )
+  await writeActiveProfileCache(cache, options?.cachePath)
+
+  return resolved
+}
+
+/**
+ * Ensure that a profile is resolved and ready for use.
+ *
+ * This is the primary bootstrap function that later workflow phases
+ * (4, 6, 7) call before executing expensive operations. It:
+ *
+ *   1. Computes the current environment state (profile file hash and
+ *      registry fingerprint) for cache validation.
+ *   2. Reads the current active profile cache if present and fresh
+ *      (TTL, definition hash, AND environment fingerprint checks).
+ *   3. If the cache is missing or stale, activates the `"default"` profile
+ *      (loads profile file, resolves lanes, writes cache).
+ *   4. Runs preflight lane-health checks on the requested lanes.
+ *   5. Returns a `ResolvedProfile` with lane-to-model bindings ready for
+ *      agent dispatch.
+ *
+ * @param requiredLanes - Optional list of lane names to verify during
+ *                        preflight health checks. If provided and any
+ *                        checked lane is unhealthy, the caller must
+ *                        handle it before dispatching work.
+ * @param options - Optional configuration forwarded to `activateProfile`.
+ * @returns A resolved profile suitable for launch-time overrides.
+ */
+export async function ensureResolved(
+  requiredLanes?: string[],
+  options?: {
+    repoRoot?: string
+    registry?: ModelRegistry
+    cachePath?: string
+  },
+): Promise<ResolvedProfile> {
+  // 1. Compute current environment state for cache validation.
+  //    We use Promise.allSettled so that partial failures (e.g., profile
+  //    file not found) don't crash — they simply force a re-activation.
+  const [currentDefinitionHash, currentEnvFingerprint] = await Promise.all([
+    computeCurrentProfileHash(options?.repoRoot).catch(() => undefined),
+    options?.registry
+      ? computeEnvironmentFingerprintFromRegistry(options.registry)
+      : undefined,
+  ])
+
+  // 2. Try reading fresh cache (with full invalidation checks:
+  //    TTL, definition hash, AND environment fingerprint)
+  const cache = await readActiveProfileCacheIfFresh(
+    options?.cachePath,
+    currentDefinitionHash,
+    currentEnvFingerprint,
+  )
+  if (cache) {
+    const resolved = cacheToResolvedProfile(cache)
+
+    // Never trust a cache that contains unresolved required lanes. This can
+    // happen with older caches written before activation started enforcing
+    // required-lane failure, or after manual edits. Force re-resolution so
+    // activateProfile() either produces a valid cache or throws.
+    if (hasUnresolvedRequiredLanes(resolved)) {
+      return activateProfile("default", {
+        repoRoot: options?.repoRoot,
+        registry: options?.registry,
+        cachePath: options?.cachePath,
+      })
+    }
+
+    // Run preflight lane health checks before returning. If the caller did
+    // not provide a subset, check all required lanes from the cached profile
+    // so stale/unhealthy required mappings cannot bypass preflight.
+    const lanesToPreflight =
+      requiredLanes && requiredLanes.length > 0
+        ? requiredLanes
+        : Object.values(resolved.resolvedLanes)
+            .filter((lane) => lane.required)
+            .map((lane) => lane.lane)
+
+    if (lanesToPreflight.length > 0) {
+      const report = preflightLaneHealth(resolved, options?.registry, lanesToPreflight)
+      if (!report.allHealthy && options?.registry) {
+        // Required lanes are unhealthy — invalidate cache and re-resolve
+        const unhealthyRequired = lanesToPreflight.filter(
+          (ln) => report.unhealthyLanes.includes(ln),
+        )
+        if (unhealthyRequired.length > 0) {
+          // Force re-resolution by calling activateProfile directly (bypasses
+          // cache), which also fails on unresolved required lanes
+          const freshResolved = await activateProfile("default", {
+            repoRoot: options?.repoRoot,
+            registry: options?.registry,
+            cachePath: options?.cachePath,
+          })
+          // Run preflight again on the fresh result
+          const freshReport = preflightLaneHealth(
+            freshResolved,
+            options?.registry,
+            lanesToPreflight,
+          )
+          if (!freshReport.allHealthy) {
+            const stillUnhealthy = lanesToPreflight.filter(
+              (ln) => freshReport.unhealthyLanes.includes(ln),
+            )
+            if (stillUnhealthy.length > 0) {
+              throw new Error(
+                `Required lane${stillUnhealthy.length > 1 ? "s" : ""} ` +
+                  `${stillUnhealthy.join(", ")} ` +
+                  `are unhealthy after re-resolution. ` +
+                  `Check that the resolved models are still available in the registry.`,
+              )
+            }
+          }
+          return freshResolved
+        }
+      }
+    }
+    return resolved
+  }
+
+  // 3. Cache missing or stale — full activation
+  //    activateProfile already fails on unresolved required lanes
+  const resolved = await activateProfile("default", {
+    repoRoot: options?.repoRoot,
+    registry: options?.registry,
+    cachePath: options?.cachePath,
+  })
+
+  // Run preflight lane health checks on freshly resolved profile
+  if (requiredLanes && requiredLanes.length > 0) {
+    const report = preflightLaneHealth(resolved, options?.registry, requiredLanes)
+    if (!report.allHealthy) {
+      const unhealthyRequired = requiredLanes.filter(
+        (ln) => report.unhealthyLanes.includes(ln),
+      )
+      if (unhealthyRequired.length > 0) {
+        throw new Error(
+          `Required lane${unhealthyRequired.length > 1 ? "s" : ""} ` +
+            `${unhealthyRequired.join(", ")} ` +
+            `are unhealthy after resolution. ` +
+            `Check that the resolved models are still available in the registry.`,
+        )
+      }
+    }
+  }
+
+  return resolved
+}
+
+/**
+ * Create an empty model registry (no models available).
+ * Used as default when no registry is provided.
+ */
+function createEmptyRegistry(): ModelRegistry {
+  return { getModel: () => undefined }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Footer/status integration (Task 2.12)
+// ═══════════════════════════════════════════════════════════════════
+
+/** Well-known status key for the profile footer indicator. */
+export const PROFILE_STATUS_KEY = "zflow-profile" as const
+
+/**
+ * Format a concise profile status string for the Pi footer/status bar.
+ *
+ * Examples:
+ *   "Profile: default"
+ *   "Profile: default (1 optional lane disabled)"
+ *   "Profile: default ⚠ (1 required lane unresolved)"
+ *   "Profile: default ⚠ (1 optional disabled, 1 required unresolved)"
+ *
+ * When there are both unresolved required lanes AND disabled optional
+ * lanes, only the required lanes are shown (they take priority since
+ * they block functionality).
+ *
+ * @param cache - The active profile cache with resolved lane info.
+ * @returns A concise status string suitable for the footer.
+ */
+export function formatProfileFooterStatus(cache: ActiveProfileCache): string {
+  let status = `Profile: ${cache.profileName}`
+
+  const resolvedLanes = Object.values(cache.resolvedLanes)
+  const unresolvedRequired = resolvedLanes.filter(
+    (l) => l.status === "unresolved-required",
+  ).length
+  const optionalDisabled = resolvedLanes.filter(
+    (l) => l.status === "disabled-optional",
+  ).length
+
+  if (unresolvedRequired > 0 && optionalDisabled > 0) {
+    status += ` ⚠ (${optionalDisabled} optional disabled, ${unresolvedRequired} required unresolved)`
+  } else if (unresolvedRequired > 0) {
+    status += ` ⚠ (${unresolvedRequired} required lane${unresolvedRequired > 1 ? "s" : ""} unresolved)`
+  } else if (optionalDisabled > 0) {
+    status += ` (${optionalDisabled} optional lane${optionalDisabled > 1 ? "s" : ""} disabled)`
+  }
+
+  return status
+}
+
+/**
+ * Read the active profile cache and update the Pi footer/status bar
+ * with a concise profile status string.
+ *
+ * If no cache exists, the status is cleared.
+ *
+ * @param ui - The ExtensionUIContext for status bar access.
+ */
+export async function updateProfileFooterStatus(
+  ui: {
+    setStatus: (key: string, text: string | undefined) => void
+  },
+  cachePath?: string,
+): Promise<void> {
+  const cache = await readActiveProfileCache(cachePath).catch(() => null)
+
+  if (!cache) {
+    ui.setStatus(PROFILE_STATUS_KEY, undefined)
+    return
+  }
+
+  ui.setStatus(PROFILE_STATUS_KEY, formatProfileFooterStatus(cache))
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Shared lane lookup API (Task 2.11)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Get the resolved agent binding for a specific agent.
+ *
+ * Reads the active profile cache and looks up the binding by agent
+ * runtime name. This is the primary API that sibling packages (e.g.
+ * `pi-zflow-review`, `pi-zflow-agents`) should use to discover which
+ * model was resolved for a particular agent.
+ *
+ * If no cache exists or the agent is not found, returns `null`.
+ * Callers should handle `null` gracefully (e.g. by calling
+ * `ensureResolved()` first to activate a profile).
+ *
+ * This is the file-backed fallback path: it reads the user-local
+ * `active-profile.json` written by `activateProfile()`. External
+ * tools or packages that cannot access the zflow registry can also
+ * read this file directly.
+ *
+ * @param agentName - The agent runtime name (e.g. "zflow.planner-frontier").
+ * @param cachePath - Optional override for the cache file path.
+ * @returns The resolved agent binding, or `null` if not found.
+ */
+export async function getResolvedAgentBinding(
+  agentName: string,
+  cachePath?: string,
+): Promise<ResolvedAgentBinding | null> {
+  const cache = await readActiveProfileCache(cachePath)
+  if (!cache) return null
+
+  const cachedBinding = cache.agentBindings[agentName]
+  if (!cachedBinding) return null
+
+  const laneResult = cache.resolvedLanes[cachedBinding.lane]
+  return {
+    agent: agentName,
+    lane: cachedBinding.lane,
+    resolvedModel: cachedBinding.resolvedModel,
+    optional: laneResult?.optional ?? false,
+    tools: cachedBinding.tools,
+    maxOutput: cachedBinding.maxOutput,
+    maxSubagentDepth: cachedBinding.maxSubagentDepth,
+    status:
+      laneResult?.status ??
+      (cachedBinding.resolvedModel ? "resolved" : "unresolved-required"),
+    reason: laneResult?.reason,
+  }
+}
+
+/**
+ * Get the resolved lane result for a specific lane.
+ *
+ * Reads the active profile cache and looks up the lane by name.
+ * Returns `null` if no cache exists or the lane is not found.
+ *
+ * @param laneName - The lane name (e.g. "planning-frontier").
+ * @param cachePath - Optional override for the cache file path.
+ * @returns The resolved lane, or `null` if not found.
+ */
+export async function getResolvedLane(
+  laneName: string,
+  cachePath?: string,
+): Promise<ResolvedLane | null> {
+  const cache = await readActiveProfileCache(cachePath)
+  if (!cache) return null
+
+  const cachedLane = cache.resolvedLanes[laneName]
+  if (!cachedLane) return null
+
+  return {
+    lane: laneName,
+    model: cachedLane.model,
+    required: cachedLane.required,
+    optional: cachedLane.optional,
+    thinking: cachedLane.thinking,
+    status: cachedLane.status,
+    reason: cachedLane.reason,
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  /zflow-profile command handlers
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Resolve the repository root directory for profile commands.
+ *
+ * Uses `resolveGitDir` from pi-zflow-core to find the git root from
+ * the current working directory. Falls back to `process.cwd()` when
+ * not in a git repo so commands still produce useful output.
+ *
+ * @param cwd - Optional override for the working directory.
+ *              When provided (e.g., from ctx.cwd), used instead of
+ *              process.cwd().
+ */
+function getRepoRoot(cwd?: string): string | undefined {
+  const effectiveCwd = cwd ?? process.cwd()
+  const gitDir = resolveGitDir(effectiveCwd)
+  if (gitDir) {
+    // resolveGitDir returns the .git path; the repo root is its parent
+    return path.dirname(gitDir)
+  }
+  // Fallback: use cwd directly; it may or may not be a repo root
+  return effectiveCwd
+}
+
+/**
+ * Format a single lane resolution line for display.
+ *
+ * @example
+ * ```
+ * - planning-frontier → openai/gpt-5.4 (high thinking)
+ * - review-system ⚠ disabled (no matching authenticated model)
+ * - review-logic ✗ FAILED (required lane unresolved)
+ * ```
+ */
+function formatLaneLine(laneName: string, lane: ResolvedLane): string {
+  switch (lane.status) {
+    case "resolved": {
+      const thinking = lane.thinking ? ` (${lane.thinking} thinking)` : ""
+      return `- ${laneName} → ${lane.model}${thinking}`
+    }
+    case "disabled-optional":
+      return `- ${laneName} ⚠ disabled${lane.reason ? ` (${lane.reason})` : ""}`
+    case "unresolved-required":
+      return `- ${laneName} ✗ FAILED${lane.reason ? ` (${lane.reason})` : ""}`
+  }
+}
+
+/**
+ * Format the active profile summary block.
+ */
+function formatProfileSummary(
+  profile: ResolvedProfile,
+  cache?: ActiveProfileCache,
+): string {
+  const lines: string[] = []
+  lines.push(`Active profile: ${profile.profileName}`)
+  lines.push(`Source: ${profile.sourcePath}`)
+  lines.push(`Resolved at: ${profile.resolvedAt}`)
+  lines.push("")
+
+  // Resolved lanes
+  let hasResolved = false
+  let hasOptional = false
+  const resolvedLines: string[] = []
+  const optionalDisabled: string[] = []
+
+  for (const lane of Object.values(profile.resolvedLanes)) {
+    if (lane.status === "resolved") {
+      resolvedLines.push(formatLaneLine(lane.lane, lane))
+      hasResolved = true
+    } else if (lane.status === "disabled-optional") {
+      optionalDisabled.push(formatLaneLine(lane.lane, lane))
+      hasOptional = true
+    } else {
+      resolvedLines.push(formatLaneLine(lane.lane, lane))
+    }
+  }
+
+  if (hasResolved) {
+    lines.push("Resolved lanes:")
+    lines.push(...resolvedLines)
+    lines.push("")
+  }
+
+  if (hasOptional) {
+    lines.push("Optional disabled:")
+    lines.push(...optionalDisabled)
+    lines.push("")
+  }
+
+  // Cache invalidation info
+  if (cache) {
+    const age = Date.now() - new Date(cache.resolvedAt).getTime()
+    const ageMinutes = Math.round(age / 60000)
+    const ttlMinutes = cache.ttlMinutes
+    lines.push(
+      `Cache: ${ageMinutes}m old (TTL ${ttlMinutes}m)` +
+        `${ageMinutes > ttlMinutes ? " — EXPIRED" : ""}`,
+    )
+  }
+
+  return lines.join("\n")
+}
+
+/**
+ * Format detailed profile information for `/zflow-profile show`.
+ */
+function formatProfileDetail(
+  profile: ResolvedProfile,
+  cache?: ActiveProfileCache,
+): string {
+  const lines: string[] = []
+
+  lines.push(`Profile: ${profile.profileName}`)
+  lines.push(`Source file: ${profile.sourcePath}`)
+  lines.push(`Resolved at: ${profile.resolvedAt}`)
+  lines.push("")
+
+  // All lanes with full detail
+  lines.push("Lanes:")
+  for (const lane of Object.values(profile.resolvedLanes)) {
+    lines.push(formatLaneLine(lane.lane, lane))
+  }
+  lines.push("")
+
+  // Agent bindings
+  const bindingEntries = Object.entries(profile.agentBindings)
+  if (bindingEntries.length > 0) {
+    lines.push("Agent bindings:")
+    for (const [agent, binding] of bindingEntries) {
+      const model = binding.resolvedModel ?? "(unresolved)"
+      lines.push(`  - ${agent} → ${binding.lane} → ${model}`)
+      if (binding.tools) lines.push(`    tools: ${binding.tools}`)
+      if (binding.maxOutput) lines.push(`    maxOutput: ${binding.maxOutput}`)
+      if (binding.maxSubagentDepth !== undefined) lines.push(`    maxSubagentDepth: ${binding.maxSubagentDepth}`)
+    }
+    lines.push("")
+  }
+
+  // Cache invalidation metadata
+  if (cache) {
+    lines.push("Cache invalidation metadata:")
+    lines.push(`  TTL: ${cache.ttlMinutes}m`)
+    lines.push(`  Definition hash: ${cache.definitionHash}`)
+    lines.push(`  Environment fingerprint: ${cache.environmentFingerprint}`)
+    const age = Date.now() - new Date(cache.resolvedAt).getTime()
+    const ageMinutes = Math.round(age / 60000)
+    lines.push(`  Age: ${ageMinutes}m (TTL ${cache.ttlMinutes}m)`)
+    lines.push(`  Expired: ${age > cache.ttlMinutes * 60 * 1000 ? "yes" : "no"}`)
+  }
+
+  return lines.join("\n")
+}
+
+/**
+ * Handler for `/zflow-profile` (no arguments) — show active profile summary.
+ *
+ * Reads the active profile cache if available and displays a concise
+ * summary. If no cache exists, suggests activating the default profile.
+ */
+async function handleNoArgs(ui: {
+  notify: (message: string, type?: "info" | "warning" | "error") => void
+}): Promise<void> {
+  const cache = await readActiveProfileCache().catch(() => null)
+
+  if (!cache) {
+    ui.notify(
+      "No active profile found. Run `/zflow-profile default` to activate the default profile.",
+    )
+    return
+  }
+
+  const profile = cacheToResolvedProfile(cache)
+  const summary = formatProfileSummary(profile, cache)
+  ui.notify(summary)
+}
+
+/**
+ * Handler for `/zflow-profile default` — activate the default profile.
+ *
+ * Loads, resolves, and caches the "default" profile, then displays
+ * a summary of the resolved lanes.
+ *
+ * Uses the Pi runtime model registry when available (via ctx.modelRegistry
+ * from the extension command context) so lane resolution checks real
+ * model availability and authentication.
+ */
+async function handleDefault(
+  ui: {
+    notify: (message: string, type?: "info" | "warning" | "error") => void
+    setStatus: (key: string, text: string | undefined) => void
+  },
+  extra?: {
+    modelRegistry?: {
+      getAll(): Array<{
+        provider: string
+        id: string
+        reasoning?: boolean
+        input?: string[]
+        contextWindow?: number
+        maxTokens?: number
+        [key: string]: unknown
+      }>
+      hasConfiguredAuth(model: {
+        provider: string
+        id: string
+        [key: string]: unknown
+      }): boolean
+    }
+    cwd?: string
+  },
+): Promise<void> {
+  try {
+    const registry = extra?.modelRegistry
+      ? createPiModelRegistryAdapter(extra.modelRegistry)
+      : undefined
+    const resolved = await activateProfile("default", {
+      repoRoot: getRepoRoot(extra?.cwd),
+      registry,
+    })
+
+    const summary = formatProfileSummary(resolved)
+    ui.notify(`Default profile activated.\n\n${summary}`)
+    await updateProfileFooterStatus(ui)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    ui.notify(`Failed to activate default profile:\n${message}`, "error")
+  }
+}
+
+/**
+ * Handler for `/zflow-profile show` — display detailed profile info.
+ *
+ * Shows the source file, every resolved lane with its model, disabled
+ * optional lanes with reasons, agent bindings, and cache invalidation
+ * metadata.
+ */
+async function handleShow(ui: {
+  notify: (message: string, type?: "info" | "warning" | "error") => void
+}): Promise<void> {
+  const cache = await readActiveProfileCache().catch(() => null)
+
+  if (!cache) {
+    ui.notify(
+      "No active profile cache found. Run `/zflow-profile default` to activate a profile first.",
+    )
+    return
+  }
+
+  const profile = cacheToResolvedProfile(cache)
+  const detail = formatProfileDetail(profile, cache)
+  ui.notify(detail)
+}
+
+/**
+ * Handler for `/zflow-profile lanes` — show lane definitions and
+ * resolution status.
+ */
+async function handleLanes(ui: {
+  notify: (message: string, type?: "info" | "warning" | "error") => void
+}): Promise<void> {
+  const repoRoot = getRepoRoot()
+
+  let profiles: LoadedProfiles
+  try {
+    profiles = await loadProfiles(repoRoot)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    ui.notify(`Failed to load profiles:\n${message}`, "error")
+    return
+  }
+
+  const cache = await readActiveProfileCache().catch(() => null)
+  const lines: string[] = []
+
+  // Show available profile names
+  const profileNames = Object.keys(profiles.profiles)
+  lines.push(`Available profiles: ${profileNames.join(", ")}`)
+
+  // Show the active profile name if cached
+  if (cache) {
+    lines.push(`Active profile: ${cache.profileName}`)
+  }
+  lines.push("")
+
+  // Show lane definitions for the active (or first) profile
+  const activeName = cache?.profileName ?? profileNames[0]
+  const activeProfile = profiles.profiles[activeName]
+
+  if (activeProfile) {
+    lines.push(`Profile "${activeName}" lanes:`)
+    for (const [laneName, lane] of Object.entries(activeProfile.lanes)) {
+      const flags = lane.required
+        ? "required"
+        : lane.optional
+          ? "optional"
+          : "required"
+      const thinking = lane.thinking ? `, thinking=${lane.thinking}` : ""
+      const models = lane.preferredModels.join(", ")
+      lines.push(`  - ${laneName} (${flags}${thinking})`)
+      lines.push(`    preferredModels: ${models}`)
+
+      // Show resolution status if cached
+      if (cache?.resolvedLanes[laneName]) {
+        const resolved = cache.resolvedLanes[laneName]
+        if (resolved.status === "resolved") {
+          lines.push(`    → resolved to: ${resolved.model}`)
+        } else if (resolved.status === "disabled-optional") {
+          lines.push(`    → disabled${resolved.reason ? `: ${resolved.reason}` : ""}`)
+        } else if (resolved.status === "unresolved-required") {
+          lines.push(`    → unresolved${resolved.reason ? `: ${resolved.reason}` : ""}`)
+        }
+      } else {
+        lines.push(`    → not yet resolved`)
+      }
+    }
+  }
+
+  ui.notify(lines.join("\n"))
+}
+
+/**
+ * Handler for `/zflow-profile refresh` — force re-resolution.
+ *
+ * Ignores the cached profile and re-resolves all lanes from the
+ * original definitions, then writes a fresh cache.
+ *
+ * Uses the Pi runtime model registry when available.
+ */
+async function handleRefresh(
+  ui: {
+    notify: (message: string, type?: "info" | "warning" | "error") => void
+    setStatus: (key: string, text: string | undefined) => void
+  },
+  extra?: {
+    modelRegistry?: {
+      getAll(): Array<{
+        provider: string
+        id: string
+        reasoning?: boolean
+        input?: string[]
+        contextWindow?: number
+        maxTokens?: number
+        [key: string]: unknown
+      }>
+      hasConfiguredAuth(model: {
+        provider: string
+        id: string
+        [key: string]: unknown
+      }): boolean
+    }
+    cwd?: string
+  },
+): Promise<void> {
+  try {
+    const registry = extra?.modelRegistry
+      ? createPiModelRegistryAdapter(extra.modelRegistry)
+      : undefined
+    const resolved = await activateProfile("default", {
+      repoRoot: getRepoRoot(extra?.cwd),
+      registry,
+    })
+
+    const summary = formatProfileSummary(resolved)
+    ui.notify(`Profile refreshed.\n\n${summary}`)
+    await updateProfileFooterStatus(ui)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    ui.notify(`Failed to refresh profile:\n${message}`, "error")
+  }
+}
+
+/**
+ * Settings overrides entry for a single agent binding.
+ * Written to `.pi/settings.json` as part of `subagents.agentOverrides`.
+ */
+export interface SettingsAgentOverride {
+  /** Resolved model identifier for this agent. */
+  model: string
+  /** Comma-separated tools the agent is allowed to use. */
+  tools?: string
+  /** Maximum total output tokens for this agent. */
+  maxOutput?: number
+  /** Maximum depth of subagent nesting. */
+  maxSubagentDepth?: number
+}
+
+/**
+ * Result of a sync-to-settings operation.
+ */
+export interface SyncSettingsResult {
+  /** Number of agent overrides written. */
+  count: number
+  /** Absolute path to the settings file that was written. */
+  settingsPath: string
+  /** List of agent names whose overrides were written. */
+  agents: string[]
+}
+
+/**
+ * Build agent overrides from an active profile cache.
+ *
+ * Iterates the cache's `agentBindings` and creates a mapping of
+ * agent name → override entry for every binding that has a resolved
+ * model. Skip entries with no resolved model (unresolved lanes).
+ *
+ * This is a pure function — it does no I/O and can be tested in
+ * isolation.
+ *
+ * @param cache - The active profile cache with resolved agent bindings.
+ * @returns A record of agent name to override settings, keyed for
+ *          insertion into `subagents.agentOverrides`.
+ */
+export function buildAgentOverrides(
+  cache: ActiveProfileCache,
+): Record<string, SettingsAgentOverride> {
+  const overrides: Record<string, SettingsAgentOverride> = {}
+
+  for (const [agentName, binding] of Object.entries(cache.agentBindings)) {
+    if (binding.resolvedModel) {
+      const entry: SettingsAgentOverride = {
+        model: binding.resolvedModel,
+      }
+      if (binding.tools) entry.tools = binding.tools
+      if (binding.maxOutput) entry.maxOutput = binding.maxOutput
+      if (binding.maxSubagentDepth !== undefined) {
+        entry.maxSubagentDepth = binding.maxSubagentDepth
+      }
+      overrides[agentName] = entry
+    }
+  }
+
+  return overrides
+}
+
+/**
+ * Format a human-readable summary of the agent overrides that would
+ * be written, suitable for display in a confirmation dialog or log.
+ *
+ * @param overrides - The agent overrides to summarise.
+ * @param settingsPath - The path where the overrides would be written.
+ * @returns An array of text lines (without trailing newlines).
+ */
+export function formatSyncSummary(
+  overrides: Record<string, SettingsAgentOverride>,
+  settingsPath: string,
+): string[] {
+  const lines: string[] = [
+    "The following agent overrides will be written to:",
+    `  ${settingsPath}`,
+    "",
+  ]
+
+  const agentNames = Object.keys(overrides).sort()
+  for (const agent of agentNames) {
+    const override = overrides[agent]
+    lines.push(`  ${agent}:`)
+    lines.push(`    model: ${override.model}`)
+    if (override.tools) lines.push(`    tools: ${override.tools}`)
+    if (override.maxOutput) lines.push(`    maxOutput: ${override.maxOutput}`)
+    if (override.maxSubagentDepth !== undefined) {
+      lines.push(`    maxSubagentDepth: ${override.maxSubagentDepth}`)
+    }
+  }
+  lines.push("")
+  lines.push("This will modify your project settings. Continue?")
+
+  return lines
+}
+
+/**
+ * Synchronise the resolved active profile to `.pi/settings.json`.
+ *
+ * Writes a `subagents.agentOverrides` block based on the currently
+ * resolved active profile cache. This is a narrow, explicit operation:
+ *
+ * - Updates only agents present in the active zflow profile's bindings.
+ * - Preserves existing `subagents.agentOverrides` for unrelated agents.
+ * - Preserves all other keys in `settings.json`.
+ * - Does NOT run as part of normal activation (`activateProfile` /
+ *   `ensureResolved` never calls this).
+ * - Requires an explicit opt-in (via `/zflow-profile sync-project`).
+ * - Aborts with an error if the existing settings file contains
+ *   invalid JSON (never silently replaces it).
+ *
+ * The settings file is read, updated, and written atomically (via
+ * write-then-rename). If the file does not exist, it is created.
+ *
+ * @param cache - The active profile cache with resolved agent bindings.
+ * @param settingsPath - Absolute path to `.pi/settings.json`.
+ * @returns A `SyncSettingsResult` describing what was written.
+ * @throws {Error} If the file cannot be written (permissions, disk full).
+ * @throws {SyntaxError} If the existing settings file has invalid JSON.
+ */
+export async function syncProfileToSettings(
+  cache: ActiveProfileCache,
+  settingsPath: string,
+): Promise<SyncSettingsResult> {
+  // 1. Build agent overrides from the cache
+  const zflowOverrides = buildAgentOverrides(cache)
+  const zflowAgentNames = Object.keys(zflowOverrides)
+
+  if (zflowAgentNames.length === 0) {
+    return {
+      count: 0,
+      settingsPath,
+      agents: [],
+    }
+  }
+
+  // 2. Read existing settings or start fresh.
+  //    If the file exists but has invalid JSON, abort — never silently
+  //    replace user data.
+  let settings: Record<string, unknown> = {}
+  try {
+    const existing = await fs.readFile(settingsPath, "utf8")
+    try {
+      settings = JSON.parse(existing) as Record<string, unknown>
+    } catch (parseErr) {
+      throw new SyntaxError(
+        `Cannot read existing settings at "${settingsPath}": ` +
+          `invalid JSON. Fix or remove the file before running sync-project.`,
+      )
+    }
+  } catch (err) {
+    // File doesn't exist — start fresh
+    if (err instanceof SyntaxError) throw err
+    settings = {}
+  }
+
+  // 3. Merge zflow agent overrides into existing overrides without
+  //    destroying overrides for unrelated (non-zflow) agents.
+  const existingOverrides = (
+    settings.subagents as Record<string, unknown> | undefined
+  )?.agentOverrides as Record<string, unknown> | undefined
+
+  const mergedOverrides: Record<string, unknown> = {
+    // Start with existing overrides for all agents
+    ...(existingOverrides ?? {}),
+    // Overlay zflow-owned agents only — preserves non-zflow overrides
+    ...zflowOverrides,
+  }
+
+  // Preserve any existing subagents config that isn't agentOverrides
+  const existingSubagents = settings.subagents as
+    | Record<string, unknown>
+    | undefined
+  settings.subagents = {
+    ...(existingSubagents ?? {}),
+    agentOverrides: mergedOverrides,
+  }
+
+  // 4. Ensure parent directory exists
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true })
+
+  // 5. Write atomically using temp-file-then-rename
+  const tmpPath = settingsPath + ".tmp"
+  try {
+    await fs.writeFile(tmpPath, JSON.stringify(settings, null, 2), "utf8")
+    await fs.rename(tmpPath, settingsPath)
+  } catch (err) {
+    // Clean up temp file on failure
+    try {
+      await fs.unlink(tmpPath)
+    } catch {
+      // Ignore cleanup errors
+    }
+    throw err
+  }
+
+  return {
+    count: zflowAgentNames.length,
+    settingsPath,
+    agents: zflowAgentNames,
+  }
+}
+
+/**
+ * Handler for `/zflow-profile sync-project` — write resolved overrides
+ * into `.pi/settings.json`.
+ *
+ * This is an explicit opt-in operation. It shows a confirmation dialog
+ * with a summary of what will be written, then delegates to
+ * `syncProfileToSettings()`.
+ */
+async function handleSyncProject(
+  ui: {
+    notify: (message: string, type?: "info" | "warning" | "error") => void
+    confirm: (title: string, message: string) => Promise<boolean>
+  },
+  extra?: { cwd?: string },
+): Promise<void> {
+  const cache = await readActiveProfileCache().catch(() => null)
+
+  if (!cache) {
+    ui.notify(
+      "No active profile found. Run `/zflow-profile default` first to activate a profile.",
+    )
+    return
+  }
+
+  const repoRoot = getRepoRoot(extra?.cwd)
+  if (!repoRoot) {
+    ui.notify(
+      "Cannot determine project root. Run this command from within your project directory.",
+    )
+    return
+  }
+
+  const settingsPath = path.join(repoRoot, ".pi", "settings.json")
+
+  // Build agent overrides (preview for confirmation)
+  const agentOverrides = buildAgentOverrides(cache)
+  const agentNames = Object.keys(agentOverrides)
+
+  if (agentNames.length === 0) {
+    ui.notify(
+      "No resolved agent bindings to sync. Ensure the profile has resolved lanes with models.",
+    )
+    return
+  }
+
+  // Show a summary before writing
+  const summaryLines = formatSyncSummary(agentOverrides, settingsPath)
+  const confirmed = await ui.confirm(
+    "Sync Profile to Settings",
+    summaryLines.join("\n"),
+  )
+  if (!confirmed) {
+    ui.notify("Sync cancelled.")
+    return
+  }
+
+  // Perform the write
+  try {
+    const result = await syncProfileToSettings(cache, settingsPath)
+    ui.notify(
+      `Wrote ${result.count} agent override(s) to:\n` +
+        `  ${result.settingsPath}\n\n` +
+        `Run /zflow-profile refresh and then /zflow-profile sync-project again\n` +
+        `to update the overrides after changing your profile.`,
+    )
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    ui.notify(`Failed to write settings: ${message}`, "error")
+  }
+}
+
+/**
+ * Main handler for the `/zflow-profile` command.
+ *
+ * Parses the first argument to dispatch to the correct subcommand handler.
+ * Supported subcommands:
+ *   (no args)  — show active profile summary
+ *   default    — activate the default profile
+ *   show       — display detailed profile info
+ *   lanes      — show lane definitions and status
+ *   refresh    — force re-resolution
+ *   sync-project — write resolved overrides to .pi/settings.json
+ *
+ * When run from the Pi interactive session, `ctx.modelRegistry` and
+ * `ctx.cwd` are available and used for real model resolution.
+ */
+async function handleProfileCommand(
+  args: string,
+  ctx: {
+    ui: {
+      notify: (message: string, type?: "info" | "warning" | "error") => void
+      setStatus: (key: string, text: string | undefined) => void
+      confirm: (title: string, message: string) => Promise<boolean>
+    }
+    modelRegistry?: {
+      getAll(): Array<{
+        provider: string
+        id: string
+        reasoning?: boolean
+        input?: string[]
+        contextWindow?: number
+        maxTokens?: number
+        [key: string]: unknown
+      }>
+      hasConfiguredAuth(model: {
+        provider: string
+        id: string
+        [key: string]: unknown
+      }): boolean
+    }
+    cwd?: string
+  },
+): Promise<void> {
+  const trimmed = args.trim()
+  const subcommand = trimmed.split(/\s+/)[0]?.toLowerCase() ?? ""
+
+  if (!subcommand) {
+    await handleNoArgs(ctx.ui)
+    return
+  }
+
+  switch (subcommand) {
+    case "default":
+      await handleDefault(ctx.ui, {
+        modelRegistry: ctx.modelRegistry,
+        cwd: ctx.cwd,
+      })
+      break
+    case "show":
+      await handleShow(ctx.ui)
+      break
+    case "lanes":
+      await handleLanes(ctx.ui)
+      break
+    case "refresh":
+      await handleRefresh(ctx.ui, {
+        modelRegistry: ctx.modelRegistry,
+        cwd: ctx.cwd,
+      })
+      break
+    case "sync-project":
+      await handleSyncProject(ctx.ui, { cwd: ctx.cwd })
+      break
+    default:
+      ctx.ui.notify(
+        `Unknown subcommand: "${subcommand}".\n\n` +
+          `Available subcommands:\n` +
+          `  /zflow-profile          — show active profile summary\n` +
+          `  /zflow-profile default   — activate the default profile\n` +
+          `  /zflow-profile show      — display detailed profile info\n` +
+          `  /zflow-profile lanes     — show lane definitions and status\n` +
+          `  /zflow-profile refresh   — force re-resolution\n` +
+          `  /zflow-profile sync-project — write resolved overrides to .pi/settings.json`,
+      )
+  }
+}
+
+// ── Extension activation ────────────────────────────────────────
+
+/**
+ * Activate the pi-zflow-profiles extension.
+ *
+ * Called by the Pi harness when the extension loads. This function:
+ *   1. Claims the "profiles" capability in the shared zflow registry.
+ *   2. Provides profile-loading services for sibling packages.
+ *   3. Handles duplicate loads gracefully (no-op if already claimed
+ *      by the same or compatible provider).
+ *
+ * @param pi - The Pi extension API provided by the harness.
+ */
 export default function activateZflowProfilesExtension(pi: ExtensionAPI): void {
-  // Registration logic will be added in Phase 2
+  const registry = getZflowRegistry()
+
+  // ── Build the capability claim ────────────────────────────────
+  const claim: CapabilityClaim = {
+    capability: PROFILES_CAPABILITY,
+    version: PI_ZFLOW_PROFILES_VERSION,
+    provider: "pi-zflow-profiles",
+    sourcePath: import.meta.url,
+    compatibilityMode: "compatible",
+  }
+
+  // ── Claim the capability ──────────────────────────────────────
+  const registered = registry.claim(claim)
+
+  // If claim returns null, an incompatible provider already owns this
+  // capability — do not register anything.
+  if (!registered) {
+    // A diagnostic was already emitted by the registry.
+    return
+  }
+
+  // If the capability already has a service, another compatible
+  // instance already initialised fully. No-op to avoid duplicate
+  // command registration and session hooks (coexistence rule 7).
+  if (registered.service !== undefined) {
+    return
+  }
+
+  // ── Build and provide the profile service ─────────────────────
+  const profileService: ProfileService = {
+    loadProfiles,
+    loadProfilesSync,
+    resolveProfileSource,
+    resolveLane,
+    resolveProfileLanes,
+    resolveAgentBindings,
+    resolveProfile,
+    hasUnresolvedRequiredLanes,
+    getLaneStatusSummary,
+    validateLaneCandidate,
+    checkCapabilityRequirements,
+    activateProfile,
+    ensureResolved,
+    readActiveProfileCache,
+    writeActiveProfileCache,
+    computeCurrentProfileHash,
+    computeEnvironmentFingerprintFromRegistry,
+    preflightLaneHealth,
+    handleLaneFailure,
+    reresolveLane,
+    checkLaneHealth,
+    getHealthStatusSummary,
+    buildAgentOverrides,
+    syncProfileToSettings,
+    formatSyncSummary,
+    getResolvedAgentBinding,
+    getResolvedLane,
+  }
+
+  registry.provide(PROFILES_CAPABILITY, profileService)
+
+  // ── Register the /zflow-profile command ────────────────────────
+  pi.registerCommand("zflow-profile", {
+    description:
+      "Manage and inspect zflow profiles. Subcommands: " +
+      "default, show, lanes, refresh, sync-project. " +
+      "Use without arguments for a summary.",
+    handler: async (args: string, ctx: {
+      ui: {
+        notify: (message: string, type?: "info" | "warning" | "error") => void
+        setStatus: (key: string, text: string | undefined) => void
+        confirm: (title: string, message: string) => Promise<boolean>
+      }
+      modelRegistry?: {
+        getAll(): Array<{
+          provider: string
+          id: string
+          reasoning?: boolean
+          input?: string[]
+          contextWindow?: number
+          maxTokens?: number
+          [key: string]: unknown
+        }>
+        hasConfiguredAuth(model: {
+          provider: string
+          id: string
+          [key: string]: unknown
+        }): boolean
+      }
+      cwd?: string
+    }): Promise<void> => {
+      await handleProfileCommand(args, ctx)
+    },
+  })
+
+  // ── Subscribe to session_start for footer status ──────────────
+  // On startup, reload, resume, or fork, read the active profile
+  // cache and set the footer status so the user sees the profile
+  // name without running a command.
+  pi.on("session_start", async (_event: { type: string; reason: string }, ctx: {
+    ui: {
+      setStatus: (key: string, text: string | undefined) => void
+    }
+  }): Promise<void> => {
+    await updateProfileFooterStatus(ctx.ui)
+  })
 }
