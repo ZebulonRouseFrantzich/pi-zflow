@@ -114,6 +114,19 @@ export type {
   SynthesisResult,
 } from "./synthesizer.js"
 
+// ── Re-export diff-baseline helpers ──────────────────────────
+
+export {
+  resolveDiffBaseline,
+  buildDiffCommand,
+  parseDiffBaselineOverride,
+} from "./diff-baseline.js"
+
+export type {
+  DiffBaselineInput,
+  ResolvedBaseline,
+} from "./diff-baseline.js"
+
 export type {
   ReviewerManifest,
   ReviewerMode,
