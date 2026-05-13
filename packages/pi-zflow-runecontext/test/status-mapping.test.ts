@@ -133,11 +133,13 @@ describe('mapHarnessStateToRuneStatus', () => {
   })
 
   describe('edge cases', () => {
-    test('handles empty vocabulary (unrestricted) — accepted values map to prompt', () => {
-      // With empty vocabulary, isAllowedStatus returns true for any value
+    test('handles empty vocabulary (ambiguous) — maps to runtime-only', () => {
+      // With empty vocabulary, isAllowedStatus returns false (conservative)
+      // so approved falls back to runtime-only to avoid lossy overwrite
       const result = mapHarnessStateToRuneStatus('approved', emptyVocabulary)
-      assert.equal(result.mappedStatus, 'approved')
-      assert.equal(result.policy, 'prompt')
+      assert.equal(result.mappedStatus, null)
+      assert.equal(result.policy, 'runtime-only')
+      assert.ok(result.reason.includes('no corresponding status'))
     })
 
     test('completed uses implemented as preferred status name', () => {

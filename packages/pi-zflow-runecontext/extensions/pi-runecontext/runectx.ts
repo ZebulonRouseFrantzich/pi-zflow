@@ -1,6 +1,8 @@
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 
+import { listCanonicalDocNames } from "./precedence.js"
+
 /**
  * runectx.ts — Conservative status mapping and write-back helpers for RuneContext integration.
  *
@@ -92,7 +94,9 @@ export interface StatusMappingResult {
 export interface StatusVocabulary {
   /**
    * Known status values in the project's `status.yaml` schema.
-   * An empty array indicates the vocabulary is unknown or unrestricted.
+   * An empty array indicates the vocabulary is unknown — the mapping
+   * treats this as ambiguous and falls back to runtime-only to avoid
+   * lossy overwrite of canonical status.yaml.
    */
   allowedStatuses: string[]
 }
@@ -151,8 +155,11 @@ export interface WriteBackResult {
  */
 function isAllowedStatus(value: string, vocabulary: StatusVocabulary): boolean {
   if (vocabulary.allowedStatuses.length === 0) {
-    // Unknown/unrestricted vocabulary — defer to runtime validation.
-    return true
+    // Unknown/unrestricted vocabulary — treat as ambiguous.
+    // Conservatively assume the status is NOT allowed so that
+    // mapping falls back to runtime-only, preserving canonical
+    // status.yaml without lossy overwrite.
+    return false
   }
   return vocabulary.allowedStatuses.includes(value)
 }
@@ -439,10 +446,29 @@ export async function writeApprovedAmendment(
   // Derived artifact regeneration MUST happen after canonical-doc
   // write-back. That orchestration is handled by the caller.
 
+  const canonicalDocNames = new Set(listCanonicalDocNames())
+
   const writtenFiles: string[] = []
   const failedFiles: Array<{ path: string; error: string }> = []
 
   for (const [filename, content] of Object.entries(amendment.docChanges)) {
+    // ── Validate: must be a basename-only canonical doc ──────────
+    if (filename.includes("/") || filename.includes("\\") || filename.includes("..")) {
+      failedFiles.push({
+        path: path.join(amendment.changePath, filename),
+        error: `"${filename}" contains path separators or parent references; only basename canonical doc names are allowed`,
+      })
+      continue
+    }
+
+    if (!canonicalDocNames.has(filename)) {
+      failedFiles.push({
+        path: path.join(amendment.changePath, filename),
+        error: `"${filename}" is not a recognised canonical RuneContext doc. Allowed: ${[...canonicalDocNames].join(", ")}`,
+      })
+      continue
+    }
+
     const targetPath = path.join(amendment.changePath, filename)
 
     try {

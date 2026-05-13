@@ -24,6 +24,10 @@ import {
   tryRunectxStatus,
 } from "./detect.js"
 
+import {
+  createRuneContextService,
+} from "../../src/api.js"
+
 export type { RuneContextDetection } from "./detect.js"
 export {
   detectRuneContext,
@@ -102,6 +106,7 @@ export {
   isWriteAllowedInRuneContextTree,
   validateRuneContextWriteTarget,
   getForbiddenArtifacts,
+  getCanonicalDocNames,
 } from "./guards.js"
 
 // Re-export custom error classes (Task 3.10)
@@ -119,13 +124,13 @@ export const RUNECONTEXT_CAPABILITY = "runecontext" as const
 /**
  * Activate the pi-zflow-runecontext extension.
  *
- * Claims the "runecontext" capability in the shared zflow registry.
+ * Claims the "runecontext" capability in the shared zflow registry and
+ * immediately provides a {@link RuneContextService} instance so that
+ * downstream consumers (e.g. Phase 7 pi-zflow-change-workflows) can
+ * discover RuneContext functionality via `registry.get("runecontext")`.
+ *
  * If the capability is already claimed by a compatible provider, the
  * activation is a no-op (duplicate load guard).
- *
- * A service will be provided in later Phase 3 tasks (3.2–3.12) after
- * change-doc resolution, status mapping, and prompt-with-preview
- * write-back support are implemented.
  *
  * @param pi - The Pi extension API provided by the harness.
  */
@@ -158,6 +163,6 @@ export default function activateZflowRunecontextExtension(pi: ExtensionAPI): voi
     return
   }
 
-  // Note: A service will be provided in later Phase 3 tasks.
-  // For now, we only claim the capability.
+  // ── Provide the RuneContext service ───────────────────────────
+  registry.provide(RUNECONTEXT_CAPABILITY, createRuneContextService())
 }

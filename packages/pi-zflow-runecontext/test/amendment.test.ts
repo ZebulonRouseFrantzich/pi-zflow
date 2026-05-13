@@ -61,11 +61,11 @@ describe('amendment flow (Task 3.7)', () => {
     assert.ok(result.summary.includes('CHANGE-001'))
   })
 
-  test('writeApprovedAmendment writes approved amendment files', async () => {
+  test('writeApprovedAmendment writes approved amendment files (canonical docs only)', async () => {
     const am = createAmendment(
       'CHANGE-002',
       tmpDir,
-      { 'test.txt': 'hello world', 'status.yaml': 'status: approved' },
+      { 'proposal.md': '# Updated proposal', 'status.yaml': 'status: approved' },
       'approved',
     )
     const approvedAm = approveAmendment(am)
@@ -75,11 +75,47 @@ describe('amendment flow (Task 3.7)', () => {
     assert.equal(result.deferred, false)
     assert.equal(result.writtenFiles.length, 2)
 
-    const content1 = await fs.readFile(path.join(tmpDir, 'test.txt'), 'utf-8')
-    assert.equal(content1, 'hello world')
+    const content1 = await fs.readFile(path.join(tmpDir, 'proposal.md'), 'utf-8')
+    assert.equal(content1, '# Updated proposal')
 
     const content2 = await fs.readFile(path.join(tmpDir, 'status.yaml'), 'utf-8')
     assert.equal(content2, 'status: approved')
+  })
+
+  test('writeApprovedAmendment rejects non-canonical doc names', async () => {
+    const am = createAmendment(
+      'CHANGE-005',
+      tmpDir,
+      { 'notes.txt': 'not a canonical doc', 'execution-groups.md': 'derived artifact' },
+      'approved',
+    )
+    const approvedAm = approveAmendment(am)
+    const result = await writeApprovedAmendment(approvedAm)
+
+    assert.equal(result.success, false)
+    assert.equal(result.deferred, false)
+    assert.equal(result.writtenFiles.length, 0)
+    assert.equal(result.failedFiles.length, 2)
+    assert.ok(result.failedFiles[0].error.includes('not a recognised canonical RuneContext doc'))
+    assert.ok(result.failedFiles[1].error.includes('not a recognised canonical RuneContext doc'))
+  })
+
+  test('writeApprovedAmendment rejects path traversal in docChanges keys', async () => {
+    const am = createAmendment(
+      'CHANGE-006',
+      tmpDir,
+      { '../../outside.txt': 'data' },
+      'approved',
+    )
+    const approvedAm = approveAmendment(am)
+    const result = await writeApprovedAmendment(approvedAm)
+
+    assert.equal(result.success, false)
+    assert.equal(result.deferred, false)
+    assert.equal(result.writtenFiles.length, 0)
+    assert.equal(result.failedFiles.length, 1)
+    assert.ok(result.failedFiles[0].error.includes('path separators') ||
+              result.failedFiles[0].error.includes('parent references'))
   })
 
   test('writeApprovedAmendment reports file write failures', async () => {
@@ -101,30 +137,31 @@ describe('amendment flow (Task 3.7)', () => {
     assert.ok(result.summary.includes('CHANGE-003'))
   })
 
-  test('writeApprovedAmendment partial failure when some dirs exist', async () => {
-    // Create only 'subdir' but not 'missing'
+  test('writeApprovedAmendment partial failure when some dirs exist but filenames are non-canonical', async () => {
     await fs.mkdir(path.join(tmpDir, 'subdir'), { recursive: true })
 
     const am = createAmendment(
       'CHANGE-004',
       tmpDir,
       {
-        'subdir/good.txt': 'written',
-        'missing/bad.txt': 'should fail',
+        'proposal.md': 'valid canonical doc',
+        'bad.txt': 'non-canonical',
       },
       'approved',
     )
     const approvedAm = approveAmendment(am)
     const result = await writeApprovedAmendment(approvedAm)
 
+    // proposal.md succeeds, bad.txt is rejected as non-canonical
     assert.equal(result.success, false)
     assert.equal(result.writtenFiles.length, 1)
     assert.equal(result.failedFiles.length, 1)
-    assert.ok(result.writtenFiles[0].endsWith('subdir/good.txt'))
-    assert.ok(result.failedFiles[0].path.endsWith('missing/bad.txt'))
+    assert.ok(result.writtenFiles[0].endsWith('proposal.md'))
+    assert.ok(result.failedFiles[0].path.endsWith('bad.txt'))
+    assert.ok(result.failedFiles[0].error.includes('not a recognised canonical RuneContext doc'))
 
     // Verify the successful write
-    const content = await fs.readFile(path.join(tmpDir, 'subdir/good.txt'), 'utf-8')
-    assert.equal(content, 'written')
+    const content = await fs.readFile(path.join(tmpDir, 'proposal.md'), 'utf-8')
+    assert.equal(content, 'valid canonical doc')
   })
 })

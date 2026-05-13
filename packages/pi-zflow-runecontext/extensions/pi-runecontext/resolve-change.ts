@@ -187,9 +187,9 @@ export interface ResolveRuneChangeInput {
  *   2. Otherwise, search from `process.cwd()` upward toward `repoRoot`
  *      for a directory containing the primary marker (`proposal.md`).
  *
- * Flavour is determined by checking for `tasks.md`:
- *   - Present  → "verified" (requires references.md + tasks.md)
- *   - Absent   → "plain"
+ * Flavour is determined by checking for `tasks.md` or `references.md`:
+ *   - Either present → "verified" (requires tasks.md + references.md)
+ *   - Neither present → "plain"
  *
  * After resolution, all required files for the detected flavour are
  * validated. If any are missing, an error names the first absent file.
@@ -238,7 +238,8 @@ export async function resolveRuneChange(
 
   // ── Step 3: Determine flavor ───────────────────────────────────
   const hasTasks = await fileExists(path.join(absChangePath, "tasks.md"))
-  const flavor: RuneChangeFlavor = hasTasks ? "verified" : "plain"
+  const hasRefs = await fileExists(path.join(absChangePath, "references.md"))
+  const flavor: RuneChangeFlavor = (hasTasks || hasRefs) ? "verified" : "plain"
 
   // ── Step 4: Validate required files ────────────────────────────
   await validateFiles(absChangePath, PLAIN_REQUIRED_FILES)

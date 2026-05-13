@@ -7,6 +7,7 @@ const {
   isWriteAllowedInRuneContextTree,
   validateRuneContextWriteTarget,
   getForbiddenArtifacts,
+  getCanonicalDocNames,
 } = await import('../extensions/pi-runecontext/guards.ts')
 
 describe('isWriteAllowedInRuneContextTree', () => {
@@ -31,13 +32,13 @@ describe('isWriteAllowedInRuneContextTree', () => {
     assert.equal(isWriteAllowedInRuneContextTree('status.yaml'), true)
   })
 
-  test('allows unrecognised files inside the tree', () => {
-    // The guard only rejects known runtime artifacts
-    assert.equal(isWriteAllowedInRuneContextTree('package.json'), true)
-    assert.equal(isWriteAllowedInRuneContextTree('README.md'), true)
-    assert.equal(isWriteAllowedInRuneContextTree('notes.txt'), true)
-    assert.equal(isWriteAllowedInRuneContextTree('.gitkeep'), true)
-    assert.equal(isWriteAllowedInRuneContextTree('src/index.ts'), true)
+  test('rejects unrecognised files inside the tree', () => {
+    // The guard now fails closed — only canonical docs are allowed
+    assert.equal(isWriteAllowedInRuneContextTree('package.json'), false)
+    assert.equal(isWriteAllowedInRuneContextTree('README.md'), false)
+    assert.equal(isWriteAllowedInRuneContextTree('notes.txt'), false)
+    assert.equal(isWriteAllowedInRuneContextTree('.gitkeep'), false)
+    assert.equal(isWriteAllowedInRuneContextTree('src/index.ts'), false)
   })
 })
 
@@ -50,7 +51,16 @@ describe('validateRuneContextWriteTarget', () => {
 
     assert.equal(result.allowed, false)
     assert.ok(result.reason.includes('run.json'))
-    assert.ok(result.reason.includes('RuneContext tree'))
+    assert.ok(result.reason.includes('canonical RuneContext doc'))
+  })
+
+  test('rejects unrecognised files inside change tree', () => {
+    const targetPath = path.join(changePath, 'notes.txt')
+    const result = validateRuneContextWriteTarget(targetPath, changePath)
+
+    assert.equal(result.allowed, false)
+    assert.ok(result.reason.includes('notes.txt'))
+    assert.ok(result.reason.includes('canonical RuneContext doc'))
   })
 
   test('allows canonical docs inside change tree', () => {
@@ -78,12 +88,27 @@ describe('validateRuneContextWriteTarget', () => {
     assert.equal(result.allowed, true)
   })
 
-  test('rejects all forbidden artifacts inside change tree', () => {
-    const forbidden = getForbiddenArtifacts()
-    for (const artifact of forbidden) {
-      const targetPath = path.join(changePath, artifact)
+  test('rejects all non-canonical files inside change tree', () => {
+    const canonical = getCanonicalDocNames()
+    const nonCanonical = [
+      'run.json',
+      'plan-state.json',
+      'state-index.json',
+      'execution-groups.md',
+      'deviation-report.md',
+      'review-findings.md',
+      'repo-map.md',
+      'reconnaissance.md',
+      'notes.txt',
+      'package.json',
+      'README.md',
+      '.gitkeep',
+    ]
+    for (const name of nonCanonical) {
+      assert.ok(!canonical.includes(name), `${name} should not be in canonical list`)
+      const targetPath = path.join(changePath, name)
       const result = validateRuneContextWriteTarget(targetPath, changePath)
-      assert.equal(result.allowed, false, `${artifact} should be forbidden`)
+      assert.equal(result.allowed, false, `${name} should be forbidden inside change tree`)
     }
   })
 })
@@ -117,5 +142,36 @@ describe('getForbiddenArtifacts', () => {
     const artifacts2 = getForbiddenArtifacts()
     assert.equal(artifacts2.length, originalLength)
     assert.equal(artifacts2.includes('extra.json'), false)
+  })
+})
+
+describe('getCanonicalDocNames', () => {
+  test('returns complete list of canonical doc names', () => {
+    const docs = getCanonicalDocNames()
+    assert.ok(Array.isArray(docs))
+
+    const expected = [
+      'proposal.md',
+      'design.md',
+      'standards.md',
+      'verification.md',
+      'tasks.md',
+      'references.md',
+      'status.yaml',
+    ]
+
+    assert.equal(docs.length, expected.length)
+    for (const name of expected) {
+      assert.ok(docs.includes(name), `Expected ${name} in canonical doc list`)
+    }
+  })
+
+  test('returns a copy (not the original reference)', () => {
+    const docs = getCanonicalDocNames()
+    const originalLength = docs.length
+    docs.push('extra.md')
+    const docs2 = getCanonicalDocNames()
+    assert.equal(docs2.length, originalLength)
+    assert.equal(docs2.includes('extra.md'), false)
   })
 })

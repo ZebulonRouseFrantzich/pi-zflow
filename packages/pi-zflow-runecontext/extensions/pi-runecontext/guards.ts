@@ -57,24 +57,22 @@ const CANONICAL_DOCS: ReadonlySet<string> = new Set([
  * Check whether a given filename is allowed to be written inside a
  * RuneContext change tree.
  *
- * - Returns `false` if the filename is a known runtime/orchestration artifact
- *   (e.g. `run.json`, `plan-state.json`, `review-findings.md`).
- * - Returns `true` if the filename is a recognised canonical doc
- *   (e.g. `proposal.md`, `design.md`, `status.yaml`).
- * - Returns `true` for any unknown filename — the guard only rejects
- *   known runtime artifacts, not unrecognised files.
+ * FAILS CLOSED — only recognized canonical RuneContext document names
+ * are allowed:
  *
- * @param filename - The file name (basename only, e.g. `"run.json"`).
+ *   - `proposal.md`, `design.md`, `standards.md`, `verification.md`,
+ *     `tasks.md`, `references.md`, `status.yaml`
+ *
+ * Everything else (known runtime artifacts AND unrecognized files) is
+ * rejected. See {@link getCanonicalDocNames} for the full allowlist.
+ *
+ * @param filename - The file name (basename only, e.g. `"proposal.md"`).
  * @returns `true` if a write with this filename is allowed inside the
- *          RuneContext tree, `false` if it is forbidden.
+ *          RuneContext tree, `false` otherwise.
  */
 export function isWriteAllowedInRuneContextTree(filename: string): boolean {
-  // Known runtime artifacts are always forbidden
-  if (FORBIDDEN_IN_RUNECONTEXT.has(filename)) {
-    return false
-  }
-  // Canonical docs and any unrecognised files are allowed
-  return true
+  // Only canonical docs are allowed; everything else is rejected.
+  return CANONICAL_DOCS.has(filename)
 }
 
 /**
@@ -82,9 +80,13 @@ export function isWriteAllowedInRuneContextTree(filename: string): boolean {
  *
  * If `targetPath` is inside `changePath` (i.e. the RuneContext change-doc
  * directory), the function checks whether the file being written is a
- * forbidden runtime artifact. If the target is outside the change tree,
- * the write is always allowed (the guard only concerns itself with content
- * inside the RuneContext tree).
+ * recognised canonical doc. Only canonical docs are allowed inside the
+ * change tree; any non-canonical file (runtime artifact OR unrecognised
+ * file) is rejected.
+ *
+ * If the target is outside the change tree, the write is always allowed
+ * (the guard only concerns itself with content inside the RuneContext
+ * tree).
  *
  * @param targetPath - The absolute or relative path where a write would occur.
  * @param changePath - The absolute path of the RuneContext change directory.
@@ -100,21 +102,27 @@ export function validateRuneContextWriteTarget(
   const absTarget = path.resolve(targetPath)
   const absChange = path.resolve(changePath)
 
+  // If the target IS exactly the change tree path (not a file inside),
+  // the guard does not apply — allow it.
+  if (absTarget === absChange) {
+    return { allowed: true, reason: "" }
+  }
+
   // If the target is NOT inside the change tree, the guard does not apply.
-  if (!absTarget.startsWith(absChange + path.sep) && absTarget !== absChange) {
+  if (!absTarget.startsWith(absChange + path.sep)) {
     return { allowed: true, reason: "" }
   }
 
   const basename = path.basename(absTarget)
 
-  if (FORBIDDEN_IN_RUNECONTEXT.has(basename)) {
-    return {
-      allowed: false,
-      reason: `runtime artifact "${basename}" must not be written inside RuneContext tree "${absChange}"`,
-    }
+  if (CANONICAL_DOCS.has(basename)) {
+    return { allowed: true, reason: "" }
   }
 
-  return { allowed: true, reason: "" }
+  return {
+    allowed: false,
+    reason: `"${basename}" is not a recognised canonical RuneContext doc; only canonical docs may be written inside RuneContext tree "${absChange}"`,
+  }
 }
 
 /**
@@ -128,4 +136,18 @@ export function validateRuneContextWriteTarget(
  */
 export function getForbiddenArtifacts(): string[] {
   return [...FORBIDDEN_IN_RUNECONTEXT]
+}
+
+/**
+ * Return a copy of the list of canonical RuneContext document names that
+ * ARE allowed to be written inside a RuneContext change tree.
+ *
+ * These are the only files permitted inside a change tree: proposal.md,
+ * design.md, standards.md, verification.md, tasks.md, references.md,
+ * status.yaml.
+ *
+ * @returns An array of canonical document file names.
+ */
+export function getCanonicalDocNames(): string[] {
+  return [...CANONICAL_DOCS]
 }

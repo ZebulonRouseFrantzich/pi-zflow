@@ -124,6 +124,44 @@ describe('resolveRuneChange', () => {
     )
   })
 
+  test('throws when verified flavor missing tasks.md but has references.md', async () => {
+    // Create a change folder with references.md but no tasks.md
+    const partialDir = path.join(repoRoot, 'packages', 'my-pkg', 'changes', 'PARTIAL-003')
+    await fs.mkdir(partialDir, { recursive: true })
+    await fs.writeFile(path.join(partialDir, 'proposal.md'), '# Proposal')
+    await fs.writeFile(path.join(partialDir, 'design.md'), '# Design')
+    await fs.writeFile(path.join(partialDir, 'standards.md'), '# Standards')
+    await fs.writeFile(path.join(partialDir, 'verification.md'), '# Verification')
+    await fs.writeFile(path.join(partialDir, 'status.yaml'), 'status: draft')
+    await fs.writeFile(path.join(partialDir, 'references.md'), '# References')
+    // No tasks.md
+
+    // Should detect as verified (because references.md exists) and fail validation
+    await assert.rejects(
+      () => resolveRuneChange({ repoRoot, changePath: partialDir }),
+      /Missing required RuneContext change file: "tasks.md"/,
+    )
+  })
+
+  test('throws when verified flavor missing references.md but has tasks.md', async () => {
+    // Create a change folder with tasks.md but no references.md
+    const partialDir = path.join(repoRoot, 'packages', 'my-pkg', 'changes', 'PARTIAL-004')
+    await fs.mkdir(partialDir, { recursive: true })
+    await fs.writeFile(path.join(partialDir, 'proposal.md'), '# Proposal')
+    await fs.writeFile(path.join(partialDir, 'design.md'), '# Design')
+    await fs.writeFile(path.join(partialDir, 'standards.md'), '# Standards')
+    await fs.writeFile(path.join(partialDir, 'verification.md'), '# Verification')
+    await fs.writeFile(path.join(partialDir, 'status.yaml'), 'status: draft')
+    await fs.writeFile(path.join(partialDir, 'tasks.md'), '# Tasks')
+    // No references.md
+
+    // Should detect as verified (because tasks.md exists) and fail validation
+    await assert.rejects(
+      () => resolveRuneChange({ repoRoot, changePath: partialDir }),
+      /Missing required RuneContext change file: "references.md"/,
+    )
+  })
+
   test('generates changeId containing path context for monorepo safety', async () => {
     const result = await resolveRuneChange({ repoRoot, changePath: plainChangeDir })
     assert.ok(result.changeId.includes('CHANGE-001'))
