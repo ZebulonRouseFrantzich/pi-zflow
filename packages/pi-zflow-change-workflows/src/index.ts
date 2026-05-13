@@ -51,3 +51,15 @@ export type {
   OwnershipConflict,
   OwnershipValidationResult,
 } from "./extensions/zflow-change-workflows/ownership-validator.js"
+
+// Worktree dispatch (Phase 5 — per-group isolated worktree launch)
+export {
+  buildWorkerTask,
+  buildWorktreeDispatchPlan,
+} from "./extensions/zflow-change-workflows/orchestration.js"
+
+export type {
+  WorktreeGroupTask,
+  WorktreeDispatchConfig,
+  DispatchExecutionGroup,
+} from "./extensions/zflow-change-workflows/orchestration.js"

@@ -607,6 +607,177 @@ export function getPlanReviewersForTier(tier: string): string[] {
   return base
 }
 
+// ── Worktree dispatch helpers (Phase 5) ───────────────────────
+
+/**
+ * A single task for worktree dispatch, representing one execution group.
+ */
+export interface WorktreeGroupTask {
+  /** Group identifier from execution-groups.md. */
+  groupId: string
+  /** The agent runtime name assigned to this group. */
+  agent: string
+  /** The assembled task prompt for this group. */
+  task: string
+  /** Files this group is expected to write (for preflight overlap check). */
+  claimedFiles: string[]
+  /** Optional scoped verification command from the plan. */
+  scopedVerification?: string
+  /** Output path for the worktree result manifest (relative to run dir). */
+  outputRelativePath: string
+}
+
+/**
+ * Configuration for a worktree dispatch operation.
+ */
+export interface WorktreeDispatchConfig {
+  /** Unique run identifier. */
+  runId: string
+  /** Absolute path to the repository root. */
+  repoRoot: string
+  /** Change identifier from the plan. */
+  changeId: string
+  /** Plan version (e.g. "v1"). */
+  planVersion: string
+}
+
+// Type for an execution group used by worktree dispatch
+export interface DispatchExecutionGroup {
+  id: string
+  agent: string
+  files: string[]
+  dependencies: string[]
+  taskPrompt: string
+  scopedVerification?: string
+}
+
+/**
+ * Build a worker task prompt for a single execution group.
+ *
+ * Produces a compact, actionable prompt that tells the worker agent:
+ * - what to implement (scoped to this group's files)
+ * - what not to touch
+ * - what context artifacts to read
+ * - how to validate
+ * - when to escalate
+ *
+ * @param group - The execution group to build a task for.
+ * @param config - Dispatch configuration (run ID, repo root, etc.).
+ * @param planArtifactPaths - Paths to canonical plan artifacts.
+ * @returns A task prompt string for the worker agent.
+ */
+export function buildWorkerTask(
+  group: DispatchExecutionGroup,
+  config: WorktreeDispatchConfig,
+  planArtifactPaths?: Record<string, string>,
+): string {
+  const lines: string[] = [
+    `# Task: ${group.id}`,
+    "",
+    `Execute the approved plan for group **${group.id}** in this isolated worktree.`,
+    "",
+    `## Run context`,
+    `- Run ID: ${config.runId}`,
+    `- Change: ${config.changeId}`,
+    `- Plan version: ${config.planVersion}`,
+    `- Repo root: ${config.repoRoot}`,
+    "",
+    `## Scope`,
+    `- Files you may modify: ${group.files.join(", ") || "(none specified)"}`,
+    `- Agent: ${group.agent}`,
+    "",
+    `## Rules`,
+    `1. ONLY modify files listed in your scope above. Do NOT touch files outside this list.`,
+    `2. If an instruction in the plan is impossible, stop work and file a deviation report.`,
+    `3. Create temporary commits as needed using format: \`[pi-worker] ${group.id}: <step>\``,
+    `4. After implementation, run the scoped verification command if provided.`,
+    `5. Do NOT launch subagents.`,
+    `6. Do NOT commit to the primary branch. Your worktree commits are disposable.`,
+    `7. Report all changed files and verification results in your output summary.`,
+  ]
+
+  if (group.dependencies.length > 0) {
+    lines.push(
+      "",
+      "## Dependencies",
+      `This group depends on: ${group.dependencies.join(", ")}.`,
+      "Those groups have already completed in their own worktrees.",
+      "If you need output from a dependency, read the plan artifacts.",
+    )
+  }
+
+  if (group.scopedVerification) {
+    lines.push(
+      "",
+      "## Scoped verification",
+      "After implementing, run the following command to verify your changes:",
+      "",
+      "```bash",
+      group.scopedVerification,
+      "```",
+      "",
+      "Include the verification result (pass/fail/output) in your summary.",
+    )
+  } else {
+    lines.push(
+      "",
+      "## Verification",
+      "No scoped verification command was specified in the plan.",
+      "If you can verify locally (e.g., type-check, lint), do so.",
+      "Otherwise, report that verification was not specified.",
+    )
+  }
+
+  if (planArtifactPaths && Object.keys(planArtifactPaths).length > 0) {
+    lines.push(
+      "",
+      "## Plan artifacts",
+      "The following plan documents are available:",
+      ...Object.entries(planArtifactPaths).map(
+        ([key, val]) => `- ${key}: \`${val}\``,
+      ),
+    )
+  }
+
+  lines.push(
+    "",
+    "## Output format",
+    "When finished, provide:",
+    "1. Summary of changes made",
+    "2. List of changed files (relative to repo root)",
+    "3. Verification result",
+    "4. Any unexpected issues or deviations",
+  )
+
+  return lines.join("\n")
+}
+
+/**
+ * Build a parallel worktree dispatch plan from execution groups.
+ *
+ * Returns an array of `WorktreeGroupTask` objects that can be passed to
+ * `subagents.parallel({ worktree: true, tasks: [...] })`.
+ *
+ * @param groups - Execution groups with assigned agents and task prompts.
+ * @param config - Dispatch configuration.
+ * @param planArtifactPaths - Optional paths to plan artifacts for context.
+ * @returns Array of worktree group tasks ready for subagent dispatch.
+ */
+export function buildWorktreeDispatchPlan(
+  groups: DispatchExecutionGroup[],
+  config: WorktreeDispatchConfig,
+  planArtifactPaths?: Record<string, string>,
+): WorktreeGroupTask[] {
+  return groups.map((group, index) => ({
+    groupId: group.id,
+    agent: group.agent,
+    task: buildWorkerTask(group, config, planArtifactPaths),
+    claimedFiles: group.files,
+    scopedVerification: group.scopedVerification,
+    outputRelativePath: `worktree-results/${group.id}-result.md`,
+  }))
+}
+
 // ── Output routing helpers ──────────────────────────────────────
 
 /**
