@@ -116,6 +116,19 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 /**
+ * Run a git diff command. Preserves trailing newlines because
+ * patch/diff output must remain valid for `git apply`.
+ */
+function gitDiff(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 10 * 1024 * 1024, // 10MB
+  })
+}
+
+/**
  * Get the HEAD commit SHA in the given working directory.
  */
 function getHeadSha(cwd: string): string {
@@ -206,54 +219,49 @@ function writeBinaryPatch(
   // 1. Get committed diff (base -> HEAD) with --binary
   let committedDiff = ""
   try {
-    committedDiff = git(
+    committedDiff = gitDiff(
       worktreeCwd,
       "diff", "--binary", baseCommit, "HEAD", "--",
       ...scopedFiles,
     )
   } catch {
     try {
-      committedDiff = git(worktreeCwd, "diff", "--binary", baseCommit, "HEAD")
+      committedDiff = gitDiff(worktreeCwd, "diff", "--binary", baseCommit, "HEAD")
     } catch {
       committedDiff = ""
     }
   }
 
   // 2. Get uncommitted diff (HEAD -> working tree) with --binary
-  //    This includes tracked-file modifications. For new untracked files,
-  //    we temporarily mark them as intent-to-add so they appear in the diff.
   let hadIntentToAdd = false
   try {
-    // Find untracked files
     const untrackedOut = git(worktreeCwd, "ls-files", "--others", "--exclude-standard")
     const untrackedFiles = untrackedOut ? untrackedOut.split("\n").filter(Boolean) : []
     if (untrackedFiles.length > 0) {
-      // Mark as intent-to-add (adds empty blob to index, doesn't touch working tree)
       for (const f of untrackedFiles) {
         git(worktreeCwd, "add", "-N", "--", f)
       }
       hadIntentToAdd = true
     }
   } catch {
-    // Ignore errors discovering/marking untracked files
+    // Ignore errors
   }
 
   let uncommittedDiff = ""
   try {
-    uncommittedDiff = git(
+    uncommittedDiff = gitDiff(
       worktreeCwd,
       "diff", "--binary", "HEAD", "--",
       ...scopedFiles,
     )
   } catch {
     try {
-      uncommittedDiff = git(worktreeCwd, "diff", "--binary", "HEAD")
+      uncommittedDiff = gitDiff(worktreeCwd, "diff", "--binary", "HEAD")
     } catch {
       uncommittedDiff = ""
     }
   }
 
-  // Undo intent-to-add markers (resets index without touching working tree)
   if (hadIntentToAdd) {
     try {
       git(worktreeCwd, "reset", "HEAD", "--", ".")
@@ -262,12 +270,13 @@ function writeBinaryPatch(
     }
   }
 
-  // 3. Combine patches
-  const combined = [committedDiff, uncommittedDiff].filter(Boolean).join("\n")
+  // 3. Combine patches, ensuring trailing newline for git apply
+  const combined = [committedDiff, uncommittedDiff].filter(Boolean).join("")
+  // Ensure the patch ends with exactly one newline
+  const finalPatch = combined.endsWith("\n") ? combined : combined + "\n"
 
-  // Create directory and write
   execFileSync("mkdir", ["-p", path.dirname(patchPath)], { stdio: "pipe" })
-  fsSync.writeFileSync(patchPath, combined, "utf-8")
+  fsSync.writeFileSync(patchPath, finalPatch, "utf-8")
 }
 
 // ---------------------------------------------------------------------------

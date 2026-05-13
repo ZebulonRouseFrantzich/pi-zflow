@@ -998,6 +998,8 @@ export async function prepareWorktreeImplementationRun(
     cwd?: string
     /** Override file paths for preflight (defaults to all group files). */
     plannedPaths?: Set<string>
+    /** Explicit repo root. Defaults to git rev-parse --show-toplevel from cwd. */
+    repoRoot?: string
   },
 ): Promise<WorktreeImplementationRunPlan> {
   const cwd = options?.cwd
@@ -1006,13 +1008,17 @@ export async function prepareWorktreeImplementationRun(
 
   // 1. Resolve repo root
   let repoRoot: string
-  try {
-    repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim()
-  } catch {
-    throw new Error("Not a git repository — cannot run worktree implementation.")
+  if (options?.repoRoot) {
+    repoRoot = options.repoRoot
+  } else {
+    try {
+      repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim()
+    } catch {
+      throw new Error("Not a git repository — cannot run worktree implementation.")
+    }
   }
 
   // 2. Collect planned file paths
@@ -1035,11 +1041,9 @@ export async function prepareWorktreeImplementationRun(
 
   // 4. Validate ownership and dependencies
   const ownershipValidation = validateOwnershipAndDependencies(groups)
-  if (ownershipValidation.errors.length > 0) {
+  if (!ownershipValidation.valid) {
     throw new Error(
-      `Ownership/dependency validation failed:\n${
-        ownershipValidation.errors.join("\n")
-      }`,
+      `Ownership/dependency validation failed:\n${ownershipValidation.summary}`,
     )
   }
 
@@ -1068,18 +1072,14 @@ export async function prepareWorktreeImplementationRun(
   const sequentialGroups: ExecutionGroup[] = []
 
   // Groups with overlapping files that must be sequential
-  const sequentialIds = new Set(ownershipValidation.sequentialGroups)
-
-  // Groups with explicit dependencies are also sequential (relative to their deps)
-  // We simply put dependency-ordered groups in sequentialGroups
-  const allGroupIds = new Set(groups.map((g) => g.id))
-  for (const conflict of ownershipValidation.conflicts) {
-    for (const id of conflict.groupIds) {
+  const sequentialIds = new Set<string>()
+  for (const batch of ownershipValidation.sequentialGroups) {
+    for (const id of batch) {
       sequentialIds.add(id)
     }
   }
 
-  // Any group with dependencies is sequential too
+  // Groups with explicit dependencies are also sequential (relative to their deps)
   for (const group of groups) {
     if (group.dependencies.length > 0) {
       sequentialIds.add(group.id)
@@ -1187,14 +1187,9 @@ export async function finalizeWorktreeImplementationRun(
     const reports = await readDeviationReports(changeId, planVersion, cwd)
     if (reports.length > 0) {
       // Synthesize deviation summary
-      const summary = await writeDeviationSummary(
-        reports,
-        runId,
-        changeId,
-        planVersion,
-        cwd,
-      )
-      deviationSummaryPath = summary
+      const { synthesizeDeviationSummary } = await import("./deviations.js")
+      const summary = synthesizeDeviationSummary(runId, changeId, planVersion, reports)
+      deviationSummaryPath = await writeDeviationSummary(summary, cwd)
     }
   } catch {
     // Ignore errors reading deviations — drift may not be implemented
