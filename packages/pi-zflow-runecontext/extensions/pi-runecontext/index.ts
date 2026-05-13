@@ -31,6 +31,15 @@ export {
   tryRunectxStatus,
 }
 
+// Re-export change resolution types and functions (Task 3.2)
+export type {
+  RuneChangeFlavor,
+  ResolvedRuneChangeFiles,
+  ResolvedRuneChange,
+  ResolveRuneChangeInput,
+} from "./resolve-change.js"
+export { resolveRuneChange } from "./resolve-change.js"
+
 /** Well-known capability name for RuneContext support. */
 export const RUNECONTEXT_CAPABILITY = "runecontext" as const
 
