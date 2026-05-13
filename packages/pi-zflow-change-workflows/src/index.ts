@@ -76,12 +76,17 @@ export type {
 export {
   buildWorkerTask,
   buildWorktreeDispatchPlan,
+  prepareWorktreeImplementationRun,
+  finalizeWorktreeImplementationRun,
+  signalDriftDetected,
+  listRetainedArtifacts,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
 export type {
   WorktreeGroupTask,
   WorktreeDispatchConfig,
   DispatchExecutionGroup,
+  WorktreeImplementationRunPlan,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
 // Worktree setup hook (Phase 5 — fail-fast hook integration)
