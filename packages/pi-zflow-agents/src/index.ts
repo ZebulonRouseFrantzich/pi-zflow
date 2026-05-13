@@ -44,3 +44,25 @@ export type {
   InstalledChainInfo,
   DiscoveryVerificationResult,
 } from "./agent-discovery.js"
+
+// Output conventions
+export {
+  getAgentRole,
+  getOutputConvention,
+  getOutputInstructions,
+  getOrchestratorOutputInstructions,
+  isKnownAgent,
+  getReportAgents,
+  getImplementationAgents,
+  getHybridAgents,
+  REPORT_AGENTS,
+  IMPLEMENTATION_AGENTS,
+  HYBRID_AGENTS,
+  ALL_AGENTS,
+  OUTPUT_CONVENTIONS,
+} from "./output-conventions.js"
+
+export type {
+  AgentRole,
+  OutputConvention,
+} from "./output-conventions.js"
