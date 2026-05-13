@@ -63,3 +63,14 @@ export type {
   WorktreeDispatchConfig,
   DispatchExecutionGroup,
 } from "./extensions/zflow-change-workflows/orchestration.js"
+
+// Worktree setup hook (Phase 5 — fail-fast hook integration)
+export {
+  repoNeedsWorktreeSetup,
+  getRepoWorktreeSetupConfig,
+  assertWorktreeSetupReady,
+} from "./extensions/zflow-change-workflows/worktree-setup.js"
+
+export type {
+  WorktreeSetupResult,
+} from "./extensions/zflow-change-workflows/worktree-setup.js"
