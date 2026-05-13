@@ -34,12 +34,14 @@ import type {
   NormalizedProfileDefinition,
   NormalizedAgentBinding,
   ModelRegistry,
+  ModelInfo,
   ResolvedLane,
   ResolvedAgentBinding,
   ResolvedProfile,
   CapabilityRequirements,
 } from "./profiles.js"
 
+import type { ThinkingCompatibilityResult } from "./capabilities.js"
 import {
   validateLaneCandidate,
   checkThinkingCompatibility,
@@ -55,14 +57,12 @@ export type { ThinkingCompatibilityResult } from "./capabilities.js"
  *
  * @deprecated Use `checkThinkingCompatibility` from the capabilities module instead.
  */
-import { checkThinkingCompatibility as _checkThinking } from "./capabilities.js"
-import type { ModelInfo } from "./profiles.js"
 export function isModelThinkingCompatible(
   model: ModelInfo,
   requestedLevel?: "low" | "medium" | "high",
   isConservative: boolean = false,
 ): ThinkingCompatibilityResult {
-  return _checkThinking(
+  return checkThinkingCompatibility(
     model.thinkingCapability,
     requestedLevel,
     isConservative,

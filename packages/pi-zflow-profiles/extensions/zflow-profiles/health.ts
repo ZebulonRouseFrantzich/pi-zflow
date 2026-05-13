@@ -38,7 +38,6 @@ import type {
   ResolvedProfile,
   ResolvedLane,
   ModelRegistry,
-  ModelInfo,
   NormalizedProfileDefinition,
 } from "./profiles.js"
 
@@ -214,7 +213,9 @@ function checkLaneModelHealth(
  * to verify continued availability before expensive workflow phases.
  *
  * When `requiredLanes` is provided, only those lanes are checked.
- * Otherwise all resolved lanes are checked.
+ * Otherwise all resolved lanes are checked (excluding lanes with
+ * `status === "disabled-optional"`, which are intentionally disabled
+ * and should not fail the preflight).
  *
  * This should be called before:
  *   - Plan review
@@ -228,7 +229,7 @@ function checkLaneModelHealth(
  *                   assumed healthy (caller should provide a registry
  *                   for meaningful checks).
  * @param requiredLanes - Optional subset of lanes to check. When omitted,
- *                        all lanes are checked.
+ *                        all non-disabled lanes are checked.
  * @returns A `LaneHealthReport` summarising the health of all checked lanes.
  */
 export function preflightLaneHealth(
@@ -255,6 +256,14 @@ export function preflightLaneHealth(
         message: `Lane "${laneName}" is not defined in the resolved profile`,
       })
       unhealthyLanes.push(laneName)
+      continue
+    }
+
+    // Skip lanes that were intentionally disabled during resolution
+    // (optional lanes with no matching model). These do not count as
+    // unhealthy — only genuinely broken required lanes should fail
+    // the preflight.
+    if (lane.status === "disabled-optional") {
       continue
     }
 
@@ -519,26 +528,41 @@ export async function handleLaneFailure(
  * Convenience wrapper that calls `preflightLaneHealth` and returns
  * a boolean indicating whether all required lanes are healthy.
  *
+ * When `lanesToCheck` is omitted, only lanes with `required: true`
+ * are checked — optional lanes are intentionally excluded so that
+ * disabled or degraded optional lanes do not falsely gate workflows.
+ *
  * This is designed for use in conditional checks before expensive
  * phases:
  *
  * ```ts
+ * if (!await checkLaneHealth(profile, registry)) {
+ *   // Handle unhealthy state on required lanes
+ * }
  * if (!await checkLaneHealth(profile, registry, ["planning-frontier"])) {
- *   // Handle unhealthy state
+ *   // Handle unhealthy state on specific lanes
  * }
  * ```
  *
  * @param resolved - The resolved profile to check.
  * @param registry - Optional registry for model availability checks.
- * @param requiredLanes - Optional subset of lanes to verify.
+ * @param lanesToCheck - Optional subset of lanes to verify. Defaults to
+ *                       all required lanes in the resolved profile.
  * @returns `true` if all checked lanes are healthy.
  */
 export function checkLaneHealth(
   resolved: ResolvedProfile,
   registry?: ModelRegistry,
-  requiredLanes?: string[],
+  lanesToCheck?: string[],
 ): boolean {
-  const report = preflightLaneHealth(resolved, registry, requiredLanes)
+  // When no explicit lanes are provided, default to required lanes only.
+  // This prevents optional lanes (including disabled-optional) from
+  // gating workflow execution.
+  const effectiveLanes = lanesToCheck ?? Object.values(resolved.resolvedLanes)
+    .filter((lane) => lane.required)
+    .map((lane) => lane.lane)
+
+  const report = preflightLaneHealth(resolved, registry, effectiveLanes)
   return report.allHealthy
 }
 

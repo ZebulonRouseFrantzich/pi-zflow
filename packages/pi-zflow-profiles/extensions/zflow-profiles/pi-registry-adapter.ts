@@ -27,7 +27,6 @@
  */
 
 import type { ModelRegistry, ModelInfo } from "./profiles.js"
-import { computeHash } from "./profiles.js"
 
 /**
  * Minimal interface for the Pi runtime model registry that this adapter
@@ -116,43 +115,6 @@ export function createPiModelRegistryAdapter(
   }
 }
 
-/**
- * Adapter-aware environment fingerprinting.
- *
- * Uses `getAllModels()` from the adapter (if available) to produce
- * a hash of model IDs and their auth status. Falls back to trying
- * the legacy `listModels()` duck-type, then to an empty string.
- *
- * @param registry - The local ModelRegistry (may have getAllModels).
- * @returns Hex-encoded fingerprint, or empty string if unavailable.
- */
-export function computeFingerprintFromAdapter(
-  registry: ModelRegistry,
-): string {
-  // Prefer the standard getAllModels() method
-  if (typeof (registry as any).getAllModels === "function") {
-    try {
-      const allModels = (registry as any).getAllModels() as ModelInfo[]
-      const sorted = [...allModels].sort((a, b) => a.id.localeCompare(b.id))
-      const canonical = sorted
-        .map((m) => `${m.id}:${m.provider ?? ""}:${m.api ?? ""}:${m.baseUrl ?? ""}:${m.authenticated}:${m.supportsTools}:${m.thinkingCapability}${m.contextWindow ? `:ctx${m.contextWindow}` : ""}${m.maxOutput ? `:out${m.maxOutput}` : ""}`)
-        .join("\n")
-      return computeHash(canonical)
-    } catch {
-      return ""
-    }
-  }
-
-  // Fall back to legacy listModels duck-type
-  if (typeof (registry as any).listModels === "function") {
-    try {
-      const ids = (registry as any).listModels() as string[]
-      const sorted = [...ids].sort()
-      return computeHash(sorted.join("\n"))
-    } catch {
-      return ""
-    }
-  }
-
-  return ""
-}
+// Fingerprinting is delegated to `computeEnvironmentFingerprintFromRegistry`
+// in profiles.ts, which is the single canonical fingerprint function.
+// No adapter-specific fingerprint helper is needed here.
