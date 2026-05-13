@@ -245,9 +245,12 @@ describe("assertCleanPrimaryTree", () => {
 
 describe("resolveRepoRoot", () => {
   test("resolves the current directory's repo root", () => {
-    // We should be inside the pi-zflow repo
     const root = resolveRepoRoot()
-    assert.ok(root.endsWith("pi-zflow") || root.includes("pi-zflow"), `Expected pi-zflow repo, got: ${root}`)
+    // Assert structural properties rather than a specific directory name:
+    // the repo root must be absolute and contain a .git entry.
+    assert.ok(path.isAbsolute(root), `repo root must be absolute, got: ${root}`)
+    assert.ok(fsSync.existsSync(path.join(root, ".git")), `repo root must contain .git, got: ${root}`)
+    assert.ok(root.length > 0, "repo root must be a non-empty path")
   })
 
   test("resolves a specific directory's repo root", () => {

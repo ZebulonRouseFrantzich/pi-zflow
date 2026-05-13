@@ -128,8 +128,4 @@ export type {
   RecoveryOptions,
 } from "../extensions/zflow-change-workflows/apply-back.js"
 
-// Drift signaling (Phase 5 — pi-intercom integration for drift reporting)
-export {
-  signalDriftDetected,
-  listRetainedArtifacts,
-} from "../extensions/zflow-change-workflows/orchestration.js"
+

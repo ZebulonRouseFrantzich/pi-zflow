@@ -168,15 +168,19 @@ describe("getRepoWorktreeSetupConfig", () => {
   })
 
   test("returns null when config file is invalid JSON", async () => {
+    // Remove the valid pi-zflow.config.json so it doesn't shadow the bad file
+    await fs.rm(path.join(repoRoot, "pi-zflow.config.json"), { force: true })
+
+    // Write invalid JSON to the FIRST candidate path (.pi/zflow/config.json)
+    await fs.mkdir(path.join(repoRoot, ".pi", "zflow"), { recursive: true })
     await fs.writeFile(
-      path.join(repoRoot, ".pi-zflow.config.json"),
+      path.join(repoRoot, ".pi", "zflow", "config.json"),
       "not valid json",
       "utf-8",
     )
     // Should skip invalid files and continue searching
     const config = await getRepoWorktreeSetupConfig(repoRoot)
-    // Will find pi-zflow.config.json (still exists) before .pi-zflow.config.json
-    assert.ok(config !== null)
-    assert.equal(config!.script, ".pi/zflow/fallback-hook.sh")
+    // No remaining candidates have valid config — should return null
+    assert.strictEqual(config, null)
   })
 })

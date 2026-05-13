@@ -307,11 +307,16 @@ export async function executeApplyBack(
     summary: `All ${groupsApplied} group(s) applied successfully in topological order.`,
   }
 
+  // Read current run to preserve the startedAt timestamp set during the "in-progress" update.
+  // updateRun does a shallow spread merge, so we must pass through the existing value.
+  const currentRun = await readRun(runId, cwd).catch(() => null)
+  const existingStartedAt = currentRun?.applyBack?.startedAt
+
   await updateRun(runId, {
     phase: "completed",
     applyBack: {
       status: "completed",
-      startedAt: undefined, // already set in the "in-progress" update
+      startedAt: existingStartedAt, // preserve the original start time
       completedAt: new Date().toISOString(),
     },
     preApplySnapshot: undefined, // clear snapshot after successful apply
