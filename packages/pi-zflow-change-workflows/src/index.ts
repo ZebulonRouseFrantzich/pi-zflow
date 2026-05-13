@@ -54,6 +54,24 @@ export type {
 
 // Run state helpers are exported from pi-zflow-artifacts/run-state
 
+// Deviations (Phase 5 — Plan Drift Protocol, deviation reports, summaries)
+export {
+  formatDeviationReport,
+  writeDeviationReport,
+  readDeviationReports,
+  synthesizeDeviationSummary,
+  writeDeviationSummary,
+  resolveDeviationReportPath,
+  resolveDeviationSummaryPath,
+  determineRecommendation,
+} from "./extensions/zflow-change-workflows/deviations.js"
+
+export type {
+  DeviationReport,
+  DeviationSummary,
+  DeviationStatus,
+} from "./extensions/zflow-change-workflows/deviations.js"
+
 // Worktree dispatch (Phase 5 — per-group isolated worktree launch)
 export {
   buildWorkerTask,

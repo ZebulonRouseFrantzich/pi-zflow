@@ -717,14 +717,16 @@ export function buildWorkerTask(
       "```",
       "",
       "Include the verification result (pass/fail/output) in your summary.",
+      "Do NOT invent or run repo-wide verification commands. Run only the",
+      "scoped verification command specified above.",
     )
   } else {
     lines.push(
       "",
       "## Verification",
       "No scoped verification command was specified in the plan.",
-      "If you can verify locally (e.g., type-check, lint), do so.",
-      "Otherwise, report that verification was not specified.",
+      "STOP and report a plan-quality gap: the plan is missing a Scoped verification",
+      "command for this group. Do NOT invent or run your own verification.",
     )
   }
 
