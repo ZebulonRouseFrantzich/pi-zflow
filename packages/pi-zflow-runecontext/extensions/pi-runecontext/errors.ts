@@ -19,13 +19,17 @@
  * integration contexts.
  */
 export class RuneContextError extends Error {
+  /** Machine-readable error code (e.g. "MISSING_REQUIRED_FILE"). */
+  readonly code: string
+
   /**
    * @param message - Human-readable error description.
    * @param code    - Machine-readable error code (e.g. "MISSING_REQUIRED_FILE").
    */
-  constructor(message: string, public readonly code: string) {
+  constructor(message: string, code: string) {
     super(message)
     this.name = "RuneContextError"
+    this.code = code
   }
 }
 
