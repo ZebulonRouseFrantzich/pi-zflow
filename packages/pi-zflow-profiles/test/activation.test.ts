@@ -434,15 +434,18 @@ describe("activateProfile", () => {
     const rawContent = await fs.readFile(filePath, "utf8")
     const expectedHash = computeHash(rawContent)
 
+    const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-test-cache-"))
+    const cachePath = path.join(cacheDir, "active-profile.json")
+
     try {
-      const resolved = await activateProfile("default", { repoRoot, registry })
-      // Read back cache
-      const cache = await readActiveProfileCache()
-      if (cache) {
-        assert.equal(cache.definitionHash, expectedHash)
-      }
+      await activateProfile("default", { repoRoot, registry, cachePath })
+      // Read back cache from the isolated test path
+      const cache = await readActiveProfileCache(cachePath)
+      assert.notEqual(cache, null)
+      assert.equal(cache!.definitionHash, expectedHash)
     } finally {
       await fs.rm(repoRoot, { recursive: true, force: true })
+      await fs.rm(cacheDir, { recursive: true, force: true })
     }
   })
 })
@@ -723,6 +726,44 @@ describe("ensureResolved", () => {
       assert.equal(second.resolvedLanes.scout.model, "m1")
       assert.equal(second.resolvedLanes.scout.status, "resolved")
       assert.equal(second.profileName, "default")
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+      await fs.rm(cacheDir, { recursive: true, force: true })
+    }
+  })
+
+  it("re-activates fresh cache with unresolved required lanes when requiredLanes omitted", async () => {
+    const { repoRoot } = await setupProfileFile({
+      default: {
+        lanes: {
+          scout: { required: true, preferredModels: ["m1"] },
+        },
+        agentBindings: { s: { lane: "scout" } },
+      },
+    })
+
+    const registry = makeRegistry([model("m1")])
+    const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-test-cache-"))
+    const cachePath = path.join(cacheDir, "active-profile.json")
+
+    try {
+      const badCache: ActiveProfileCache = {
+        profileName: "default",
+        sourcePath: path.join(repoRoot, ".pi", "zflow-profiles.json"),
+        resolvedAt: new Date().toISOString(),
+        ttlMinutes: 15,
+        definitionHash: computeHash(await fs.readFile(path.join(repoRoot, ".pi", "zflow-profiles.json"), "utf8")),
+        environmentFingerprint: computeEnvironmentFingerprintFromRegistry(registry),
+        resolvedLanes: {
+          scout: { model: null, required: true, optional: false, status: "unresolved-required", reason: "bad stale cache" },
+        },
+        agentBindings: {},
+      }
+      await writeActiveProfileCache(badCache, cachePath)
+
+      const resolved = await ensureResolved(undefined, { repoRoot, registry, cachePath })
+      assert.equal(resolved.resolvedLanes.scout.status, "resolved")
+      assert.equal(resolved.resolvedLanes.scout.model, "m1")
     } finally {
       await fs.rm(repoRoot, { recursive: true, force: true })
       await fs.rm(cacheDir, { recursive: true, force: true })

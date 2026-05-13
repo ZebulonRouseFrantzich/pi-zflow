@@ -147,7 +147,6 @@ describe("updateProfileFooterStatus", () => {
       scout: { model: "m1", required: true, optional: false, status: "resolved" },
     })
 
-    // Temporarily write to the real cache path for this test
     // Use a mock ui to capture the call
     let lastKey: string | undefined
     let lastText: string | undefined | null
@@ -158,16 +157,13 @@ describe("updateProfileFooterStatus", () => {
       },
     }
 
-    // Write cache to default path
-    await writeActiveProfileCache(cache)
+    const cachePath = await writeCache(cache)
     try {
-      await updateProfileFooterStatus(mockUi)
+      await updateProfileFooterStatus(mockUi, cachePath)
       assert.equal(lastKey, PROFILE_STATUS_KEY)
       assert.equal(lastText, "Profile: default")
     } finally {
-      // Clean up cache
-      const { ACTIVE_PROFILE_PATH } = await import("pi-zflow-core")
-      await fs.unlink(ACTIVE_PROFILE_PATH).catch(() => {})
+      await fs.rm(path.dirname(cachePath), { recursive: true, force: true })
     }
   })
 
@@ -181,13 +177,15 @@ describe("updateProfileFooterStatus", () => {
       },
     }
 
-    // Ensure no cache exists at the default path
-    const { ACTIVE_PROFILE_PATH } = await import("pi-zflow-core")
-    await fs.unlink(ACTIVE_PROFILE_PATH).catch(() => {})
-
-    await updateProfileFooterStatus(mockUi)
-    assert.equal(lastKey, PROFILE_STATUS_KEY)
-    assert.equal(lastText, undefined)
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-footer-test-"))
+    const missingCachePath = path.join(dir, "missing-active-profile.json")
+    try {
+      await updateProfileFooterStatus(mockUi, missingCachePath)
+      assert.equal(lastKey, PROFILE_STATUS_KEY)
+      assert.equal(lastText, undefined)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
   })
 
   it("sets status with health indicator when required lanes unresolved", async () => {
@@ -195,16 +193,15 @@ describe("updateProfileFooterStatus", () => {
       required: { model: null, required: true, optional: false, status: "unresolved-required" },
     })
 
-    await writeActiveProfileCache(cache)
+    const cachePath = await writeCache(cache)
     try {
       let lastText: string | undefined
       const mockUi = { setStatus: (_k: string, t: string | undefined) => { lastText = t } }
-      await updateProfileFooterStatus(mockUi)
+      await updateProfileFooterStatus(mockUi, cachePath)
       assert.ok(lastText?.includes("⚠"))
       assert.ok(lastText?.includes("1 required lane"))
     } finally {
-      const { ACTIVE_PROFILE_PATH } = await import("pi-zflow-core")
-      await fs.unlink(ACTIVE_PROFILE_PATH).catch(() => {})
+      await fs.rm(path.dirname(cachePath), { recursive: true, force: true })
     }
   })
 })

@@ -90,6 +90,8 @@ interface CandidateCheckResult {
  * @param registry - The model registry to query.
  * @param lane - The lane definition being resolved.
  * @param laneName - The lane name (for conservative detection).
+ * @param bindingConstraints - Optional aggregate constraints from agent
+ *        bindings bound to this lane.
  * @returns Check result with reasons for rejection.
  */
 function checkCandidate(
@@ -97,6 +99,7 @@ function checkCandidate(
   registry: ModelRegistry,
   lane: NormalizedLaneDefinition,
   laneName: string,
+  bindingConstraints?: { maxOutput?: number; maxSubagentDepth?: number },
 ): CandidateCheckResult {
   const model = registry.getModel(modelId)
 
@@ -106,6 +109,10 @@ function checkCandidate(
     requiresText: true,
     requiredThinking: lane.thinking,
     isConservativeLane: CONSERVATIVE_LANES.has(laneName),
+    // Incorporate agent binding constraints: the model must be able to
+    // produce enough output tokens for the most demanding agent bound to
+    // this lane.
+    minOutput: bindingConstraints?.maxOutput,
   }
 
   const result = validateLaneCandidate(modelId, model, requirements)
@@ -123,16 +130,19 @@ function checkCandidate(
  * @param laneName - The lane name (e.g., "planning-frontier").
  * @param lane - The normalized lane definition.
  * @param registry - The model registry for capability lookups.
+ * @param bindingConstraints - Optional aggregate constraints from agent
+ *        bindings bound to this lane (e.g., maxOutput).
  * @returns The resolved lane result.
  */
 export function resolveLane(
   laneName: string,
   lane: NormalizedLaneDefinition,
   registry: ModelRegistry,
+  bindingConstraints?: { maxOutput?: number; maxSubagentDepth?: number },
 ): ResolvedLane {
   // Walk preferredModels in order
   for (const modelId of lane.preferredModels) {
-    const check = checkCandidate(modelId, registry, lane, laneName)
+    const check = checkCandidate(modelId, registry, lane, laneName, bindingConstraints)
     if (check.valid) {
       // Determine effective thinking level from the model
       const model = registry.getModel(modelId)!
@@ -159,7 +169,7 @@ export function resolveLane(
   // No candidate resolved
   const allReasons: string[] = []
   for (const modelId of lane.preferredModels) {
-    const check = checkCandidate(modelId, registry, lane, laneName)
+    const check = checkCandidate(modelId, registry, lane, laneName, bindingConstraints)
     allReasons.push(...check.reasons)
   }
 
@@ -194,6 +204,45 @@ export function resolveLane(
 // ── Resolve all lanes in a profile ──────────────────────────────
 
 /**
+ * Aggregate agent binding constraints for each lane.
+ *
+ * For each lane, looks at all agent bindings that reference it and
+ * computes the maximum `maxOutput` and `maxSubagentDepth` values.
+ * These become capability constraints on the lane's model candidate
+ * selection: the chosen model must be capable enough for the most
+ * demanding agent bound to that lane.
+ *
+ * @param profile - The normalized profile definition.
+ * @returns A map of lane name to aggregated binding constraints.
+ */
+function aggregateBindingConstraints(
+  profile: NormalizedProfileDefinition,
+): Record<string, { maxOutput?: number; maxSubagentDepth?: number }> {
+  const constraints: Record<
+    string,
+    { maxOutput?: number; maxSubagentDepth?: number }
+  > = {}
+
+  for (const binding of Object.values(profile.agentBindings)) {
+    const existing = constraints[binding.lane] ?? {}
+    const maxOutput =
+      binding.maxOutput !== undefined
+        ? Math.max(existing.maxOutput ?? 0, binding.maxOutput)
+        : existing.maxOutput
+    const maxSubagentDepth =
+      binding.maxSubagentDepth !== undefined
+        ? Math.max(existing.maxSubagentDepth ?? 0, binding.maxSubagentDepth)
+        : existing.maxSubagentDepth
+    constraints[binding.lane] = {
+      ...(maxOutput !== undefined ? { maxOutput } : {}),
+      ...(maxSubagentDepth !== undefined ? { maxSubagentDepth } : {}),
+    }
+  }
+
+  return constraints
+}
+
+/**
  * Resolve all lanes defined in a profile.
  *
  * @param profile - The normalized profile definition.
@@ -204,9 +253,13 @@ export function resolveProfileLanes(
   profile: NormalizedProfileDefinition,
   registry: ModelRegistry,
 ): Record<string, ResolvedLane> {
+  // Aggregate agent binding constraints so lane resolution considers
+  // what the most demanding agent needs
+  const bindingConstraints = aggregateBindingConstraints(profile)
+
   const resolved: Record<string, ResolvedLane> = {}
   for (const [laneName, lane] of Object.entries(profile.lanes)) {
-    resolved[laneName] = resolveLane(laneName, lane, registry)
+    resolved[laneName] = resolveLane(laneName, lane, registry, bindingConstraints[laneName])
   }
   return resolved
 }

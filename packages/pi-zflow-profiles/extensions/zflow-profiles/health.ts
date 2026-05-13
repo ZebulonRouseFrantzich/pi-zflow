@@ -333,19 +333,18 @@ export function reresolveLane(
     return null
   }
 
-  // Build a temporary lane definition with the remaining candidates
-  // but preserving the original required/optional/thinking settings
-  const shortenedLane = {
-    required: laneDef.required,
-    optional: laneDef.optional,
-    thinking: laneDef.thinking,
-    preferredModels: remaining,
-  }
+  // Aggregate binding constraints for this lane. Runtime re-resolution
+  // must respect the same output constraints as initial resolution.
+  const maxOutput = Object.values(profileDef.agentBindings)
+    .filter((binding) => binding.lane === laneName)
+    .reduce<number | undefined>((max, binding) => {
+      if (binding.maxOutput === undefined) return max
+      return Math.max(max ?? 0, binding.maxOutput)
+    }, undefined)
 
-  // Use the existing resolveLane logic via our internal validator
-  // Since resolveLane is in model-resolution.ts, we replicate the
-  // core logic here to avoid a circular dependency. We iterate
-  // remaining candidates and validate each one.
+  // Use the existing candidate validation policy. Since resolveLane is in
+  // model-resolution.ts, we replicate the core loop here to avoid a circular
+  // dependency, including the binding-derived output requirement.
   for (const modelId of remaining) {
     const model = registry.getModel(modelId)
 
@@ -356,6 +355,7 @@ export function reresolveLane(
       requiresText: true,
       requiredThinking: laneDef.thinking,
       isConservativeLane: isConservative,
+      minOutput: maxOutput,
     }
 
     const validation = validateLaneCandidate(modelId, model, requirements)

@@ -250,6 +250,12 @@ export interface ResolvedProfile {
 export interface ModelInfo {
   /** Full model identifier (e.g. "openai/gpt-5.4", "github-copilot/gpt-5.4-codex"). */
   id: string
+  /** Provider identifier when available from the runtime registry. */
+  provider?: string
+  /** API family when available from the runtime registry. */
+  api?: string
+  /** Provider/model base URL when available; included in environment fingerprints. */
+  baseUrl?: string
   /** Whether this model supports tool calling. */
   supportsTools: boolean
   /** Whether this model supports text input/output. */
@@ -328,6 +334,18 @@ export interface ModelRegistry {
    * Returns `undefined` if the model is not known to the runtime.
    */
   getModel(modelId: string): ModelInfo | undefined
+
+  /**
+   * Optional: enumerate all known models for cache fingerprinting.
+   *
+   * When provided, the fingerprint function uses this to produce a
+   * stable hash of the current environment (model IDs, auth state,
+   * capability metadata) for cache invalidation.
+   *
+   * When absent, fingerprinting falls back to the legacy `listModels()`
+   * duck-type approach, then to an empty set.
+   */
+  getAllModels?(): ModelInfo[]
 }
 
 // ── Validation result types ─────────────────────────────────────
@@ -1284,10 +1302,10 @@ export async function computeCurrentProfileHash(
  * The fingerprint is computed from the model IDs and their
  * authenticated status, sorted for determinism.
  *
- * If the registry does not expose a `listModels()` method, the
- * fingerprint is computed from an empty set — meaning it will never
- * match a cache written by `activateProfile()` (which always includes
- * model info). This is safe: it simply forces a re-resolution.
+ * If the registry exposes `getAllModels()`, provider/model metadata is
+ * included. Otherwise this falls back to a legacy `listModels()` duck-type.
+ * If neither is available, the fingerprint is computed from an empty set;
+ * this is safe because it simply forces conservative re-resolution.
  *
  * @param registry - The model registry to fingerprint.
  * @returns Hex-encoded fingerprint string.
@@ -1295,7 +1313,24 @@ export async function computeCurrentProfileHash(
 export function computeEnvironmentFingerprintFromRegistry(
   registry: ModelRegistry,
 ): string {
-  // Try to enumerate models from the registry
+  // 1. Prefer the standard getAllModels() method
+  if (typeof registry.getAllModels === "function") {
+    try {
+      const allModels = registry.getAllModels()
+      const sorted = [...allModels].sort((a, b) => a.id.localeCompare(b.id))
+      const canonical = sorted
+        .map(
+          (m) =>
+            `${m.id}:${m.provider ?? ""}:${m.api ?? ""}:${m.baseUrl ?? ""}:${m.authenticated}:${m.supportsTools}:${m.thinkingCapability}${m.contextWindow ? `:ctx${m.contextWindow}` : ""}${m.maxOutput ? `:out${m.maxOutput}` : ""}`,
+        )
+        .join("\n")
+      return computeHash(canonical)
+    } catch {
+      // Fall through to legacy approaches
+    }
+  }
+
+  // 2. Fall back to legacy listModels duck-type
   const r = registry as Record<string, unknown>
   let entries: Array<{ id: string; authenticated: boolean }> = []
 

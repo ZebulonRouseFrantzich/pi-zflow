@@ -151,14 +151,20 @@ describe("Edge case: binding references unknown lane", () => {
 // ── 3. Required lane unresolved ─────────────────────────────────
 
 describe("Edge case: required lane unresolved", () => {
-  it("activation succeeds with unresolved status when a required lane has no available models", async () => {
+  it("activation throws on required lane unresolved", async () => {
     const repoRoot = await setupFixture("required-unresolved")
     const registry = makeRegistry([]) // no models available
     try {
-      const resolved = await activateProfile("default", { repoRoot, registry })
-      // Profile activates but the required lane is unresolved
-      assert.equal(resolved.resolvedLanes["scout-cheap"].status, "unresolved-required")
-      assert.equal(hasUnresolvedRequiredLanes(resolved), true)
+      await assert.rejects(
+        () => activateProfile("default", { repoRoot, registry }),
+        (err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err)
+          return (
+            msg.includes("unresolved required lanes") &&
+            msg.includes("scout-cheap")
+          )
+        },
+      )
     } finally {
       await cleanDir(repoRoot)
     }
@@ -353,7 +359,12 @@ describe("Edge case: cache invalidation on TTL expiry", () => {
 
   it("ensureResolved re-activates when cached profile is expired", async () => {
     const repoRoot = await setupFixture("all-resolved")
-    const registry = makeRegistry([model("available-model")])
+    // Must provide models that satisfy ALL required lanes in the fixture,
+    // including worker-strong which requires "available-model-hi" with high thinking
+    const registry = makeRegistry([
+      model("available-model"),
+      model("available-model-hi", { thinkingCapability: "high" }),
+    ])
     const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-edge-cache-"))
     const cachePath = path.join(cacheDir, "active-profile.json")
 
@@ -436,7 +447,10 @@ describe("Edge case: worker-strong not silently downgraded", () => {
 describe("Edge case: sync-project writes only on explicit command", () => {
   it("normal activation (activateProfile) does not create .pi/settings.json", async () => {
     const repoRoot = await setupFixture("all-resolved")
-    const registry = makeRegistry([model("available-model")])
+    const registry = makeRegistry([
+      model("available-model"),
+      model("available-model-hi", { thinkingCapability: "high" }),
+    ])
     try {
       await activateProfile("default", { repoRoot, registry })
       const settingsPath = path.join(repoRoot, ".pi", "settings.json")
@@ -449,7 +463,10 @@ describe("Edge case: sync-project writes only on explicit command", () => {
 
   it("normal activation (ensureResolved) does not create .pi/settings.json", async () => {
     const repoRoot = await setupFixture("all-resolved")
-    const registry = makeRegistry([model("available-model")])
+    const registry = makeRegistry([
+      model("available-model"),
+      model("available-model-hi", { thinkingCapability: "high" }),
+    ])
     const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-edge-cache-"))
     const cachePath = path.join(cacheDir, "active-profile.json")
     try {

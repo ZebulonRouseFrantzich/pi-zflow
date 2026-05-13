@@ -83,6 +83,8 @@ import {
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 
+import { createPiModelRegistryAdapter } from "./pi-registry-adapter.js"
+
 // Re-export the public profile API so sibling packages or extensions
 // can import from "pi-zflow-profiles" directly.
 export {
@@ -179,9 +181,6 @@ export type {
   CapabilityCheckResult,
 } from "./capabilities.js"
 
-export type {
-  ThinkingCheckResult,
-} from "./model-resolution.js"
 
 export type {
   LaneHealthStatus,
@@ -295,6 +294,20 @@ export async function activateProfile(
   const registry = options?.registry ?? createEmptyRegistry()
   const resolved = resolveProfile(profileName, profileDef, source, registry)
 
+  // 5a. Fail if any required lane is unresolved (must-preserve decision 7)
+  if (hasUnresolvedRequiredLanes(resolved)) {
+    const failedLanes = Object.values(resolved.resolvedLanes)
+      .filter((l) => l.status === "unresolved-required")
+      .map((l) => `  - ${l.lane}: ${l.reason ?? "no reason"}`)
+    const errorMsg =
+      `Profile "${profileName}" has unresolved required lanes and cannot be activated:\n` +
+      failedLanes.join("\n") +
+      `\n\n` +
+      `Check that the model registry has at least one matching model for each required lane. ` +
+      `Run \`/zflow-profile show\` for details or \`/zflow-profile refresh\` to re-resolve.`
+    throw new Error(errorMsg)
+  }
+
   // 6. Compute environment fingerprint from the registry
   const environmentFingerprint = computeEnvironmentFingerprintFromRegistry(registry)
 
@@ -362,18 +375,72 @@ export async function ensureResolved(
   )
   if (cache) {
     const resolved = cacheToResolvedProfile(cache)
-    // Run preflight lane health checks before returning
-    if (requiredLanes && requiredLanes.length > 0) {
-      const report = preflightLaneHealth(resolved, options?.registry, requiredLanes)
-      if (!report.allHealthy) {
-        // Log degradation — caller will handle via preflight checks
-        // if more specific action is needed
+
+    // Never trust a cache that contains unresolved required lanes. This can
+    // happen with older caches written before activation started enforcing
+    // required-lane failure, or after manual edits. Force re-resolution so
+    // activateProfile() either produces a valid cache or throws.
+    if (hasUnresolvedRequiredLanes(resolved)) {
+      return activateProfile("default", {
+        repoRoot: options?.repoRoot,
+        registry: options?.registry,
+        cachePath: options?.cachePath,
+      })
+    }
+
+    // Run preflight lane health checks before returning. If the caller did
+    // not provide a subset, check all required lanes from the cached profile
+    // so stale/unhealthy required mappings cannot bypass preflight.
+    const lanesToPreflight =
+      requiredLanes && requiredLanes.length > 0
+        ? requiredLanes
+        : Object.values(resolved.resolvedLanes)
+            .filter((lane) => lane.required)
+            .map((lane) => lane.lane)
+
+    if (lanesToPreflight.length > 0) {
+      const report = preflightLaneHealth(resolved, options?.registry, lanesToPreflight)
+      if (!report.allHealthy && options?.registry) {
+        // Required lanes are unhealthy — invalidate cache and re-resolve
+        const unhealthyRequired = lanesToPreflight.filter(
+          (ln) => report.unhealthyLanes.includes(ln),
+        )
+        if (unhealthyRequired.length > 0) {
+          // Force re-resolution by calling activateProfile directly (bypasses
+          // cache), which also fails on unresolved required lanes
+          const freshResolved = await activateProfile("default", {
+            repoRoot: options?.repoRoot,
+            registry: options?.registry,
+            cachePath: options?.cachePath,
+          })
+          // Run preflight again on the fresh result
+          const freshReport = preflightLaneHealth(
+            freshResolved,
+            options?.registry,
+            lanesToPreflight,
+          )
+          if (!freshReport.allHealthy) {
+            const stillUnhealthy = lanesToPreflight.filter(
+              (ln) => freshReport.unhealthyLanes.includes(ln),
+            )
+            if (stillUnhealthy.length > 0) {
+              throw new Error(
+                `Required lane${stillUnhealthy.length > 1 ? "s" : ""} ` +
+                  `${stillUnhealthy.join(", ")} ` +
+                  `are unhealthy after re-resolution. ` +
+                  `Check that the resolved models are still available in the registry.`,
+              )
+            }
+          }
+          return freshResolved
+        }
       }
     }
     return resolved
   }
 
   // 3. Cache missing or stale — full activation
+  //    activateProfile already fails on unresolved required lanes
   const resolved = await activateProfile("default", {
     repoRoot: options?.repoRoot,
     registry: options?.registry,
@@ -384,7 +451,17 @@ export async function ensureResolved(
   if (requiredLanes && requiredLanes.length > 0) {
     const report = preflightLaneHealth(resolved, options?.registry, requiredLanes)
     if (!report.allHealthy) {
-      // Log degradation — caller will handle via preflight checks
+      const unhealthyRequired = requiredLanes.filter(
+        (ln) => report.unhealthyLanes.includes(ln),
+      )
+      if (unhealthyRequired.length > 0) {
+        throw new Error(
+          `Required lane${unhealthyRequired.length > 1 ? "s" : ""} ` +
+            `${unhealthyRequired.join(", ")} ` +
+            `are unhealthy after resolution. ` +
+            `Check that the resolved models are still available in the registry.`,
+        )
+      }
     }
   }
 
@@ -452,10 +529,13 @@ export function formatProfileFooterStatus(cache: ActiveProfileCache): string {
  *
  * @param ui - The ExtensionUIContext for status bar access.
  */
-export async function updateProfileFooterStatus(ui: {
-  setStatus: (key: string, text: string | undefined) => void
-}): Promise<void> {
-  const cache = await readActiveProfileCache().catch(() => null)
+export async function updateProfileFooterStatus(
+  ui: {
+    setStatus: (key: string, text: string | undefined) => void
+  },
+  cachePath?: string,
+): Promise<void> {
+  const cache = await readActiveProfileCache(cachePath).catch(() => null)
 
   if (!cache) {
     ui.setStatus(PROFILE_STATUS_KEY, undefined)
@@ -557,15 +637,20 @@ export async function getResolvedLane(
  * Uses `resolveGitDir` from pi-zflow-core to find the git root from
  * the current working directory. Falls back to `process.cwd()` when
  * not in a git repo so commands still produce useful output.
+ *
+ * @param cwd - Optional override for the working directory.
+ *              When provided (e.g., from ctx.cwd), used instead of
+ *              process.cwd().
  */
-function getRepoRoot(): string | undefined {
-  const gitDir = resolveGitDir(process.cwd())
+function getRepoRoot(cwd?: string): string | undefined {
+  const effectiveCwd = cwd ?? process.cwd()
+  const gitDir = resolveGitDir(effectiveCwd)
   if (gitDir) {
     // resolveGitDir returns the .git path; the repo root is its parent
     return path.dirname(gitDir)
   }
   // Fallback: use cwd directly; it may or may not be a repo root
-  return process.cwd()
+  return effectiveCwd
 }
 
 /**
@@ -726,14 +811,43 @@ async function handleNoArgs(ui: {
  *
  * Loads, resolves, and caches the "default" profile, then displays
  * a summary of the resolved lanes.
+ *
+ * Uses the Pi runtime model registry when available (via ctx.modelRegistry
+ * from the extension command context) so lane resolution checks real
+ * model availability and authentication.
  */
-async function handleDefault(ui: {
-  notify: (message: string, type?: "info" | "warning" | "error") => void
-  setStatus: (key: string, text: string | undefined) => void
-}): Promise<void> {
+async function handleDefault(
+  ui: {
+    notify: (message: string, type?: "info" | "warning" | "error") => void
+    setStatus: (key: string, text: string | undefined) => void
+  },
+  extra?: {
+    modelRegistry?: {
+      getAll(): Array<{
+        provider: string
+        id: string
+        reasoning?: boolean
+        input?: string[]
+        contextWindow?: number
+        maxTokens?: number
+        [key: string]: unknown
+      }>
+      hasConfiguredAuth(model: {
+        provider: string
+        id: string
+        [key: string]: unknown
+      }): boolean
+    }
+    cwd?: string
+  },
+): Promise<void> {
   try {
+    const registry = extra?.modelRegistry
+      ? createPiModelRegistryAdapter(extra.modelRegistry)
+      : undefined
     const resolved = await activateProfile("default", {
-      repoRoot: getRepoRoot(),
+      repoRoot: getRepoRoot(extra?.cwd),
+      registry,
     })
 
     const summary = formatProfileSummary(resolved)
@@ -841,14 +955,41 @@ async function handleLanes(ui: {
  *
  * Ignores the cached profile and re-resolves all lanes from the
  * original definitions, then writes a fresh cache.
+ *
+ * Uses the Pi runtime model registry when available.
  */
-async function handleRefresh(ui: {
-  notify: (message: string, type?: "info" | "warning" | "error") => void
-  setStatus: (key: string, text: string | undefined) => void
-}): Promise<void> {
+async function handleRefresh(
+  ui: {
+    notify: (message: string, type?: "info" | "warning" | "error") => void
+    setStatus: (key: string, text: string | undefined) => void
+  },
+  extra?: {
+    modelRegistry?: {
+      getAll(): Array<{
+        provider: string
+        id: string
+        reasoning?: boolean
+        input?: string[]
+        contextWindow?: number
+        maxTokens?: number
+        [key: string]: unknown
+      }>
+      hasConfiguredAuth(model: {
+        provider: string
+        id: string
+        [key: string]: unknown
+      }): boolean
+    }
+    cwd?: string
+  },
+): Promise<void> {
   try {
+    const registry = extra?.modelRegistry
+      ? createPiModelRegistryAdapter(extra.modelRegistry)
+      : undefined
     const resolved = await activateProfile("default", {
-      repoRoot: getRepoRoot(),
+      repoRoot: getRepoRoot(extra?.cwd),
+      registry,
     })
 
     const summary = formatProfileSummary(resolved)
@@ -964,12 +1105,14 @@ export function formatSyncSummary(
  * Writes a `subagents.agentOverrides` block based on the currently
  * resolved active profile cache. This is a narrow, explicit operation:
  *
- * - Only writes the `subagents.agentOverrides` key.
- * - Preserves all other keys in `settings.json` (e.g. existing
- *   `subagents` config that is not `agentOverrides`).
+ * - Updates only agents present in the active zflow profile's bindings.
+ * - Preserves existing `subagents.agentOverrides` for unrelated agents.
+ * - Preserves all other keys in `settings.json`.
  * - Does NOT run as part of normal activation (`activateProfile` /
  *   `ensureResolved` never calls this).
  * - Requires an explicit opt-in (via `/zflow-profile sync-project`).
+ * - Aborts with an error if the existing settings file contains
+ *   invalid JSON (never silently replaces it).
  *
  * The settings file is read, updated, and written atomically (via
  * write-then-rename). If the file does not exist, it is created.
@@ -978,16 +1121,17 @@ export function formatSyncSummary(
  * @param settingsPath - Absolute path to `.pi/settings.json`.
  * @returns A `SyncSettingsResult` describing what was written.
  * @throws {Error} If the file cannot be written (permissions, disk full).
+ * @throws {SyntaxError} If the existing settings file has invalid JSON.
  */
 export async function syncProfileToSettings(
   cache: ActiveProfileCache,
   settingsPath: string,
 ): Promise<SyncSettingsResult> {
   // 1. Build agent overrides from the cache
-  const agentOverrides = buildAgentOverrides(cache)
-  const agentNames = Object.keys(agentOverrides)
+  const zflowOverrides = buildAgentOverrides(cache)
+  const zflowAgentNames = Object.keys(zflowOverrides)
 
-  if (agentNames.length === 0) {
+  if (zflowAgentNames.length === 0) {
     return {
       count: 0,
       settingsPath,
@@ -995,24 +1139,46 @@ export async function syncProfileToSettings(
     }
   }
 
-  // 2. Read existing settings or start fresh
+  // 2. Read existing settings or start fresh.
+  //    If the file exists but has invalid JSON, abort — never silently
+  //    replace user data.
   let settings: Record<string, unknown> = {}
   try {
     const existing = await fs.readFile(settingsPath, "utf8")
-    settings = JSON.parse(existing) as Record<string, unknown>
-  } catch {
-    // File doesn't exist or is invalid JSON — start fresh
+    try {
+      settings = JSON.parse(existing) as Record<string, unknown>
+    } catch (parseErr) {
+      throw new SyntaxError(
+        `Cannot read existing settings at "${settingsPath}": ` +
+          `invalid JSON. Fix or remove the file before running sync-project.`,
+      )
+    }
+  } catch (err) {
+    // File doesn't exist — start fresh
+    if (err instanceof SyntaxError) throw err
     settings = {}
   }
 
-  // 3. Merge subagents.agentOverrides without destroying unrelated keys
-  //    Preserve any existing subagents config that isn't agentOverrides
+  // 3. Merge zflow agent overrides into existing overrides without
+  //    destroying overrides for unrelated (non-zflow) agents.
+  const existingOverrides = (
+    settings.subagents as Record<string, unknown> | undefined
+  )?.agentOverrides as Record<string, unknown> | undefined
+
+  const mergedOverrides: Record<string, unknown> = {
+    // Start with existing overrides for all agents
+    ...(existingOverrides ?? {}),
+    // Overlay zflow-owned agents only — preserves non-zflow overrides
+    ...zflowOverrides,
+  }
+
+  // Preserve any existing subagents config that isn't agentOverrides
   const existingSubagents = settings.subagents as
     | Record<string, unknown>
     | undefined
   settings.subagents = {
     ...(existingSubagents ?? {}),
-    agentOverrides,
+    agentOverrides: mergedOverrides,
   }
 
   // 4. Ensure parent directory exists
@@ -1034,9 +1200,9 @@ export async function syncProfileToSettings(
   }
 
   return {
-    count: agentNames.length,
+    count: zflowAgentNames.length,
     settingsPath,
-    agents: agentNames,
+    agents: zflowAgentNames,
   }
 }
 
@@ -1048,10 +1214,13 @@ export async function syncProfileToSettings(
  * with a summary of what will be written, then delegates to
  * `syncProfileToSettings()`.
  */
-async function handleSyncProject(ui: {
-  notify: (message: string, type?: "info" | "warning" | "error") => void
-  confirm: (title: string, message: string) => Promise<boolean>
-}): Promise<void> {
+async function handleSyncProject(
+  ui: {
+    notify: (message: string, type?: "info" | "warning" | "error") => void
+    confirm: (title: string, message: string) => Promise<boolean>
+  },
+  extra?: { cwd?: string },
+): Promise<void> {
   const cache = await readActiveProfileCache().catch(() => null)
 
   if (!cache) {
@@ -1061,7 +1230,7 @@ async function handleSyncProject(ui: {
     return
   }
 
-  const repoRoot = getRepoRoot()
+  const repoRoot = getRepoRoot(extra?.cwd)
   if (!repoRoot) {
     ui.notify(
       "Cannot determine project root. Run this command from within your project directory.",
@@ -1119,14 +1288,36 @@ async function handleSyncProject(ui: {
  *   lanes      — show lane definitions and status
  *   refresh    — force re-resolution
  *   sync-project — write resolved overrides to .pi/settings.json
+ *
+ * When run from the Pi interactive session, `ctx.modelRegistry` and
+ * `ctx.cwd` are available and used for real model resolution.
  */
 async function handleProfileCommand(
   args: string,
-  ctx: { ui: {
-    notify: (message: string, type?: "info" | "warning" | "error") => void
-    setStatus: (key: string, text: string | undefined) => void
-    confirm: (title: string, message: string) => Promise<boolean>
-  }},
+  ctx: {
+    ui: {
+      notify: (message: string, type?: "info" | "warning" | "error") => void
+      setStatus: (key: string, text: string | undefined) => void
+      confirm: (title: string, message: string) => Promise<boolean>
+    }
+    modelRegistry?: {
+      getAll(): Array<{
+        provider: string
+        id: string
+        reasoning?: boolean
+        input?: string[]
+        contextWindow?: number
+        maxTokens?: number
+        [key: string]: unknown
+      }>
+      hasConfiguredAuth(model: {
+        provider: string
+        id: string
+        [key: string]: unknown
+      }): boolean
+    }
+    cwd?: string
+  },
 ): Promise<void> {
   const trimmed = args.trim()
   const subcommand = trimmed.split(/\s+/)[0]?.toLowerCase() ?? ""
@@ -1138,7 +1329,10 @@ async function handleProfileCommand(
 
   switch (subcommand) {
     case "default":
-      await handleDefault(ctx.ui)
+      await handleDefault(ctx.ui, {
+        modelRegistry: ctx.modelRegistry,
+        cwd: ctx.cwd,
+      })
       break
     case "show":
       await handleShow(ctx.ui)
@@ -1147,10 +1341,13 @@ async function handleProfileCommand(
       await handleLanes(ctx.ui)
       break
     case "refresh":
-      await handleRefresh(ctx.ui)
+      await handleRefresh(ctx.ui, {
+        modelRegistry: ctx.modelRegistry,
+        cwd: ctx.cwd,
+      })
       break
     case "sync-project":
-      await handleSyncProject(ctx.ui)
+      await handleSyncProject(ctx.ui, { cwd: ctx.cwd })
       break
     default:
       ctx.ui.notify(
@@ -1201,6 +1398,13 @@ export default function activateZflowProfilesExtension(pi: ExtensionAPI): void {
     return
   }
 
+  // If the capability already has a service, another compatible
+  // instance already initialised fully. No-op to avoid duplicate
+  // command registration and session hooks (coexistence rule 7).
+  if (registered.service !== undefined) {
+    return
+  }
+
   // ── Build and provide the profile service ─────────────────────
   const profileService: ProfileService = {
     loadProfiles,
@@ -1246,6 +1450,23 @@ export default function activateZflowProfilesExtension(pi: ExtensionAPI): void {
         setStatus: (key: string, text: string | undefined) => void
         confirm: (title: string, message: string) => Promise<boolean>
       }
+      modelRegistry?: {
+        getAll(): Array<{
+          provider: string
+          id: string
+          reasoning?: boolean
+          input?: string[]
+          contextWindow?: number
+          maxTokens?: number
+          [key: string]: unknown
+        }>
+        hasConfiguredAuth(model: {
+          provider: string
+          id: string
+          [key: string]: unknown
+        }): boolean
+      }
+      cwd?: string
     }): Promise<void> => {
       await handleProfileCommand(args, ctx)
     },

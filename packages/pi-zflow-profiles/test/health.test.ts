@@ -359,6 +359,30 @@ describe("reresolveLane", () => {
     assert.equal(result, null)
   })
 
+  it("respects binding maxOutput constraints during re-resolution", () => {
+    const profileDef: NormalizedProfileDefinition = {
+      lanes: {
+        "test-lane": laneDef(["too-small", "large-enough"]),
+      },
+      agentBindings: {
+        "zflow.large-output-agent": {
+          lane: "test-lane",
+          optional: false,
+          maxOutput: 12000,
+        },
+      },
+    }
+
+    const registry = makeRegistry([
+      model("too-small", { maxOutput: 4000 }),
+      model("large-enough", { maxOutput: 16000 }),
+    ])
+
+    const result = reresolveLane("test-lane", profileDef, registry, [])
+    assert.notEqual(result, null)
+    assert.equal(result!.model, "large-enough")
+  })
+
   it("preserves required/optional flags in the result", () => {
     const profileDef = makeProfileDef({
       "test-lane": laneDef(["failed-model", "good-model"], {

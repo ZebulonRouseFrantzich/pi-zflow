@@ -360,7 +360,7 @@ describe("syncProfileToSettings", () => {
     }
   })
 
-  it("replaces existing agentOverrides when merging", async () => {
+  it("preserves old and adds new agentOverrides when merging", async () => {
     const dir = await tempDir()
     try {
       // Pre-write a settings file with existing agent overrides
@@ -380,8 +380,8 @@ describe("syncProfileToSettings", () => {
       assert.equal(result.count, 2)
 
       const written = JSON.parse(await fs.readFile(settingsPath, "utf8"))
-      // Old overrides should be REPLACED by new ones
-      assert.equal(written.subagents.agentOverrides["old-agent"], undefined)
+      // Old overrides should be PRESERVED (merged, not replaced)
+      assert.deepEqual(written.subagents.agentOverrides["old-agent"], { model: "old-model" })
       // Unrelated config should be preserved
       assert.equal(written.subagents.unrelatedConfig, "keep-me")
       // New overrides should be written
