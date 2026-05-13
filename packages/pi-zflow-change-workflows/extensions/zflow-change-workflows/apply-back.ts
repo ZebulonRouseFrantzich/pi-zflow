@@ -22,7 +22,7 @@
 
 import * as path from "node:path"
 import { execFileSync } from "node:child_process"
-import { readRun, updateRun, resetToPreApplySnapshot, setRunPhase } from "pi-zflow-artifacts/run-state"
+import { readRun, updateRun, resetToPreApplySnapshot, setRunPhase, createRecoveryRef, removeRecoveryRef } from "pi-zflow-artifacts/run-state"
 import type { PreApplySnapshot } from "pi-zflow-artifacts/run-state"
 import { resolveRunDir } from "pi-zflow-artifacts/artifact-paths"
 import { topoSortGroups } from "./ownership-validator.js"
@@ -206,6 +206,10 @@ export async function executeApplyBack(
     applyBack: { status: "in-progress", startedAt: new Date().toISOString() },
   }, cwd)
 
+  // Create recovery ref before any patches are applied
+  // This ensures we can restore the pre-apply state if apply-back fails or is interrupted.
+  createRecoveryRef(runId, repoRoot, snapshot.head)
+
   // Compute topological order
   const orderedIds = topoSortGroups(groups)
   if (!orderedIds) {
@@ -311,6 +315,9 @@ export async function executeApplyBack(
     },
     preApplySnapshot: undefined, // clear snapshot after successful apply
   }, cwd)
+
+  // Remove recovery ref — apply-back completed successfully, no rollback needed
+  removeRecoveryRef(runId, repoRoot)
 
   return result
 }

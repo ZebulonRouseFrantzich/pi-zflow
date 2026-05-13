@@ -12,21 +12,25 @@
  * - worktree path
  * - base commit
  * - worktree head commit/ref
- * - changed files
- * - patch artifact path
+ * - changed files (committed + uncommitted)
+ * - patch artifact path (binary-safe)
  * - scoped verification result
  * - retained/not-retained status
+ *
+ * ## Design
+ *
+ * - All git diff commands run FROM the worktree directory (worktreePath as cwd).
+ * - Patches are generated with `--binary` for safe apply-back replay.
+ * - Uncommitted changes in the worktree are captured alongside committed diffs.
  *
  * @module pi-zflow-change-workflows/group-result
  */
 
 import * as path from "node:path"
-import * as fs from "node:fs/promises"
 import { execFileSync } from "node:child_process"
 import { resolveRunDir } from "pi-zflow-artifacts/artifact-paths"
 import { readRun, updateRun } from "pi-zflow-artifacts/run-state"
 
-// Synchronous file operations for patch writing
 import * as fsSync from "node:fs"
 
 // ---------------------------------------------------------------------------
@@ -61,6 +65,8 @@ export interface GroupResult {
   headCommit: string
   /** Files changed by this group (relative to repo root). */
   changedFiles: string[]
+  /** Files with uncommitted changes in the worktree. */
+  uncommittedChanges: string[]
   /** Absolute path to the patch artifact file. */
   patchPath: string
   /** Result of scoped verification. */
@@ -94,92 +100,174 @@ export interface CaptureGroupResultOptions {
 }
 
 // ---------------------------------------------------------------------------
-// Git helpers
+// Git helpers — all commands run from the worktree directory
 // ---------------------------------------------------------------------------
 
 /**
- * Get the HEAD commit SHA of a worktree or repo.
+ * Run a git command in the given working directory and return trimmed stdout.
  */
-function getHeadSha(cwd: string): string {
-  return execFileSync("git", ["rev-parse", "HEAD"], {
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, {
     cwd,
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
-  }).trim()
+    maxBuffer: 10 * 1024 * 1024, // 10MB
+  }).trimEnd()
 }
 
 /**
- * Get the diff between two commits for specific files.
- *
- * Returns unified diff output as a string.
+ * Get the HEAD commit SHA in the given working directory.
  */
-function getDiff(repoRoot: string, baseCommit: string, headCommit: string, paths: string[]): string {
-  try {
-    const result = execFileSync("git", [
-      "diff", baseCommit, headCommit, "--",
-      ...paths,
-    ], {
-      cwd: repoRoot,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-      maxBuffer: 10 * 1024 * 1024, // 10MB
-    })
-    return result
-  } catch {
-    // Fall back to full diff if scoped diff fails
-    try {
-      return execFileSync("git", [
-        "diff", baseCommit, headCommit,
-      ], {
-        cwd: repoRoot,
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "pipe"],
-        maxBuffer: 10 * 1024 * 1024,
-      })
-    } catch {
-      return ""
-    }
-  }
+function getHeadSha(cwd: string): string {
+  return git(cwd, "rev-parse", "HEAD")
 }
 
 /**
  * Get the list of files changed between two commits, scoped to specific paths.
+ *
+ * Runs from `worktreeCwd` to ensure we capture worktree-local changes.
  */
-function getChangedFiles(repoRoot: string, baseCommit: string, headCommit: string, scopedFiles: string[]): string[] {
+function getChangedFiles(
+  worktreeCwd: string,
+  baseCommit: string,
+  scopedFiles: string[],
+): string[] {
+  // Committed changes between base and HEAD
+  let committed: string[] = []
   try {
-    const result = execFileSync("git", [
-      "diff", "--name-only", baseCommit, headCommit, "--",
+    const out = git(
+      worktreeCwd,
+      "diff", "--name-only", baseCommit, "HEAD", "--",
       ...scopedFiles,
-    ], {
-      cwd: repoRoot,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    })
-    return result.trim().split("\n").filter(Boolean)
+    )
+    committed = out ? out.split("\n").filter(Boolean) : []
   } catch {
-    // Fall back to full file list
     try {
-      const result = execFileSync("git", [
-        "diff", "--name-only", baseCommit, headCommit,
-      ], {
-        cwd: repoRoot,
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "pipe"],
-      })
-      return result.trim().split("\n").filter(Boolean)
+      const out = git(worktreeCwd, "diff", "--name-only", baseCommit, "HEAD")
+      committed = out ? out.split("\n").filter(Boolean) : []
     } catch {
-      return []
+      committed = []
     }
   }
+
+  // Uncommitted changes (working tree vs HEAD, tracked files only)
+  let uncommittedTracked: string[] = []
+  try {
+    const out = git(
+      worktreeCwd,
+      "diff", "--name-only", "HEAD", "--",
+      ...scopedFiles,
+    )
+    uncommittedTracked = out ? out.split("\n").filter(Boolean) : []
+  } catch {
+    try {
+      const out = git(worktreeCwd, "diff", "--name-only", "HEAD")
+      uncommittedTracked = out ? out.split("\n").filter(Boolean) : []
+    } catch {
+      uncommittedTracked = []
+    }
+  }
+
+  // Untracked files (not yet tracked by git)
+  let untracked: string[] = []
+  try {
+    const out = git(worktreeCwd, "ls-files", "--others", "--exclude-standard")
+    untracked = out ? out.split("\n").filter(Boolean) : []
+  } catch {
+    untracked = []
+  }
+
+  // Merge and deduplicate all three lists
+  const seen = new Set<string>()
+  return [...committed, ...uncommittedTracked, ...untracked].filter((f) => {
+    if (seen.has(f)) return false
+    seen.add(f)
+    return true
+  })
 }
 
 /**
- * Write a patch file from the diff between two commits.
+ * Generate a binary-safe patch from the worktree's changes.
+ *
+ * Combines committed diff (base->HEAD) and uncommitted diff (HEAD->working tree).
+ * Writes the combined patch atomically to `patchPath`.
+ *
+ * @param worktreeCwd - Worktree root directory (cd here for git commands).
+ * @param baseCommit - The commit the worktree was created from.
+ * @param patchPath - Absolute path to write the patch file to.
+ * @param scopedFiles - Files to scope the diff to.
  */
-function writePatchFile(repoRoot: string, baseCommit: string, headCommit: string, patchPath: string, scopedFiles: string[]): void {
-  const diff = getDiff(repoRoot, baseCommit, headCommit, scopedFiles)
+function writeBinaryPatch(
+  worktreeCwd: string,
+  baseCommit: string,
+  patchPath: string,
+  scopedFiles: string[],
+): void {
+  // 1. Get committed diff (base -> HEAD) with --binary
+  let committedDiff = ""
+  try {
+    committedDiff = git(
+      worktreeCwd,
+      "diff", "--binary", baseCommit, "HEAD", "--",
+      ...scopedFiles,
+    )
+  } catch {
+    try {
+      committedDiff = git(worktreeCwd, "diff", "--binary", baseCommit, "HEAD")
+    } catch {
+      committedDiff = ""
+    }
+  }
+
+  // 2. Get uncommitted diff (HEAD -> working tree) with --binary
+  //    This includes tracked-file modifications. For new untracked files,
+  //    we temporarily mark them as intent-to-add so they appear in the diff.
+  let hadIntentToAdd = false
+  try {
+    // Find untracked files
+    const untrackedOut = git(worktreeCwd, "ls-files", "--others", "--exclude-standard")
+    const untrackedFiles = untrackedOut ? untrackedOut.split("\n").filter(Boolean) : []
+    if (untrackedFiles.length > 0) {
+      // Mark as intent-to-add (adds empty blob to index, doesn't touch working tree)
+      for (const f of untrackedFiles) {
+        git(worktreeCwd, "add", "-N", "--", f)
+      }
+      hadIntentToAdd = true
+    }
+  } catch {
+    // Ignore errors discovering/marking untracked files
+  }
+
+  let uncommittedDiff = ""
+  try {
+    uncommittedDiff = git(
+      worktreeCwd,
+      "diff", "--binary", "HEAD", "--",
+      ...scopedFiles,
+    )
+  } catch {
+    try {
+      uncommittedDiff = git(worktreeCwd, "diff", "--binary", "HEAD")
+    } catch {
+      uncommittedDiff = ""
+    }
+  }
+
+  // Undo intent-to-add markers (resets index without touching working tree)
+  if (hadIntentToAdd) {
+    try {
+      git(worktreeCwd, "reset", "HEAD", "--", ".")
+    } catch {
+      // Best-effort cleanup
+    }
+  }
+
+  // 3. Combine patches
+  const combined = [committedDiff, uncommittedDiff].filter(Boolean).join("\n")
+
+  // Create directory and write
   execFileSync("mkdir", ["-p", path.dirname(patchPath)], { stdio: "pipe" })
-  fsSync.writeFileSync(patchPath, diff, "utf-8")
+  fsSync.writeFileSync(patchPath, combined, "utf-8")
 }
 
 // ---------------------------------------------------------------------------
@@ -189,8 +277,11 @@ function writePatchFile(repoRoot: string, baseCommit: string, headCommit: string
 /**
  * Capture the result of a worktree group run.
  *
- * Collects changed files, creates a patch artifact, and records the
- * normalized metadata in the run's run.json.
+ * Collects changed files (committed + uncommitted), creates a binary-safe
+ * patch artifact, and records the normalized metadata in the run's run.json.
+ *
+ * All git diff commands run FROM the worktree directory (`worktreePath`)
+ * to ensure changes in the isolated worktree are captured correctly.
  *
  * @param options - Capture options.
  * @returns The captured GroupResult.
@@ -210,20 +301,53 @@ export async function captureGroupResult(
     cwd,
   } = options
 
-  // Resolve the base commit (the worktree was created from this)
+  // The base commit is the commit the worktree was created from (the primary's HEAD)
   const baseCommit = getHeadSha(repoRoot)
 
-  // Get the worktree's head commit
+  // The worktree's HEAD (may differ from base if worker committed)
   const headCommit = getHeadSha(worktreePath)
 
-  // Get changed files
-  const changedFiles = getChangedFiles(repoRoot, baseCommit, headCommit, scopedFiles)
+  // Get changed files FROM the worktree (captures both committed and uncommitted)
+  const changedFiles = getChangedFiles(worktreePath, baseCommit, scopedFiles)
 
-  // Write the patch artifact
+  // Get uncommitted-only changes (tracked modifications + untracked files)
+  let uncommitted: string[] = []
+  try {
+    const out = git(
+      worktreePath,
+      "diff", "--name-only", "HEAD", "--",
+      ...scopedFiles,
+    )
+    uncommitted = out ? out.split("\n").filter(Boolean) : []
+  } catch {
+    try {
+      const out = git(worktreePath, "diff", "--name-only", "HEAD")
+      uncommitted = out ? out.split("\n").filter(Boolean) : []
+    } catch {
+      uncommitted = []
+    }
+  }
+
+  // Also include untracked files in uncommitted list
+  try {
+    const out = git(worktreePath, "ls-files", "--others", "--exclude-standard")
+    const untrackedFiles = out ? out.split("\n").filter(Boolean) : []
+    const seen = new Set(uncommitted)
+    for (const f of untrackedFiles) {
+      if (!seen.has(f)) {
+        uncommitted.push(f)
+        seen.add(f)
+      }
+    }
+  } catch {
+    // Ignore errors discovering untracked files
+  }
+
+  // Write binary-safe patch artifact
   const runDir = resolveRunDir(runId, cwd)
   const patchesDir = path.join(runDir, "patches")
   const patchPath = path.join(patchesDir, `${groupId}.patch`)
-  writePatchFile(repoRoot, baseCommit, headCommit, patchPath, scopedFiles)
+  writeBinaryPatch(worktreePath, baseCommit, patchPath, scopedFiles)
 
   // Build the group result
   const groupResult: GroupResult = {
@@ -233,6 +357,7 @@ export async function captureGroupResult(
     baseCommit,
     headCommit,
     changedFiles,
+    uncommittedChanges: uncommitted,
     patchPath,
     verification,
     retained: retain,
@@ -249,6 +374,7 @@ export async function captureGroupResult(
     baseCommit,
     headCommit,
     changedFiles,
+    uncommittedChanges: uncommitted,
     patchPath,
     scopedVerification: verification
       ? {
@@ -295,6 +421,7 @@ export async function getGroupResult(
     baseCommit: group.baseCommit,
     headCommit: group.headCommit ?? "",
     changedFiles: group.changedFiles,
+    uncommittedChanges: group.uncommittedChanges ?? [],
     patchPath: group.patchPath,
     verification: group.scopedVerification
       ? {
@@ -326,6 +453,7 @@ export async function listGroupResults(
     baseCommit: group.baseCommit,
     headCommit: group.headCommit ?? "",
     changedFiles: group.changedFiles,
+    uncommittedChanges: group.uncommittedChanges ?? [],
     patchPath: group.patchPath,
     verification: group.scopedVerification
       ? {

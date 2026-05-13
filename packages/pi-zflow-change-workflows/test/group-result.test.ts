@@ -159,6 +159,45 @@ describe("captureGroupResult", () => {
 
     assert.equal(result.retained, true)
   })
+
+  test("captures uncommitted changes in worktree", async () => {
+    // Make an uncommitted change in the worktree (no git add/commit)
+    const uncommittedFilePath = path.join(worktreePath, "src", "newfile.ts")
+    await fs.mkdir(path.dirname(uncommittedFilePath), { recursive: true })
+    await fs.writeFile(uncommittedFilePath, 'export const newFeature = true;\n', "utf-8")
+
+    const result = await captureGroupResult({
+      groupId: "group-uncommitted",
+      agent: "zflow.implement-routine",
+      worktreePath,
+      runId,
+      repoRoot,
+      scopedFiles: ["src"],
+      cwd: repoRoot,
+    })
+
+    // uncommittedChanges should include the new file
+    assert.ok(result.uncommittedChanges.length > 0)
+    assert.ok(result.uncommittedChanges.some((f) => f.includes("newfile.ts")))
+    // changedFiles should also include it
+    assert.ok(result.changedFiles.some((f) => f.includes("newfile.ts")))
+  })
+
+  test("patch is generated with binary-safe markers", async () => {
+    const result = await captureGroupResult({
+      groupId: "group-binary",
+      agent: "zflow.implement-routine",
+      worktreePath,
+      runId,
+      repoRoot,
+      scopedFiles: ["src"],
+      cwd: repoRoot,
+    })
+
+    const patchContent = await fs.readFile(result.patchPath, "utf-8")
+    // Patch should contain diff headers
+    assert.ok(patchContent.includes("diff --git"), `Patch should have diff headers: ${result.patchPath}`)
+  })
 })
 
 describe("getGroupResult and listGroupResults", () => {

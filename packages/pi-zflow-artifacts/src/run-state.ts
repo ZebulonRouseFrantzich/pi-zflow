@@ -90,6 +90,8 @@ export interface GroupRunMetadata {
   headCommit?: string
   /** Files changed by this group (relative to repo root). */
   changedFiles: string[]
+  /** Files with uncommitted changes in the worktree (empty if all changes committed). */
+  uncommittedChanges?: string[]
   /** Path to the patch artifact. */
   patchPath: string
   /** Result of scoped verification. */
@@ -417,12 +419,11 @@ export function resetToPreApplySnapshot(
       stdio: ["ignore", "pipe", "pipe"],
     })
   }
-
-  // Also clean untracked files that may have been created during apply
-  execFileSync("git", ["clean", "-fd"], {
-    cwd: repoRoot,
-    stdio: ["ignore", "pipe", "pipe"],
-  })
+  // NOTE: We intentionally do NOT run `git clean -fd` here.
+  // Preflight permits non-overlapping untracked files, and a blanket clean
+  // would delete unrelated user files that existed before dispatch.
+  // The hard reset restores tracked files; untracked files created by apply
+  // are harmless orphans that can be ignored or cleaned selectively.
 }
 
 /**
