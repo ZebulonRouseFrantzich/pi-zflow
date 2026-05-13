@@ -127,6 +127,22 @@ export type {
   ResolvedBaseline,
 } from "./diff-baseline.js"
 
+// ── Re-export PR/MR helpers ──────────────────────────────────
+
+export {
+  parsePrUrl,
+  detectHost,
+  buildPrApiCommands,
+  validatePrUrl,
+} from "./pr.js"
+
+export type {
+  PrPlatform,
+  ResolvedPrTarget,
+  PrApiCommands,
+  PrUrlValidation,
+} from "./pr.js"
+
 export type {
   ReviewerManifest,
   ReviewerMode,
