@@ -13,7 +13,8 @@
   "keywords": ["pi-package", "pi-zflow"],
   "license": "MIT",
   "dependencies": {
-    "pi-zflow-core": "0.1.0"
+    "pi-zflow-core": "0.1.0",
+    "pi-zflow-artifacts": "0.1.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
