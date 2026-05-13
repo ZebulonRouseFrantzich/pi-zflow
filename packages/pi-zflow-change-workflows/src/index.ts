@@ -87,3 +87,15 @@ export type {
   GroupVerificationResult,
   CaptureGroupResultOptions,
 } from "./extensions/zflow-change-workflows/group-result.js"
+
+// Apply-back (Phase 5 — topological ordering, atomic patch replay, rollback)
+export {
+  executeApplyBack,
+  PatchReplayStrategy,
+} from "./extensions/zflow-change-workflows/apply-back.js"
+
+export type {
+  ApplyBackStrategy,
+  ApplyBackResult,
+  ApplyBackOptions,
+} from "./extensions/zflow-change-workflows/apply-back.js"
