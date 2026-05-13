@@ -36,3 +36,14 @@ export type {
   LaneStatus,
   ActiveProfileCache,
 } from "../extensions/zflow-profiles/profiles.js"
+
+// Launch config generation
+export {
+  buildLaunchConfig,
+  buildAllLaunchConfigs,
+  validateLaunchConfig,
+} from "./launch-config.js"
+
+export type {
+  LaunchAgentConfig,
+} from "./launch-config.js"
