@@ -97,6 +97,13 @@ export {
   writeApprovedAmendment,
 } from "./runectx.js"
 
+// Re-export write-target guard functions (Task 3.8)
+export {
+  isWriteAllowedInRuneContextTree,
+  validateRuneContextWriteTarget,
+  getForbiddenArtifacts,
+} from "./guards.js"
+
 /** Well-known capability name for RuneContext support. */
 export const RUNECONTEXT_CAPABILITY = "runecontext" as const
 
