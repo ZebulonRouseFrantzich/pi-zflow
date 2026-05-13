@@ -75,6 +75,63 @@ export interface PrUrlValidation {
   error?: string
 }
 
+// ── Diff fetch types ───────────────────────────────────────────
+
+/**
+ * PR/MR metadata fetched from the hosting platform.
+ */
+export interface PrMetadata {
+  platform: "github" | "gitlab"
+  owner: string
+  repo: string
+  number: number
+  title: string
+  description: string
+  state: string
+  headSha: string
+  baseSha: string
+  url: string
+}
+
+/**
+ * A single changed file entry from a PR/MR diff.
+ */
+export interface PrFile {
+  path: string
+  status: "added" | "modified" | "removed" | "renamed"
+  additions: number
+  deletions: number
+  patch?: string
+}
+
+/**
+ * Complete diff fetch result for a PR/MR.
+ */
+export interface PrFetchResult {
+  metadata: PrMetadata
+  files: PrFile[]
+  diffContent: string
+}
+
+/**
+ * Command runner callback for executing CLI commands.
+ * Accepts a shell command string and returns its stdout.
+ */
+export type CommandRunner = (command: string) => Promise<string>
+
+/**
+ * Default command runner that executes CLI commands via child_process.exec.
+ */
+export const defaultCommandRunner: CommandRunner = async (
+  command: string,
+): Promise<string> => {
+  const { exec } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const execAsync = promisify(exec)
+  const { stdout } = await execAsync(command, { timeout: 30_000 })
+  return stdout
+}
+
 // ── URL parsing ────────────────────────────────────────────────
 
 /**
@@ -192,6 +249,189 @@ export function buildPrApiCommands(target: ResolvedPrTarget): PrApiCommands {
     metadata: `glab api ${base}`,
     files: `glab api ${base}/changes`,
   }
+}
+
+// ── Fetch command builders ─────────────────────────────────────
+
+/**
+ * Build the exact CLI commands needed to fetch PR/MR data.
+ *
+ * Returns the command strings for fetching metadata and changed files.
+ *
+ * **GitHub:**
+ * - `gh api /repos/{owner}/{repo}/pulls/{number}` (metadata)
+ * - `gh api /repos/{owner}/{repo}/pulls/{number}/files` (files)
+ *
+ * **GitLab:**
+ * - `glab api projects/{owner}%2F{repo}/merge_requests/{number}` (metadata)
+ * - `glab api projects/{owner}%2F{repo}/merge_requests/{number}/changes` (files)
+ *
+ * @param target - Resolved PR/MR target.
+ * @returns An object with `metadata` and `files` command strings.
+ */
+export function buildFetchCommands(target: ResolvedPrTarget): PrApiCommands {
+  // Reuses buildPrApiCommands which already produces the correct commands
+  return buildPrApiCommands(target)
+}
+
+/**
+ * Parse a PR/MR metadata API response into a normalized PrMetadata object.
+ *
+ * Handles differences between GitHub and GitLab API response shapes.
+ *
+ * @param platform - The hosting platform.
+ * @param data - Parsed JSON response from the metadata API.
+ * @returns Normalized PrMetadata.
+ */
+export function parsePrMetadataResponse(
+  platform: PrPlatform,
+  data: Record<string, unknown>,
+): PrMetadata {
+  if (platform === "github") {
+    return {
+      platform: "github",
+      owner: data.head?.repo?.owner?.login as string ?? "",
+      repo: data.head?.repo?.name as string ?? "",
+      number: data.number as number,
+      title: data.title as string ?? "",
+      description: data.body as string ?? "",
+      state: data.state as string ?? "",
+      headSha: data.head?.sha as string ?? "",
+      baseSha: data.base?.sha as string ?? "",
+      url: data.html_url as string ?? "",
+    }
+  }
+
+  // GitLab
+  return {
+    platform: "gitlab",
+    owner: "",
+    repo: "",
+    number: data.iid as number ?? (data.number as number ?? 0),
+    title: data.title as string ?? "",
+    description: data.description as string ?? "",
+    state: data.state as string ?? "",
+    headSha: data.sha as string ?? "",
+    baseSha: data.diff_refs?.base_sha as string ?? "",
+    url: data.web_url as string ?? "",
+  }
+}
+
+/**
+ * Parse a PR/MR files/changes API response into a normalized PrFile array.
+ *
+ * @param platform - The hosting platform.
+ * @param data - Parsed JSON response from the files API.
+ * @returns Array of normalized PrFile objects.
+ */
+export function parsePrFilesResponse(
+  platform: PrPlatform,
+  data: unknown[],
+): PrFile[] {
+  if (platform === "github") {
+    return data.map((entry: Record<string, unknown>) => ({
+      path: (entry.filename as string) ?? (entry.path as string) ?? "",
+      status: normalizeFileStatus(entry.status as string),
+      additions: (entry.additions as number) ?? 0,
+      deletions: (entry.deletions as number) ?? 0,
+      patch: (entry.patch as string) ?? undefined,
+    }))
+  }
+
+  // GitLab
+  return data.map((entry: Record<string, unknown>) => ({
+    path: (entry.new_path as string) ?? (entry.path as string) ?? "",
+    status: normalizeFileStatus(entry.new_file ? "added" : entry.renamed_file ? "renamed" : entry.deleted_file ? "removed" : entry.status as string ?? "modified"),
+    additions: 0,
+    deletions: 0,
+    patch: (entry.diff as string) ?? undefined,
+  }))
+}
+
+/**
+ * Normalize a file status string to the PrFile status union.
+ */
+function normalizeFileStatus(status: string): PrFile["status"] {
+  const s = status?.toLowerCase() ?? ""
+  if (s === "added" || s === "add") return "added"
+  if (s === "removed" || s === "deleted" || s === "deletion") return "removed"
+  if (s === "renamed" || s === "rename") return "renamed"
+  return "modified"
+}
+
+/**
+ * Combine file patches into a single unified diff string.
+ *
+ * Each file entry produces a standard diff header with its path and patch.
+ *
+ * @param files - Array of PrFile entries (must have patch content).
+ * @returns Combined diff string, or empty string if no files have patches.
+ */
+export function combineDiffContent(files: PrFile[]): string {
+  const parts: string[] = []
+
+  for (const file of files) {
+    if (!file.patch) continue
+    parts.push(`diff --git a/${file.path} b/${file.path}`)
+    parts.push(file.patch)
+  }
+
+  return parts.join("\n")
+}
+
+/**
+ * Fetch PR/MR metadata and diff content using CLI commands.
+ *
+ * Uses the provided `commandRunner` to execute platform-specific `gh`/`glab`
+ * API commands. When no runner is provided, defaults to `defaultCommandRunner`
+ * which uses `child_process.exec`.
+ *
+ * This function is fully diff-based — it does not check out code, run builds,
+ * or execute PR code.
+ *
+ * @param target - Resolved PR/MR target (from parsePrUrl).
+ * @param commandRunner - Optional callback for CLI execution (for testing).
+ * @returns PrFetchResult with metadata, files, and combined diff content.
+ * @throws If API calls fail or return non-JSON responses.
+ */
+export async function fetchPrDiff(
+  target: ResolvedPrTarget,
+  commandRunner?: CommandRunner,
+): Promise<PrFetchResult> {
+  const run = commandRunner ?? defaultCommandRunner
+  const cmds = buildFetchCommands(target)
+
+  // Fetch metadata
+  const metadataRaw = await run(cmds.metadata)
+  const metadataData: Record<string, unknown> = JSON.parse(metadataRaw)
+  const metadata = parsePrMetadataResponse(target.platform, metadataData)
+
+  // Fill in owner/repo from target (not always in API response)
+  metadata.owner = target.owner
+  metadata.repo = target.repo
+
+  // Fetch files
+  const filesRaw = await run(cmds.files)
+  const filesParsed: unknown = JSON.parse(filesRaw)
+  let filesData: unknown[]
+  if (Array.isArray(filesParsed)) {
+    filesData = filesParsed as unknown[]
+  } else {
+    // GitLab returns { changes: [...] } or similar wrappers
+    const filesObj = filesParsed as Record<string, unknown>
+    if (target.platform === "gitlab") {
+      const changes = filesObj.changes as unknown[]
+      filesData = Array.isArray(changes) ? changes : [filesObj]
+    } else {
+      filesData = []
+    }
+  }
+  const files = parsePrFilesResponse(target.platform, filesData)
+
+  // Build combined diff content
+  const diffContent = combineDiffContent(files)
+
+  return { metadata, files, diffContent }
 }
 
 // ── URL validation ─────────────────────────────────────────────

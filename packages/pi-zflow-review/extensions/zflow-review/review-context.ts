@@ -19,6 +19,11 @@
  */
 
 import * as fs from "node:fs/promises"
+import type { PrMetadata as PrMetadata_ } from "./pr.js"
+
+// Re-export PrMetadata so downstream modules and tests can import it from
+// review-context.js without a direct dependency on pr.js.
+export type PrMetadata = PrMetadata_
 
 // ── Context interfaces ─────────────────────────────────────────
 
@@ -47,26 +52,6 @@ export interface InternalReviewContext {
   verificationStatus: "passed" | "failed" | "skipped" | "unknown"
   /** The review tier (e.g. "standard", "+logic", "+system", "+full") */
   tier: string
-}
-
-/**
- * Metadata extracted from a resolved PR/MR URL.
- */
-export interface PrMetadata {
-  /** Platform identifier */
-  platform: "github" | "gitlab"
-  /** Repository owner */
-  owner: string
-  /** Repository name */
-  repo: string
-  /** PR/MR number */
-  number: number
-  /** Full URL to the PR/MR */
-  url: string
-  /** PR/MR title */
-  title: string
-  /** PR/MR description / body */
-  description: string
 }
 
 /**

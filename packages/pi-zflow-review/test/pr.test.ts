@@ -17,9 +17,14 @@ import {
   detectHost,
   buildPrApiCommands,
   validatePrUrl,
+  buildFetchCommands,
+  parsePrMetadataResponse,
+  parsePrFilesResponse,
+  combineDiffContent,
+  fetchPrDiff,
 } from "../extensions/zflow-review/pr.js"
 
-import type { ResolvedPrTarget } from "../extensions/zflow-review/pr.js"
+import type { ResolvedPrTarget, PrMetadata, PrFile, PrFetchResult } from "../extensions/zflow-review/pr.js"
 
 // ── parsePrUrl ─────────────────────────────────────────────────
 
@@ -290,5 +295,330 @@ void describe("validatePrUrl", () => {
     const result = validatePrUrl("")
     assert.equal(result.valid, false)
     assert.ok(typeof result.error === "string")
+  })
+})
+
+// ── buildFetchCommands ────────────────────────────────────────
+
+void describe("buildFetchCommands", () => {
+  it("should return gh commands for a GitHub target", () => {
+    const target: ResolvedPrTarget = {
+      platform: "github",
+      owner: "my-org",
+      repo: "my-repo",
+      number: 42,
+      url: "https://github.com/my-org/my-repo/pull/42",
+    }
+
+    const cmds = buildFetchCommands(target)
+
+    assert.equal(
+      cmds.metadata,
+      "gh api /repos/my-org/my-repo/pulls/42",
+    )
+    assert.equal(
+      cmds.files,
+      "gh api /repos/my-org/my-repo/pulls/42/files",
+    )
+  })
+
+  it("should return glab commands for a GitLab target", () => {
+    const target: ResolvedPrTarget = {
+      platform: "gitlab",
+      owner: "my-group",
+      repo: "my-project",
+      number: 7,
+      url: "https://gitlab.com/my-group/my-project/-/merge_requests/7",
+    }
+
+    const cmds = buildFetchCommands(target)
+
+    assert.equal(
+      cmds.metadata,
+      "glab api projects/my-group%2Fmy-project/merge_requests/7",
+    )
+    assert.equal(
+      cmds.files,
+      "glab api projects/my-group%2Fmy-project/merge_requests/7/changes",
+    )
+  })
+})
+
+// ── parsePrMetadataResponse ────────────────────────────────────
+
+void describe("parsePrMetadataResponse", () => {
+  it("should normalize GitHub PR metadata correctly", () => {
+    const data = {
+      number: 42,
+      title: "Fix bug in parser",
+      body: "This PR fixes a parsing bug",
+      state: "open",
+      head: { sha: "abc123", repo: { owner: { login: "my-org" }, name: "my-repo" } },
+      base: { sha: "def456" },
+      html_url: "https://github.com/my-org/my-repo/pull/42",
+    }
+
+    const meta = parsePrMetadataResponse("github", data)
+
+    assert.equal(meta.number, 42)
+    assert.equal(meta.title, "Fix bug in parser")
+    assert.equal(meta.description, "This PR fixes a parsing bug")
+    assert.equal(meta.state, "open")
+    assert.equal(meta.headSha, "abc123")
+    assert.equal(meta.baseSha, "def456")
+    assert.equal(meta.url, "https://github.com/my-org/my-repo/pull/42")
+    assert.equal(meta.platform, "github")
+  })
+
+  it("should normalize GitLab MR metadata correctly", () => {
+    const data = {
+      iid: 7,
+      title: "Add new feature",
+      description: "Implements the new feature",
+      state: "merged",
+      sha: "ghi789",
+      diff_refs: { base_sha: "jkl012" },
+      web_url: "https://gitlab.com/group/project/-/merge_requests/7",
+    }
+
+    const meta = parsePrMetadataResponse("gitlab", data)
+
+    assert.equal(meta.number, 7)
+    assert.equal(meta.title, "Add new feature")
+    assert.equal(meta.description, "Implements the new feature")
+    assert.equal(meta.state, "merged")
+    assert.equal(meta.headSha, "ghi789")
+    assert.equal(meta.baseSha, "jkl012")
+    assert.equal(meta.url, "https://gitlab.com/group/project/-/merge_requests/7")
+    assert.equal(meta.platform, "gitlab")
+  })
+
+  it("should handle missing fields gracefully", () => {
+    const data = { number: 1 }
+
+    const meta = parsePrMetadataResponse("github", data)
+
+    assert.equal(meta.title, "")
+    assert.equal(meta.description, "")
+    assert.equal(meta.state, "")
+    assert.equal(meta.headSha, "")
+    assert.equal(meta.baseSha, "")
+  })
+})
+
+// ── parsePrFilesResponse ───────────────────────────────────────
+
+void describe("parsePrFilesResponse", () => {
+  it("should normalize GitHub files response correctly", () => {
+    const data = [
+      {
+        filename: "src/main.ts",
+        status: "modified",
+        additions: 10,
+        deletions: 2,
+        patch: "@@ -1,5 +1,13 @@\n+new line",
+      },
+      {
+        filename: "src/new.ts",
+        status: "added",
+        additions: 20,
+        deletions: 0,
+        patch: "@@ -0,0 +1,20 @@\n+new file",
+      },
+    ]
+
+    const files = parsePrFilesResponse("github", data)
+
+    assert.equal(files.length, 2)
+    assert.equal(files[0].path, "src/main.ts")
+    assert.equal(files[0].status, "modified")
+    assert.equal(files[0].additions, 10)
+    assert.equal(files[0].deletions, 2)
+    assert.ok(files[0].patch)
+    assert.equal(files[1].path, "src/new.ts")
+    assert.equal(files[1].status, "added")
+    assert.equal(files[1].additions, 20)
+  })
+
+  it("should normalize GitLab changes response correctly", () => {
+    const data = [
+      {
+        new_path: "src/feature.ts",
+        new_file: true,
+        diff: "@@ -0,0 +1,5 @@\n+feature code",
+      },
+      {
+        new_path: "src/old.ts",
+        deleted_file: true,
+        diff: "@@ -1,10 +0,0 @@\n-removed code",
+      },
+    ]
+
+    const files = parsePrFilesResponse("gitlab", data)
+
+    assert.equal(files.length, 2)
+    assert.equal(files[0].path, "src/feature.ts")
+    assert.equal(files[0].status, "added")
+    assert.ok(files[0].patch)
+    assert.equal(files[1].path, "src/old.ts")
+    assert.equal(files[1].status, "removed")
+  })
+
+  it("should handle empty file list", () => {
+    const files = parsePrFilesResponse("github", [])
+    assert.equal(files.length, 0)
+  })
+})
+
+// ── combineDiffContent ─────────────────────────────────────────
+
+void describe("combineDiffContent", () => {
+  it("should combine patches from multiple files into a single diff string", () => {
+    const files: PrFile[] = [
+      {
+        path: "src/a.ts",
+        status: "modified",
+        additions: 1,
+        deletions: 1,
+        patch: "@@ -1,3 +1,3 @@\n-old\n+new",
+      },
+      {
+        path: "src/b.ts",
+        status: "modified",
+        additions: 2,
+        deletions: 0,
+        patch: "@@ -1,0 +1,2 @@\n+new lines",
+      },
+    ]
+
+    const combined = combineDiffContent(files)
+
+    assert.ok(combined.includes("diff --git a/src/a.ts b/src/a.ts"))
+    assert.ok(combined.includes("diff --git a/src/b.ts b/src/b.ts"))
+    assert.ok(combined.includes("@@ -1,3 +1,3 @@"))
+    assert.ok(combined.includes("@@ -1,0 +1,2 @@"))
+  })
+
+  it("should return empty string when no files have patches", () => {
+    const files: PrFile[] = [
+      { path: "src/a.ts", status: "modified", additions: 1, deletions: 0 },
+      { path: "src/b.ts", status: "added", additions: 5, deletions: 0 },
+    ]
+
+    const combined = combineDiffContent(files)
+    assert.equal(combined, "")
+  })
+
+  it("should return empty string for empty file array", () => {
+    assert.equal(combineDiffContent([]), "")
+  })
+})
+
+// ── fetchPrDiff ───────────────────────────────────────────────
+
+void describe("fetchPrDiff", () => {
+  it("should return PrFetchResult from mock runner for GitHub", async () => {
+    const target: ResolvedPrTarget = {
+      platform: "github",
+      owner: "my-org",
+      repo: "my-repo",
+      number: 42,
+      url: "https://github.com/my-org/my-repo/pull/42",
+    }
+
+    const mockRunner = async (cmd: string): Promise<string> => {
+      if (cmd.includes("pulls/42/files")) {
+        return JSON.stringify([
+          {
+            filename: "src/main.ts",
+            status: "modified",
+            additions: 5,
+            deletions: 1,
+            patch: "@@ -1,3 +1,7 @@\n+added\n",
+          },
+        ])
+      }
+      return JSON.stringify({
+        number: 42,
+        title: "Test PR",
+        body: "Description",
+        state: "open",
+        head: { sha: "abc123", repo: { owner: { login: "my-org" }, name: "my-repo" } },
+        base: { sha: "def456" },
+        html_url: "https://github.com/my-org/my-repo/pull/42",
+      })
+    }
+
+    const result = await fetchPrDiff(target, mockRunner)
+
+    assert.equal(result.metadata.number, 42)
+    assert.equal(result.metadata.title, "Test PR")
+    assert.equal(result.metadata.headSha, "abc123")
+    assert.equal(result.metadata.baseSha, "def456")
+    assert.equal(result.files.length, 1)
+    assert.equal(result.files[0].path, "src/main.ts")
+    assert.ok(result.diffContent.includes("diff --git a/src/main.ts b/src/main.ts"))
+  })
+
+  it("should return PrFetchResult from mock runner for GitLab", async () => {
+    const target: ResolvedPrTarget = {
+      platform: "gitlab",
+      owner: "my-group",
+      repo: "my-project",
+      number: 7,
+      url: "https://gitlab.com/my-group/my-project/-/merge_requests/7",
+    }
+
+    const mockRunner = async (cmd: string): Promise<string> => {
+      if (cmd.includes("/changes")) {
+        return JSON.stringify({
+          changes: [
+            {
+              new_path: "src/feature.ts",
+              new_file: true,
+              diff: "@@ -0,0 +1,5 @@\n+new feature",
+            },
+          ],
+        })
+      }
+      return JSON.stringify({
+        iid: 7,
+        title: "MR Title",
+        description: "MR description",
+        state: "merged",
+        sha: "ghi789",
+        diff_refs: { base_sha: "jkl012" },
+        web_url: "https://gitlab.com/group/my-project/-/merge_requests/7",
+      })
+    }
+
+    const result = await fetchPrDiff(target, mockRunner)
+
+    assert.equal(result.metadata.number, 7)
+    assert.equal(result.metadata.title, "MR Title")
+    assert.equal(result.metadata.owner, "my-group")
+    assert.equal(result.metadata.repo, "my-project")
+    assert.equal(result.files.length, 1)
+    assert.equal(result.files[0].path, "src/feature.ts")
+    assert.equal(result.files[0].status, "added")
+  })
+
+  it("should propagate CLI errors from the runner", async () => {
+    const target: ResolvedPrTarget = {
+      platform: "github",
+      owner: "o",
+      repo: "r",
+      number: 1,
+      url: "https://github.com/o/r/pull/1",
+    }
+
+    const failingRunner = async (_cmd: string): Promise<string> => {
+      throw new Error("gh: command not found")
+    }
+
+    await assert.rejects(
+      () => fetchPrDiff(target, failingRunner),
+      /gh: command not found/,
+    )
   })
 })

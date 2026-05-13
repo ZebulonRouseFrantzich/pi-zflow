@@ -93,7 +93,6 @@ export {
 export type {
   InternalReviewContext,
   ExternalReviewContext,
-  PrMetadata,
   DiffChunk,
 } from "./review-context.js"
 
@@ -134,6 +133,12 @@ export {
   detectHost,
   buildPrApiCommands,
   validatePrUrl,
+  buildFetchCommands,
+  parsePrMetadataResponse,
+  parsePrFilesResponse,
+  combineDiffContent,
+  fetchPrDiff,
+  defaultCommandRunner,
 } from "./pr.js"
 
 export type {
@@ -141,6 +146,10 @@ export type {
   ResolvedPrTarget,
   PrApiCommands,
   PrUrlValidation,
+  PrMetadata,
+  PrFile,
+  PrFetchResult,
+  CommandRunner,
 } from "./pr.js"
 
 export type {
