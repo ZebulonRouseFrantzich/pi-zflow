@@ -44,6 +44,11 @@ export {
   formatCoverageNotes,
   formatFindingsBySeverity,
   persistCodeReviewFindings,
+  resolveReviewerArtifactDir,
+  persistReviewerRawOutput,
+  resolveAllReviewerArtifacts,
+  loadReviewerRawOutput,
+  addFindingTraceability,
 } from "./findings.js"
 
 export type {

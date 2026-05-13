@@ -19,6 +19,11 @@ import {
   formatFindingsBySeverity,
   persistCodeReviewFindings,
   chooseCodeReviewTier,
+  resolveReviewerArtifactDir,
+  persistReviewerRawOutput,
+  resolveAllReviewerArtifacts,
+  loadReviewerRawOutput,
+  addFindingTraceability,
 } from "../extensions/zflow-review/findings.js"
 
 import { createManifest, recordExecuted, recordSkipped, recordFailed } from "../src/reviewer-manifest.js"
@@ -721,5 +726,220 @@ void describe("chooseCodeReviewTier", () => {
       ],
     }
     assert.equal(chooseCodeReviewTier(ctx), "+full")
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════
+// Raw reviewer artifact preservation
+// ═══════════════════════════════════════════════════════════════
+
+void describe("resolveReviewerArtifactDir", () => {
+  it("should return the correct path pattern", () => {
+    const result = resolveReviewerArtifactDir("rev-test-001", "correctness", "/tmp/pi-test")
+    assert.ok(result.endsWith("/runs/rev-test-001/review-artifacts/correctness.md"))
+    assert.ok(result.includes("correctness.md"))
+  })
+
+  it("should handle different reviewer names", () => {
+    const result = resolveReviewerArtifactDir("rev-test-001", "integration", "/tmp/pi-test")
+    assert.ok(result.endsWith("integration.md"))
+    assert.ok(result.includes("review-artifacts"))
+  })
+})
+
+void describe("persistReviewerRawOutput", () => {
+  it("should create file at correct path", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "art-test-"))
+    const runId = "rev-test-save"
+
+    const fp = await persistReviewerRawOutput(runId, "security", "No issues found.", dir)
+
+    assert.ok(fp.endsWith(`/runs/${runId}/review-artifacts/security.md`))
+    const exists = await fs.stat(fp).then(() => true).catch(() => false)
+    assert.ok(exists)
+
+    await fs.rm(path.join(dir, "runs"), { recursive: true, force: true }).catch(() => {})
+    await fs.rmdir(dir).catch(() => {})
+  })
+
+  it("should create parent directories automatically", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "art-test-"))
+    const deepDir = path.join(dir, "deep", "nested")
+
+    const fp = await persistReviewerRawOutput("run-deep", "correctness", "output", deepDir)
+
+    const exists = await fs.stat(fp).then(() => true).catch(() => false)
+    assert.ok(exists)
+
+    await fs.rm(path.join(deepDir, "runs"), { recursive: true, force: true }).catch(() => {})
+    await fs.rm(deepDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
+  })
+})
+
+void describe("loadReviewerRawOutput", () => {
+  it("should read back written content", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "load-test-"))
+
+    await persistReviewerRawOutput("run-load", "integration", "Test output content", dir)
+
+    const loaded = await loadReviewerRawOutput("run-load", "integration", dir)
+    assert.equal(loaded, "Test output content")
+
+    await fs.rm(path.join(dir, "runs"), { recursive: true, force: true }).catch(() => {})
+    await fs.rmdir(dir).catch(() => {})
+  })
+
+  it("should return null for missing file", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "load-miss-"))
+
+    const loaded = await loadReviewerRawOutput("run-miss", "nonexistent", dir)
+    assert.equal(loaded, null)
+
+    await fs.rmdir(dir).catch(() => {})
+  })
+})
+
+void describe("resolveAllReviewerArtifacts", () => {
+  it("should return list of artifacts", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "list-test-"))
+
+    await persistReviewerRawOutput("run-list", "correctness", "content", dir)
+    await persistReviewerRawOutput("run-list", "integration", "content", dir)
+
+    const artifacts = resolveAllReviewerArtifacts("run-list", dir)
+
+    assert.equal(artifacts.length, 2)
+    assert.ok(artifacts.some((a) => a.name === "correctness"))
+    assert.ok(artifacts.some((a) => a.name === "integration"))
+    assert.ok(artifacts[0].path.endsWith(".md"))
+
+    await fs.rm(path.join(dir, "runs"), { recursive: true, force: true }).catch(() => {})
+    await fs.rmdir(dir).catch(() => {})
+  })
+
+  it("should return empty array for no artifacts", () => {
+    const dir = "/tmp/nonexistent-artifact-dir-test"
+    const artifacts = resolveAllReviewerArtifacts("run-empty", dir)
+    assert.deepEqual(artifacts, [])
+  })
+
+  it("should return sorted results", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "sort-test-"))
+
+    await persistReviewerRawOutput("run-sort", "system", "content", dir)
+    await persistReviewerRawOutput("run-sort", "correctness", "content", dir)
+    await persistReviewerRawOutput("run-sort", "integration", "content", dir)
+    await persistReviewerRawOutput("run-sort", "security", "content", dir)
+
+    const artifacts = resolveAllReviewerArtifacts("run-sort", dir)
+
+    assert.equal(artifacts.length, 4)
+    assert.equal(artifacts[0].name, "correctness")
+    assert.equal(artifacts[1].name, "integration")
+    assert.equal(artifacts[2].name, "security")
+    assert.equal(artifacts[3].name, "system")
+
+    await fs.rm(path.join(dir, "runs"), { recursive: true, force: true }).catch(() => {})
+    await fs.rmdir(dir).catch(() => {})
+  })
+})
+
+void describe("addFindingTraceability", () => {
+  it("should add artifactPath to findings", () => {
+    const findings: CodeReviewFinding[] = [
+      {
+        severity: "major",
+        title: "Missing validation",
+        reviewerSupport: ["correctness", "security"],
+        evidence: "src/auth.ts:10",
+        whyItMatters: "Security risk",
+        recommendation: "Add validation",
+      },
+    ]
+
+    const result = addFindingTraceability(findings, "rev-trace-001", "/tmp/pi")
+
+    assert.equal(result.length, 1)
+    assert.ok(result[0].artifactPath)
+    assert.ok(result[0].artifactPath!.includes("correctness.md"))
+    assert.equal(result[0].runId, "rev-trace-001")
+  })
+
+  it("should preserve existing finding fields", () => {
+    const findings: CodeReviewFinding[] = [
+      {
+        severity: "minor",
+        title: "Unused import",
+        reviewerSupport: ["correctness"],
+        evidence: "src/util.ts:5",
+        whyItMatters: "Clean code",
+        recommendation: "Remove import",
+        artifactPath: "/custom/path/artifact.md",
+        runId: "existing-run",
+      },
+    ]
+
+    const result = addFindingTraceability(findings, "new-run", "/tmp/pi")
+
+    assert.equal(result[0].artifactPath, "/custom/path/artifact.md")
+    assert.equal(result[0].runId, "existing-run")
+    assert.equal(result[0].title, "Unused import")
+    assert.equal(result[0].severity, "minor")
+  })
+
+  it("should use first supporter for artifact path", () => {
+    const findings: CodeReviewFinding[] = [
+      {
+        severity: "critical",
+        title: "Auth bypass",
+        reviewerSupport: ["security", "correctness", "integration"],
+        evidence: "src/auth.ts:50",
+        whyItMatters: "Complete bypass",
+        recommendation: "Fix logic",
+      },
+    ]
+
+    const result = addFindingTraceability(findings, "rev-trace-002", "/tmp")
+
+    assert.ok(result[0].artifactPath!.includes("security.md"))
+    assert.equal(result[0].runId, "rev-trace-002")
+  })
+
+  it("should handle findings with empty reviewerSupport", () => {
+    const findings: CodeReviewFinding[] = [
+      {
+        severity: "nit",
+        title: "Minor style issue",
+        reviewerSupport: [],
+        evidence: "src/style.ts:1",
+        whyItMatters: "Consistency",
+        recommendation: "Format code",
+      },
+    ]
+
+    const result = addFindingTraceability(findings, "rev-trace-003", "/tmp")
+
+    assert.equal(result[0].artifactPath, undefined)
+    assert.equal(result[0].runId, "rev-trace-003")
+  })
+
+  it("should not mutate the original findings array", () => {
+    const findings: CodeReviewFinding[] = [
+      {
+        severity: "major",
+        title: "Test",
+        reviewerSupport: ["correctness"],
+        evidence: "src/test.ts:1",
+        whyItMatters: "Test",
+        recommendation: "Fix",
+      },
+    ]
+
+    const result = addFindingTraceability(findings, "rev-trace-004", "/tmp")
+
+    assert.notStrictEqual(result, findings)
+    assert.equal(findings[0].artifactPath, undefined)
+    assert.equal(findings[0].runId, undefined)
   })
 })

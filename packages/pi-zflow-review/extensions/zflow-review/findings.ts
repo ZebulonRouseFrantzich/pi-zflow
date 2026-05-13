@@ -29,7 +29,8 @@
 
 import * as path from "node:path"
 import * as fs from "node:fs/promises"
-import { resolveCodeReviewFindingsPath } from "pi-zflow-artifacts"
+import * as fsSync from "node:fs"
+import { resolveCodeReviewFindingsPath, resolveRunDir } from "pi-zflow-artifacts"
 
 import {
   createManifest,
@@ -400,6 +401,10 @@ export interface CodeReviewFinding {
   whyItMatters: string
   failureMode?: string
   recommendation: string
+  /** Path to the raw reviewer artifact for traceability */
+  artifactPath?: string
+  /** Run ID for cross-referencing */
+  runId?: string
 }
 
 /**
@@ -642,4 +647,139 @@ export async function persistCodeReviewFindings(
 
   await fs.writeFile(fp, content, "utf-8")
   return fp
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Raw reviewer artifact preservation
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Resolve the path for a single reviewer's raw output artifact.
+ *
+ * Pattern: `<runtime-state-dir>/runs/{runId}/review-artifacts/{reviewerName}.md`
+ *
+ * @param runId - Run identifier from the reviewer manifest.
+ * @param reviewerName - Short name of the reviewer (e.g. "correctness").
+ * @param cwd - Working directory for runtime-state resolution (optional).
+ * @returns The absolute path to the raw reviewer artifact file.
+ */
+export function resolveReviewerArtifactDir(
+  runId: string,
+  reviewerName: string,
+  cwd?: string,
+): string {
+  return path.join(resolveRunDir(runId, cwd), "review-artifacts", `${reviewerName}.md`)
+}
+
+/**
+ * Persist a reviewer's raw output to the run's artifact directory.
+ *
+ * Creates parent directories as needed and writes the raw text as
+ * a markdown file at:
+ * `<runtime-state-dir>/runs/{runId}/review-artifacts/{reviewerName}.md`
+ *
+ * @param runId - Run identifier from the reviewer manifest.
+ * @param reviewerName - Short name of the reviewer (e.g. "correctness").
+ * @param rawOutput - The raw text output from the reviewer agent.
+ * @param cwd - Working directory for runtime-state resolution (optional).
+ * @returns The absolute path to the written artifact file.
+ */
+export async function persistReviewerRawOutput(
+  runId: string,
+  reviewerName: string,
+  rawOutput: string,
+  cwd?: string,
+): Promise<string> {
+  const fp = resolveReviewerArtifactDir(runId, reviewerName, cwd)
+  await fs.mkdir(path.dirname(fp), { recursive: true })
+  await fs.writeFile(fp, rawOutput, "utf-8")
+  return fp
+}
+
+/**
+ * Resolve paths to all raw reviewer artifacts for a given run.
+ *
+ * Scans `<runtime-state-dir>/runs/{runId}/review-artifacts/` for
+ * `.md` files and returns their names and paths. Returns an empty
+ * array if the directory does not exist or contains no artifacts.
+ *
+ * @param runId - Run identifier from the reviewer manifest.
+ * @param cwd - Working directory for runtime-state resolution (optional).
+ * @returns Array of `{ name, path }` objects where `name` is the
+ *   reviewer name derived from the file stem.
+ */
+export function resolveAllReviewerArtifacts(
+  runId: string,
+  cwd?: string,
+): Array<{ name: string; path: string }> {
+  const artifactsDir = path.join(resolveRunDir(runId, cwd), "review-artifacts")
+
+  if (!fsSync.existsSync(artifactsDir)) {
+    return []
+  }
+
+  const entries = fsSync.readdirSync(artifactsDir, { withFileTypes: true })
+  const artifacts: Array<{ name: string; path: string }> = []
+
+  for (const entry of entries) {
+    if (entry.isFile() && entry.name.endsWith(".md")) {
+      const name = entry.name.slice(0, -3) // strip ".md" suffix
+      artifacts.push({ name, path: path.join(artifactsDir, entry.name) })
+    }
+  }
+
+  return artifacts.sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/**
+ * Load a single reviewer's raw output from the artifact directory.
+ *
+ * @param runId - Run identifier from the reviewer manifest.
+ * @param reviewerName - Short name of the reviewer (e.g. "correctness").
+ * @param cwd - Working directory for runtime-state resolution (optional).
+ * @returns The raw text content, or `null` if the artifact file does
+ *   not exist or cannot be read.
+ */
+export async function loadReviewerRawOutput(
+  runId: string,
+  reviewerName: string,
+  cwd?: string,
+): Promise<string | null> {
+  const fp = resolveReviewerArtifactDir(runId, reviewerName, cwd)
+  try {
+    return await fs.readFile(fp, "utf-8")
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Add traceability references to an array of findings.
+ *
+ * Each finding receives an `artifactPath` pointing to the raw reviewer
+ * output for the first reviewer in its `reviewerSupport` list, and a
+ * `runId` field for cross-referencing.
+ *
+ * If a finding already has an `artifactPath` or `runId`, it is not
+ * overwritten.
+ *
+ * @param findings - Array of code review findings to annotate.
+ * @param runId - Run identifier used to resolve artifact paths.
+ * @param cwd - Working directory for runtime-state resolution (optional).
+ * @returns A new array of findings with traceability fields added.
+ */
+export function addFindingTraceability(
+  findings: CodeReviewFinding[],
+  runId: string,
+  cwd?: string,
+): CodeReviewFinding[] {
+  return findings.map((f) => ({
+    ...f,
+    artifactPath: f.artifactPath ?? (
+      f.reviewerSupport.length > 0
+        ? resolveReviewerArtifactDir(runId, f.reviewerSupport[0], cwd)
+        : undefined
+    ),
+    runId: f.runId ?? runId,
+  }))
 }
