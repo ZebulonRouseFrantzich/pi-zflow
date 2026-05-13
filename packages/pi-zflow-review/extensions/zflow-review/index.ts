@@ -76,6 +76,22 @@ export type {
   RetryPolicy,
 } from "./plan-review.js"
 
+// ── Re-export review-context helpers ──────────────────────────
+
+export {
+  buildInternalReviewPrompt,
+  buildExternalReviewPrompt,
+  getVerificationStatusReminder,
+  getPlanAdherenceInstruction,
+} from "./review-context.js"
+
+export type {
+  InternalReviewContext,
+  ExternalReviewContext,
+  PrMetadata,
+  DiffChunk,
+} from "./review-context.js"
+
 export type {
   ReviewerManifest,
   ReviewerMode,
