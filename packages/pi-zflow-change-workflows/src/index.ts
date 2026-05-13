@@ -38,3 +38,16 @@ export type {
   GitPorcelainResult,
   GitPreflightResult,
 } from "./extensions/zflow-change-workflows/git-preflight.js"
+
+// File ownership validation (Phase 5 — parallel write conflict detection)
+export {
+  detectOwnershipConflicts,
+  validateOwnershipAndDependencies,
+  topoSortGroups,
+} from "./extensions/zflow-change-workflows/ownership-validator.js"
+
+export type {
+  ExecutionGroup,
+  OwnershipConflict,
+  OwnershipValidationResult,
+} from "./extensions/zflow-change-workflows/ownership-validator.js"
