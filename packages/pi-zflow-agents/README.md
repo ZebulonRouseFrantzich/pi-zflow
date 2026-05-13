@@ -112,8 +112,23 @@ and other packages. The `zflow.` prefix is consistent across:
 - Command namespaces (`/zflow-*`)
 - Tool namespaces (`zflow_*`)
 
+## Smoke tests
+
+Comprehensive smoke-test procedures for every chain and key agent are documented
+in `docs/smoke-tests.md`. Run these after installation or when upgrading Pi to
+verify that:
+
+- All agents are discoverable and responsive
+- Chain definitions resolve and invoke correctly
+- Builtin agent overrides (`scout`, `context-builder`) work as expected
+- Output conventions and manifest structures are correct
+
+A [quick validation recipe](../../docs/smoke-tests.md#quick-validation-recipe) is
+available for rapid sanity checks without the full test setup.
+
 ## See also
 
 - `docs/subagents-integration.md` — detailed `pi-subagents` integration notes
+- `docs/smoke-tests.md` — smoke-test procedures for all chains and key agents
 - `extensions/zflow-agents/install.ts` — idempotent install/update implementation
 - `extensions/zflow-agents/manifest.ts` — install manifest handling
