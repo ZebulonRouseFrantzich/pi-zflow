@@ -86,6 +86,17 @@ export {
   shouldOfferWriteBack,
 } from "./runectx.js"
 
+// Re-export amendment flow types and functions (Task 3.7)
+export type {
+  RuneContextAmendment,
+  WriteBackResult,
+} from "./runectx.js"
+export {
+  createAmendment,
+  approveAmendment,
+  writeApprovedAmendment,
+} from "./runectx.js"
+
 /** Well-known capability name for RuneContext support. */
 export const RUNECONTEXT_CAPABILITY = "runecontext" as const
 

@@ -1,3 +1,6 @@
+import * as fs from "node:fs/promises"
+import * as path from "node:path"
+
 /**
  * runectx.ts — Conservative status mapping and write-back helpers for RuneContext integration.
  *
@@ -92,6 +95,45 @@ export interface StatusVocabulary {
    * An empty array indicates the vocabulary is unknown or unrestricted.
    */
   allowedStatuses: string[]
+}
+
+/**
+ * A pending or approved amendment to canonical RuneContext docs.
+ *
+ * Captures the document-level changes that should be written back
+ * to the canonical RuneContext change folder once approved.
+ */
+export interface RuneContextAmendment {
+  /** The change this amendment targets. */
+  changeId: string
+  /** Absolute path to the change folder. */
+  changePath: string
+  /** Document changes to apply (key = filename, value = new content). */
+  docChanges: Record<string, string>
+  /** The harness state that triggered this amendment. */
+  triggerState: HarnessState
+  /** ISO timestamp of when the amendment was created. */
+  createdAt: string
+  /** Whether this amendment has been approved for write-back. */
+  approved: boolean
+}
+
+/**
+ * Result of attempting to write back an approved amendment.
+ *
+ * Reports per-file success/failure and a human-readable summary.
+ */
+export interface WriteBackResult {
+  /** Whether the write-back succeeded (all files written). */
+  success: boolean
+  /** Files that were written successfully. */
+  writtenFiles: string[]
+  /** Files that failed to write (with error messages). */
+  failedFiles: Array<{ path: string; error: string }>
+  /** Whether the write-back was deferred (approval not yet granted). */
+  deferred: boolean
+  /** Human-readable summary of the outcome. */
+  summary: string
 }
 
 // ── Mapping helpers ──────────────────────────────────────────────
@@ -308,4 +350,121 @@ export function buildRuntimeMetadata(
  */
 export function shouldOfferWriteBack(result: StatusMappingResult): boolean {
   return result.policy === "prompt" || result.policy === "auto"
+}
+
+// ── Amendment flow ───────────────────────────────────────────────
+
+/**
+ * Create a new amendment for a set of document changes.
+ *
+ * The amendment is created with `approved: false` — it must be
+ * explicitly approved via {@link approveAmendment} before it can be
+ * written back via {@link writeApprovedAmendment}.
+ *
+ * This function does NOT write anything to disk; it only constructs
+ * the amendment object. Write-back is handled separately by
+ * {@link writeApprovedAmendment}.
+ *
+ * @param changeId - Identifier for the change this amendment targets.
+ * @param changePath - Absolute path to the change folder.
+ * @param docChanges - Map of filenames to new file content.
+ * @param triggerState - The harness state that triggered the amendment.
+ * @returns A new {@link RuneContextAmendment} with `approved: false`.
+ */
+export function createAmendment(
+  changeId: string,
+  changePath: string,
+  docChanges: Record<string, string>,
+  triggerState: HarnessState,
+): RuneContextAmendment {
+  return {
+    changeId,
+    changePath,
+    docChanges,
+    triggerState,
+    createdAt: new Date().toISOString(),
+    approved: false,
+  }
+}
+
+/**
+ * Mark an amendment as approved for write-back.
+ *
+ * Returns a new {@link RuneContextAmendment} with `approved: true`.
+ * The original amendment object is not mutated.
+ *
+ * @param amendment - The amendment to approve.
+ * @returns A copy of the amendment with `approved: true`.
+ */
+export function approveAmendment(
+  amendment: RuneContextAmendment,
+): RuneContextAmendment {
+  return {
+    ...amendment,
+    approved: true,
+  }
+}
+
+/**
+ * Write an approved amendment's document changes to disk.
+ *
+ * For each entry in `amendment.docChanges`, writes the content to
+ * `<amendment.changePath>/<filename>`. If the amendment has not been
+ * approved (`amendment.approved` is `false`), returns a deferred result
+ * without writing anything.
+ *
+ * Canonical-doc write-back happens BEFORE derived artifact regeneration.
+ * This function performs only the write-back; regeneration is an
+ * orchestration concern for later phases.
+ *
+ * @param amendment - The amendment to write back (must be approved).
+ * @returns A {@link WriteBackResult} describing what was written, what
+ *          failed, and whether the write was deferred.
+ */
+export async function writeApprovedAmendment(
+  amendment: RuneContextAmendment,
+): Promise<WriteBackResult> {
+  // ── Guard: amendment must be approved ──────────────────────────
+  if (!amendment.approved) {
+    return {
+      success: false,
+      writtenFiles: [],
+      failedFiles: [],
+      deferred: true,
+      summary: `Write-back deferred: amendment for change "${amendment.changeId}" has not been approved yet.`,
+    }
+  }
+
+  // ── Enforce canonical-doc write-back rule ──────────────────────
+  // Derived artifact regeneration MUST happen after canonical-doc
+  // write-back. That orchestration is handled by the caller.
+
+  const writtenFiles: string[] = []
+  const failedFiles: Array<{ path: string; error: string }> = []
+
+  for (const [filename, content] of Object.entries(amendment.docChanges)) {
+    const targetPath = path.join(amendment.changePath, filename)
+
+    try {
+      await fs.writeFile(targetPath, content, "utf-8")
+      writtenFiles.push(targetPath)
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : String(err)
+      failedFiles.push({ path: targetPath, error: message })
+    }
+  }
+
+  const success = failedFiles.length === 0
+  const summary = success
+    ? `Successfully wrote ${writtenFiles.length} file(s) for change "${amendment.changeId}".`
+    : `Wrote ${writtenFiles.length} file(s) but ${failedFiles.length} file(s) failed for change "${amendment.changeId}".`
+
+  return {
+    success,
+    writtenFiles,
+    failedFiles,
+    deferred: false,
+    summary,
+  }
 }
