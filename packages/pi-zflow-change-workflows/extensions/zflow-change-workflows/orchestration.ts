@@ -1052,10 +1052,10 @@ export async function prepareWorktreeImplementationRun(
   const runId = `impl-${changeId}-${Date.now().toString(36)}`
   const run = await createRun(runId, repoRoot, changeId, planVersion, cwd)
 
-  // 6. Create git recovery ref
-  createRecoveryRef(runId, repoRoot, run.head)
+  // Recovery ref is created later by executeApplyBack, right before patches are applied.
+  // This ensures the ref points at the exact pre-apply snapshot and cannot diverge.
 
-  // 7. Update state-index.json
+  // 6. Update state-index.json
   await addStateIndexEntry({
     type: "run",
     id: runId,
