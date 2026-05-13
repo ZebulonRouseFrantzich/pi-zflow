@@ -40,6 +40,14 @@ export type {
 } from "./resolve-change.js"
 export { resolveRuneChange } from "./resolve-change.js"
 
+// Re-export canonical doc reader types and function (Task 3.3)
+export type {
+  RuneDoc,
+  RuneStatus,
+  RuneDocs,
+} from "./read-docs.js"
+export { readRuneContextDocs } from "./read-docs.js"
+
 /** Well-known capability name for RuneContext support. */
 export const RUNECONTEXT_CAPABILITY = "runecontext" as const
 
