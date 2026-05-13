@@ -41,6 +41,8 @@ import type {
   ReviewerMode,
 } from "pi-zflow-review"
 
+import { resolvePrReviewPath } from "pi-zflow-artifacts"
+
 // ── Plan-review tier mapping ───────────────────────────────────
 
 /**
@@ -782,4 +784,215 @@ export function addFindingTraceability(
     ),
     runId: f.runId ?? runId,
   }))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PR/MR review findings persistence
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * A single finding produced during PR/MR diff review.
+ */
+export interface PrReviewFinding {
+  severity: "critical" | "major" | "minor" | "nit"
+  title: string
+  /** Relative file path */
+  file: string
+  /** Line range (e.g. "120-127" or "45") */
+  lines?: string
+  /** Evidence description */
+  evidence: string
+  /** Recommendation text */
+  recommendation: string
+  /** Whether this finding should be submitted as an inline PR comment */
+  submit: boolean
+  /** Optional edited body text for PR submission */
+  editedBody?: string
+}
+
+/**
+ * Input for generating the external PR/MR review findings file.
+ */
+export interface PrReviewFindingsInput {
+  /** PR/MR metadata */
+  prMetadata: {
+    /** Full PR/MR URL */
+    url: string
+    /** Host platform */
+    platform: "github" | "gitlab"
+    /** Head (source) SHA */
+    headSha: string
+    /** Base (target) SHA */
+    baseSha: string
+  }
+  /** Run ID for correlation */
+  runId: string
+  /** Coverage notes (e.g. "Diff-only review", "Chunked: yes") */
+  coverageNotes: string[]
+  /** Structured findings */
+  findings: PrReviewFinding[]
+  /** Whether the diff was chunked into parts */
+  wasChunked: boolean
+  /** Whether inline comment submission is available (auth/permissions) */
+  submissionAvailable: boolean
+  /** Working directory for runtime-state resolution (optional) */
+  cwd?: string
+}
+
+// ── PR severity summary ───────────────────────────────────────
+
+/**
+ * Format a summary table of PR review findings counts by severity.
+ *
+ * @param findings - Array of PR review findings.
+ * @returns Markdown table string.
+ */
+export function formatPrSeveritySummary(findings: PrReviewFinding[]): string {
+  let critical = 0
+  let major = 0
+  let minor = 0
+  let nit = 0
+
+  for (const f of findings) {
+    switch (f.severity) {
+      case "critical": critical++; break
+      case "major":    major++; break
+      case "minor":    minor++; break
+      case "nit":      nit++; break
+    }
+  }
+
+  const lines: string[] = []
+  lines.push(`| Severity | Count |`)
+  lines.push(`| -------- | ----- |`)
+  lines.push(`| Critical | ${critical} |`)
+  lines.push(`| Major    | ${major} |`)
+  lines.push(`| Minor    | ${minor} |`)
+  lines.push(`| Nit      | ${nit} |`)
+
+  return lines.join("\n")
+}
+
+/**
+ * Group PR findings by severity and format them as markdown sections
+ * with file/line references and submit checkboxes.
+ *
+ * Sections appear in order: Critical, Major, Minor, Nits.
+ *
+ * @param findings - Array of PR review findings.
+ * @returns Markdown string with severity-grouped sections.
+ */
+export function formatPrFindingsBySeverity(findings: PrReviewFinding[]): string {
+  const grouped: Record<string, PrReviewFinding[]> = {
+    critical: [],
+    major:    [],
+    minor:    [],
+    nit:      [],
+  }
+
+  for (const f of findings) {
+    grouped[f.severity].push(f)
+  }
+
+  const lines: string[] = []
+
+  const severityLabels: Array<{ key: string; heading: string }> = [
+    { key: "critical", heading: "Critical Findings" },
+    { key: "major",    heading: "Major Findings" },
+    { key: "minor",    heading: "Minor Findings" },
+    { key: "nit",      heading: "Nits" },
+  ]
+
+  for (const { key, heading } of severityLabels) {
+    const entries = grouped[key]
+    if (entries.length === 0) {
+      lines.push(`## ${heading}`)
+      lines.push(``)
+      lines.push(`None.`)
+      lines.push(``)
+      continue
+    }
+
+    lines.push(`## ${heading}`)
+    lines.push(``)
+
+    for (const f of entries) {
+      lines.push(`### ${f.title}`)
+      if (f.file) {
+        lines.push(`**File**: ${f.file}`)
+      }
+      if (f.lines) {
+        lines.push(`**Lines**: ${f.lines}`)
+      }
+      lines.push(`**Evidence**: ${f.evidence}`)
+      lines.push(`**Recommendation**: ${f.recommendation}`)
+      lines.push(`**Submit**: ${f.submit ? "[ ] (pending)" : "[ ]"}`)
+      if (f.editedBody) {
+        lines.push(`**Edited body**: ${f.editedBody}`)
+      }
+      lines.push(``)
+    }
+  }
+
+  return lines.join("\n")
+}
+
+/**
+ * Persist PR/MR review findings to the canonical file location.
+ *
+ * Writes a structured markdown file to:
+ * `<runtime-state-dir>/review/pr-review-{id}.md`
+ *
+ * The file includes PR metadata headers, coverage notes, a severity
+ * summary table, and findings grouped by severity with file/line
+ * references and submit checkboxes.
+ *
+ * @param input - The PR review findings input.
+ * @returns The absolute path to the written file.
+ */
+export async function persistPrReviewFindings(
+  input: PrReviewFindingsInput,
+): Promise<string> {
+  const fp = resolvePrReviewPath(input.runId, input.cwd)
+
+  // Ensure parent directory exists
+  await fs.mkdir(path.dirname(fp), { recursive: true })
+
+  const lines: string[] = []
+
+  // ── Header ──────────────────────────────────────────────────
+  lines.push(`# PR Review Findings`)
+  lines.push(``)
+  lines.push(`**PR URL**: ${input.prMetadata.url}`)
+  lines.push(`**Platform**: ${input.prMetadata.platform}`)
+  lines.push(`**Head SHA**: ${input.prMetadata.headSha}`)
+  lines.push(`**Base SHA**: ${input.prMetadata.baseSha}`)
+  lines.push(`**Generated**: ${new Date().toISOString()}`)
+  lines.push(`**Run ID**: ${input.runId}`)
+  lines.push(``)
+
+  // ── Coverage Notes ──────────────────────────────────────────
+  lines.push(`## Coverage Notes`)
+  lines.push(``)
+  for (const note of input.coverageNotes) {
+    lines.push(`- ${note}`)
+  }
+  lines.push(`- Diff-only review (no code execution)`)
+  lines.push(`- Chunked: ${input.wasChunked ? "yes" : "no"}`)
+  lines.push(`- Submission available: ${input.submissionAvailable ? "yes" : "no"}`)
+  lines.push(``)
+
+  // ── Findings Summary ────────────────────────────────────────
+  lines.push(`## Findings Summary`)
+  lines.push(``)
+  lines.push(formatPrSeveritySummary(input.findings))
+  lines.push(``)
+
+  // ── Findings by severity ────────────────────────────────────
+  lines.push(formatPrFindingsBySeverity(input.findings))
+
+  const content = lines.join("\n")
+
+  await fs.writeFile(fp, content, "utf-8")
+  return fp
 }

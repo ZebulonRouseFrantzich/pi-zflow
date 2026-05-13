@@ -152,6 +152,17 @@ export type {
   CommandRunner,
 } from "./pr.js"
 
+export {
+  persistPrReviewFindings,
+  formatPrSeveritySummary,
+  formatPrFindingsBySeverity,
+} from "./findings.js"
+
+export type {
+  PrReviewFinding,
+  PrReviewFindingsInput,
+} from "./findings.js"
+
 export type {
   ReviewerManifest,
   ReviewerMode,
