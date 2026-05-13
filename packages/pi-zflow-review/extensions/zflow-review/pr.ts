@@ -458,3 +458,206 @@ export function validatePrUrl(url: string): PrUrlValidation {
     return { valid: false, error: message }
   }
 }
+
+// ── Auth checking ──────────────────────────────────────────────
+
+/**
+ * Result of checking CLI authentication for a hosting platform.
+ */
+export interface AuthStatus {
+  /** Whether the CLI is authenticated. */
+  authenticated: boolean
+  /** The platform that was checked. */
+  platform: PrPlatform
+  /** Authenticated username, if available. */
+  username?: string
+  /** Error description when not authenticated or check failed. */
+  error?: string
+}
+
+/**
+ * Whether submission of inline comments is possible.
+ */
+export interface SubmissionCapability {
+  /** Whether inline comment submission is possible. */
+  canSubmit: boolean
+  /** Result of the authentication check. */
+  authStatus: AuthStatus
+  /** Human-readable message when submission is not possible. */
+  fallbackMessage?: string
+}
+
+/**
+ * Check whether the `gh` or `glab` CLI is authenticated.
+ *
+ * Runs the platform's auth status command and parses the output.
+ * Returns structured `AuthStatus` with the authenticated flag and
+ * the detected username when available.
+ *
+ * @param platform - The hosting platform to check.
+ * @param commandRunner - Optional command runner (defaults to `defaultCommandRunner`).
+ * @returns AuthStatus with authenticated flag, username, and optional error.
+ */
+export async function checkAuthStatus(
+  platform: PrPlatform,
+  commandRunner?: CommandRunner,
+): Promise<AuthStatus> {
+  const run = commandRunner ?? defaultCommandRunner
+
+  if (platform === "github") {
+    try {
+      const stdout = await run("gh auth status 2>&1")
+      // Parse "Logged in to github.com as <username>"
+      const usernameMatch = stdout.match(/as\s+([^\s]+)/)
+      return {
+        authenticated: true,
+        platform: "github",
+        username: usernameMatch?.[1]?.replace(/[^a-zA-Z0-9._-]/g, "") ?? undefined,
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      return {
+        authenticated: false,
+        platform: "github",
+        error: message,
+      }
+    }
+  }
+
+  // GitLab
+  try {
+    const stdout = await run("glab auth status 2>&1")
+    // Parse "Logged in to gitlab.com as <username>"
+    const usernameMatch = stdout.match(/as\s+([^\s]+)/)
+    return {
+      authenticated: true,
+      platform: "gitlab",
+      username: usernameMatch?.[1]?.replace(/[^a-zA-Z0-9._-]/g, "") ?? undefined,
+    }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    return {
+      authenticated: false,
+      platform: "gitlab",
+      error: message,
+    }
+  }
+}
+
+/**
+ * Determine whether inline comment submission is possible for a platform.
+ *
+ * Checks CLI authentication and returns a `SubmissionCapability` with
+ * a `canSubmit` flag and a fallback message when submission is not
+ * possible.
+ *
+ * @param platform - The hosting platform to check.
+ * @param commandRunner - Optional command runner (defaults to `defaultCommandRunner`).
+ * @returns SubmissionCapability with canSubmit, authStatus, and fallback message.
+ */
+export async function checkSubmissionCapability(
+  platform: PrPlatform,
+  commandRunner?: CommandRunner,
+): Promise<SubmissionCapability> {
+  const authStatus = await checkAuthStatus(platform, commandRunner)
+
+  if (authStatus.authenticated) {
+    return {
+      canSubmit: true,
+      authStatus,
+    }
+  }
+
+  const cliName = platform === "github" ? "gh" : "glab"
+  return {
+    canSubmit: false,
+    authStatus,
+    fallbackMessage:
+      `Authentication for ${platform} not available. ` +
+      `To submit inline comments, configure \`${cliName} auth login\`.`,
+  }
+}
+
+// ── Comment submission command builders ────────────────────────
+
+/**
+ * Input for building a submit comment command.
+ */
+export interface SubmitCommentInput {
+  /** The PR/MR target to submit to. */
+  target: ResolvedPrTarget
+  /** The body text of the comment. */
+  body: string
+  /** Optional file path for line-specific comments. */
+  path?: string
+  /** Optional line number for line-specific comments. */
+  line?: number
+}
+
+/**
+ * Build the CLI command string for submitting an inline comment to a
+ * PR/MR via `gh` or `glab` API.
+ *
+ * **GitHub:**
+ * ```
+ * gh api repos/{owner}/{repo}/pulls/{number}/comments \
+ *   --method POST \
+ *   -f body="..." \
+ *   -f path="..." \
+ *   -F line=...
+ * ```
+ *
+ * **GitLab:**
+ * ```
+ * glab api projects/{owner}%2F{repo}/merge_requests/{number}/notes \
+ *   --method POST \
+ *   -f body="..."
+ * ```
+ *
+ * @param input - Submit comment input with target, body, optional path and line.
+ * @returns The CLI command string for submitting the comment.
+ */
+export function buildSubmitCommentCommand(input: SubmitCommentInput): string {
+  const { target, body, path, line } = input
+
+  if (target.platform === "github") {
+    const base = `/repos/${target.owner}/${target.repo}/pulls/${target.number}/comments`
+    let cmd = `gh api ${base} --method POST -f body=${JSON.stringify(body)}`
+    if (path !== undefined) {
+      cmd += ` -f path=${JSON.stringify(path)}`
+    }
+    if (line !== undefined) {
+      cmd += ` -F line=${line}`
+    }
+    return cmd
+  }
+
+  // GitLab
+  const encodedPath = `${target.owner}%2F${target.repo}`
+  const base = `projects/${encodedPath}/merge_requests/${target.number}/notes`
+  let cmd = `glab api ${base} --method POST -f body=${JSON.stringify(body)}`
+  if (path !== undefined) {
+    cmd += ` -f path=${JSON.stringify(path)}`
+  }
+  return cmd
+}
+
+/**
+ * Format a message explaining that submission was skipped due to
+ * missing authentication.
+ *
+ * @param platform - The hosting platform.
+ * @param findingsPath - Path to the exported findings file.
+ * @returns A human-readable message.
+ */
+export function formatAuthSkipMessage(
+  platform: PrPlatform,
+  findingsPath: string,
+): string {
+  const cliName = platform === "github" ? "gh" : "glab"
+  return (
+    `Authentication for ${platform} not available. ` +
+    `Review findings exported to ${findingsPath}. ` +
+    `To submit comments, configure \`${cliName}\` authentication.`
+  )
+}

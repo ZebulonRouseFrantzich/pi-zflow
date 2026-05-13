@@ -22,9 +22,19 @@ import {
   parsePrFilesResponse,
   combineDiffContent,
   fetchPrDiff,
+  checkAuthStatus,
+  checkSubmissionCapability,
+  buildSubmitCommentCommand,
+  formatAuthSkipMessage,
 } from "../extensions/zflow-review/pr.js"
 
-import type { ResolvedPrTarget, PrMetadata, PrFile, PrFetchResult } from "../extensions/zflow-review/pr.js"
+import type {
+  ResolvedPrTarget,
+  PrMetadata,
+  PrFile,
+  PrFetchResult,
+  CommandRunner,
+} from "../extensions/zflow-review/pr.js"
 
 // ── parsePrUrl ─────────────────────────────────────────────────
 
@@ -620,5 +630,234 @@ void describe("fetchPrDiff", () => {
       () => fetchPrDiff(target, failingRunner),
       /gh: command not found/,
     )
+  })
+})
+
+// ── checkAuthStatus ────────────────────────────────────────────
+
+void describe("checkAuthStatus", () => {
+  it("should return authenticated for GitHub when auth status succeeds", async () => {
+    const mockRunner: CommandRunner = async () => {
+      return "Logged in to github.com as octocat\n"
+    }
+
+    const status = await checkAuthStatus("github", mockRunner)
+    assert.equal(status.authenticated, true)
+    assert.equal(status.platform, "github")
+    assert.equal(status.username, "octocat")
+    assert.equal(status.error, undefined)
+  })
+
+  it("should return unauthenticated for GitHub when auth status fails", async () => {
+    const mockRunner: CommandRunner = async () => {
+      throw new Error("gh: not logged in")
+    }
+
+    const status = await checkAuthStatus("github", mockRunner)
+    assert.equal(status.authenticated, false)
+    assert.equal(status.platform, "github")
+    assert.ok(typeof status.error === "string")
+    assert.ok(status.error!.includes("not logged in"))
+  })
+
+  it("should return authenticated for GitLab when auth status succeeds", async () => {
+    const mockRunner: CommandRunner = async () => {
+      return "Logged in to gitlab.com as gituser\n"
+    }
+
+    const status = await checkAuthStatus("gitlab", mockRunner)
+    assert.equal(status.authenticated, true)
+    assert.equal(status.platform, "gitlab")
+    assert.equal(status.username, "gituser")
+  })
+
+  it("should return unauthenticated for GitLab when auth status fails", async () => {
+    const mockRunner: CommandRunner = async () => {
+      throw new Error("glab: not authenticated")
+    }
+
+    const status = await checkAuthStatus("gitlab", mockRunner)
+    assert.equal(status.authenticated, false)
+    assert.equal(status.platform, "gitlab")
+    assert.ok(typeof status.error === "string")
+  })
+
+  it("should handle CLI not installed (non-gh/glab error)", async () => {
+    const mockRunner: CommandRunner = async () => {
+      throw new Error("command not found: gh")
+    }
+
+    const status = await checkAuthStatus("github", mockRunner)
+    assert.equal(status.authenticated, false)
+    assert.ok(status.error!.includes("command not found"))
+  })
+
+  it("should handle username with dot in it", async () => {
+    const mockRunner: CommandRunner = async () => {
+      return "Logged in to github.com as user.name\n"
+    }
+
+    const status = await checkAuthStatus("github", mockRunner)
+    assert.equal(status.authenticated, true)
+    assert.equal(status.username, "user.name")
+  })
+})
+
+// ── checkSubmissionCapability ──────────────────────────────────
+
+void describe("checkSubmissionCapability", () => {
+  it("should return canSubmit:true when authenticated on GitHub", async () => {
+    const mockRunner: CommandRunner = async () => {
+      return "Logged in to github.com as octocat\n"
+    }
+
+    const capability = await checkSubmissionCapability("github", mockRunner)
+    assert.equal(capability.canSubmit, true)
+    assert.equal(capability.authStatus.authenticated, true)
+    assert.equal(capability.fallbackMessage, undefined)
+  })
+
+  it("should return canSubmit:false with fallback message when unauthenticated", async () => {
+    const mockRunner: CommandRunner = async () => {
+      throw new Error("gh: not logged in")
+    }
+
+    const capability = await checkSubmissionCapability("github", mockRunner)
+    assert.equal(capability.canSubmit, false)
+    assert.equal(capability.authStatus.authenticated, false)
+    assert.ok(typeof capability.fallbackMessage === "string")
+    assert.ok(capability.fallbackMessage!.includes("Authentication for github"))
+    assert.ok(capability.fallbackMessage!.includes("gh auth login"))
+  })
+
+  it("should return canSubmit:true when authenticated on GitLab", async () => {
+    const mockRunner: CommandRunner = async () => {
+      return "Logged in to gitlab.com as gituser\n"
+    }
+
+    const capability = await checkSubmissionCapability("gitlab", mockRunner)
+    assert.equal(capability.canSubmit, true)
+    assert.equal(capability.authStatus.authenticated, true)
+  })
+
+  it("should return canSubmit:false with fallback message for GitLab", async () => {
+    const mockRunner: CommandRunner = async () => {
+      throw new Error("glab: not authenticated")
+    }
+
+    const capability = await checkSubmissionCapability("gitlab", mockRunner)
+    assert.equal(capability.canSubmit, false)
+    assert.ok(capability.fallbackMessage!.includes("Authentication for gitlab"))
+    assert.ok(capability.fallbackMessage!.includes("glab auth login"))
+  })
+})
+
+// ── buildSubmitCommentCommand ──────────────────────────────────
+
+void describe("buildSubmitCommentCommand", () => {
+  it("should build gh command for GitHub with body only", () => {
+    const target: ResolvedPrTarget = {
+      platform: "github",
+      owner: "my-org",
+      repo: "my-repo",
+      number: 42,
+      url: "https://github.com/my-org/my-repo/pull/42",
+    }
+
+    const cmd = buildSubmitCommentCommand({
+      target,
+      body: "Please add input validation here.",
+    })
+
+    assert.ok(cmd.startsWith("gh api"))
+    assert.ok(cmd.includes("/repos/my-org/my-repo/pulls/42/comments"))
+    assert.ok(cmd.includes("Please add input validation here."))
+    assert.ok(cmd.includes("--method POST"))
+  })
+
+  it("should build gh command for GitHub with path and line", async () => {
+    const target: ResolvedPrTarget = {
+      platform: "github",
+      owner: "my-org",
+      repo: "my-repo",
+      number: 42,
+      url: "https://github.com/my-org/my-repo/pull/42",
+    }
+
+    const cmd = buildSubmitCommentCommand({
+      target,
+      body: "Missing null check",
+      path: "src/main.ts",
+      line: 87,
+    })
+
+    assert.ok(cmd.includes('-f path="src/main.ts"'))
+    assert.ok(cmd.includes("-F line=87"))
+    assert.ok(cmd.includes("Missing null check"))
+  })
+
+  it("should build glab command for GitLab", () => {
+    const target: ResolvedPrTarget = {
+      platform: "gitlab",
+      owner: "my-group",
+      repo: "my-project",
+      number: 7,
+      url: "https://gitlab.com/my-group/my-project/-/merge_requests/7",
+    }
+
+    const cmd = buildSubmitCommentCommand({
+      target,
+      body: "Please fix this issue",
+      path: "src/feature.ts",
+    })
+
+    assert.ok(cmd.startsWith("glab api"))
+    assert.ok(cmd.includes("my-group%2Fmy-project"))
+    assert.ok(cmd.includes("merge_requests/7/notes"))
+    assert.ok(cmd.includes("Please fix this issue"))
+  })
+
+  it("should escape special characters in body", () => {
+    const target: ResolvedPrTarget = {
+      platform: "github",
+      owner: "o",
+      repo: "r",
+      number: 1,
+      url: "https://github.com/o/r/pull/1",
+    }
+
+    const cmd = buildSubmitCommentCommand({
+      target,
+      body: 'Line with "quotes" and $pecial chars',
+    })
+
+    assert.ok(cmd.includes("Line with"))
+    assert.ok(cmd.includes("quotes"))
+  })
+})
+
+// ── formatAuthSkipMessage ──────────────────────────────────────
+
+void describe("formatAuthSkipMessage", () => {
+  it("should include platform name and findings path for GitHub", () => {
+    const msg = formatAuthSkipMessage("github", "/tmp/review/pr-review-abc.md")
+
+    assert.ok(msg.includes("github"))
+    assert.ok(msg.includes("/tmp/review/pr-review-abc.md"))
+    assert.ok(msg.includes("gh"))
+  })
+
+  it("should include platform name and findings path for GitLab", () => {
+    const msg = formatAuthSkipMessage("gitlab", "/tmp/review/pr-review-xyz.md")
+
+    assert.ok(msg.includes("gitlab"))
+    assert.ok(msg.includes("/tmp/review/pr-review-xyz.md"))
+    assert.ok(msg.includes("glab"))
+  })
+
+  it("should mention configuring authentication", () => {
+    const msg = formatAuthSkipMessage("github", "/tmp/review/findings.md")
+
+    assert.ok(msg.includes("configure"))
   })
 })

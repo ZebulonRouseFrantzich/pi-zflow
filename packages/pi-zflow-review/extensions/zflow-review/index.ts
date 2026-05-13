@@ -139,6 +139,10 @@ export {
   combineDiffContent,
   fetchPrDiff,
   defaultCommandRunner,
+  checkAuthStatus,
+  checkSubmissionCapability,
+  buildSubmitCommentCommand,
+  formatAuthSkipMessage,
 } from "./pr.js"
 
 export type {
@@ -150,6 +154,9 @@ export type {
   PrFile,
   PrFetchResult,
   CommandRunner,
+  AuthStatus,
+  SubmissionCapability,
+  SubmitCommentInput,
 } from "./pr.js"
 
 export {
