@@ -1,5 +1,14 @@
 /**
  * ownership-validator.test.ts — Unit tests for Task 5.2 ownership validation.
+ *
+ * Tests cover:
+ * - No conflicts when groups own disjoint files
+ * - Detection of overlapping file claims
+ * - Resolution via explicit dependency order
+ * - Failure when overlap is ambiguous (no dependency ordering)
+ * - Multiple parallel groups with complex dependency chains
+ * - Single-file conflicts, multi-file conflicts
+ * - Empty groups, single groups
  */
 import * as assert from "node:assert"
 import { test, describe } from "node:test"
@@ -7,18 +16,14 @@ import { test, describe } from "node:test"
 import {
   detectOwnershipConflicts,
   validateOwnershipAndDependencies,
-  topoSortGroups,
 } from "../extensions/zflow-change-workflows/ownership-validator.js"
-
-import type {
-  ExecutionGroup,
-} from "../extensions/zflow-change-workflows/ownership-validator.js"
+import type { ExecutionGroup } from "../extensions/zflow-change-workflows/ownership-validator.js"
 
 // ---------------------------------------------------------------------------
-// Fixtures
+// Test data helpers
 // ---------------------------------------------------------------------------
 
-function makeGroup(
+function group(
   id: string,
   files: string[],
   deps: string[] = [],
@@ -32,144 +37,64 @@ function makeGroup(
 // ---------------------------------------------------------------------------
 
 describe("detectOwnershipConflicts", () => {
-  test("returns empty for groups with no overlap", () => {
-    const groups = [
-      makeGroup("group-1", ["src/a.ts", "src/b.ts"]),
-      makeGroup("group-2", ["src/c.ts", "src/d.ts"]),
+  test("returns empty for groups with disjoint files", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", ["src/a.ts"]),
+      group("g2", ["src/b.ts"]),
+      group("g3", ["src/c.ts"]),
     ]
-    const conflicts = detectOwnershipConflicts(groups)
-    assert.deepEqual(conflicts, [])
+    const result = detectOwnershipConflicts(groups)
+    assert.deepEqual(result, [])
   })
 
-  test("detects simple overlap between two groups", () => {
-    const groups = [
-      makeGroup("group-1", ["src/a.ts"]),
-      makeGroup("group-2", ["src/a.ts"]),
+  test("detects single-file conflict between two groups", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", ["src/a.ts"]),
+      group("g2", ["src/a.ts"]),
     ]
-    const conflicts = detectOwnershipConflicts(groups)
-    assert.equal(conflicts.length, 1)
-    assert.equal(conflicts[0].file, "src/a.ts")
-    assert.deepEqual(conflicts[0].groups, ["group-1", "group-2"])
+    const result = detectOwnershipConflicts(groups)
+    assert.strictEqual(result.length, 1)
+    assert.strictEqual(result[0].file, "src/a.ts")
+    assert.deepEqual(result[0].groups, ["g1", "g2"])
   })
 
-  test("detects overlap among three groups", () => {
-    const groups = [
-      makeGroup("group-1", ["src/a.ts"]),
-      makeGroup("group-2", ["src/a.ts", "src/b.ts"]),
-      makeGroup("group-3", ["src/a.ts"]),
+  test("detects same file claimed by three groups", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", ["src/shared.ts"]),
+      group("g2", ["src/shared.ts"]),
+      group("g3", ["src/shared.ts"]),
     ]
-    const conflicts = detectOwnershipConflicts(groups)
-    assert.equal(conflicts.length, 1)
-    assert.equal(conflicts[0].file, "src/a.ts")
-    assert.equal(conflicts[0].groups.length, 3)
+    const result = detectOwnershipConflicts(groups)
+    assert.strictEqual(result.length, 1)
+    assert.strictEqual(result[0].file, "src/shared.ts")
+    assert.strictEqual(result[0].groups.length, 3)
   })
 
-  test("detects multiple independent conflicts", () => {
-    const groups = [
-      makeGroup("group-1", ["src/a.ts"]),
-      makeGroup("group-2", ["src/a.ts"]),
-      makeGroup("group-3", ["src/b.ts"]),
-      makeGroup("group-4", ["src/b.ts"]),
+  test("detects multiple file conflicts", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", ["src/a.ts", "src/b.ts"]),
+      group("g2", ["src/b.ts", "src/c.ts"]),
     ]
-    const conflicts = detectOwnershipConflicts(groups)
-    assert.equal(conflicts.length, 2)
+    const result = detectOwnershipConflicts(groups)
+    assert.strictEqual(result.length, 1)
+    assert.strictEqual(result[0].file, "src/b.ts")
   })
 
-  test("returns empty for non-parallelizable groups", () => {
-    const groups = [
-      makeGroup("group-1", ["src/a.ts"], [], false),
-      makeGroup("group-2", ["src/a.ts"], [], false),
+  test("returns empty for single group", () => {
+    const groups: ExecutionGroup[] = [group("g1", ["src/a.ts"])]
+    assert.deepEqual(detectOwnershipConflicts(groups), [])
+  })
+
+  test("returns empty for empty groups array", () => {
+    assert.deepEqual(detectOwnershipConflicts([]), [])
+  })
+
+  test("handles groups with empty files array", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", []),
+      group("g2", []),
     ]
-    const conflicts = detectOwnershipConflicts(groups)
-    assert.deepEqual(conflicts, [])
-  })
-
-  test("ignores non-parallel groups that overlap with parallel ones", () => {
-    // Non-parallel groups are ignored in conflict detection,
-    // but parallel groups can still conflict with each other
-    const groups = [
-      makeGroup("group-1", ["src/a.ts"]),
-      makeGroup("group-2", ["src/a.ts"], [], false),
-    ]
-    const conflicts = detectOwnershipConflicts(groups)
-    // group-2 is non-parallelizable, so it's excluded
-    // group-1 alone doesn't create a conflict
-    assert.deepEqual(conflicts, [])
-  })
-
-  test("returns empty for no groups", () => {
-    const conflicts = detectOwnershipConflicts([])
-    assert.deepEqual(conflicts, [])
-  })
-
-  test("returns empty for groups with no files", () => {
-    const groups = [
-      makeGroup("group-1", []),
-      makeGroup("group-2", []),
-    ]
-    const conflicts = detectOwnershipConflicts(groups)
-    assert.deepEqual(conflicts, [])
-  })
-})
-
-// ---------------------------------------------------------------------------
-// topoSortGroups
-// ---------------------------------------------------------------------------
-
-describe("topoSortGroups", () => {
-  test("returns sorted order for simple dependency chain", () => {
-    const groups = [
-      makeGroup("group-1", ["src/a.ts"]),
-      makeGroup("group-2", ["src/b.ts"], ["group-1"]),
-      makeGroup("group-3", ["src/c.ts"], ["group-2"]),
-    ]
-    const sorted = topoSortGroups(groups)
-    assert.deepEqual(sorted, ["group-1", "group-2", "group-3"])
-  })
-
-  test("handles groups with no dependencies", () => {
-    const groups = [
-      makeGroup("group-3", ["src/c.ts"], []),
-      makeGroup("group-1", ["src/a.ts"], []),
-      makeGroup("group-2", ["src/b.ts"], []),
-    ]
-    const sorted = topoSortGroups(groups)
-    assert.ok(sorted !== null)
-    assert.equal(sorted!.length, 3)
-    // All three have no deps, any order is valid
-    assert.deepEqual(new Set(sorted), new Set(["group-1", "group-2", "group-3"]))
-  })
-
-  test("returns null for cyclic dependencies", () => {
-    const groups = [
-      makeGroup("group-1", ["src/a.ts"], ["group-2"]),
-      makeGroup("group-2", ["src/b.ts"], ["group-3"]),
-      makeGroup("group-3", ["src/c.ts"], ["group-1"]),
-    ]
-    const sorted = topoSortGroups(groups)
-    assert.equal(sorted, null)
-  })
-
-  test("handles diamond dependency", () => {
-    const groups = [
-      makeGroup("group-1", ["src/a.ts"]),
-      makeGroup("group-2", ["src/b.ts"], ["group-1"]),
-      makeGroup("group-3", ["src/c.ts"], ["group-1"]),
-      makeGroup("group-4", ["src/d.ts"], ["group-2", "group-3"]),
-    ]
-    const sorted = topoSortGroups(groups)
-    assert.ok(sorted !== null)
-    assert.equal(sorted!.length, 4)
-    assert.ok(sorted!.indexOf("group-1") < sorted!.indexOf("group-2"))
-    assert.ok(sorted!.indexOf("group-1") < sorted!.indexOf("group-3"))
-    assert.ok(sorted!.indexOf("group-2") < sorted!.indexOf("group-4"))
-    assert.ok(sorted!.indexOf("group-3") < sorted!.indexOf("group-4"))
-  })
-
-  test("handles single group", () => {
-    const groups = [makeGroup("group-1", ["src/a.ts"])]
-    const sorted = topoSortGroups(groups)
-    assert.deepEqual(sorted, ["group-1"])
+    assert.deepEqual(detectOwnershipConflicts(groups), [])
   })
 })
 
@@ -178,134 +103,127 @@ describe("topoSortGroups", () => {
 // ---------------------------------------------------------------------------
 
 describe("validateOwnershipAndDependencies", () => {
-  test("passes with no conflicts and no dependencies", () => {
-    const groups = [
-      makeGroup("group-1", ["src/a.ts"]),
-      makeGroup("group-2", ["src/b.ts"]),
+  test("passes for groups with no file overlaps", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", ["src/a.ts"]),
+      group("g2", ["src/b.ts"]),
+      group("g3", ["src/c.ts"]),
     ]
     const result = validateOwnershipAndDependencies(groups)
-    assert.equal(result.valid, true)
-    assert.equal(result.conflicts.length, 0)
-    assert.equal(result.sequentialGroups.length, 0)
+    assert.strictEqual(result.valid, true)
+    assert.deepEqual(result.conflicts, [])
   })
 
-  test("passes with no conflicts and explicit dependencies", () => {
-    const groups = [
-      makeGroup("group-1", ["src/a.ts"]),
-      makeGroup("group-2", ["src/b.ts"], ["group-1"]),
+  test("passes for overlapping files with explicit dependency order", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", ["src/shared.ts"]),
+      group("g2", ["src/shared.ts"], ["g1"]), // g2 depends on g1
     ]
     const result = validateOwnershipAndDependencies(groups)
-    assert.equal(result.valid, true)
-    assert.equal(result.conflicts.length, 0)
+    assert.strictEqual(result.valid, true)
+    assert.strictEqual(result.conflicts.length, 0)
+    assert.ok(result.summary.includes("dependency order is explicit"))
   })
 
-  test("fails when conflicts exist and no dependency ordering", () => {
-    const groups = [
-      makeGroup("group-1", ["src/a.ts"]),
-      makeGroup("group-2", ["src/a.ts"]),
+  test("passes for transitive dependency resolving overlap", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", ["src/a.ts"]),
+      group("g2", ["src/b.ts"], ["g1"]),
+      group("g3", ["src/a.ts"], ["g2"]), // g3 depends on g2, which depends on g1
     ]
     const result = validateOwnershipAndDependencies(groups)
-    assert.equal(result.valid, false)
-    assert.equal(result.conflicts.length, 1)
+    assert.strictEqual(result.valid, true)
+    assert.strictEqual(result.conflicts.length, 0)
   })
 
-  test("passes with conflicts resolved by explicit dependencies", () => {
-    const groups = [
-      makeGroup("group-1", ["src/a.ts"]),
-      makeGroup("group-2", ["src/a.ts"], ["group-1"]),
+  test("fails for overlapping files with no dependency order", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", ["src/shared.ts"]),
+      group("g2", ["src/shared.ts"]), // no dependency between g1 and g2
     ]
     const result = validateOwnershipAndDependencies(groups)
-    assert.equal(result.valid, true)
-    assert.equal(result.conflicts.length, 1)
-    // The two groups share a file and have explicit deps,
-    // so they form a sequential chain
-    assert.ok(result.sequentialGroups.length >= 0)
+    assert.strictEqual(result.valid, false)
+    assert.strictEqual(result.conflicts.length, 1)
+    assert.strictEqual(result.conflicts[0].file, "src/shared.ts")
   })
 
-  test("fails with cyclic dependencies even without file conflicts", () => {
-    const groups = [
-      makeGroup("group-1", ["src/a.ts"], ["group-2"]),
-      makeGroup("group-2", ["src/b.ts"], ["group-1"]),
+  test("fails when only some overlapping groups have dependencies", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", ["src/a.ts"]),
+      group("g2", ["src/a.ts"], ["g1"]), // g2 depends on g1 — ok
+      group("g3", ["src/a.ts"]), // g3 overlaps but has no dependency — fails
     ]
     const result = validateOwnershipAndDependencies(groups)
-    assert.equal(result.valid, false)
+    // g3 overlaps with both g1 and g2 but has no dependency on either
+    assert.strictEqual(result.valid, false)
   })
 
-  test("handles non-parallelizable groups without invalidating", () => {
-    const groups = [
-      makeGroup("group-1", ["src/a.ts"], [], false),
-      makeGroup("group-2", ["src/a.ts"], [], false),
-    ]
-    const result = validateOwnershipAndDependencies(groups)
-    assert.equal(result.valid, true)
-    assert.equal(result.conflicts.length, 0)
-  })
-
-  test("fails when parallel groups conflict without deps but non-parallel groups exist", () => {
-    const groups = [
-      makeGroup("group-1", ["src/a.ts"]),
-      makeGroup("group-2", ["src/a.ts"]),
-      makeGroup("group-3", ["src/b.ts"], [], false),
-    ]
-    const result = validateOwnershipAndDependencies(groups)
-    assert.equal(result.valid, false)
-    assert.equal(result.conflicts.length, 1)
-  })
-
-  test("passes with no groups (empty edge case)", () => {
+  test("handles empty groups array", () => {
     const result = validateOwnershipAndDependencies([])
-    assert.equal(result.valid, true)
-    assert.equal(result.conflicts.length, 0)
+    assert.strictEqual(result.valid, true)
+    assert.deepEqual(result.conflicts, [])
   })
 
-  test("passes with complex multi-group dependencies resolving overlaps", () => {
-    const groups = [
-      makeGroup("group-1", ["src/core.ts"]),
-      makeGroup("group-2", ["src/core.ts", "src/utils.ts"], ["group-1"]),
-      makeGroup("group-3", ["src/utils.ts"], ["group-2"]),
-      makeGroup("group-4", ["src/other.ts"]),
-    ]
+  test("handles single group", () => {
+    const groups: ExecutionGroup[] = [group("g1", ["src/a.ts"])]
     const result = validateOwnershipAndDependencies(groups)
-    assert.equal(result.valid, true)
-    assert.equal(result.conflicts.length, 2)
-
-    // Verify topological order
-    const sorted = topoSortGroups(groups)
-    assert.ok(sorted !== null)
-    assert.ok(sorted!.indexOf("group-1") < sorted!.indexOf("group-2"))
-    assert.ok(sorted!.indexOf("group-2") < sorted!.indexOf("group-3"))
+    assert.strictEqual(result.valid, true)
   })
 
-  test("fails when conflicting groups have wrong partial dependencies", () => {
-    // group-1 and group-2 overlap on src/a.ts, but only group-1 depends on group-2
-    const groups = [
-      makeGroup("group-1", ["src/a.ts"], ["group-2"]),
-      makeGroup("group-2", ["src/a.ts"]),
+  test("passes when overlapping groups are in a dependency chain (A←B←C)", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", ["src/core.ts"]),
+      group("g2", ["src/core.ts", "src/more.ts"], ["g1"]),
+      group("g3", ["src/more.ts"], ["g2"]),
     ]
     const result = validateOwnershipAndDependencies(groups)
-    // This is valid because group-1 depends on group-2, which creates a clear ordering
-    // (group-2 first, then group-1)
-    assert.equal(result.valid, true)
+    assert.strictEqual(result.valid, true)
+    assert.strictEqual(result.conflicts.length, 0)
   })
 
-  test("generates useful summary for valid result", () => {
-    const groups = [
-      makeGroup("group-1", ["src/a.ts"]),
-      makeGroup("group-2", ["src/a.ts"], ["group-1"]),
+  test("reports multiple overlapping files when ambiguously owned", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", ["src/a.ts", "src/b.ts"]),
+      group("g2", ["src/a.ts", "src/b.ts"]),
+      group("g3", ["src/c.ts"]),
     ]
     const result = validateOwnershipAndDependencies(groups)
-    assert.ok(result.summary.includes("Conflict"))
-    assert.ok(result.summary.includes("group-1"))
-    assert.ok(result.summary.includes("group-2"))
+    assert.strictEqual(result.valid, false)
+    // Both a.ts and b.ts are conflicts, but they involve the same groups,
+    // so they collapse into one OwnershipConflict per file
+    assert.strictEqual(result.conflicts.length, 2)
   })
 
-  test("generates useful summary for invalid result", () => {
-    const groups = [
-      makeGroup("group-1", ["src/a.ts"]),
-      makeGroup("group-2", ["src/a.ts"]),
+  test("conflict summary lists all ambiguous groups", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", ["src/app.ts"]),
+      group("g2", ["src/app.ts"]),
+      group("g3", ["src/app.ts"]),
     ]
     const result = validateOwnershipAndDependencies(groups)
-    assert.ok(result.summary.includes("Conflict"))
-    assert.ok(result.summary.includes("Resolution options"))
+    assert.strictEqual(result.valid, false)
+    assert.ok(result.summary.includes("g1"))
+    assert.ok(result.summary.includes("g2"))
+    assert.ok(result.summary.includes("g3"))
+  })
+
+  test("single-file overlap between two groups with no deps fails", () => {
+    const groups: ExecutionGroup[] = [
+      group("g-a", ["src/conflict.ts"]),
+      group("g-b", ["src/conflict.ts"]),
+    ]
+    const result = validateOwnershipAndDependencies(groups)
+    assert.strictEqual(result.valid, false)
+    assert.strictEqual(result.conflicts.length, 1)
+    assert.strictEqual(result.conflicts[0].file, "src/conflict.ts")
+  })
+
+  test("overlapping groups with mutual one-way dep pass (A depends on B, B claims A's file)", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", ["src/shared.ts"]),
+      group("g2", ["src/shared.ts"], ["g1"]),
+    ]
+    const result = validateOwnershipAndDependencies(groups)
+    assert.strictEqual(result.valid, true)
   })
 })

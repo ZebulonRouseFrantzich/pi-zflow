@@ -39,6 +39,18 @@ export type {
   GitPreflightResult,
 } from "./extensions/zflow-change-workflows/git-preflight.js"
 
+// Ownership validator (Phase 5 — file ownership and dependency validation)
+export {
+  detectOwnershipConflicts,
+  validateOwnershipAndDependencies,
+} from "./extensions/zflow-change-workflows/ownership-validator.js"
+
+export type {
+  ExecutionGroup,
+  OwnershipConflict,
+  OwnershipValidationResult,
+} from "./extensions/zflow-change-workflows/ownership-validator.js"
+
 // File ownership validation (Phase 5 — parallel write conflict detection)
 export {
   detectOwnershipConflicts,
