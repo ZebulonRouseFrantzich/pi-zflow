@@ -233,6 +233,157 @@ export function choosePlanReviewTier(groups: ExecutionGroupLike[]): string {
   return "standard"
 }
 
+// ── Tier selection — code review ──────────────────────────────
+
+/**
+ * Context for making code-review tier decisions.
+ *
+ * All fields are optional so callers may pass whatever data they
+ * have available.  The decision logic applies the documented trigger
+ * rules to determine whether optional reviewers (logic, system) are
+ * needed.
+ */
+export interface CodeReviewTierContext {
+  /** Execution groups with review tags. */
+  executionGroups?: Array<{ reviewTags?: string | string[] }>
+  /** Verification document content (plain text). */
+  verificationText?: string
+  /** List of modified file paths. */
+  modifiedFiles?: string[]
+  /** List of modified directory paths. */
+  modifiedDirectories?: string[]
+  /** Cross-module dependency descriptions (if known). */
+  crossModuleDependencies?: string[]
+  /** Whether public API changes are present. */
+  hasPublicApiChanges?: boolean
+  /** Whether migration/schema/config changes are present. */
+  hasMigrationChanges?: boolean
+  /** Whether the planner explicitly flagged algorithmic risk. */
+  hasAlgorithmicRisk?: boolean
+}
+
+/**
+ * Substrings in file paths that suggest algorithmic or concurrency
+ * risk, triggering the `+logic` tier.
+ */
+const LOGIC_KEYWORDS = [
+  "algorithm",
+  "concurrency",
+  "parallel",
+  "scheduler",
+  "lock",
+  "mutex",
+  "computation",
+  "sort",
+  "cache",
+] as const
+
+/**
+ * Choose a code-review tier based on the change context and the
+ * documented trigger rules.
+ *
+ * ## Logic reviewer added when ANY match:
+ * - `reviewTags` include `"logic"`
+ * - `verificationText` mentions "performance" or "complexity"
+ * - A modified file path contains an algorithmic keyword
+ *   (algorithm, concurrency, parallel, scheduler, lock, mutex,
+ *   computation, sort, cache)
+ * - `hasAlgorithmicRisk` is true
+ *
+ * ## System reviewer added when ANY match:
+ * - `reviewTags` include `"system"`
+ * - > 10 files changed
+ * - > 3 directories touched
+ * - `crossModuleDependencies` is non-empty
+ * - `hasPublicApiChanges` is true
+ * - `hasMigrationChanges` is true
+ *
+ * ## Return values
+ *
+ * | logic? | system? | tier       |
+ * | :----: | :-----: | ---------- |
+ * | no     | no      | `"standard"` |
+ * | yes    | no      | `"+logic"`   |
+ * | no     | yes     | `"+system"`  |
+ * | yes    | yes     | `"+full"`    |
+ *
+ * @param ctx - Change context for the review tier decision.
+ * @returns One of `"standard"`, `"+logic"`, `"+system"`, `"+full"`.
+ */
+export function chooseCodeReviewTier(ctx: CodeReviewTierContext): string {
+  const addLogic = shouldAddLogicReviewer(ctx)
+  const addSystem = shouldAddSystemReviewer(ctx)
+
+  if (addLogic && addSystem) return "+full"
+  if (addLogic) return "+logic"
+  if (addSystem) return "+system"
+  return "standard"
+}
+
+/**
+ * Determine whether the logic reviewer should be added.
+ *
+ * Returns true if **any** of the logic trigger conditions are met.
+ */
+function shouldAddLogicReviewer(ctx: CodeReviewTierContext): boolean {
+  // 1. execution-group reviewTags include "logic"
+  if (ctx.executionGroups && ctx.executionGroups.length > 0) {
+    const tags = collectReviewTags(ctx.executionGroups as ExecutionGroupLike[])
+    if (tags.includes("logic")) return true
+  }
+
+  // 2. verification text mentions "performance" or "complexity"
+  if (ctx.verificationText) {
+    const lower = ctx.verificationText.toLowerCase()
+    if (lower.includes("performance") || lower.includes("complexity")) {
+      return true
+    }
+  }
+
+  // 3. modified file paths contain algorithmic keywords
+  if (ctx.modifiedFiles && ctx.modifiedFiles.length > 0) {
+    for (const file of ctx.modifiedFiles) {
+      const lower = file.toLowerCase()
+      for (const kw of LOGIC_KEYWORDS) {
+        if (lower.includes(kw)) return true
+      }
+    }
+  }
+
+  // 4. planner flagged algorithmic risk
+  if (ctx.hasAlgorithmicRisk) return true
+
+  return false
+}
+
+/**
+ * Determine whether the system reviewer should be added.
+ *
+ * Returns true if **any** of the system trigger conditions are met.
+ */
+function shouldAddSystemReviewer(ctx: CodeReviewTierContext): boolean {
+  // 1. execution-group reviewTags include "system"
+  if (ctx.executionGroups && ctx.executionGroups.length > 0) {
+    const tags = collectReviewTags(ctx.executionGroups as ExecutionGroupLike[])
+    if (tags.includes("system")) return true
+  }
+
+  // 2. >10 files changed or >3 directories touched
+  if (ctx.modifiedFiles && ctx.modifiedFiles.length > 10) return true
+  if (ctx.modifiedDirectories && ctx.modifiedDirectories.length > 3) return true
+
+  // 3. cross-module dependencies present
+  if (ctx.crossModuleDependencies && ctx.crossModuleDependencies.length > 0) return true
+
+  // 4. public API changes
+  if (ctx.hasPublicApiChanges) return true
+
+  // 5. migration/schema/config changes
+  if (ctx.hasMigrationChanges) return true
+
+  return false
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Code review findings persistence
 // ═══════════════════════════════════════════════════════════════

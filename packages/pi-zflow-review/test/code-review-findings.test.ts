@@ -18,11 +18,12 @@ import {
   formatCoverageNotes,
   formatFindingsBySeverity,
   persistCodeReviewFindings,
+  chooseCodeReviewTier,
 } from "../extensions/zflow-review/findings.js"
 
 import { createManifest, recordExecuted, recordSkipped, recordFailed } from "../src/reviewer-manifest.js"
 
-import type { CodeReviewFinding, CodeReviewFindingsInput } from "../extensions/zflow-review/findings.js"
+import type { CodeReviewFinding, CodeReviewFindingsInput, CodeReviewTierContext } from "../extensions/zflow-review/findings.js"
 import type { ReviewerManifest } from "../src/reviewer-manifest.js"
 
 // ── Helpers ────────────────────────────────────────────────────
@@ -477,5 +478,248 @@ void describe("persistCodeReviewFindings", () => {
     assert.ok(!content.includes("**Reviewer dissent**"))
     // No failure mode line since none was provided
     assert.ok(!content.includes("**Failure mode**"))
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════
+// chooseCodeReviewTier tests
+// ═══════════════════════════════════════════════════════════════
+
+void describe("chooseCodeReviewTier", () => {
+  it("should return standard for empty context", () => {
+    assert.equal(chooseCodeReviewTier({}), "standard")
+  })
+
+  it("should return standard when no trigger conditions are met", () => {
+    const ctx = {
+      executionGroups: [],
+      verificationText: "simple boilerplate change",
+      modifiedFiles: ["src/button.tsx"],
+      modifiedDirectories: ["src"],
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "standard")
+  })
+
+  // ── Logic triggers ──────────────────────────────────────────
+
+  it("should return +logic when reviewTags includes logic", () => {
+    const ctx: CodeReviewTierContext = {
+      executionGroups: [{ reviewTags: "logic" }],
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+logic")
+  })
+
+  it("should return +logic when verification text mentions performance", () => {
+    const ctx: CodeReviewTierContext = {
+      verificationText: "Must meet sub-second response times for performance requirements",
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+logic")
+  })
+
+  it("should return +logic when verification text mentions complexity", () => {
+    const ctx: CodeReviewTierContext = {
+      verificationText: "time complexity should not exceed O(n log n)",
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+logic")
+  })
+
+  it("should return +logic when modified file contains algorithmic keyword", () => {
+    const ctx: CodeReviewTierContext = {
+      modifiedFiles: ["src/algorithm/sort.ts"],
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+logic")
+  })
+
+  it("should return +logic when modified file contains concurrency keyword", () => {
+    const ctx: CodeReviewTierContext = {
+      modifiedFiles: ["src/concurrency/worker.ts"],
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+logic")
+  })
+
+  it("should return +logic when modified file contains parallel keyword", () => {
+    const ctx: CodeReviewTierContext = {
+      modifiedFiles: ["src/parallel/processor.ts"],
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+logic")
+  })
+
+  it("should return +logic when hasAlgorithmicRisk is true", () => {
+    const ctx: CodeReviewTierContext = {
+      hasAlgorithmicRisk: true,
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+logic")
+  })
+
+  // ── System triggers ─────────────────────────────────────────
+
+  it("should return +system when reviewTags includes system", () => {
+    const ctx: CodeReviewTierContext = {
+      executionGroups: [{ reviewTags: "system" }],
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+system")
+  })
+
+  it("should return +system when more than 10 files changed", () => {
+    const files = Array.from({ length: 11 }, (_, i) => `src/file${i}.ts`)
+    const ctx: CodeReviewTierContext = {
+      modifiedFiles: files,
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+system")
+  })
+
+  it("should return standard when exactly 10 files changed", () => {
+    const files = Array.from({ length: 10 }, (_, i) => `src/file${i}.ts`)
+    const ctx: CodeReviewTierContext = {
+      modifiedFiles: files,
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "standard")
+  })
+
+  it("should return +system when more than 3 directories touched", () => {
+    const ctx: CodeReviewTierContext = {
+      modifiedDirectories: ["src", "lib", "config", "tests"],
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+system")
+  })
+
+  it("should return standard when exactly 3 directories touched", () => {
+    const ctx: CodeReviewTierContext = {
+      modifiedDirectories: ["src", "lib", "config"],
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "standard")
+  })
+
+  it("should return +system when crossModuleDependencies present", () => {
+    const ctx: CodeReviewTierContext = {
+      crossModuleDependencies: ["auth → api", "db → cache"],
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+system")
+  })
+
+  it("should return +system when hasPublicApiChanges is true", () => {
+    const ctx: CodeReviewTierContext = {
+      hasPublicApiChanges: true,
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+system")
+  })
+
+  it("should return +system when hasMigrationChanges is true", () => {
+    const ctx: CodeReviewTierContext = {
+      hasMigrationChanges: true,
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+system")
+  })
+
+  // ── Combined triggers ───────────────────────────────────────
+
+  it("should return +full when both logic and system conditions are met", () => {
+    const ctx: CodeReviewTierContext = {
+      executionGroups: [{ reviewTags: ["logic", "system"] }],
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+full")
+  })
+
+  it("should return +full when logic from tags and system from file count", () => {
+    const files = Array.from({ length: 11 }, (_, i) => `src/file${i}.ts`)
+    const ctx: CodeReviewTierContext = {
+      executionGroups: [{ reviewTags: "logic" }],
+      modifiedFiles: files,
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+full")
+  })
+
+  it("should return +full when system from tags and logic from algorithmic file", () => {
+    const ctx: CodeReviewTierContext = {
+      executionGroups: [{ reviewTags: "system" }],
+      modifiedFiles: ["src/algorithm/sort.ts"],
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+full")
+  })
+
+  it("should return +full when logic from verification text and system from API change", () => {
+    const ctx: CodeReviewTierContext = {
+      verificationText: "performance requirements must be met",
+      hasPublicApiChanges: true,
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+full")
+  })
+
+  // ── Edge cases ──────────────────────────────────────────────
+
+  it("should return +full when logic from algorithmicRisk and system from migration", () => {
+    const ctx: CodeReviewTierContext = {
+      hasAlgorithmicRisk: true,
+      hasMigrationChanges: true,
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+full")
+  })
+
+  it("should still return +system when multiple system conditions met but logic not flagged", () => {
+    const files = Array.from({ length: 11 }, (_, i) => `src/file${i}.ts`)
+    const ctx: CodeReviewTierContext = {
+      modifiedFiles: files,
+      modifiedDirectories: ["src", "lib", "config", "tests"],
+      crossModuleDependencies: ["auth → api"],
+      hasPublicApiChanges: true,
+      hasMigrationChanges: true,
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+system")
+  })
+
+  it("should still return +logic when multiple logic conditions met but system not flagged", () => {
+    const ctx: CodeReviewTierContext = {
+      executionGroups: [{ reviewTags: "logic" }],
+      verificationText: "performance-critical path",
+      modifiedFiles: ["src/concurrency/worker.ts", "src/algorithm/sort.ts"],
+      hasAlgorithmicRisk: true,
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+logic")
+  })
+
+  it("should handle empty arrays correctly", () => {
+    const ctx: CodeReviewTierContext = {
+      executionGroups: [],
+      modifiedFiles: [],
+      modifiedDirectories: [],
+      crossModuleDependencies: [],
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "standard")
+  })
+
+  it("should handle undefined fields correctly", () => {
+    const ctx: CodeReviewTierContext = {
+      executionGroups: [{ reviewTags: undefined }],
+      modifiedFiles: undefined,
+      modifiedDirectories: undefined,
+      crossModuleDependencies: undefined,
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "standard")
+  })
+
+  // ── reviewTags as array in execution group ──────────────────
+
+  it("should handle reviewTags as array with logic", () => {
+    const ctx: CodeReviewTierContext = {
+      executionGroups: [{ reviewTags: ["logic"] }],
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+logic")
+  })
+
+  it("should handle reviewTags as array with system", () => {
+    const ctx: CodeReviewTierContext = {
+      executionGroups: [{ reviewTags: ["system"] }],
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+system")
+  })
+
+  it("should handle reviewTags as array with both tags across groups", () => {
+    const ctx: CodeReviewTierContext = {
+      executionGroups: [
+        { reviewTags: ["logic"] },
+        { reviewTags: ["system"] },
+      ],
+    }
+    assert.equal(chooseCodeReviewTier(ctx), "+full")
   })
 })

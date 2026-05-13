@@ -39,6 +39,7 @@ export {
   resolveTier,
   collectReviewTags,
   choosePlanReviewTier,
+  chooseCodeReviewTier,
   formatSeveritySummary,
   formatCoverageNotes,
   formatFindingsBySeverity,
@@ -47,6 +48,7 @@ export {
 
 export type {
   ExecutionGroupLike,
+  CodeReviewTierContext,
   CodeReviewFinding,
   CodeReviewFindingsInput,
 } from "./findings.js"
