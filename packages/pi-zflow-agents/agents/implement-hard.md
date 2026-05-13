@@ -15,7 +15,7 @@ systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
 skills: implementation-orchestration, code-skeleton, plan-drift-protocol
-maxSubagentDepth: 1
+maxSubagentDepth: 0
 maxOutput: 20000
 ---
 

@@ -63,3 +63,12 @@ export type {
   BuiltinAgentOverride,
   BuiltinOverrideDefinition,
 } from "./builtin-overrides.js"
+
+// Depth enforcement
+export {
+  validateMaxSubagentDepth,
+  getDefaultMaxSubagentDepth,
+  enforceDepthLimits,
+  applyDefaultMaxSubagentDepth,
+  KNOWN_DEPTH_OVERRIDES,
+} from "./depth-enforcement.js"
