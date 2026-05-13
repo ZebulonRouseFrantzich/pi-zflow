@@ -810,6 +810,100 @@ registry.provide("artifacts", artifactService);
 See `packages/pi-zflow-core/src/registry.ts` for the implementation.
 See `packages/pi-zflow-core/src/diagnostics.ts` for capability conflict helpers.
 
+## Subagent Integration Boundary
+
+> This section documents the explicit division of responsibility between
+> `pi-subagents` (the orchestration runtime) and `pi-zflow` packages (the
+> workflow layer). This boundary is a **must-preserve architectural decision**
+> and must not be eroded in later phases.
+
+### What `pi-subagents` owns
+
+`pi-subagents` is the **only orchestration runtime** in the foundation. It owns
+all subprocess/agent lifecycle and isolation:
+
+| Responsibility                       | Details                                                                                                     |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| **Single subagent execution**        | Launch and manage one-shot `/run` subagents by runtime name                                                 |
+| **Parallel execution**               | Run multiple subagents concurrently within a chain or orchestration step                                    |
+| **Chain execution**                  | Sequence subagent stages with dependency ordering, output routing, and conditional branching                |
+| **Background runs**                  | Fork and track long-running subagent sessions                                                               |
+| **Child contexts / forked contexts** | Create isolated sub-contexts with narrowed prompt, tool, and file-access scope                              |
+| **Agent discovery**                  | Resolve agent markdown files from user/project discovery directories (`~/.pi/agent/agents/`, `.pi/agents/`) |
+| **Chain discovery**                  | Resolve chain markdown files (`*.chain.md`) from user/project discovery directories                         |
+| **Worktree creation/cleanup**        | Create and tear down isolated worktree environments when `worktree: true`                                   |
+| **Artifact capture**                 | Capture subagent stdout, stderr, structured output, and written file paths from each run                    |
+
+### What `pi-zflow` packages own
+
+`pi-zflow` packages are the **workflow and configuration layer**. They choose
+_which_ agents/chains to run, _how_ to configure them, and _what_ to do with
+their output — but they do not implement a runner.
+
+| Package                     | Owns                                                                                                                                       | Integration with `pi-subagents`                                                                                                                                          |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pi-zflow-agents`           | Agent markdown, chain definitions, skills, prompt fragments, and setup/update installation (`/zflow-setup-agents`, `/zflow-update-agents`) | Installs agent `.md` and chain `.chain.md` files into `pi-subagents` discovery directories so they become available via runtime name                                     |
+| `pi-zflow-profiles`         | Profile/lane resolution, agent-to-model binding, active profile cache                                                                      | Provides resolved bindings (model, tools, `maxOutput`, `maxSubagentDepth`) that are injected as launch-time overrides when `pi-subagents` starts a subagent              |
+| `pi-zflow-change-workflows` | Formal prepare/implement orchestration, plan lifecycle, verification/fix loops, apply-back                                                 | Chooses which agents/chains to invoke, builds launch configs from profile bindings, routes output to `pi-zflow-artifacts` for persistence                                |
+| `pi-zflow-review`           | Plan-review and code-review orchestration, PR/MR diff review, findings management                                                          | Assembles reviewer manifests, dispatches review swarms via chains, and persists synthesised findings through the artifact layer                                          |
+| `pi-zflow-artifacts`        | Runtime state path resolution, atomic artifact writes, cleanup metadata                                                                    | Persists subagent outputs (plan artifacts, review findings, run state) into `<runtime-state-dir>` — the orchestrator owns _what_ to persist, this owns _how_ and _where_ |
+| `pi-zflow-plan-mode`        | Ad-hoc read-only planning mode, active-tool restriction                                                                                    | Does not directly integrate with `pi-subagents`; constrains tool availability for the main session                                                                       |
+| `pi-zflow-compaction`       | Proactive compaction hooks and handoff reminders                                                                                           | Owns the `session_before_compact` hook that runs before Pi compacts session history                                                                                      |
+| `pi-zflow-runecontext`      | RuneContext detection, change-doc flavor parsing, canonical doc resolution                                                                 | Provides document context that the workflow layer feeds into subagent prompts                                                                                            |
+| `pi-zflow-core`             | Shared types, registry, version constants                                                                                                  | Library-only; no direct Pi or subagent integration                                                                                                                       |
+
+### How they connect
+
+The integration follows a strict **config-invoke-store** pattern:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      pi-zflow workflow layer                     │
+│                                                                  │
+│  1. Resolve │ pi-zflow-profiles  │→ resolved agent bindings      │
+│  2. Assemble│ pi-zflow-agents    │→ agent/chain markdown files   │
+│  3. Build   │ workflow package   │→ launch config + prompt       │
+│             │                    │                                │
+│             ▼                    │                                │
+│  4. Invoke  │ pi-subagents API   │→ runs subagent/chain          │
+│             │                    │                                │
+│             ▼                    │                                │
+│  5. Persist │ pi-zflow-artifacts │→ capture output to state dir   │
+│  6. Process │ workflow package   │→ validate, synthesize, retry   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key rules:**
+
+- Workflow packages never call `pi-subagents` internals directly — they use the
+  public `/run`, `/chain`, `subagent(...)` API that `pi-subagents` exposes to
+  the Pi runtime.
+- `pi-zflow-agents` installs markdown files into `pi-subagents` discovery paths;
+  `pi-subagents` reads and interprets them. The workflow layer does not parse
+  agent frontmatter directly — it relies on the profile binding for launch config
+  and the chain file for stage ordering.
+- The workflow layer builds _launch configs_ (model, tools, `maxOutput`,
+  `maxSubagentDepth`) from resolved profile bindings and injects them as
+  overrides at invocation time. It does not modify agent markdown files.
+- `pi-subagents` owns _how_ a subagent runs (lifecycle, isolation, parallelism);
+  `pi-zflow` owns _what_ runs and _why_.
+
+### Anti-goal
+
+**Do not build a custom runner.** There must never be a `pi-zflow-runner`
+package or a `pi-zflow`-owned subagent framework. `pi-subagents` is the only
+runner. If `pi-subagents` does not support a needed capability, extend
+`pi-subagents` or work around it at the workflow layer — do not reimplement
+subagent execution.
+
+### Related documentation
+
+- `docs/subagents-integration.md` — detailed integration notes, examples, and
+  troubleshooting
+- `docs/architecture/package-ownership.md` — canonical single-owner policy
+- `packages/pi-zflow-agents/README.md` — agent/chain asset ownership and
+  install/discovery flow
+
 ## License
 
 MIT
