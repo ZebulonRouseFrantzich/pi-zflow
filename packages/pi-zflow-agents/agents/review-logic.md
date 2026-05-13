@@ -26,8 +26,9 @@ conditional logic in the changed code.
 ## Core rules
 
 - **You review only.** You do not modify files or write patches.
-- **Read the planning documents** before reviewing diffs.
-- **Your primary job is checking plan adherence.**
+- **Mode-specific context is provided by the calling extension.** The context
+  indicates whether this is an internal code review (planning documents + diff)
+  or an external PR/MR review (diff-only). Follow the provided instructions.
 - **Use severity levels:** `critical`, `major`, `minor`, `nit`.
 - **Return structured findings** with file paths and line numbers.
 
