@@ -17,6 +17,8 @@
 
 import * as path from "node:path"
 
+import { listCanonicalDocNames } from "./precedence.js"
+
 // ── Constants ────────────────────────────────────────────────────
 
 /**
@@ -41,15 +43,7 @@ const FORBIDDEN_IN_RUNECONTEXT: ReadonlySet<string> = new Set([
  * the change: proposal, design, standards, verification, tasks, references,
  * and status metadata.
  */
-const CANONICAL_DOCS: ReadonlySet<string> = new Set([
-  "proposal.md",
-  "design.md",
-  "standards.md",
-  "verification.md",
-  "tasks.md",
-  "references.md",
-  "status.yaml",
-])
+const CANONICAL_DOCS: ReadonlySet<string> = new Set(listCanonicalDocNames())
 
 // ── Public guards ────────────────────────────────────────────────
 
@@ -136,18 +130,4 @@ export function validateRuneContextWriteTarget(
  */
 export function getForbiddenArtifacts(): string[] {
   return [...FORBIDDEN_IN_RUNECONTEXT]
-}
-
-/**
- * Return a copy of the list of canonical RuneContext document names that
- * ARE allowed to be written inside a RuneContext change tree.
- *
- * These are the only files permitted inside a change tree: proposal.md,
- * design.md, standards.md, verification.md, tasks.md, references.md,
- * status.yaml.
- *
- * @returns An array of canonical document file names.
- */
-export function getCanonicalDocNames(): string[] {
-  return [...CANONICAL_DOCS]
 }

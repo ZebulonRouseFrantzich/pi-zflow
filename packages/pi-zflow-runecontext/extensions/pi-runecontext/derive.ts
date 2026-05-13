@@ -69,11 +69,17 @@ export interface DerivedExecutionGroups {
 /** Minimum number of significant words for a heading to be usable as a group name. */
 const MIN_HEADING_WORDS = 1
 
-/** Markdown heading pattern — matches ## or ### headings. */
-const HEADING_RE = /^(#{2,3})\s+(.+)$/gm
+// ── tasks.md parser ──────────────────────────────────────────────
 
-/** Markdown list-item pattern — matches lines starting with - or * (including task lists). */
-const LIST_ITEM_RE = /^\s*[-*]\s+(.+)$/gm
+/** RegExp for matching markdown headings (## or ###). Created fresh per call to avoid shared mutable state. */
+function headingRe(): RegExp {
+  return /^(#{2,3})\s+(.+)$/gm
+}
+
+/** RegExp for matching markdown list items. Created fresh per call to avoid shared mutable state. */
+function listItemRe(): RegExp {
+  return /^\s*[-*]\s+(.+)$/gm
+}
 
 // ── tasks.md parser ──────────────────────────────────────────────
 
@@ -94,16 +100,14 @@ export function parseTasksMd(content: string): DerivedExecutionGroup[] {
 
   // Collect all heading positions
   const headings: Array<{ level: string; name: string; startIndex: number }> = []
-  let match: RegExpExecArray | null
 
-  HEADING_RE.lastIndex = 0
-  while ((match = HEADING_RE.exec(normalised)) !== null) {
+  for (const headingMatch of normalised.matchAll(headingRe())) {
     // Trim the heading text and use as group name
-    const name = match[2].trim()
+    const name = headingMatch[2].trim()
     headings.push({
-      level: match[1],
+      level: headingMatch[1],
       name,
-      startIndex: match.index,
+      startIndex: headingMatch.index,
     })
   }
 
@@ -184,13 +188,11 @@ export function inferGroupsFromDocs(
     const docGroups: DerivedExecutionGroup[] = []
 
     const headings: Array<{ name: string; startIndex: number }> = []
-    let match: RegExpExecArray | null
 
-    HEADING_RE.lastIndex = 0
-    while ((match = HEADING_RE.exec(normalised)) !== null) {
-      const name = match[2].trim()
+    for (const headingMatch of normalised.matchAll(headingRe())) {
+      const name = headingMatch[2].trim()
       if (name) {
-        headings.push({ name, startIndex: match.index })
+        headings.push({ name, startIndex: headingMatch.index })
       }
     }
 
@@ -340,9 +342,7 @@ function extractListItems(
 ): Array<{ text: string; verification?: string }> {
   const items: Array<{ text: string; verification?: string }> = []
 
-  LIST_ITEM_RE.lastIndex = 0
-  let match: RegExpExecArray | null
-  while ((match = LIST_ITEM_RE.exec(content)) !== null) {
+  for (const match of content.matchAll(listItemRe())) {
     let raw = match[1].trim()
 
     // Strip leading task-list markers: "- [ ]" or "- [x]"

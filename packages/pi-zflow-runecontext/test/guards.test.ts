@@ -7,8 +7,9 @@ const {
   isWriteAllowedInRuneContextTree,
   validateRuneContextWriteTarget,
   getForbiddenArtifacts,
-  getCanonicalDocNames,
 } = await import('../extensions/pi-runecontext/guards.ts')
+
+const { listCanonicalDocNames } = await import('../extensions/pi-runecontext/precedence.ts')
 
 describe('isWriteAllowedInRuneContextTree', () => {
   test('rejects known runtime artifacts', () => {
@@ -89,7 +90,7 @@ describe('validateRuneContextWriteTarget', () => {
   })
 
   test('rejects all non-canonical files inside change tree', () => {
-    const canonical = getCanonicalDocNames()
+    const canonical = listCanonicalDocNames()
     const nonCanonical = [
       'run.json',
       'plan-state.json',
@@ -145,9 +146,9 @@ describe('getForbiddenArtifacts', () => {
   })
 })
 
-describe('getCanonicalDocNames', () => {
+describe('listCanonicalDocNames (from precedence.ts)', () => {
   test('returns complete list of canonical doc names', () => {
-    const docs = getCanonicalDocNames()
+    const docs = listCanonicalDocNames()
     assert.ok(Array.isArray(docs))
 
     const expected = [
@@ -167,10 +168,10 @@ describe('getCanonicalDocNames', () => {
   })
 
   test('returns a copy (not the original reference)', () => {
-    const docs = getCanonicalDocNames()
+    const docs = listCanonicalDocNames()
     const originalLength = docs.length
     docs.push('extra.md')
-    const docs2 = getCanonicalDocNames()
+    const docs2 = listCanonicalDocNames()
     assert.equal(docs2.length, originalLength)
     assert.equal(docs2.includes('extra.md'), false)
   })

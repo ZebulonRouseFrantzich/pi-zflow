@@ -33,8 +33,12 @@ describe('detectRuneContext', () => {
   })
 
   test('no detection when neither marker is present', async () => {
-    // In the test environment, runectx is not installed so tryRunectxStatus
-    // will return false, leading to no detection.
+    // NOTE: This test assumes `runectx` is not installed on the host
+    // (typical for dev and CI environments). If `runectx` is on PATH in the
+    // test environment, this test may fail because tryRunectxStatus could
+    // succeed against the empty tmpdir or block for up to 10 seconds.
+    // TODO(phase-4): Inject a stub for tryRunectxStatus via dependency
+    // injection or module mock to make detection tests fully deterministic.
     const result = await detectRuneContext(tmpDir)
 
     assert.equal(result.enabled, false)

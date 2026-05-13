@@ -106,7 +106,9 @@ async function findChangeFolder(
   const root = path.resolve(repoRoot)
 
   // Walk up until we reach or pass repoRoot
-  while (current.startsWith(root)) {
+  // Use path-aware containment to avoid false positives when sibling
+  // directories share a prefix (e.g. repo and repo-backup).
+  while (current === root || current.startsWith(root + path.sep)) {
     if (await isChangeFolder(current)) {
       return current
     }

@@ -106,7 +106,6 @@ export {
   isWriteAllowedInRuneContextTree,
   validateRuneContextWriteTarget,
   getForbiddenArtifacts,
-  getCanonicalDocNames,
 } from "./guards.js"
 
 // Re-export custom error classes (Task 3.10)

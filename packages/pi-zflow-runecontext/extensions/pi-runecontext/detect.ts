@@ -86,6 +86,10 @@ export async function fileExists(filePath: string): Promise<boolean> {
  * @returns `true` if the command succeeded (exit code 0), `false` otherwise.
  */
 export function tryRunectxStatus(cwd: string): boolean {
+  // TODO(phase-4): Convert to async child_process.exec to avoid blocking
+  // the event loop during detection. Sync exec is acceptable for now because
+  // detection runs once at extension activation (session start), not in a hot
+  // path. The 10-second timeout prevents indefinite blocking if runectx hangs.
   try {
     execSync("runectx status", {
       cwd,

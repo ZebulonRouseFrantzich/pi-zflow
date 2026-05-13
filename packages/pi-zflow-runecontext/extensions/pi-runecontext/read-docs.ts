@@ -88,8 +88,13 @@ async function readFile(filePath: string): Promise<string> {
  * found in RuneContext status files (key-value mappings, basic scalars,
  * nested objects, arrays).
  *
+ * When the YAML content is not a mapping (e.g. scalar or array) or the
+ * `status` field is missing, the function falls back to `status: "unknown"`
+ * and sets `_ambiguousStatus: true` so callers can detect the ambiguity.
+ * No warnings are written to stdout/stderr from library-level code.
+ *
  * @param yamlString - Raw YAML content.
- * @returns Parsed object (always a record).
+ * @returns Parsed object (always a record with at least a `status` field).
  * @throws If the YAML content is invalid and cannot be parsed.
  */
 function parseYaml(yamlString: string): RuneStatus {
@@ -97,28 +102,18 @@ function parseYaml(yamlString: string): RuneStatus {
 
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     // The YAML content is not a mapping (e.g. it's a scalar or array).
-    // This is an unrecognized/ambiguous status schema — fall back to
-    // "unknown" rather than throwing, so downstream consumers can still
-    // operate with degraded visibility.
-    console.warn(
-      `[pi-zflow-runecontext] Ambiguous status.yaml: expected a mapping, ` +
-        `got ${typeof parsed === "object" ? "array" : typeof parsed}. ` +
-        `Falling back to status: "unknown".`,
-    )
-    return { status: "unknown" }
+    // This is an unrecognized/ambiguous status schema — fall back silently
+    // to "unknown" so downstream consumers can still operate with degraded
+    // visibility. The `_ambiguousStatus` flag lets callers detect this.
+    return { status: "unknown", _ambiguousStatus: true }
   }
 
   // Ensure `status` field exists — the RuneContext spec requires it.
   // If the field is missing or not a string, the schema is ambiguous.
-  // We fall back to "unknown" rather than failing, keeping the rest of
-  // the parsed data available for inspection.
+  // Fall back silently to "unknown" and flag the ambiguity for callers.
   if (typeof (parsed as Record<string, unknown>).status !== "string") {
-    console.warn(
-      `[pi-zflow-runecontext] Ambiguous status.yaml: "status" field is ` +
-        `missing or not a string. Falling back to status: "unknown". ` +
-        `Parsed content keys: ${Object.keys(parsed as Record<string, unknown>).join(", ")}.`,
-    )
     ;(parsed as Record<string, unknown>).status = "unknown"
+    ;(parsed as Record<string, unknown>)._ambiguousStatus = true
   }
 
   return parsed as RuneStatus
