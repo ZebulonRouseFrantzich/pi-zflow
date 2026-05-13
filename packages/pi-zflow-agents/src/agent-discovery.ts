@@ -57,7 +57,7 @@ const PI_USER_DIR = resolve(homedir(), ".pi")
 const ZFLOW_AGENTS_DIR = resolve(PI_USER_DIR, "agent", "agents", "zflow")
 
 /** Chain install target. */
-const ZFLOW_CHAINS_DIR = resolve(PI_USER_DIR, "agent", "chains")
+const ZFLOW_CHAINS_DIR = resolve(PI_USER_DIR, "agent", "chains", "zflow")
 
 /** Install manifest directory. */
 const ZFLOW_MANIFEST_DIR = resolve(PI_USER_DIR, "agent", "zflow")
@@ -283,6 +283,7 @@ export function installAgents(options: InstallOptions = {}): InstallResult {
     errorDetails: [],
     installedAgents: [],
     installedChains: [],
+    messages: [],
   }
 
   if (!existsSync(agentsDir)) {
@@ -301,15 +302,18 @@ export function installAgents(options: InstallOptions = {}): InstallResult {
       const sourcePath = resolve(agentsDir, filename)
       const targetPath = resolve(targetDir, filename)
 
-      // Idempotent copy: skip if hashes match
+      // Idempotent copy: skip if hashes match (unless skipHashCheck or force)
       if (!options.force && existsSync(targetPath)) {
-        const sourceHash = hashFile(sourcePath)
-        const targetHash = hashFile(targetPath)
-        if (sourceHash === targetHash) {
-          result.skipped++
-          result.installedAgents.push(filename)
-          continue
+        if (!options.skipHashCheck) {
+          const sourceHash = hashFile(sourcePath)
+          const targetHash = hashFile(targetPath)
+          if (sourceHash === targetHash) {
+            result.skipped++
+            result.installedAgents.push(filename)
+            continue
+          }
         }
+        // When skipHashCheck is true, skip hash comparison and always copy
       }
 
       // Copy the file
@@ -358,9 +362,11 @@ export function installChains(options: InstallOptions = {}): InstallResult {
     errorDetails: [],
     installedAgents: [],
     installedChains: [],
+    messages: [],
   }
 
   if (!existsSync(chainsDir)) {
+    result.messages = [`Chain source directory not found: ${chainsDir}`]
     if (!options.silent) {
       console.warn(`[agent-discovery] Warning: Source chains directory not found: ${chainsDir}`)
     }
@@ -375,15 +381,18 @@ export function installChains(options: InstallOptions = {}): InstallResult {
       const sourcePath = resolve(chainsDir, filename)
       const targetPath = resolve(targetDir, filename)
 
-      // Idempotent copy: skip if hashes match
+      // Idempotent copy: skip if hashes match (unless skipHashCheck or force)
       if (!options.force && existsSync(targetPath)) {
-        const sourceHash = hashFile(sourcePath)
-        const targetHash = hashFile(targetPath)
-        if (sourceHash === targetHash) {
-          result.skipped++
-          result.installedChains.push(filename)
-          continue
+        if (!options.skipHashCheck) {
+          const sourceHash = hashFile(sourcePath)
+          const targetHash = hashFile(targetPath)
+          if (sourceHash === targetHash) {
+            result.skipped++
+            result.installedChains.push(filename)
+            continue
+          }
         }
+        // When skipHashCheck is true, skip hash comparison and always copy
       }
 
       // Copy the file
@@ -426,6 +435,7 @@ export function installAll(options: InstallOptions = {}): InstallResult {
     errorDetails: [...agentResult.errorDetails, ...chainResult.errorDetails],
     installedAgents: agentResult.installedAgents,
     installedChains: chainResult.installedChains,
+    messages: [...agentResult.messages, ...chainResult.messages],
   }
 }
 

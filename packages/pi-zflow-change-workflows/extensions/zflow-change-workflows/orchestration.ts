@@ -144,11 +144,45 @@ export interface ReviewSwarmConfig {
 // ── Launch-plan builders ───────────────────────────────────────
 
 /**
+ * Resolve a launch config for a builtin agent (e.g. "builtin:scout").
+ *
+ * Builtins aren't in `resolvedProfile.agentBindings`, so we derive the
+ * config from their override definition and the resolved lane.
+ *
+ * @param agentName - The builtin runtime name (e.g. "builtin:scout").
+ * @param resolvedProfile - The fully resolved active profile.
+ * @returns A `LaunchAgentConfig` or `null` if the override or lane is missing.
+ */
+function resolveBuiltinLaunchConfig(
+  agentName: string,
+  resolvedProfile: ResolvedProfile,
+): LaunchAgentConfig | null {
+  // Strip "builtin:" prefix to get the override key (e.g. "scout")
+  const shortName = agentName.replace("builtin:", "")
+  const overrideDef = getBuiltinOverride(shortName)
+  if (!overrideDef) return null
+
+  const lane = overrideDef.override.lane ?? "scout-cheap"
+  const resolvedLane = resolvedProfile.resolvedLanes[lane]
+  if (!resolvedLane) return null
+
+  return {
+    agent: agentName,
+    model: resolvedLane.resolvedModel,
+    tools: overrideDef.override.tools,
+    maxOutput: overrideDef.override.maxOutput,
+    maxSubagentDepth: overrideDef.override.maxSubagentDepth,
+    thinking: resolvedLane.thinking,
+  }
+}
+
+/**
  * Build a complete `SubagentLaunchPlan` for a single agent.
  *
- * Resolves the agent's launch config from the active profile,
- * assembles the appropriate prompt with mode/reminder fragments,
- * and attaches output-convention metadata.
+ * Resolves the agent's launch config from the active profile (or from
+ * builtin override definitions for `builtin:*` agents), assembles the
+ * appropriate prompt with mode/reminder fragments, and attaches
+ * output-convention metadata.
  *
  * @param agentName - Agent runtime name (e.g. "zflow.planner-frontier").
  * @param resolvedProfile - The fully resolved active profile.
@@ -166,37 +200,42 @@ export function buildSubagentLaunchPlan(
     distilledInvariants?: string[]
   },
 ): SubagentLaunchPlan | null {
-  // 1. Resolve launch config from profile bindings
-  let config = buildLaunchConfig(agentName, resolvedProfile)
-  if (!config) return null
+  // 1. Resolve launch config — builtins via overrides, custom via profile bindings
+  let config: LaunchAgentConfig | null = null
 
-  // 2. Apply builtin overrides for scout / context-builder
-  const shortName = agentName.replace("zflow.", "").replace("builtin:", "")
-  const overrideDef = getBuiltinOverride(shortName)
-  if (overrideDef) {
-    config = applyBuiltinOverride(config, overrideDef)
+  if (agentName.startsWith("builtin:")) {
+    config = resolveBuiltinLaunchConfig(agentName, resolvedProfile)
+  } else {
+    config = buildLaunchConfig(agentName, resolvedProfile)
+    // Apply builtin overrides for agents whose short name matches a builtin
+    if (config) {
+      const shortName = agentName.replace("zflow.", "")
+      const overrideDef = getBuiltinOverride(shortName)
+      if (overrideDef) {
+        config = applyBuiltinOverride(config, overrideDef)
+      }
+    }
   }
 
-  // 3. Apply default depth and output limits (validates as a side effect)
+  if (!config) return null
+
+  // 2. Apply default depth and output limits (validates as a side effect)
   config = applyDefaultMaxSubagentDepth(config)
   config = applyDefaultMaxOutput(config)
 
-  // 4. Assemble the prompt
+  // 3. Assemble the prompt
   const assemblyInput: PromptAssemblyInput = {
     agentName,
     mode: options?.mode,
-    activeReminders: options?.activeReminders
-      ? new Set(options.activeReminders)
-      : undefined,
+    activeReminders: options?.activeReminders,  // pass as-is (ReminderId[])
     artifactPaths: options?.artifactPaths,
     distilledOrchestratorInvariants: options?.distilledInvariants,
   }
 
   const assembled = assemblePrompt(assemblyInput)
 
-  // 5. Attach output convention metadata
+  // 4. Attach output convention metadata
   const convention = getOutputConvention(agentName)
-  const outputInstructions = getOutputInstructions(agentName)
 
   return {
     config,
@@ -209,8 +248,8 @@ export function buildSubagentLaunchPlan(
     promptSources: {
       rolePromptIncluded: true,
       modeFragment: assembled.modeFragment ?? null,
-      activeReminders: Array.from(assembled.activeReminders ?? []),
-      distilledCount: assembled.distilledCount ?? 0,
+      activeReminders: Object.keys(assembled.includedReminders),
+      distilledCount: assembled.orchestratorInvariants ? 1 : 0,
     },
   }
 }
@@ -306,31 +345,22 @@ export function buildWorkflowExecutionPlan(
         steps.push({ label: "Plan validator — structural validation", target: { type: "agent", plan: validatorPlan } })
       }
 
-      // Conditional plan-review: only when reviewTags != "standard"
+      // Conditional plan-review: runs when reviewTags != "standard"
+      // Uses getPlanReviewersForTier() for tier→reviewer mapping (correctness + integration
+      // for all tiers, plus feasibility for system / logic,system).
       const reviewTags = options?.reviewTags ?? "standard"
       if (reviewTags !== "standard") {
-        const planReviewCorrectness = buildSubagentLaunchPlan("zflow.plan-review-correctness", resolvedProfile, {
-          mode: "plan-mode",
-          artifactPaths: options?.artifactPaths,
-        })
-        if (planReviewCorrectness) {
-          steps.push({
-            label: "Plan-review correctness",
-            target: { type: "agent", plan: planReviewCorrectness },
-            condition: { predicate: `reviewTags=${reviewTags}`, description: "Runs when reviewTags != standard" },
-          })
-        }
-
-        if (reviewTags === "system" || reviewTags === "logic,system") {
-          const planReviewFeasibility = buildSubagentLaunchPlan("zflow.plan-review-feasibility", resolvedProfile, {
+        const planReviewAgents = getPlanReviewersForTier(reviewTags)
+        for (const prAgentName of planReviewAgents) {
+          const prPlan = buildSubagentLaunchPlan(prAgentName, resolvedProfile, {
             mode: "plan-mode",
             artifactPaths: options?.artifactPaths,
           })
-          if (planReviewFeasibility) {
+          if (prPlan) {
             steps.push({
-              label: "Plan-review feasibility",
-              target: { type: "agent", plan: planReviewFeasibility },
-              condition: { predicate: `reviewTags=${reviewTags}`, description: "Runs for system or logic,system tier" },
+              label: `Plan-review ${prAgentName.replace("zflow.plan-review-", "")}`,
+              target: { type: "agent", plan: prPlan },
+              condition: { predicate: `reviewTags=${reviewTags}`, description: `Plan-review tier ${reviewTags}` },
             })
           }
         }

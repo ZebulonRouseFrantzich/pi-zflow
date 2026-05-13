@@ -58,6 +58,7 @@ void describe("ALL_AGENTS", () => {
 void describe("REPORT_AGENTS", () => {
   const expected = [
     "builtin:scout",
+    "builtin:context-builder",
     "zflow.repo-mapper",
     "zflow.verifier",
     "zflow.review-correctness",

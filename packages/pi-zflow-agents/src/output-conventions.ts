@@ -92,6 +92,7 @@ export interface OutputConvention {
  */
 export const REPORT_AGENTS: ReadonlySet<string> = new Set([
   "builtin:scout",
+  "builtin:context-builder",
   "zflow.repo-mapper",
   "zflow.verifier",
   "zflow.review-correctness",
@@ -142,6 +143,13 @@ export const OUTPUT_CONVENTIONS: Record<string, OutputConvention> = {
     outputFormat: "structured-markdown",
     persistsOutput: true,
     description: "Reconnaissance context handoff with affected files, patterns, and constraints",
+  },
+  "builtin:context-builder": {
+    agent: "builtin:context-builder",
+    role: "report",
+    outputFormat: "structured-markdown",
+    persistsOutput: true,
+    description: "Analogical code examples with signatures, snippets, and API patterns for worker preparation",
   },
   "zflow.repo-mapper": {
     agent: "zflow.repo-mapper",
