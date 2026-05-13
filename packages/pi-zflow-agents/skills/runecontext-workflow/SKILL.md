@@ -1,76 +1,546 @@
 ---
 name: runecontext-workflow
 description: |
-  RuneContext change-document flavors, canonical precedence rules, status
-  handling, and how agents should interact with RuneContext documents during
-  planning and implementation.
+  RuneContext change-document flavors, canonical precedence rules, reading
+  rules, amendment/write-back process, safety rules, and how agents should
+  interact with RuneContext documents during planning, implementation, and
+  review.
 ---
 
 # RuneContext Workflow
 
-Use this skill when the repository uses **RuneContext** change documents (files
-such as `change.md` or similar structured change descriptions) to govern
-planning and implementation. RuneContext documents are the canonical source of
-truth for approved change scope.
+Use this skill when the repository uses **RuneContext** change documents to
+govern planning, implementation, and review. RuneContext documents are the
+canonical source of truth for approved change scope within a RuneContext-managed
+repo.
 
-## RuneContext Flavors
+---
 
-RuneContext documents come in several flavors, distinguished by their
-frontmatter or file naming:
+## 1. RuneContext Flavors
 
-| Flavor              | Purpose                                                  | Typical file                         |
-| ------------------- | -------------------------------------------------------- | ------------------------------------ |
-| **Planning**        | Describes a proposed change before implementation starts | `change.md` or `proposal.md`         |
-| **Active**          | Describes an in-progress change with approved scope      | `change.md` with `status: active`    |
-| **Completed**       | Documents a finished change for historical reference     | `change.md` with `status: completed` |
-| **Decision record** | Captures a single architectural decision                 | `adr/*.md`                           |
-| **Review**          | Structured review of a planned or completed change       | `review/*.md`                        |
+RuneContext recognises two change-document **flavours**, distinguished by which
+files are present in the change folder.
 
-## Canonical Precedence
+### 1.1 Plain flavor
+
+A minimal set of documents suitable for simple changes:
+
+```
+CHANGE_IN_QUESTION/
+  proposal.md         — What change is proposed and why
+  design.md           — How the change will be implemented
+  standards.md        — Conventions and standards to follow
+  verification.md     — Acceptance criteria and test expectations
+  status.yaml         — Current lifecycle status (machine-readable)
+```
+
+**Example: a "fix typo in README" change**
+
+```
+changes/2026-05-12-fix-typo/
+  proposal.md         # "Fix an outdated URL in the README introduction"
+  design.md           # "Replace URL in single line, no other changes"
+  standards.md        # "Follow existing README tone; one sentence per line"
+  verification.md     # "README renders with new URL, old URL no longer present"
+  status.yaml         # status: active
+```
+
+**Never assume `tasks.md` or `references.md` exist in plain flavor.** They
+are absent. Task grouping must be derived from the other documents.
+
+### 1.2 Verified flavor
+
+An extended set that adds task grouping and reference linking for changes
+requiring stronger traceability:
+
+```
+CHANGE_IN_QUESTION/
+  proposal.md         — What change is proposed and why
+  design.md           — How the change will be implemented
+  standards.md        — Conventions and standards to follow
+  references.md       — External references, RFCs, related changes
+  tasks.md            — Task breakdown grouped by implementation phase
+  verification.md     — Acceptance criteria and test expectations
+  status.yaml         — Current lifecycle status (machine-readable)
+```
+
+**Example: a "migrate auth library" change**
+
+```
+changes/2026-05-12-auth-migration/
+  proposal.md         # "Migrate from bcrypt to argon2 for password hashing"
+  design.md           # "New argon2 wrapper, deprecate old bcrypt helper, update tests"
+  standards.md        # "No new JS dependencies; use existing Node crypto"
+  references.md       # RFC 9106 (Argon2 spec), linked issue #452, prior migration plan
+  tasks.md            # ## Setup  - Add argon2 package  ## Migration  - ...
+  verification.md     # "All password flows pass, bcrypt import removed"
+  status.yaml         # status: active
+```
+
+### 1.3 Flavour detection
+
+The flavour is determined at resolution time by checking for the presence of
+`tasks.md`:
+
+| `tasks.md` present? | Detected flavour | Also requires   |
+| ------------------- | ---------------- | --------------- |
+| Yes                 | `"verified"`     | `references.md` |
+| No                  | `"plain"`        | (no extra)      |
+
+Detection is implemented by `resolveRuneChange()` from `pi-zflow-runecontext`
+(resolve-change.ts).
+
+---
+
+## 2. Canonical Precedence
 
 When multiple documents describe the same change, precedence is:
 
-1. **Active RuneContext doc** (`status: active`) — highest authority
-2. **Approved plan artifact** (under `<runtime-state-dir>/plans/`) — operational
-   contract for implementers
-3. **Planning RuneContext doc** (`status: planning`) — guiding but not final
-4. **Ad-hoc user request** — lowest precedence, should be formalised
+1. **RuneContext change documents** (proposal.md, design.md, standards.md,
+   verification.md, tasks.md if present, references.md if present, status.yaml)
+   — highest authority, always the source of truth for approved scope.
+2. **Versioned plan artifacts** under `<runtime-state-dir>/plans/{change-id}/v{n}/`
+   — operational contract for implementers, derived from (1) but may be
+   more detailed.
+3. **Derived orchestration aids** (execution-groups.md, plan-state.json,
+   run.json, deviation-report.md, review-findings.md, repo-map.md,
+   reconnaissance.md, widgets, runtime status)
+   — lowest precedence, may be regenerated from (1) and (2).
 
-Agents **must** check for a RuneContext document before starting planning work.
-If found, its decisions are the starting point and may only be refined (not
-overridden) through the approved plan artifact.
+Agents **must** read the RuneContext change documents before starting planning
+or implementation work. If a plan artifact contradicts the RuneContext
+documents, the RuneContext documents win and the divergence must be flagged.
 
-## Status Handling
+### 2.1 Key reinforcement: execution-groups.md is ALWAYS derived
+
+In RuneContext mode, `execution-groups.md` is **always** a derived artifact.
+It is generated by `deriveExecutionGroupsFromRuneDocs()` (from
+`pi-zflow-runecontext/derive.ts`) from canonical docs. It must **never** be
+treated as a source of requirements.
+
+- If `tasks.md` exists (verified flavor), execution groups are derived from
+  `tasks.md` with full confidence.
+- If `tasks.md` does not exist (plain flavor), execution groups are inferred
+  from `proposal.md + design.md + verification.md` with partial confidence.
+
+**Contrast with adhoc mode:** In adhoc mode (no RuneContext), plan artifacts
+including `execution-groups.md` ARE canonical because no higher authority
+exists.
+
+### 2.2 Plan artifacts are secondary
+
+Versioned plan artifacts under `<runtime-state-dir>/plans/{change-id}/v{n}/`
+(handled by `pi-zflow-artifacts`) are derived from RuneContext docs. They
+formalise the canonical scope with implementation-level detail, but they
+must never override or contradict the canonical docs.
+
+If a plan artifact diverges from RuneContext docs, the divergence must be
+flagged and the plan artifact must be corrected — or if the divergence
+indicates a genuine requirement change, the canonical docs must be amended
+first (see Section 6).
+
+### 2.3 Never treat derived artifacts as the source of requirements
+
+Derived artifacts (execution-groups.md, plan-state.json, run.json,
+deviation-report.md, review-findings.md, repo-map.md, reconnaissance.md)
+are **regenerated** from canonical sources. Treating them as requirements
+sources creates circular reasoning and silent scope creep.
+
+The code-level enforcement is in `guards.ts` — known runtime/derived
+artifact names are explicitly forbidden from being written inside the
+RuneContext change tree.
+
+---
+
+## 3. Reading Rules
+
+When loading canonical documents from a resolved RuneContext change:
+
+| Rule                               | Description                                                                                                                                                                             |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Always read `status.yaml`**      | Parsed as structured YAML (not raw text). Contains the lifecycle status ("draft", "active", "review", "completed", etc.) and may include metadata (author, priority, reviewers, dates). |
+| **Always read `standards.md`**     | Every flavour includes this file. It constrains how the implementation must be carried out.                                                                                             |
+| **Conditional: `tasks.md`**        | If present (verified flavour), read and use it directly for task grouping and verification ordering.                                                                                    |
+| **Derived hints: no `tasks.md`**   | If absent (plain flavour), derive task-group hints from `proposal.md + design.md + verification.md` together. Do not expect a task breakdown.                                           |
+| **Conditional: `references.md`**   | If present (verified flavour), read it for external reference material.                                                                                                                 |
+| **Always read all core documents** | `proposal.md`, `design.md`, `standards.md`, `verification.md`, and `status.yaml` are always present regardless of flavour.                                                              |
+
+### Implementation notes
+
+- The `readRuneContextDocs()` function (from `pi-zflow-runecontext`) implements
+  these rules automatically. It reads required files in parallel and parses
+  `status.yaml` using the `yaml` library.
+- Downstream consumers receive a `RuneDocs` object where optional fields
+  (`tasks`, `references`) are `null` when absent.
+
+### 3.1 Enhanced: status.yaml reading requirement
+
+- **Always read `status.yaml` first.** Before any planning, implementation,
+  or review, read and parse `status.yaml`. The lifecycle state determines
+  what actions are appropriate (see Status Handling below).
+- **Parse as structured YAML**, not raw text. Use the `yaml` library or
+  equivalent. The parsed `status` field drives agent behaviour.
+- **Never silently overwrite `status.yaml`.** Status transitions in the
+  canonical `status.yaml` follow the write-back policy documented in
+  `pi-zflow-runecontext/runectx.ts`:
+  - Most harness states are **runtime-only** (no canonical write-back).
+  - `approved` and `completed` use a **prompt** policy — a preview is shown
+    and explicit operator approval is required before writing.
+  - Only write to `status.yaml` through the amendment flow (Section 6).
+- **Check vocabulary compatibility.** Before writing a status value, verify
+  that the project's `status.yaml` schema recognises it (the
+  `StatusVocabulary.allowedStatuses` check).
+
+### 3.2 Enhanced: standards.md reading requirement
+
+- **Must be read before any implementation or review.** Every flavour includes
+  `standards.md`. It constrains what code changes, design patterns, naming
+  conventions, and tooling choices are acceptable.
+- **Standards take precedence over agent preferences.** If `standards.md`
+  specifies a particular testing framework, code style, or architectural
+  pattern, the agent must follow it even if it would normally choose a
+  different approach.
+- **Flag violations.** If the plan or implementation would violate a standard
+  stated in `standards.md`, flag it as a deviation before proceeding.
+- **Standards may reference external policies.** They may reference company
+  coding guidelines, security policies, or API conventions that live outside
+  the change folder. Follow the references.
+
+---
+
+## 4. Status Handling
 
 | Status      | Meaning                                  | Agent behaviour                                           |
 | ----------- | ---------------------------------------- | --------------------------------------------------------- |
 | `planning`  | Change is being scoped                   | Read to understand proposal; plan against it              |
 | `active`    | Change is approved and being implemented | Use as authoritative scope; deviation requires replanning |
+| `review`    | Change is under review                   | Read for context; do not modify without approval          |
 | `completed` | Change is done                           | Read for historical context only; do not reopen           |
 | `draft`     | Early, not yet ready for planning        | Ask user if they want to formalise it                     |
 | `stale`     | Superseded or abandoned                  | Ignore; check for newer version                           |
 
-## Canonical Doc Detection
+### Status mapping (harness ↔ RuneContext)
 
-Look for RuneContext documents in:
+When the pi-zflow harness needs to synchronise workflow state with RuneContext
+canonical status, the mapping in `pi-zflow-runecontext/runectx.ts` applies:
 
-- `<project-root>/change.md`
-- `<project-root>/docs/change.md`
-- `<project-root>/.rune/change.md`
-- `<project-root>/changes/*.md` (for multi-change repos)
-- Any file with a `rune` or `change` frontmatter field
+| Harness state | Maps to                   | Policy       |
+| ------------- | ------------------------- | ------------ |
+| draft         | (none)                    | runtime-only |
+| validated     | (none)                    | runtime-only |
+| reviewed      | (none)                    | runtime-only |
+| approved      | "approved"                | prompt       |
+| executing     | (none)                    | runtime-only |
+| drifted       | (none)                    | runtime-only |
+| superseded    | (none)                    | runtime-only |
+| completed     | "implemented"/"completed" | prompt       |
+| cancelled     | "cancelled"               | runtime-only |
 
-Use `read` or `find` to locate them. If multiple exist, the one with
-`status: active` wins. If none has `active` status, the most recent
-`planning`-status doc is the best starting point.
+"Prompt" policy means the operator sees a preview and must approve before
+the write-back occurs.
 
-## Interaction Rules for Agents
+---
 
-- **Planners**: Always check for RuneContext doc first. Treat it as canonical
-  input; your plan artifact formalises it.
-- **Implementers**: Read the RuneContext doc + approved plan artifact before
-  starting work. If the plan contradicts the RuneContext doc, flag a deviation.
-- **Reviewers**: Check plan adherence against both the RuneContext doc and the
-  plan artifact.
+## 5. tasks.md vs Derived Grouping Behavior
+
+### 5.1 If tasks.md exists (verified flavor)
+
+- **Use it directly** for task grouping and verification ordering.
+- The `tasks.md` contains structured headings (`##` and `###`) that define
+  execution groups (e.g. "Setup", "Implementation", "Verification").
+- Task items under each heading become `DerivedTask` entries with
+  `origin: "tasks.md"` and `confidence: "full"`.
+- The `parseTasksMd()` function extracts this structure automatically.
+
+### 5.2 If tasks.md does NOT exist (plain flavor)
+
+- **Derive task groups** from `proposal.md + design.md + verification.md`
+  together. Do not rely on verification.md alone.
+- The `inferGroupsFromDocs()` function implements this inference. It scans
+  headings and list items across all three documents.
+- **Never invent tasks absent from canonical docs.** The derived groups
+  must only contain steps that have a clear mapping back to the canonical
+  source documents.
+
+### 5.3 Confidence marking
+
+- If the source was `tasks.md`, confidence is **"full"** — every task is
+  explicitly specified.
+- If the source was `proposal+design+verification` (inferred), confidence
+  is **"partial"** — the grouping is a best-effort inference and may not
+  reflect the author's exact intent.
+- Downstream workflows must respect the `confidence` field. A "partial"
+  group should be presented to the user for confirmation before execution.
+
+### 5.4 Never invent tasks
+
+- Every derived task must map back to an explicit requirement in a canonical
+  doc. If a task cannot be traced to `proposal.md`, `design.md`,
+  `verification.md`, or `tasks.md`, it must be flagged as unsupported.
+- The `DerivedTask.sources` field lists which canonical documents each task
+  came from. If `sources` is empty, the task was invented — flag it.
+
+---
+
+## 6. Canonical Amendment / Write-Back Process
+
+When plan drift or implementation discoveries reveal that requirements need
+to change, the canonical RuneContext docs must be updated first. The
+amendment flow is:
+
+```
+┌─────────────┐     ┌──────────────┐     ┌────────────┐     ┌──────────────────┐
+│  1. CREATE   │ ──> │  2. APPROVE  │ ──> │ 3. WRITE   │ ──> │ 4. REGENERATE    │
+│  Amendment   │     │  (preview)   │     │  Canonical │     │  Derived Artifacts│
+└─────────────┘     └──────────────┘     └────────────┘     └──────────────────┘
+```
+
+### Step 1: Create the amendment
+
+When a requirement gap is detected (e.g. the plan reveals an uncovered edge
+case, or implementation discovers an unstated assumption):
+
+1. Build the set of document changes (which documents need updating, and
+   what the new content should be).
+2. Call `createAmendment()` with the change ID, change path, document
+   changes, and the triggering harness state.
+3. The amendment is created with `approved: false`. **No files are written
+   at this point.**
+
+### Step 2: Approve (prompt-with-preview)
+
+Before any canonical document is modified:
+
+1. Present the proposed changes to the operator as a **preview** (diff or
+   full content).
+2. Explain why the amendment is needed (what drove the requirement change).
+3. **Wait for explicit approval** before proceeding.
+4. Once approved, call `approveAmendment()` to produce the approved
+   amendment object.
+
+### Step 3: Write canonical docs
+
+1. Call `writeApprovedAmendment()` with the approved amendment.
+2. This writes the new content to the canonical files in the RuneContext
+   change tree.
+3. If the amendment is not yet approved, `writeApprovedAmendment()` returns
+   a `deferred: true` result without writing anything.
+
+**Important:** Only canonical RuneContext docs (proposal.md, design.md,
+standards.md, verification.md, tasks.md, references.md, status.yaml) should
+be written in this step. Derived artifacts are handled separately.
+
+### Step 4: Regenerate derived artifacts
+
+1. **After** the canonical write-back succeeds, regenerate all derived
+   artifacts (execution-groups.md, plan artifacts, etc.) from the updated
+   canonical docs.
+2. Never regenerate execution-groups.md before the canonical write-back
+   is complete — the derived content would be stale.
+3. The regeneration is an orchestration concern handled by the workflow
+   layer, not by the amendment functions themselves.
+
+### Key rule
+
+**Never regenerate `execution-groups.md` before canonical write-back.**
+The execution groups must always reflect the latest canonical docs. If a
+requirement changes, update canonical docs first, then regenerate.
+
+---
+
+## 7. Safety Rules / Anti-Patterns
+
+These rules describe what agents must **never** do when RuneContext mode
+is active. Violations can lead to silent scope creep, loss of traceability,
+or corruption of the canonical change record.
+
+### DO NOT treat execution-groups.md as the new requirement source
+
+`execution-groups.md` is a **derived** artifact. After regeneration, it
+may appear authoritative (well-structured, complete-looking), but it is
+generated from canonical docs. If you use it as the requirement source,
+changes made to the generated grouping will be lost on the next
+regeneration. Requirements live in the canonical docs.
+
+### DO NOT write runtime artifacts inside the RuneContext change tree
+
+Files like `run.json`, `plan-state.json`, `state-index.json`,
+`execution-groups.md`, `deviation-report.md`, `review-findings.md`,
+`repo-map.md`, and `reconnaissance.md` are **forbidden** from being written
+inside the RuneContext change folder.
+
+- Runtime artifacts belong under `<runtime-state-dir>` (handled by
+  `pi-zflow-artifacts`).
+- The guard in `guards.ts` (`validateRuneContextWriteTarget()`) enforces
+  this at the code level — but agents must also respect it.
+
+Only canonical docs (proposal.md, design.md, standards.md, verification.md,
+tasks.md, references.md, status.yaml) and any unrecognised files are allowed
+inside the change tree.
+
+### DO NOT auto-overwrite status.yaml without explicit approval
+
+`status.yaml` is the canonical lifecycle record. Writing to it without
+going through the amendment flow (Section 6) breaks the provenance chain.
+
+- Most status transitions are **runtime-only** — they belong in runtime
+  metadata (e.g. plan-state.json), not in `status.yaml`.
+- Even for statuses that CAN be written back (`approved`, `completed`),
+  the policy is **prompt** — a preview must be shown and the operator
+  must explicitly approve.
+- The `mapHarnessStateToRuneStatus()` function determines the correct
+  policy for each state. Trust it.
+
+### DO NOT invent requirements not present in canonical docs
+
+Every requirement that drives implementation must trace back to a canonical
+RuneContext document (proposal.md, design.md, standards.md, or
+verification.md). If a requirement appears only in a plan artifact or in
+a derived execution group, it is not canonical.
+
+- If a genuine gap is discovered, use the amendment flow (Section 6) to
+  update canonical docs before proceeding.
+- The `DerivedTask.sources` field tracks provenance. Empty sources = flag.
+
+### DO NOT skip reading standards.md before implementation or review
+
+`standards.md` constrains what is acceptable. Implementing without reading it
+may produce code that violates project conventions, security policies, or
+API design rules. Always read it first.
+
+### DO NOT assume tasks.md exists
+
+Plain flavor changes do not have `tasks.md` or `references.md`. Code and
+workflows must handle their absence gracefully:
+
+- Check the detected flavour or test if the `tasks` field is non-null.
+- Derive task grouping from the other canonical docs (proposal + design +
+  verification) when tasks.md is absent.
+- The `parseTasksMd()` function will produce empty groups if called with
+  a null document — use `deriveExecutionGroupsFromRuneDocs()` which handles
+  both flavours correctly.
+
+### DO NOT skip reading status.yaml before acting
+
+The lifecycle state determines what actions are legal:
+
+- `draft` → not yet ready. Don't plan against it without confirmation.
+- `completed` → read-only. Don't reopen without explicit request.
+- `review` → context only. Don't modify without approval.
+
+Reading `status.yaml` **first** avoids wasted work or accidental violations.
+
+### DO NOT regenerate derived artifacts before canonical write-back
+
+If a requirement change is needed, the sequence is always:
+canonical write-back → regenerate derived artifacts (in that order).
+Regenerating first produces stale derived artifacts and loses the
+requirement update.
+
+---
+
+## 8. Integration with Other pi-zflow Packages
+
+### pi-zflow-runecontext (`packages/pi-zflow-runecontext`)
+
+The core RuneContext integration module. Its `pi-runecontext` extension
+provides:
+
+| Module              | Service                                      | Import                                    |
+| ------------------- | -------------------------------------------- | ----------------------------------------- |
+| `detect.ts`         | Detect if RuneContext is active in the repo  | `detectRuneContext(repoRoot)`             |
+| `resolve-change.ts` | Resolve which change folder is canonical     | `resolveRuneChange({...})`                |
+| `read-docs.ts`      | Read all canonical docs in parallel          | `readRuneContextDocs(resolvedChange)`     |
+| `precedence.ts`     | Classify canonical vs derived artifacts      | `classifyArtifact(name, mode)`            |
+| `derive.ts`         | Derive execution groups from canonical docs  | `deriveExecutionGroupsFromRuneDocs(docs)` |
+| `runectx.ts`        | Status mapping + amendment write-back        | `mapHarnessStateToRuneStatus(...)`        |
+| `guards.ts`         | Validate write targets (forbidden artifacts) | `validateRuneContextWriteTarget(...)`     |
+
+Use `detectRuneContext()` early in repo setup to determine whether the
+RuneContext workflow applies. If RuneContext is not active, fall back to
+the standard (adhoc) workflow.
+
+### pi-zflow-change-workflows (`packages/pi-zflow-change-workflows`)
+
+This package calls `pi-runecontext` for change preparation and
+implementation. The workflow layer:
+
+1. Detects RuneContext mode via `detectRuneContext()`.
+2. Resolves the active change via `resolveRuneChange()`.
+3. Reads canonical docs via `readRuneContextDocs()`.
+4. Derives execution groups via `deriveExecutionGroupsFromRuneDocs()`.
+5. Uses status mapping via `mapHarnessStateToRuneStatus()` for lifecycle
+   transitions.
+6. Handles amendment creation and write-back coordination.
+
+The workflow layer is responsible for maintaining the correct execution
+order — it must not bypass the canonical docs or write directly to the
+change tree without going through the amendment flow.
+
+### pi-zflow-artifacts (`packages/pi-zflow-artifacts`)
+
+Handles all runtime state paths. Key path conventions:
+
+| Artifact                | Path                                                   |
+| ----------------------- | ------------------------------------------------------ |
+| Versioned plan artifact | `<runtime-state-dir>/plans/{changeId}/v{version}/`     |
+| Plan state              | `<runtime-state-dir>/plans/{changeId}/plan-state.json` |
+| Run state               | `<runtime-state-dir>/runs/{runId}/run.json`            |
+| State index             | `<runtime-state-dir>/state-index.json`                 |
+| Deviation report        | `<runtime-state-dir>/plans/{changeId}/deviations.md`   |
+
+All these paths live **outside** the RuneContext change tree. Never write
+them inside the change folder. The `pi-zflow-artifacts` package enforces
+the `<runtime-state-dir>` boundary.
+
+### Coordination summary
+
+```
+pi-zflow-change-workflows
+      │
+      ├── calls ──> pi-zflow-runecontext (detect, resolve, read, derive, map, amend)
+      │
+      └── calls ──> pi-zflow-artifacts (runtime state: plans, runs, state-index)
+```
+
+The workflow layer is the orchestrator. It calls `pi-runecontext` for
+canonical doc operations and `pi-zflow-artifacts` for runtime state. It
+must never write runtime artifacts into the RuneContext change tree or
+write canonical docs outside the amendment flow.
+
+---
+
+## 9. Interaction Rules for Agents
+
+- **Planners**: Always read the RuneContext documents first. Treat them as
+  canonical input; your plan artifact formalises them with additional detail.
+  Never treat `execution-groups.md` as a requirements source.
+- **Implementers**: Read the RuneContext documents **and** the approved plan
+  artifact before starting work. If the plan contradicts the RuneContext
+  documents, flag a deviation. Read `standards.md` before writing any code.
+- **Reviewers**: Check plan adherence against both the RuneContext documents
+  and the plan artifact. Verify that no runtime artifacts were written into
+  the change tree. Check that `standards.md` was followed.
 - **All agents**: Treat `status: completed` docs as read-only. Do not suggest
-  reopening them unless explicitly asked.
+  reopening them unless explicitly asked. Never overwrite `status.yaml`
+  without going through the amendment flow.
+- **All agents**: If a requirement gap is discovered, escalate through the
+  amendment flow (Section 6). Do not silently add requirements or modify
+  plan artifacts to cover the gap.
+
+---
+
+## 10. Common Pitfalls
+
+| Pitfall                                                            | Why it's wrong                                                                                                                       | Correct approach                                                                                             |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| Assuming `tasks.md` always exists                                  | Plain flavour changes do not have `tasks.md`. Code that assumes it exists will fail at runtime.                                      | Check the detected flavour or use the `tasks` field which is `null` for plain flavour.                       |
+| Reading `status.yaml` as raw text                                  | `status.yaml` contains structured data that drives agent behaviour. Raw-text comparison of `status` values is fragile.               | Parse as YAML and access fields directly (e.g. `docs.status.status`).                                        |
+| Treating plan artifacts as higher precedence than RuneContext docs | Plan artifacts are _derived_ from the canonical RuneContext documents. If they diverge, the RuneContext documents are authoritative. | RuneContext docs always win. Flag any divergence.                                                            |
+| Using `verification.md` as task list                               | Verification criteria are not the same as task groupings.                                                                            | In plain flavour, derive task hints from proposal + design + verification _together_, not just verification. |
+| Silently skipping optional documents                               | `references.md` and `tasks.md` are present only in verified flavour. Silently skipping them when they exist loses information.       | Always check for optional files; the reader handles this automatically.                                      |
+| Writing runtime artifacts inside the change tree                   | Runtime artifacts (run.json, plan-state.json, etc.) corrupt the portable change-doc directory and break provenance.                  | Write runtime state under `<runtime-state-dir>` via `pi-zflow-artifacts`.                                    |
+| Overwriting `status.yaml` without approval                         | Silently changing the canonical lifecycle record breaks traceability and may overwrite operator-intended state.                      | Use the amendment flow with `prompt` policy — preview then approve before writing.                           |
+| Regenerating derived artifacts before canonical write-back         | Stale derived content becomes the de facto source of truth, and the requirement change is lost.                                      | Write canonical docs first, _then_ regenerate derived artifacts.                                             |
+| Inventing requirements absent from canonical docs                  | Unchecked scope creep undermines the change contract and invalidates verification.                                                   | Every requirement must trace to a canonical doc. If absent, use the amendment flow to add it.                |
+| Skipping `standards.md`                                            | Code may violate project conventions, security policies, or API design rules.                                                        | Always read `standards.md` before implementation or review.                                                  |
