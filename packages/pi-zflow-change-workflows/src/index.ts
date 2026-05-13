@@ -74,3 +74,16 @@ export {
 export type {
   WorktreeSetupResult,
 } from "./extensions/zflow-change-workflows/worktree-setup.js"
+
+// Group result capture (Phase 5 — worktree output and patch artifacts)
+export {
+  captureGroupResult,
+  getGroupResult,
+  listGroupResults,
+} from "./extensions/zflow-change-workflows/group-result.js"
+
+export type {
+  GroupResult,
+  GroupVerificationResult,
+  CaptureGroupResultOptions,
+} from "./extensions/zflow-change-workflows/group-result.js"
