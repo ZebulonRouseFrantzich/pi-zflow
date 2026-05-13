@@ -21,3 +21,26 @@ export type {
   WorkflowMode,
   ReminderId,
 } from "./prompt-assembly.js"
+
+// Agent discovery
+export {
+  installAgents,
+  installChains,
+  installAll,
+  writeInstallManifest,
+  readInstallManifest,
+  getInstalledAgents,
+  getInstalledChains,
+  getAgentPath,
+  getChainPath,
+  verifyDiscovery,
+  uninstallAll,
+} from "./agent-discovery.js"
+
+export type {
+  InstallOptions,
+  InstallResult,
+  InstalledAgentInfo,
+  InstalledChainInfo,
+  DiscoveryVerificationResult,
+} from "./agent-discovery.js"
