@@ -92,6 +92,23 @@ export type {
   DiffChunk,
 } from "./review-context.js"
 
+// ── Re-export synthesizer helpers ─────────────────────────────
+
+export {
+  getWeightingGuidance,
+  prepareSynthesisInput,
+  formatSynthesisPrompt,
+  evaluateRecommendation,
+  buildSynthesisResult,
+} from "./synthesizer.js"
+
+export type {
+  SynthesisInput,
+  SynthesisReviewerOutput,
+  WeightingGuidance,
+  SynthesisResult,
+} from "./synthesizer.js"
+
 export type {
   ReviewerManifest,
   ReviewerMode,
