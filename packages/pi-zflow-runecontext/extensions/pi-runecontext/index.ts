@@ -5,19 +5,77 @@
  * resolution services. Note the extension directory is `pi-runecontext`
  * (not `zflow-runecontext`) for consistency with the canonical tool naming.
  *
- * TODO(phase-3): Implement RuneContext integration.
- *   - claim("runecontext", ...) via getZflowRegistry()
- *   - provide("runecontext", runeContextService) with:
- *     - Detecting RuneContext roots in the project
- *     - Resolving change docs and parsing both supported document flavors
- *     - Status/transition mapping
- *     - Prompt-with-preview write-back support
- *   - Guard against duplicate loads: check registry.has("runecontext")
- *   - No required public command in v1; may expose `/zflow-runecontext status`
- *   - See detect.ts, resolve-change.ts, runectx.ts
+ * Phase 3 Task 3.1: On activation, the extension:
+ *   1. Claims the "runecontext" capability via `getZflowRegistry()`.
+ *   2. Guards against duplicate loads — if "runecontext" is already claimed
+ *      by a compatible provider, it no-ops.
+ *   3. Re-exports RuneContext detection utilities for sibling packages.
+ *
+ * @module pi-zflow-runecontext/index
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import { getZflowRegistry, PI_ZFLOW_RUNECONTEXT_VERSION } from "pi-zflow-core"
+import type { CapabilityClaim } from "pi-zflow-core"
+
+import {
+  detectRuneContext,
+  fileExists,
+  tryRunectxStatus,
+} from "./detect.js"
+
+export type { RuneContextDetection } from "./detect.js"
+export {
+  detectRuneContext,
+  fileExists,
+  tryRunectxStatus,
+}
+
+/** Well-known capability name for RuneContext support. */
+export const RUNECONTEXT_CAPABILITY = "runecontext" as const
+
+/**
+ * Activate the pi-zflow-runecontext extension.
+ *
+ * Claims the "runecontext" capability in the shared zflow registry.
+ * If the capability is already claimed by a compatible provider, the
+ * activation is a no-op (duplicate load guard).
+ *
+ * A service will be provided in later Phase 3 tasks (3.2–3.12) after
+ * change-doc resolution, status mapping, and prompt-with-preview
+ * write-back support are implemented.
+ *
+ * @param pi - The Pi extension API provided by the harness.
+ */
 export default function activateZflowRunecontextExtension(pi: ExtensionAPI): void {
-  // Registration logic will be added in Phase 3
+  const registry = getZflowRegistry()
+
+  // ── Build the capability claim ────────────────────────────────
+  const claim: CapabilityClaim = {
+    capability: RUNECONTEXT_CAPABILITY,
+    version: PI_ZFLOW_RUNECONTEXT_VERSION,
+    provider: "pi-zflow-runecontext",
+    sourcePath: import.meta.url,
+    compatibilityMode: "compatible",
+  }
+
+  // ── Claim the capability ──────────────────────────────────────
+  const registered = registry.claim(claim)
+
+  // If claim returns null, an incompatible provider already owns this
+  // capability — do not register anything.
+  if (!registered) {
+    // A diagnostic was already emitted by the registry.
+    return
+  }
+
+  // If the capability already has a service, another compatible
+  // instance already initialised fully. No-op to avoid duplicate
+  // command registration and session hooks.
+  if (registered.service !== undefined) {
+    return
+  }
+
+  // Note: A service will be provided in later Phase 3 tasks.
+  // For now, we only claim the capability.
 }
