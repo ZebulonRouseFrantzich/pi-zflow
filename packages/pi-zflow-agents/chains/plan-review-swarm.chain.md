@@ -2,10 +2,31 @@
 name: plan-review-swarm
 package: zflow
 description: |
-  Parallel plan-review swarm. Runs all three plan-review agents
-  (correctness, integration, feasibility) concurrently against the
-  planning artifacts, then synthesises findings into a consolidated
-  plan-review report.
+  Parallel plan-review swarm with tier-based reviewer selection.
+  Runs the appropriate set of plan-review agents (correctness,
+  integration, feasibility) concurrently against the planning
+  artifacts, depending on the review tier, then synthesises
+  findings into a consolidated plan-review report.
+---
+
+## Orchestrator notes — tier-based reviewer selection
+
+The orchestrator selects which reviewers to include based on the plan's
+review tier classification. Include the matching reviewers as parallel
+stages in this chain.
+
+| Tier           | Required reviewers                    | Optional reviewers |
+| -------------- | ------------------------------------- | ------------------ |
+| `standard`     | correctness, integration              | —                  |
+| `logic`        | correctness, integration              | —                  |
+| `system`       | correctness, integration, feasibility | —                  |
+| `logic,system` | correctness, integration, feasibility | —                  |
+
+When `standard` or `logic` tier (no feasibility), omit the
+`zflow.plan-review-feasibility` stage from the dispatched chain.
+`zflow.plan-validator` always runs — it performs structural validation
+regardless of tier.
+
 ---
 
 ## zflow.plan-review-correctness

@@ -1,9 +1,15 @@
 /**
  * pi-zflow-change-workflows extension entrypoint
  *
- * Registers `/zflow-change-prepare`, `/zflow-change-implement`, `/zflow-clean` commands.
+ * Phase 4 milestones:
+ * - orchestration.ts now wires Phase 4 infrastructure into dispatchable helpers:
+ *   - `buildSubagentLaunchPlan` — resolves profile bindings, assembles prompts,
+ *     attaches output conventions, validates limits
+ *   - `buildWorkflowExecutionPlan` — composes agent/chain steps for each workflow phase
+ *   - `createSwarmManifest` — creates reviewer manifests with tier-based selection
+ *   - `getOutputRoute` — maps agent output to correct persistence target
  *
- * TODO(phase-7): Implement change workflow orchestration.
+ * TODO(phase-7): Register extension commands and service.
  *   - claim("change-workflows", ...) via getZflowRegistry()
  *   - provide("change-workflows", changeWorkflowService) with:
  *     - Artifact-first prepare/implement lifecycle

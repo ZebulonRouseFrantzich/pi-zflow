@@ -9,6 +9,27 @@ description: |
   the plan is complex or high-risk.
 ---
 
+## Orchestrator notes — conditional plan-review stages
+
+The plan-review stages at the end of this chain (`zflow.plan-review-correctness`
+and `zflow.plan-review-feasibility`) are **conditional** — the orchestrator
+should only include them when the plan's `reviewTags` are not `standard`.
+
+| reviewTags value         | Reviewers to include                                             |
+| ------------------------ | ---------------------------------------------------------------- |
+| `standard`               | None — skip plan-review stages entirely                          |
+| `logic`                  | `zflow.plan-review-correctness`                                  |
+| `system`                 | `zflow.plan-review-correctness`, `zflow.plan-review-feasibility` |
+| `logic,system` (or both) | Both reviewers                                                   |
+
+The condition is evaluated by the orchestrator before dispatching this chain.
+When the chain is run without plan-review stages, it terminates after
+`zflow.plan-validator` (the structural validation result is the final output).
+When plan-review stages are included, `zflow.plan-validator` output is passed
+as context alongside the planning artifacts.
+
+---
+
 ## scout
 
 output: context.md

@@ -2,10 +2,23 @@
 name: implement-and-review
 package: zflow
 description: |
-  Implementation → verification → code review pipeline. Executes a
-  plan group, runs scoped verification, then reviews the result for
-  correctness and integration soundness.
+  Context-builder → implementation → verification → code review pipeline.
+  Analyses analogous code patterns, executes a plan group, runs scoped
+  verification, then reviews the result with a multi-angle swarm.
+  This chain is a per-execution-group building block; the orchestrator
+  invokes it once for each group in the approved plan.
 ---
+
+## builtin:context-builder
+
+reads: false
+progress: false
+
+Analyse the codebase for analogous patterns, conventions, and existing
+APIs relevant to the implementation group. Return 2–3 focused code
+examples with signatures and snippets — not full file dumps. This
+context equips the implementation agent with project-specific patterns
+to follow.
 
 ## zflow.implement-routine
 
