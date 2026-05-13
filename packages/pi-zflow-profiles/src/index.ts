@@ -47,3 +47,18 @@ export {
 export type {
   LaunchAgentConfig,
 } from "./launch-config.js"
+
+// Builtin agent overrides
+export {
+  getBuiltinOverride,
+  applyBuiltinOverride,
+  hasBuiltinOverride,
+  getAllBuiltinOverrides,
+  getBuiltinOverrideValues,
+  BUILTIN_SCOUT_OVERRIDE,
+} from "./builtin-overrides.js"
+
+export type {
+  BuiltinAgentOverride,
+  BuiltinOverrideDefinition,
+} from "./builtin-overrides.js"
