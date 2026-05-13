@@ -16,6 +16,7 @@ import { test, describe } from "node:test"
 import {
   detectOwnershipConflicts,
   validateOwnershipAndDependencies,
+  topoSortGroups,
 } from "../extensions/zflow-change-workflows/ownership-validator.js"
 import type { ExecutionGroup } from "../extensions/zflow-change-workflows/ownership-validator.js"
 
@@ -225,5 +226,108 @@ describe("validateOwnershipAndDependencies", () => {
     ]
     const result = validateOwnershipAndDependencies(groups)
     assert.strictEqual(result.valid, true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// topoSortGroups
+// ---------------------------------------------------------------------------
+
+describe("topoSortGroups", () => {
+  test("returns all groups in input order when no dependencies", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", []),
+      group("g2", []),
+      group("g3", []),
+    ]
+    const result = topoSortGroups(groups)
+    assert.notStrictEqual(result, null)
+    assert.strictEqual(result!.length, 3)
+  })
+
+  test("respects linear dependency chain", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", [], []),
+      group("g2", [], ["g1"]),
+      group("g3", [], ["g2"]),
+    ]
+    const result = topoSortGroups(groups)
+    assert.notStrictEqual(result, null)
+    // g1 must come before g2 before g3
+    const idx1 = result!.indexOf("g1")
+    const idx2 = result!.indexOf("g2")
+    const idx3 = result!.indexOf("g3")
+    assert.ok(idx1 < idx2, "g1 should come before g2")
+    assert.ok(idx2 < idx3, "g2 should come before g3")
+  })
+
+  test("handles diamond dependency (g3 depends on g1 and g2)", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", [], []),
+      group("g2", [], []),
+      group("g3", [], ["g1", "g2"]),
+    ]
+    const result = topoSortGroups(groups)
+    assert.notStrictEqual(result, null)
+    const idx1 = result!.indexOf("g1")
+    const idx2 = result!.indexOf("g2")
+    const idx3 = result!.indexOf("g3")
+    assert.ok(idx1 < idx3, "g1 should come before g3")
+    assert.ok(idx2 < idx3, "g2 should come before g3")
+  })
+
+  test("returns null for circular dependency", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", [], ["g2"]),
+      group("g2", [], ["g1"]),
+    ]
+    const result = topoSortGroups(groups)
+    assert.strictEqual(result, null)
+  })
+
+  test("returns null for self-loop", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", [], ["g1"]),
+    ]
+    const result = topoSortGroups(groups)
+    assert.strictEqual(result, null)
+  })
+
+  test("handles groups with no files and no dependencies", () => {
+    const groups: ExecutionGroup[] = []
+    const result = topoSortGroups(groups)
+    assert.notStrictEqual(result, null)
+    assert.deepEqual(result, [])
+  })
+
+  test("handles complex multi-level dependencies", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", [], []),
+      group("g2", [], ["g1"]),
+      group("g3", [], ["g1"]),
+      group("g4", [], ["g2", "g3"]),
+      group("g5", [], ["g4"]),
+    ]
+    const result = topoSortGroups(groups)
+    assert.notStrictEqual(result, null)
+    const idx: Record<string, number> = {}
+    result!.forEach((id, i) => { idx[id] = i })
+    assert.ok(idx["g1"] < idx["g2"])
+    assert.ok(idx["g1"] < idx["g3"])
+    assert.ok(idx["g2"] < idx["g4"])
+    assert.ok(idx["g3"] < idx["g4"])
+    assert.ok(idx["g4"] < idx["g5"])
+  })
+
+  test("ignores external dependencies not in the group list", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", [], []),
+      group("g2", [], ["g1", "external-dep"]),
+    ]
+    const result = topoSortGroups(groups)
+    assert.notStrictEqual(result, null)
+    const idx1 = result!.indexOf("g1")
+    const idx2 = result!.indexOf("g2")
+    assert.ok(idx1 < idx2, "g1 should come before g2 even with external deps")
   })
 })

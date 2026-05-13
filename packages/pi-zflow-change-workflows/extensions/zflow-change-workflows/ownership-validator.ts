@@ -5,6 +5,9 @@
  * when multiple groups claim the same file. Also validates that dependency order
  * is explicit enough to resolve any overlaps safely.
  *
+ * Also provides topological sort of execution groups for apply-back ordering
+ * (used by apply-back.ts).
+ *
  * ## Design rules
  *
  * - This module validates BEFORE workers are dispatched. It does not enforce
@@ -210,4 +213,72 @@ export function validateOwnershipAndDependencies(
       "or separate their file ownership so they no longer write to the same files.",
     ].join("\n"),
   }
+}
+
+// ---------------------------------------------------------------------------
+// Topological sort
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute a topological ordering of execution groups based on their
+ * declared dependencies.
+ *
+ * Uses Kahn's algorithm (BFS-based). Returns `null` if the dependency
+ * graph contains a cycle.
+ *
+ * @param groups - Execution groups to order.
+ * @returns Array of group IDs in topological order, or `null` if a cycle
+ *          is detected.
+ */
+export function topoSortGroups(groups: ExecutionGroup[]): string[] | null {
+  // Build adjacency map and in-degree count
+  const inDegree = new Map<string, number>()
+  const adjacency = new Map<string, string[]>()
+
+  for (const group of groups) {
+    inDegree.set(group.id, 0)
+    adjacency.set(group.id, [])
+  }
+
+  for (const group of groups) {
+    for (const dep of group.dependencies) {
+      const adj = adjacency.get(dep)
+      if (adj) {
+        adj.push(group.id)
+      }
+      // Only count in-degree for dependencies that are in our group list
+      if (inDegree.has(dep)) {
+        inDegree.set(group.id, (inDegree.get(group.id) ?? 0) + 1)
+      }
+    }
+  }
+
+  // Start with zero-in-degree nodes
+  const queue: string[] = []
+  for (const [id, degree] of inDegree) {
+    if (degree === 0) {
+      queue.push(id)
+    }
+  }
+
+  const result: string[] = []
+  while (queue.length > 0) {
+    const node = queue.shift()!
+    result.push(node)
+
+    for (const neighbor of adjacency.get(node) ?? []) {
+      const newDegree = (inDegree.get(neighbor) ?? 1) - 1
+      inDegree.set(neighbor, newDegree)
+      if (newDegree === 0) {
+        queue.push(neighbor)
+      }
+    }
+  }
+
+  // If we didn't process all nodes, there's a cycle
+  if (result.length !== groups.length) {
+    return null
+  }
+
+  return result
 }
