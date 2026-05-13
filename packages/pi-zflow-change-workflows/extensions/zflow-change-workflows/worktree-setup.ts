@@ -17,6 +17,7 @@
  */
 
 import * as path from "node:path"
+import { fileURLToPath } from "node:url"
 import * as fs from "node:fs/promises"
 import {
   runWorktreeSetupHook,
@@ -177,8 +178,8 @@ export async function assertWorktreeSetupReady(
   if (!hookConfig) {
     // Fail fast with actionable guidance
     const templatesDir = path.join(
-      path.dirname(new URL(import.meta.url).pathname),
-      "..", "..", "..", "..", "templates", "worktree-setup-hooks",
+      path.dirname(fileURLToPath(import.meta.resolve("pi-zflow-change-workflows/package.json"))),
+      "templates", "worktree-setup-hooks",
     )
 
     return {

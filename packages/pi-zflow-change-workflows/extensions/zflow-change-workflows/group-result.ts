@@ -28,6 +28,7 @@
 
 import * as path from "node:path"
 import { execFileSync } from "node:child_process"
+import { mkdirSync } from "node:fs"
 import { resolveRunDir } from "pi-zflow-artifacts/artifact-paths"
 import { readRun, updateRun } from "pi-zflow-artifacts/run-state"
 
@@ -275,7 +276,7 @@ function writeBinaryPatch(
   // Ensure the patch ends with exactly one newline
   const finalPatch = combined.endsWith("\n") ? combined : combined + "\n"
 
-  execFileSync("mkdir", ["-p", path.dirname(patchPath)], { stdio: "pipe" })
+  mkdirSync(path.dirname(patchPath), { recursive: true })
   fsSync.writeFileSync(patchPath, finalPatch, "utf-8")
 }
 

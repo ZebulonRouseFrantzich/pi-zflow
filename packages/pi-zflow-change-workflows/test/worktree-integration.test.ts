@@ -280,7 +280,7 @@ describe("Phase 5 — Worktree orchestration integration", () => {
 
     const finalResult = await finalizeWorktreeImplementationRun(
       plan.runId, results,
-      { cwd: repoRoot, changeId: "ch-full", planVersion: "v1" },
+      { cwd: repoRoot, changeId: "ch-full", planVersion: "v1", executionGroups: groups },
     )
 
     assert.ok(finalResult.success, `Apply-back should succeed: ${finalResult.error}`)
@@ -317,7 +317,7 @@ describe("Phase 5 — Worktree orchestration integration", () => {
 
     const finalResult = await finalizeWorktreeImplementationRun(
       plan.runId, [result],
-      { cwd: repoRoot, changeId: "ch-untracked", planVersion: "v1" },
+      { cwd: repoRoot, changeId: "ch-untracked", planVersion: "v1", executionGroups: groups },
     )
 
     assert.ok(finalResult.success, "Apply-back should succeed")
@@ -364,7 +364,7 @@ describe("Phase 5 — Worktree orchestration integration", () => {
 
     const finalResult = await finalizeWorktreeImplementationRun(
       plan.runId, [result],
-      { cwd: repoRoot, changeId: "ch-dev", planVersion: "v1" },
+      { cwd: repoRoot, changeId: "ch-dev", planVersion: "v1", executionGroups: groups },
     )
 
     assert.ok(finalResult.success, "Apply-back should succeed despite deviation reports")

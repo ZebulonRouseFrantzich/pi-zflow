@@ -86,8 +86,13 @@ export async function loadStateIndex(cwd?: string): Promise<StateIndex> {
     if (!Array.isArray(parsed.entries)) parsed.entries = []
     return parsed
   } catch (err: unknown) {
-    // ENOENT or parse error — return default
-    return { ...DEFAULT_INDEX, entries: [...DEFAULT_INDEX.entries] }
+    // ENOENT: file doesn't exist yet — return default
+    // Other errors (corruption, permissions): re-throw so they are surfaced
+    const nodeErr = err as NodeJS.ErrnoException
+    if (nodeErr.code === "ENOENT") {
+      return { ...DEFAULT_INDEX, entries: [...DEFAULT_INDEX.entries] }
+    }
+    throw err
   }
 }
 

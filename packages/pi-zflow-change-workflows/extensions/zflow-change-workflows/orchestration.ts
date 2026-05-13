@@ -704,7 +704,8 @@ export function buildWorkerTask(
     `2. If an instruction in the plan is impossible, stop work and file a deviation report.`,
     `3. Prefer batch edits for multi-file changes (use the \`edit\` tool with \`multi\` parameter).`,
     `4. For complex refactors, use patch mode to apply structured diffs.`,
-    `5. Create temporary commits as needed using format: \`[pi-worker] ${group.id}: <step>\`.`, `6. After implementation, run the scoped verification command if provided.`,
+    `5. Create temporary commits as needed using format: \`[pi-worker] ${group.id}: <step>\`.`,
+    `6. After implementation, run the scoped verification command if provided.`,
     `7. Do NOT launch subagents.`,
     `8. Do NOT commit to the primary branch. Your worktree commits are disposable.`,
     `9. Report all changed files and verification results in your output summary.`,
@@ -1164,6 +1165,12 @@ export async function finalizeWorktreeImplementationRun(
     planVersion?: string
     /** Whether to retain artifacts on failure. */
     retainOnFailure?: boolean
+    /**
+     * Original execution groups with real dependencies from the approved plan.
+     * When provided, these are used for topological apply-back ordering instead
+     * of reconstructing groups from run.json (which strips dependency info).
+     */
+    executionGroups?: ExecutionGroup[]
   },
 ): Promise<ApplyBackResult & { deviationSummaryPath?: string }> {
   const cwd = options?.cwd
@@ -1196,16 +1203,27 @@ export async function finalizeWorktreeImplementationRun(
   }
 
   // 2. Apply patches back atomically
+  // Use original execution groups (with real dependencies) if provided,
+  // falling back to reconstructed groups from run.json.
+  const applyBackGroups = options?.executionGroups && options.executionGroups.length > 0
+    ? options.executionGroups.map((g) => ({
+        id: g.id,
+        files: g.files,
+        dependencies: g.dependencies,
+        assignedAgent: g.agent,
+      }))
+    : run.groups.map((g) => ({
+        id: g.groupId,
+        files: g.changedFiles,
+        dependencies: [],
+        assignedAgent: g.agent,
+      }))
+
   const applyBackResult = await executeApplyBack({
     runId,
     repoRoot,
     snapshot: run.preApplySnapshot!,
-    groups: run.groups.map((g) => ({
-      id: g.groupId,
-      files: g.changedFiles,
-      dependencies: [], // dependencies were resolved during execution
-      assignedAgent: g.agent,
-    })),
+    groups: applyBackGroups,
     cwd,
   })
 

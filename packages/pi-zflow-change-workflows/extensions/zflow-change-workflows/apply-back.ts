@@ -22,6 +22,7 @@
 
 import * as path from "node:path"
 import { execFileSync } from "node:child_process"
+import { existsSync, statSync } from "node:fs"
 import { readRun, updateRun, resetToPreApplySnapshot, setRunPhase, createRecoveryRef, removeRecoveryRef } from "pi-zflow-artifacts/run-state"
 import type { PreApplySnapshot } from "pi-zflow-artifacts/run-state"
 import { resolveRunDir } from "pi-zflow-artifacts/artifact-paths"
@@ -151,10 +152,10 @@ export interface ApplyBackOptions {
 /**
  * Check whether a patch file exists and has content.
  */
+
 function patchExists(patchPath: string): boolean {
   try {
-    const stat = execFileSync("stat", [patchPath], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] })
-    return stat.length > 0
+    return existsSync(patchPath) && statSync(patchPath).size > 0
   } catch {
     return false
   }
