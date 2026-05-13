@@ -73,6 +73,19 @@ export {
   inferGroupsFromDocs,
 } from "./derive.js"
 
+// Re-export status mapping types and functions (Task 3.6)
+export type {
+  HarnessState,
+  WriteBackPolicy,
+  StatusMappingResult,
+  StatusVocabulary,
+} from "./runectx.js"
+export {
+  mapHarnessStateToRuneStatus,
+  buildRuntimeMetadata,
+  shouldOfferWriteBack,
+} from "./runectx.js"
+
 /** Well-known capability name for RuneContext support. */
 export const RUNECONTEXT_CAPABILITY = "runecontext" as const
 
