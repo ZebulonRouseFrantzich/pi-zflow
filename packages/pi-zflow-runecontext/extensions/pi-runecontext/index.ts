@@ -61,6 +61,18 @@ export {
   listDerivedArtifactNames,
 } from "./precedence.js"
 
+// Re-export execution-group derivation types and functions (Task 3.5)
+export type {
+  DerivedExecutionGroup,
+  DerivedTask,
+  DerivedExecutionGroups,
+} from "./derive.js"
+export {
+  deriveExecutionGroupsFromRuneDocs,
+  parseTasksMd,
+  inferGroupsFromDocs,
+} from "./derive.js"
+
 /** Well-known capability name for RuneContext support. */
 export const RUNECONTEXT_CAPABILITY = "runecontext" as const
 
