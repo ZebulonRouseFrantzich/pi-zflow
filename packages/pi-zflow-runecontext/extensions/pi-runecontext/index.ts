@@ -48,6 +48,19 @@ export type {
 } from "./read-docs.js"
 export { readRuneContextDocs } from "./read-docs.js"
 
+// Re-export precedence utilities (Task 3.4)
+export type {
+  RequirementsSource,
+  DerivationStatus,
+} from "./precedence.js"
+export {
+  getRequirementsSource,
+  classifyArtifact,
+  isCanonicalArtifact,
+  listCanonicalDocNames,
+  listDerivedArtifactNames,
+} from "./precedence.js"
+
 /** Well-known capability name for RuneContext support. */
 export const RUNECONTEXT_CAPABILITY = "runecontext" as const
 
