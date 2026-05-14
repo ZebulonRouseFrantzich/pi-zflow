@@ -54,7 +54,6 @@ const ROLES_ALLOWED_WEB_ACCESS = new Set([
   "review-security",
   "review-logic",
   "review-system",
-  "synthesizer",
 ])
 
 /**

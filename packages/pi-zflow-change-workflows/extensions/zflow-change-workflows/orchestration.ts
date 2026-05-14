@@ -327,7 +327,7 @@ export async function injectAgentGuidanceFragments(
   if (agentName.includes("scout") || agentName.includes("context-builder")) {
     try {
       const { loadFragment } = await import("pi-zflow-agents")
-      const fragment = await loadFragment("scout-reconnaissance" as any)
+      const fragment = await loadFragment("scout-reconnaissance")
       parts.push(fragment.trim())
     } catch {
       // Fragment not available — skip
@@ -341,7 +341,7 @@ export async function injectAgentGuidanceFragments(
   ) {
     try {
       const { loadFragment } = await import("pi-zflow-agents")
-      const fragment = await loadFragment("code-skeleton-guide" as any)
+      const fragment = await loadFragment("code-skeleton-guide")
       parts.push(fragment.trim())
     } catch {
       // Fragment not available — skip
@@ -2916,22 +2916,44 @@ export async function buildRepoMap(cwd?: string): Promise<{ path: string; entrie
     lines.push(`- **Workspaces**: ${workspaces.join(", ")}`, "")
   }
 
-  // Depth-3 directory tree
+  // Depth-3 directory tree — in-process bounded traversal (no shell find)
   if (repoRoot) {
     try {
-      // Safer: list dirs depth-2 via find
-      const dirsOutput = execFileSync("find", [
-        repoRoot, "-maxdepth", "3", "-type", "f",
-        "-not", "-path", "*/node_modules/*",
-        "-not", "-path", "*/.git/*",
-      ].slice(0, 100), { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }).trim()
-      if (dirsOutput) {
-        const files = dirsOutput.split("\n").filter(Boolean).slice(0, 80)
+      const MAX_TREE_FILES = 80
+      const MAX_DEPTH = 3
+      const excludeDirNames = new Set(["node_modules", ".git"])
+      const collectedFiles: string[] = []
+
+      const walkDir = async (dir: string, depth: number): Promise<void> => {
+        if (depth > MAX_DEPTH || collectedFiles.length >= MAX_TREE_FILES) return
+        let entries
+        try {
+          entries = await fs.readdir(dir, { withFileTypes: true })
+        } catch {
+          return
+        }
+        for (const entry of entries) {
+          if (collectedFiles.length >= MAX_TREE_FILES) break
+          const fullPath = path.join(dir, entry.name)
+          if (entry.isDirectory()) {
+            if (excludeDirNames.has(entry.name)) continue
+            await walkDir(fullPath, depth + 1)
+          } else if (entry.isFile()) {
+            const relative = fullPath.startsWith(repoRoot)
+              ? fullPath.slice(repoRoot.length + 1)
+              : fullPath
+            collectedFiles.push(relative)
+          }
+        }
+      }
+
+      await walkDir(repoRoot, 0)
+
+      if (collectedFiles.length > 0) {
         lines.push("## Directory structure", "")
         // Build a tree-like representation
         const tree = new Map<string, string[]>()
-        for (const f of files) {
-          const relative = f.startsWith(repoRoot) ? f.slice(repoRoot.length + 1) : f
+        for (const relative of collectedFiles) {
           const parts = relative.split("/")
           if (parts.length > 1) {
             const dir = parts.slice(0, -1).join("/")
@@ -3199,17 +3221,23 @@ export async function buildReconnaissance(
  * resolved absolute file paths in the runtime state directory.
  * Callers use these to inject into agent context after compaction.
  *
- * @param cwd - Working directory (optional, for resolving runtime state dir).
+ * @param options - Optional change ID/cwd pair. For backwards compatibility,
+ *   a single string argument is treated as `cwd`; pass `{ changeId, cwd }` or
+ *   `(changeId, cwd)` to include plan-state.
+ * @param cwd - Working directory when passing `changeId` as the first argument.
  * @returns Record of artifact ID → absolute path.
  */
 export async function buildCompactionReanchorArtifacts(
+  options?: { changeId?: string; cwd?: string } | string,
   cwd?: string,
 ): Promise<Record<string, string>> {
   const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
   const { default: pathModule } = await import("node:path")
   const { default: fs } = await import("node:fs/promises")
 
-  const runtimeStateDir = resolveRuntimeStateDir(cwd)
+  const changeId = typeof options === "object" ? options.changeId : cwd ? options : undefined
+  const resolvedCwd = typeof options === "object" ? options.cwd : cwd ?? options
+  const runtimeStateDir = resolveRuntimeStateDir(resolvedCwd)
   const paths: Record<string, string> = {}
 
   // Well-known artifacts that exist if generated
@@ -3231,16 +3259,18 @@ export async function buildCompactionReanchorArtifacts(
     }
   }
 
-  // Plan-state resolves via artifact-paths if available
-  try {
-    const { resolvePlanStatePath } = await import("pi-zflow-artifacts/artifact-paths")
-    const planPath = resolvePlanStatePath(cwd)
+  // Plan-state resolves via artifact-paths only when changeId is provided
+  if (changeId) {
     try {
-      await fs.access(planPath)
-      paths["plan-state"] = planPath
-    } catch { /* not created yet */ }
-  } catch {
-    // pi-zflow-artifacts not available — skip plan-state
+      const { resolvePlanStatePath } = await import("pi-zflow-artifacts/artifact-paths")
+      const planPath = resolvePlanStatePath(changeId, resolvedCwd)
+      try {
+        await fs.access(planPath)
+        paths["plan-state"] = planPath
+      } catch { /* not created yet */ }
+    } catch {
+      // pi-zflow-artifacts not available — skip plan-state
+    }
   }
 
   return paths

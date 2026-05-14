@@ -158,7 +158,7 @@ async function runBootstrapChecks(opts: {
   const rtk = await checkBinary("rtk");
   if (!rtk.available) {
     warnings.push(
-      "rtk not found: output compaction will not be available. Install with: npm install -g rtk",
+      "rtk not found: Install rtk for command rewriting. Output compaction will still work without it.",
     );
   }
 

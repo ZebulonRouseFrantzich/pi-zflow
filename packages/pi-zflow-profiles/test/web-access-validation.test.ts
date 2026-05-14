@@ -129,3 +129,22 @@ describe("web-access validation", () => {
     assert.equal(config.tools, "read, grep, find, ls, bash, web_search, fetch_content")
   })
 })
+
+describe("synthesizer web-access policy", () => {
+  it("rejects web tools on synthesizer — per web-access-policy.md", () => {
+    const result = validateWebAccessScope(
+      "zflow.synthesizer",
+      "read, grep, find, ls, bash, web_search, fetch_content",
+    )
+    assert.equal(result.valid, false, "synthesizer should NOT be allowed web tools")
+    assert.ok(result.reason, "synthesizer should have a rejection reason")
+  })
+
+  it("passes synthesizer without web tools", () => {
+    const result = validateWebAccessScope(
+      "zflow.synthesizer",
+      "read, grep, find, ls, bash",
+    )
+    assert.equal(result.valid, true, "synthesizer without web tools should pass")
+  })
+})

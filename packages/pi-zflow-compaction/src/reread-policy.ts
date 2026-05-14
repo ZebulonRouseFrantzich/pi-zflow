@@ -54,14 +54,14 @@ export interface ArtifactEntry {
 export const CANONICAL_ARTIFACTS: readonly ArtifactEntry[] = [
   {
     id: "plan-state",
-    path: "plan-state.json",
-    description: "Current plan state including phase, version, and completion flags",
+    path: "plans/{changeId}/plan-state.json",
+    description: "Current plan state including phase, version, and completion flags (per-changeId under plans/<changeId>/)",
     mandatory: true,
   },
   {
     id: "approved-plan",
-    path: "approved-plan.md",
-    description: "Approved plan document with exact decisions and acceptance criteria",
+    path: "plans/{changeId}/v{planVersion}/",
+    description: "Approved plan artifact files: design.md, execution-groups.md, standards.md, verification.md (per-changeId, per-version)",
     mandatory: true,
   },
   {

@@ -23,13 +23,13 @@ The following artifacts are **canonical** — they remain as files on disk and m
 
 These artifacts contain information essential for continuing work safely.
 
-| Artifact       | File path                               | Purpose                                                  |
-| -------------- | --------------------------------------- | -------------------------------------------------------- |
-| Plan state     | `<runtime-state-dir>/plan-state.json`   | Current phase, completion flags, version, change ID      |
-| Approved plan  | `<runtime-state-dir>/approved-plan.md`  | Exact decisions, acceptance criteria, scope constraints  |
-| Repo map       | `<runtime-state-dir>/repo-map.md`       | Current project structure and module locations           |
-| Reconnaissance | `<runtime-state-dir>/reconnaissance.md` | Codebase exploration results, conventions, patterns      |
-| Failure log    | `<runtime-state-dir>/failure-log.md`    | Recent failures, root causes, prevention recommendations |
+| Artifact       | File path                                              | Purpose                                                                                 |
+| -------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| Plan state     | `<runtime-state-dir>/plans/{changeId}/plan-state.json` | Current phase, completion flags, version, change ID (per-changeId)                      |
+| Approved plan  | `<runtime-state-dir>/plans/{changeId}/v{planVersion}/` | Versioned plan artifacts: design.md, execution-groups.md, standards.md, verification.md |
+| Repo map       | `<runtime-state-dir>/repo-map.md`                      | Current project structure and module locations                                          |
+| Reconnaissance | `<runtime-state-dir>/reconnaissance.md`                | Codebase exploration results, conventions, patterns                                     |
+| Failure log    | `<runtime-state-dir>/failure-log.md`                   | Recent failures, root causes, prevention recommendations                                |
 
 ### Optional rereads (role-specific)
 
@@ -92,7 +92,7 @@ The model should read the compaction summary for context, then reread specific a
 2. `pi-zflow-compaction` sets `pendingCompactionHandoff = true`
 3. Next agent starts → receives `compaction-handoff` reminder in system prompt
 4. Agent reads the compaction summary for orientation
-5. Agent rereads `plan-state.json` and `approved-plan.md` for exact decisions
+5. Agent rereads `plans/{changeId}/plan-state.json` and plan artifact files under `plans/{changeId}/v{planVersion}/` for exact decisions
 6. If relevant, agent rereads `repo-map.md` and `reconnaissance.md` for structure
 7. Agent continues the workflow with file-backed accuracy
 

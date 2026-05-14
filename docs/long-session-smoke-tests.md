@@ -169,7 +169,7 @@ alone.
 ### Steps
 
 1. **Complete a planning phase** that produces:
-   - A plan artifact at `<runtime-state-dir>/plan-state.json`
+   - A plan-state file at `<runtime-state-dir>/plans/{changeId}/plan-state.json`
    - A `repo-map.md` at `<runtime-state-dir>/repo-map.md`
    - A `reconnaissance.md` at `<runtime-state-dir>/reconnaissance.md`
 
@@ -180,7 +180,7 @@ alone.
 
 4. **Check the subagent's prompt** (via session logs) for explicit `read` calls
    targeting the canonical artifacts:
-   - `read plan-state.json`
+   - `read plans/{changeId}/plan-state.json`
    - `read repo-map.md`
    - `read reconnaissance.md`
 
@@ -199,8 +199,8 @@ alone.
   ```
   **Compaction handoff.** A compaction cycle has completed.
   Do not rely on cached or summarised state from before compaction.
-  Reread canonical artifacts — especially plan documents,
-  `plan-state.json`, and the approved plan — for exact decisions
+  Reread canonical artifacts — especially plan documents under
+  `plans/{changeId}/v{planVersion}/`, and `plans/{changeId}/plan-state.json` — for exact decisions
   and current state before continuing.
   ```
 
@@ -414,7 +414,7 @@ read docs/bootstrap-checks.md   # expected: suppressed
 # Manual: start /zflow-change-prepare, fill context until compaction fires
 
 # Layer: Canonical reread (Scenario 3)
-# Manual: after compaction, check that the agent reads plan-state.json
+# Manual: after compaction, check that the agent reads plans/{changeId}/plan-state.json
 
 # Layer: Bounded output (Scenario 2)
 # Manual: /zflow-change-implement, verify each agent output size
