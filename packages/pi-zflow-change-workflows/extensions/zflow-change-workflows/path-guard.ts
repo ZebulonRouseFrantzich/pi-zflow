@@ -25,7 +25,7 @@
  */
 
 import * as path from "node:path"
-import * as os from "node:os"
+import * as fs from "node:fs"
 import { realpathSafe } from "pi-zflow-core/path-guard"
 import { resolveRuntimeStateDir } from "pi-zflow-core/runtime-paths"
 
@@ -130,6 +130,46 @@ function isPathWithinOrEqual(rootPath: string, candidatePath: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))
 }
 
+/**
+ * Resolve `targetPath` to a real path, handling files that do not yet exist.
+ *
+ * - If the target exists, resolves it through symlinks via `realpathSafe`.
+ * - If the target does not exist, walks up the directory tree until it finds
+ *   an existing ancestor, resolves that ancestor through symlinks, then
+ *   re-appends the non-existing suffix.
+ *
+ * This prevents symlink-escape for writes to new files under a symlinked
+ * parent directory: the symlinked parent is resolved to its real location,
+ * exposing any escape.
+ *
+ * Returns `null` if the nearest existing ancestor cannot be safely resolved.
+ */
+function resolveAncestorSafe(targetPath: string, projectRoot: string): string | null {
+  const resolved = path.resolve(targetPath)
+
+  let checkPath = resolved
+  while (true) {
+    try {
+      // lstatSync succeeds for existing files, directories, and symlinks.
+      fs.lstatSync(checkPath)
+      const realPrefix = realpathSafe(checkPath, projectRoot)
+      if (realPrefix === null) {
+        return null
+      }
+      const suffix = path.relative(checkPath, resolved)
+      return suffix ? path.join(realPrefix, suffix) : realPrefix
+    } catch {
+      // Path does not exist — continue walking up.
+    }
+
+    const parent = path.dirname(checkPath)
+    if (parent === checkPath) {
+      return null
+    }
+    checkPath = parent
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Core guard functions
 // ---------------------------------------------------------------------------
@@ -159,8 +199,17 @@ export function guardWrite(
     ? targetPath
     : path.resolve(projectRoot, targetPath)
 
-  // Symlink/traversal safety: resolve real path
-  const resolvedPath = realpathSafe(absolutePath, projectRoot) || absolutePath
+  // Symlink/traversal safety: resolve real path via ancestor-safe resolution.
+  // This handles both existing files (direct realpath) and new files under
+  // symlinked directories (walks up to find a resolvable ancestor).
+  const resolvedPath = resolveAncestorSafe(absolutePath, projectRoot)
+  if (resolvedPath === null) {
+    return {
+      allowed: false,
+      message: `Path "${absolutePath}" could not be safely resolved. Writes are denied by policy.`,
+      resolvedPath: absolutePath,
+    }
+  }
 
   // Runtime state dir override: if the resolved path is under the known
   // runtime state directory (e.g. <git-dir>/pi-zflow/), allow it regardless

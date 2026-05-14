@@ -40,6 +40,13 @@ void describe("validatePlanModeBash", () => {
       ["npm ls", "list installed packages (read-only)"],
       ["npx tsx --test some.test.ts", "run tests"],
       ["echo hello", "echo (no redirection)"],
+
+      // Input redirection (read-only)
+      ["grep pattern < file.ts", "grep with input redirection"],
+      ["sort < data.txt", "sort with input redirection"],
+      ["wc -l < file.ts", "wc with input redirection"],
+      ["cat < file.ts", "cat with input redirection"],
+      ["cat << EOF", "heredoc (input redirection)"],
       ["env", "list environment variables"],
       ["file some-file.ts", "detect file type"],
     ]
@@ -119,10 +126,10 @@ void describe("validatePlanModeBash", () => {
       assert.ok(validatePlanModeBash("   ").allowed)
     })
 
-    void it("blocks redirection in complex pipeline", () => {
+    void it("blocks output redirection in complex pipeline", () => {
       const result = validatePlanModeBash("cat file.txt | grep pattern > output.txt")
       assert.ok(!result.allowed)
-      assert.ok(result.reason?.includes("redirection"))
+      assert.ok(result.reason?.includes("output redirection"))
     })
 
     void it("blocks npm install with explicit version", () => {

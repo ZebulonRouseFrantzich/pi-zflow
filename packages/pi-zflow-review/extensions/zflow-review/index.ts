@@ -329,7 +329,6 @@ export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
         const input: CodeReviewInput = {
           source: "Manual code review via /zflow-review-code",
           repoPath: repoRoot,
-          branch: "(unknown)",
           planningArtifacts: {
             design: "",
             executionGroups: "",

@@ -102,11 +102,14 @@ const DEFAULT_INDEX: StateIndex = {
 /**
  * Load the state index from disk.
  *
- * Reads `<runtime-state-dir>/state-index.json`. Returns the default empty
- * index if the file does not exist or is malformed.
+ * Reads `<runtime-state-dir>/state-index.json`.
+ * - If the file does not exist (ENOENT), returns the default empty index.
+ * - If the file is malformed (JSON parse error) or inaccessible (permission error),
+ *   the error is surfaced to the caller — not silently swallowed.
  *
  * @param cwd - Working directory (optional, for resolving runtime state dir).
- * @returns The loaded or default StateIndex.
+ * @returns The loaded StateIndex, or the default if the file does not exist.
+ * @throws {Error} If the file exists but is malformed or cannot be read.
  */
 export async function loadStateIndex(cwd?: string): Promise<StateIndex> {
   const indexPath = resolveStateIndexPath(cwd)

@@ -15,18 +15,34 @@ import type { InstallManifest } from "pi-zflow-core/schemas"
  * Reads `~/.pi/agent/zflow/install-manifest.json`.
  * Returns `null` if the file does not exist.
  * Throws with a clear error if the file is malformed.
+ *
+ * **Coercion:** If the manifest version exists but `installedAgents`,
+ * `installedChains`, or `installedSkills` are missing or not arrays,
+ * they are defaulted to `[]` for backward compatibility with older
+ * or partially-written manifests.
  */
 export async function readManifest(): Promise<InstallManifest | null> {
   try {
     const raw = await fs.readFile(INSTALL_MANIFEST_PATH, "utf-8")
-    const parsed = JSON.parse(raw) as InstallManifest
+    const parsed = JSON.parse(raw) as Partial<InstallManifest>
 
-    // Basic validation
-    if (!parsed.version || !parsed.installedAgents) {
-      throw new Error("Install manifest is missing required fields")
+    // Basic validation: version is required
+    if (!parsed.version) {
+      throw new Error("Install manifest is missing required field: version")
     }
 
-    return parsed
+    // Coerce missing or malformed array fields for backward compatibility
+    if (!Array.isArray(parsed.installedAgents)) {
+      parsed.installedAgents = []
+    }
+    if (!Array.isArray(parsed.installedChains)) {
+      parsed.installedChains = []
+    }
+    if (!Array.isArray(parsed.installedSkills)) {
+      parsed.installedSkills = []
+    }
+
+    return parsed as InstallManifest
   } catch (err: unknown) {
     const nodeErr = err as NodeJS.ErrnoException
     if (nodeErr.code === "ENOENT") {

@@ -62,10 +62,6 @@ export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
     return
   }
 
-  // Provide a minimal service marker so subsequent duplicate loads see
-  // registered.service !== undefined and bail out early.
-  registry.provide("plan-mode", { activated: true })
-
   // ── Plan mode service ────────────────────────────────────────────
 
   const planModeService = {

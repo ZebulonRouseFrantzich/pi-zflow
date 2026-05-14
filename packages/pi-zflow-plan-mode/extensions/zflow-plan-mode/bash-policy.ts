@@ -44,8 +44,9 @@ export interface BashPolicyResult {
  */
 const BLOCKED_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   // Shell redirection operators (write to files)
-  { pattern: /[>]{1,2}/, reason: "File redirection blocked in plan mode" },
-  { pattern: /[<]{1,2}/, reason: "File input redirection blocked in plan mode" },
+  // Only output redirection (`>`, `>>`) is blocked.
+  // Input redirection (`<`, `<<`) is allowed (read-only commands like `grep pattern < file` are fine).
+  { pattern: /[>]{1,2}/, reason: "File output redirection blocked in plan mode" },
 
   // tee command (writes to files)
   { pattern: /\btee\b/, reason: "tee command blocked in plan mode" },

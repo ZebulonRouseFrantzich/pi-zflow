@@ -12,7 +12,7 @@ import * as assert from "node:assert/strict"
 import { describe, it, afterEach, mock } from "node:test"
 import * as path from "node:path"
 import * as os from "node:os"
-import { mkdtempSync, existsSync, mkdirSync, writeFileSync } from "node:fs"
+import { mkdtempSync, existsSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs"
 
 import {
   guardWrite,
@@ -257,5 +257,87 @@ describe("path-guard integration — buildToolDeniedReminder", () => {
     const reminder = buildToolDeniedReminder(result)
     assert.ok(reminder.includes("Tool call blocked by path guard"))
     assert.ok(reminder.includes("Blocked path pattern matched."))
+  })
+})
+
+describe("path-guard integration — symlink escape prevention", () => {
+  it("blocks writes to a new file under a symlinked directory that points outside projectRoot", { skip: process.platform === "win32" }, () => {
+    // Create temp directory structure
+    const testRoot = mkdtempSync(path.join(os.tmpdir(), "zflow-symlink-test-"))
+    const outsideDir = path.join(testRoot, "outside")
+    const repoDir = path.join(testRoot, "repo")
+    const symlinkedDir = path.join(repoDir, "link-outside")
+    const newFilePath = path.join(symlinkedDir, "new-file.ts")
+
+    mkdirSync(outsideDir, { recursive: true })
+    mkdirSync(path.join(outsideDir, "subdir"), { recursive: true })
+    mkdirSync(repoDir, { recursive: true })
+
+    // Attempt to create symlink
+    let symlinkCreated = false
+    try {
+      symlinkSync(outsideDir, symlinkedDir)
+      symlinkCreated = existsSync(symlinkedDir)
+    } catch {
+      // Symlink creation not supported — skip
+    }
+
+    if (!symlinkCreated) {
+      // Cleanup and skip
+      rmSync(testRoot, { recursive: true, force: true })
+      return
+    }
+
+    try {
+      const result = guardWrite(newFilePath, {
+        projectRoot: repoDir,
+        runtimeStateDir: path.join(testRoot, "runtime-state"),
+      })
+      assert.ok(!result.allowed,
+        `Expected write through symlink outside project root to be blocked, got: ${result.message}`)
+      assert.ok(
+        result.message.includes("outside allowed write roots"),
+        `Expected "outside allowed write roots" in message, got: ${result.message}`,
+      )
+    } finally {
+      rmSync(testRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("allows writes to a new file under a symlinked directory that points inside projectRoot", { skip: process.platform === "win32" }, () => {
+    const testRoot = mkdtempSync(path.join(os.tmpdir(), "zflow-symlink-test-"))
+    const realDir = path.join(testRoot, "realdir")
+    const repoDir = path.join(testRoot, "repo")
+    const symlinkedDir = path.join(repoDir, "link-inside")
+    const newFilePath = path.join(symlinkedDir, "new-file.ts")
+
+    mkdirSync(realDir, { recursive: true })
+    mkdirSync(repoDir, { recursive: true })
+
+    let symlinkCreated = false
+    try {
+      symlinkSync(realDir, symlinkedDir)
+      symlinkCreated = existsSync(symlinkedDir)
+    } catch {
+      // skip
+    }
+
+    if (!symlinkCreated) {
+      rmSync(testRoot, { recursive: true, force: true })
+      return
+    }
+
+    try {
+      const result = guardWrite(newFilePath, {
+        projectRoot: repoDir,
+        runtimeStateDir: path.join(testRoot, "runtime-state"),
+        worktreePaths: [realDir],
+      })
+      // Should be allowed because realDir is in worktreePaths which are allowed roots
+      assert.ok(result.allowed,
+        `Expected write through symlink inside allowed roots to be allowed, got: ${result.message}`)
+    } finally {
+      rmSync(testRoot, { recursive: true, force: true })
+    }
   })
 })

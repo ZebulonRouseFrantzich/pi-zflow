@@ -29,7 +29,7 @@
  * @module pi-zflow-change-workflows/verification
  */
 
-import { execFileSync } from "node:child_process"
+import { spawnSync } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import * as path from "node:path"
 import { resolveFailureLogPath } from "pi-zflow-artifacts/artifact-paths"
@@ -155,7 +155,7 @@ export function resolveVerificationCommand(
  * Run a verification command and capture the result.
  *
  * Executes the given command via `bash -c` in the repo root directory.
- * Captures stdout, stderr, exit code, and duration.
+ * Captures combined stdout and stderr, exit code, and duration.
  *
  * @param command - The shell command to run.
  * @param repoRoot - Absolute path to the repository root.
@@ -167,40 +167,27 @@ export async function runVerification(
 ): Promise<VerificationResult> {
   const start = Date.now()
 
-  try {
-    const output = execFileSync("bash", ["-c", command], {
-      cwd: repoRoot,
-      encoding: "utf-8",
-      timeout: 15 * 60 * 1000, // 15 minutes
-      stdio: ["ignore", "pipe", "pipe"],
-      maxBuffer: 10 * 1024 * 1024, // 10 MB
-    })
+  const result = spawnSync("bash", ["-c", command], {
+    cwd: repoRoot,
+    encoding: "utf-8",
+    timeout: 15 * 60 * 1000, // 15 minutes
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 10 * 1024 * 1024, // 10 MB
+  })
 
-    const redacted = redactSecrets(output)
+  const stdout: string = result.stdout ?? ""
+  const stderr: string = result.stderr ?? ""
+  const combined = stdout + (stderr ? "\n" + stderr : "")
+  const redacted = redactSecrets(combined)
 
-    return {
-      pass: true,
-      command,
-      output: redacted,
-      duration: Date.now() - start,
-    }
-  } catch (err: unknown) {
-    const nodeErr = err as NodeJS.ErrnoException & {
-      stdout?: string
-      stderr?: string
-      status?: number
-    }
+  const pass = result.status === 0
 
-    const rawOutput = (nodeErr.stdout ?? "") + "\n" + (nodeErr.stderr ?? "")
-    const redacted = redactSecrets(rawOutput)
-
-    return {
-      pass: false,
-      command,
-      output: redacted,
-      duration: Date.now() - start,
-      error: nodeErr.message ?? String(err),
-    }
+  return {
+    pass,
+    command,
+    output: redacted,
+    duration: Date.now() - start,
+    error: pass ? undefined : result.error?.message ?? `exit code ${result.status ?? "unknown"}`,
   }
 }
 

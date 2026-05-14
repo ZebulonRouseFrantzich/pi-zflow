@@ -242,14 +242,15 @@ describe("state-index.ts", () => {
     )
   })
 
-  test("loadStateIndex returns default for malformed JSON", async () => {
-    const indexPath = path.join(tmpDir, "state-index.json")
+  test("loadStateIndex throws for malformed JSON", async () => {
+    const indexPath = resolveStateIndexPath()
+    await fs.mkdir(path.dirname(indexPath), { recursive: true })
     await fs.writeFile(indexPath, "this is not json", "utf-8")
 
-    const index = await loadStateIndex()
-    assert.equal(index.version, 2)
-    assert.deepEqual(index.entries, [])
-    assert.deepEqual(index.changes, {})
+    await assert.rejects(
+      () => loadStateIndex(),
+      SyntaxError,
+    )
   })
 
   test("multiple entries survive save/load cycle", async () => {
