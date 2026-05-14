@@ -125,6 +125,8 @@ import type { StateIndexEntry } from "pi-zflow-artifacts/state-index"
 import {
   discoverUnfinishedWork,
   promptResumeChoices,
+  runChangePrepareWorkflow,
+  updatePlanState,
 } from "./orchestration.js"
 
 import {
@@ -139,9 +141,16 @@ import type {
   ModeFragment,
 } from "./prompt-fragments.js"
 
+import type {
+  PrepareWorkflowOptions,
+  PrepareWorkflowResult,
+} from "./orchestration.js"
+
 export {
   discoverUnfinishedWork,
   promptResumeChoices,
+  runChangePrepareWorkflow,
+  updatePlanState,
   loadFragment,
   buildReminderInjection,
   buildModeInjection,
@@ -152,6 +161,8 @@ export type {
   StateIndexEntry,
   ReminderId,
   ModeFragment,
+  PrepareWorkflowOptions,
+  PrepareWorkflowResult,
 }
 
 // ── Extension activation ────────────────────────────────────────

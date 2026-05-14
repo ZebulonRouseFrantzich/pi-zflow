@@ -95,6 +95,17 @@ export {
   promptResumeChoices,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
+// Formal prepare workflow (Phase 7 — /zflow-change-prepare orchestration)
+export {
+  runChangePrepareWorkflow,
+  updatePlanState,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
+export type {
+  PrepareWorkflowOptions,
+  PrepareWorkflowResult,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
 export type {
   StateIndexEntry,
 } from "pi-zflow-artifacts/state-index"

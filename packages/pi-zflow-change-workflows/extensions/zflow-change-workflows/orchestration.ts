@@ -59,7 +59,7 @@ import {
 } from "pi-zflow-review"
 import { readRun, updateRun, setRunPhase, addRetainedArtifact, createRun, createRecoveryRef, removeRecoveryRef } from "pi-zflow-artifacts"
 import type { RunPhase, RetainedArtifact, RunJson } from "pi-zflow-artifacts"
-import { resolveRunDir, resolveRunStatePath } from "pi-zflow-artifacts/artifact-paths"
+import { resolveRunDir, resolveRunStatePath, resolvePlanVersionDir, resolvePlanStatePath } from "pi-zflow-artifacts/artifact-paths"
 import { addStateIndexEntry, loadStateIndex, listStateIndexEntries } from "pi-zflow-artifacts/state-index"
 import type { StateIndexEntry } from "pi-zflow-artifacts/state-index"
 import { assertCleanPrimaryTree } from "./git-preflight.js"
@@ -1384,4 +1384,197 @@ export function promptResumeChoices(unfinished: {
   lines.push("Enter one of the above to proceed, or `skip` to ignore and continue.")
 
   return lines.join("\n")
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase 7 — Formal workflow orchestration
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Options for the `/zflow-change-prepare` workflow orchestration.
+ */
+export interface PrepareWorkflowOptions {
+  /** Working directory for runtime state dir resolution. */
+  cwd?: string
+  /** Optional change path (RuneContext path or directory). */
+  changePath?: string
+  /** Explicit change ID. Auto-generated from changePath if omitted. */
+  changeId?: string
+  /** Whether to skip the plan-review step. */
+  skipReview?: boolean
+}
+
+/**
+ * Result of the `/zflow-change-prepare` workflow orchestration.
+ */
+export interface PrepareWorkflowResult {
+  /** Resolved change identifier. */
+  changeId: string
+  /** The initial plan version label (always "v1" for a new prepare). */
+  planVersion: string
+  /** Absolute path to the plan-state.json file. */
+  planStatePath: string
+  /** Current lifecycle state of the plan. */
+  status: "draft" | "validated" | "reviewed" | "approved" | "needs-revision"
+  /** Absolute paths to the four canonical plan artifact files. */
+  artifactPaths: Record<string, string>
+  /** Absolute path to review findings, if a plan-review was run. */
+  reviewFindingsPath?: string
+}
+
+/**
+ * Generate a deterministic but unique change identifier.
+ *
+ * If a `changePath` is provided, derives a slug from it and appends a
+ * timestamp suffix for uniqueness. Otherwise creates a timestamp-only ID.
+ *
+ * @param changePath - Optional path to derive the slug from.
+ * @returns A kebab-case change ID string.
+ */
+function generateChangeId(changePath?: string): string {
+  const timestamp = Date.now().toString(36)
+  if (changePath) {
+    const slug = changePath
+      .replace(/[^a-zA-Z0-9]/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .toLowerCase()
+      .slice(0, 20)
+    return `${slug}-${timestamp}`
+  }
+  return `change-${timestamp}`
+}
+
+/**
+ * Update the plan-state.json for a change with partial updates.
+ *
+ * Reads the existing plan state, merges the provided updates, and writes
+ * it back atomically. The plan-state.json file lives at
+ * `<runtime-state-dir>/plans/{changeId}/plan-state.json`.
+ *
+ * @param changeId - The change identifier.
+ * @param updates - Partial plan-state fields to merge.
+ * @param cwd - Working directory (optional).
+ */
+export async function updatePlanState(
+  changeId: string,
+  updates: Partial<{
+    currentVersion: string
+    approvedVersion: string | null
+    lifecycleState: string
+    versions: Record<string, { state: string; createdAt?: string }>
+  }>,
+  cwd?: string,
+): Promise<void> {
+  const { default: fs } = await import("node:fs/promises")
+  const planStatePath = resolvePlanStatePath(changeId, cwd)
+
+  const existing = JSON.parse(await fs.readFile(planStatePath, "utf-8"))
+  const updated = { ...existing, ...updates, updatedAt: new Date().toISOString() }
+  await fs.writeFile(planStatePath, JSON.stringify(updated, null, 2), "utf-8")
+}
+
+/**
+ * Run the formal `/zflow-change-prepare` workflow orchestration.
+ *
+ * This function:
+ * 1. Checks for unfinished work in the state index for the given change.
+ * 2. Resolves or generates a change ID.
+ * 3. Creates `plan-state.json` with draft status and version `v1`.
+ * 4. Creates the version directory under `<runtime-state-dir>/plans/{changeId}/v1/`.
+ * 5. Builds canonical plan artifact paths for agent dispatch.
+ * 6. Adds a state-index entry tracking this plan.
+ * 7. Returns an initial workflow execution plan structure for the caller
+ *    to populate with resolved profile steps.
+ *
+ * The caller (the extension command handler) is responsible for:
+ * - Resolving the active profile (`Profile.ensureResolved()`)
+ * - Calling `buildWorkflowExecutionPlan("prepare", ...)` with the resolved profile
+ * - Dispatching agents via pi-subagents
+ * - Calling `updatePlanState()` to advance lifecycle state after each phase
+ *
+ * @param options - Prepare workflow options.
+ * @returns The prepared plan context with change ID, version, plan state path, and initial plan.
+ */
+export async function runChangePrepareWorkflow(
+  options: PrepareWorkflowOptions,
+): Promise<{
+  changeId: string
+  planVersion: string
+  stateDir: string
+  planStatePath: string
+  artifactPaths: Record<string, string>
+  initialPlanState: Record<string, unknown>
+}> {
+  const cwd = options.cwd
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+
+  // 1. Check for unfinished work if a changeId was provided
+  if (options.changeId) {
+    const unfinished = await discoverUnfinishedWork(options.changeId, cwd)
+    if (unfinished.hasUnfinishedWork) {
+      console.warn(
+        `[zflow] Unfinished work detected for change "${options.changeId}". ` +
+        "Call promptResumeChoices() before proceeding.",
+      )
+    }
+  }
+
+  // 2. Resolve or generate change ID
+  const changeId = options.changeId ?? generateChangeId(options.changePath)
+
+  // 3. Create initial plan-state.json
+  const planStatePath = resolvePlanStatePath(changeId, cwd)
+  const initialPlanState = {
+    changeId,
+    currentVersion: "v1",
+    approvedVersion: null,
+    lifecycleState: "draft",
+    runeContext: {
+      enabled: !!options.changePath,
+      changePath: options.changePath ?? null,
+    },
+    versions: {
+      v1: { state: "draft", createdAt: new Date().toISOString() },
+    },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
+
+  await fs.mkdir(path.dirname(planStatePath), { recursive: true })
+  await fs.writeFile(planStatePath, JSON.stringify(initialPlanState, null, 2), "utf-8")
+
+  // 4. Create version v1 directory
+  const versionDir = resolvePlanVersionDir(changeId, "v1", cwd)
+  await fs.mkdir(versionDir, { recursive: true })
+
+  // 5. Build canonical plan artifact paths
+  const artifactPaths = {
+    design: path.join(versionDir, "design.md"),
+    executionGroups: path.join(versionDir, "execution-groups.md"),
+    standards: path.join(versionDir, "standards.md"),
+    verification: path.join(versionDir, "verification.md"),
+  }
+
+  // 6. Add state-index entry
+  await addStateIndexEntry({
+    type: "plan",
+    id: `plan-${changeId}-v1`,
+    status: "draft",
+    metadata: {
+      changeId,
+      version: "v1",
+      changePath: options.changePath ?? null,
+    },
+  }, cwd)
+
+  return {
+    changeId,
+    planVersion: "v1",
+    stateDir: path.dirname(planStatePath),
+    planStatePath,
+    artifactPaths,
+    initialPlanState,
+  }
 }
