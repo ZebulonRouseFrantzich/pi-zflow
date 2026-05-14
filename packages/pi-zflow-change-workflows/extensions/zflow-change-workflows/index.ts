@@ -132,6 +132,8 @@ import {
   buildPlanApprovalQuestions,
   buildImplementationGateQuestions,
   parseInterviewResponse,
+  runChangeAuditWorkflow,
+  runChangeFixWorkflow,
 } from "./orchestration.js"
 
 import {
@@ -153,6 +155,10 @@ import type {
   ImplementWorkflowOptions,
   ImplementWorkflowResult,
   CodeReviewInputContext,
+  AuditWorkflowOptions,
+  AuditWorkflowResult,
+  FixWorkflowOptions,
+  FixWorkflowResult,
 } from "./orchestration.js"
 
 import {
@@ -194,6 +200,8 @@ export {
   createPlanAmendment,
   buildDriftDetectedReminder,
   buildCodeReviewInputFromContext,
+  runChangeAuditWorkflow,
+  runChangeFixWorkflow,
 }
 
 export type {
@@ -211,6 +219,10 @@ export type {
   FixAttempt,
   DriftResolution,
   CodeReviewInputContext,
+  AuditWorkflowOptions,
+  AuditWorkflowResult,
+  FixWorkflowOptions,
+  FixWorkflowResult,
 }
 
 // ── Extension activation ────────────────────────────────────────

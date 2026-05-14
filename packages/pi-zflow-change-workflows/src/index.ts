@@ -229,4 +229,17 @@ export type {
   ImplementationHandoff,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
+// Audit and fix workflow wrappers (Phase 7 — /zflow-change-audit and /zflow-change-fix)
+export {
+  runChangeAuditWorkflow,
+  runChangeFixWorkflow,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
+export type {
+  AuditWorkflowOptions,
+  AuditWorkflowResult,
+  FixWorkflowOptions,
+  FixWorkflowResult,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
 

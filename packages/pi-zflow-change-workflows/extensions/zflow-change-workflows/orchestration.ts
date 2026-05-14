@@ -771,6 +771,316 @@ export function buildWorkerTask(
   return lines.join("\n")
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// Phase 7 — /zflow-change-audit and /zflow-change-fix wrappers
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Options for the change-audit workflow.
+ */
+export interface AuditWorkflowOptions {
+  /** Change identifier to audit. */
+  changeId: string
+  /** Working directory (optional). */
+  cwd?: string
+  /** Whether to re-run review if findings already exist. */
+  rerunReview?: boolean
+}
+
+/**
+ * Result of the change-audit workflow.
+ */
+export interface AuditWorkflowResult {
+  /** The audited change identifier. */
+  changeId: string
+  /** Current plan lifecycle state. */
+  status: string
+  /** Active plan version. */
+  planVersion: string
+  /** Verification status string. */
+  verificationStatus: string
+  /** Path to review findings if available. */
+  reviewFindingsPath?: string
+  /** Human-readable audit summary. */
+  summary: string
+  /** Recommended next actions. */
+  recommendedActions: string[]
+}
+
+/**
+ * Run the `/zflow-change-audit <change-path>` workflow.
+ *
+ * Resolves the approved or completed change context, loads plan state,
+ * verification status, and latest review findings, then returns a
+ * summarized status with recommended next actions.
+ *
+ * @param options - Audit workflow options.
+ * @returns Audit result with summary and recommended actions.
+ */
+export async function runChangeAuditWorkflow(
+  options: AuditWorkflowOptions,
+): Promise<AuditWorkflowResult> {
+  const cwd = options.cwd
+  const changeId = options.changeId
+  const { default: fs } = await import("node:fs/promises")
+
+  // Read plan state
+  const planStatePath = resolvePlanStatePath(changeId, cwd)
+  let planState: Record<string, unknown>
+  try {
+    const raw = await fs.readFile(planStatePath, "utf-8")
+    planState = JSON.parse(raw)
+  } catch {
+    throw new Error(`No plan found for change "${changeId}". Run /zflow-change-prepare ${changeId} first.`)
+  }
+
+  const planVersion = (planState.approvedVersion ?? planState.currentVersion ?? "v1") as string
+  const lifecycleState = (planState.lifecycleState ?? "unknown") as string
+
+  // Determine verification status
+  let verificationStatus = "unknown"
+  try {
+    const versionNum = planVersion.replace(/^v/, "")
+    const verificationPath = resolvePlanArtifactPath(changeId, planVersion, "verification", cwd)
+    const verContent = await fs.readFile(verificationPath, "utf-8")
+    if (verContent.includes("pass") || verContent.includes("PASS")) {
+      verificationStatus = "passed"
+    } else if (verContent.includes("fail") || verContent.includes("FAIL")) {
+      verificationStatus = "failed"
+    } else {
+      verificationStatus = "unknown"
+    }
+  } catch {
+    // no verification artifact
+  }
+
+  // Check for review findings
+  const reviewFindingsPath = resolveCodeReviewFindingsPath(cwd)
+  let hasReviewFindings = false
+  try {
+    await fs.access(reviewFindingsPath)
+    hasReviewFindings = true
+  } catch {
+    // no findings file
+  }
+
+  // Build recommended actions
+  const recommendedActions: string[] = []
+  if (lifecycleState === "completed") {
+    recommendedActions.push("Change is complete. Review findings and close out.")
+  } else if (lifecycleState === "approved") {
+    recommendedActions.push(`Run /zflow-change-implement ${changeId} to execute the approved plan.`)
+  } else if (lifecycleState === "executing") {
+    recommendedActions.push("Implementation is in progress. Wait for completion or check run status.")
+  } else if (lifecycleState === "draft" || lifecycleState === "validated") {
+    recommendedActions.push("Plan is not yet approved. Review and approve via the planning workflow.")
+  } else if (lifecycleState === "drifted") {
+    recommendedActions.push("Plan drift detected. Review deviations and create an amendment.")
+  } else if (lifecycleState === "cancelled") {
+    recommendedActions.push("Plan was cancelled. Start a new planning session if needed.")
+  } else if (lifecycleState === "superseded") {
+    recommendedActions.push("Plan was superseded by a newer version. Check for v{n+1}.")
+  } else {
+    recommendedActions.push("Run /zflow-change-prepare to start planning.")
+  }
+
+  if (!hasReviewFindings && lifecycleState !== "draft") {
+    recommendedActions.push("Run /zflow-review-code to review the implementation.")
+  }
+
+  if (verificationStatus === "failed") {
+    recommendedActions.push("Verification failed. Run /zflow-change-fix to resolve issues.")
+  }
+
+  // Build summary
+  const planVersionDir = resolvePlanVersionDir(changeId, planVersion, cwd)
+  const summary = [
+    `## Audit: ${changeId}`,
+    "",
+    `**Status:** ${lifecycleState}`,
+    `**Plan Version:** ${planVersion}`,
+    `**Verification:** ${verificationStatus}`,
+    `**Review Findings:** ${hasReviewFindings ? "available" : "none"}`,
+    "",
+    `Plan artifacts: \`${planVersionDir}\``,
+    hasReviewFindings ? `Review findings: \`${reviewFindingsPath}\`` : "",
+  ].filter(Boolean).join("\n")
+
+  return {
+    changeId,
+    status: lifecycleState,
+    planVersion,
+    verificationStatus,
+    reviewFindingsPath: hasReviewFindings ? reviewFindingsPath : undefined,
+    summary,
+    recommendedActions,
+  }
+}
+
+/**
+ * Options for the change-fix workflow.
+ */
+export interface FixWorkflowOptions {
+  /** Change identifier to fix. */
+  changeId: string
+  /** Working directory (optional). */
+  cwd?: string
+  /** Specific finding indices to fix (empty = all). */
+  findingIndices?: number[]
+  /** Whether to auto-apply fixes without manual review. */
+  autoFix?: boolean
+}
+
+/**
+ * Result of the change-fix workflow.
+ */
+export interface FixWorkflowResult {
+  /** The fixed change identifier. */
+  changeId: string
+  /** Generated fix plan description. */
+  fixPlan: string
+  /** Files identified for modification. */
+  filesToModify: string[]
+  /** Resolved verification command if available. */
+  verificationCommand?: string
+}
+
+/**
+ * Run the `/zflow-change-fix <change-path>` workflow.
+ *
+ * Loads selected findings or verification failures, builds a focused
+ * fix plan, and returns the fix context for dispatch.
+ *
+ * @param options - Fix workflow options.
+ * @returns Fix result with plan and target files.
+ */
+export async function runChangeFixWorkflow(
+  options: FixWorkflowOptions,
+): Promise<FixWorkflowResult> {
+  const cwd = options.cwd
+  const changeId = options.changeId
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+
+  // Read plan state
+  const planStatePath = resolvePlanStatePath(changeId, cwd)
+  let planState: Record<string, unknown>
+  try {
+    const raw = await fs.readFile(planStatePath, "utf-8")
+    planState = JSON.parse(raw)
+  } catch {
+    throw new Error(`No plan found for change "${changeId}". Run /zflow-change-prepare ${changeId} first.`)
+  }
+
+  const planVersion = (planState.approvedVersion ?? planState.currentVersion ?? "v1") as string
+  const lifecycleState = (planState.lifecycleState ?? "unknown") as string
+
+  // Read review findings
+  const reviewFindingsPath = resolveCodeReviewFindingsPath(cwd)
+  let findingsContent = ""
+  let findingsLines: string[] = []
+  try {
+    findingsContent = await fs.readFile(reviewFindingsPath, "utf-8")
+    findingsLines = findingsContent.split("\n").filter(l => l.trim().startsWith("-") || l.trim().startsWith("*"))
+  } catch {
+    // no findings file
+  }
+
+  // Read verification artifact
+  let verificationContent = ""
+  let verificationCommand: string | undefined
+  try {
+    const verificationPath = resolvePlanArtifactPath(changeId, planVersion, "verification", cwd)
+    verificationContent = await fs.readFile(verificationPath, "utf-8")
+    // Extract verification command if present
+    const cmdMatch = verificationContent.match(/```(?:bash)?\s*\n([\s\S]*?)```/)
+    if (cmdMatch) {
+      verificationCommand = cmdMatch[1].trim()
+    }
+  } catch {
+    // no verification artifact
+  }
+
+  // Read execution groups to determine files to modify
+  const filesToModify: string[] = []
+  try {
+    const egPath = resolvePlanArtifactPath(changeId, planVersion, "execution-groups", cwd)
+    const egContent = await fs.readFile(egPath, "utf-8")
+    // Extract file paths from execution groups
+    const fileMatches = egContent.matchAll(/[`"']([^`"']*\.[a-zA-Z]+)[`"']/g)
+    for (const match of fileMatches) {
+      const filePath = match[1]
+      if (!filesToModify.includes(filePath)) {
+        filesToModify.push(filePath)
+      }
+    }
+  } catch {
+    // no execution groups artifact
+  }
+
+  // Build fix plan
+  const fixPlanLines: string[] = [
+    `# Fix Plan for ${changeId}`,
+    "",
+    `**Plan Version:** ${planVersion}`,
+    `**Plan State:** ${lifecycleState}`,
+    "",
+  ]
+
+  if (findingsLines.length > 0) {
+    fixPlanLines.push(
+      "## Findings to Address",
+      "",
+      ...(options.findingIndices && options.findingIndices.length > 0
+        ? findingsLines
+            .filter((_, i) => options.findingIndices!.includes(i))
+            .map(l => `- ${l}`)
+        : findingsLines.map(l => `- ${l}`)),
+      "",
+    )
+  } else {
+    fixPlanLines.push("## Findings", "No review findings available.", "")
+  }
+
+  fixPlanLines.push(
+    "## Approach",
+    "",
+    options.autoFix
+      ? "Auto-fix mode: applying targeted fixes based on findings."
+      : "Manual review mode: findings loaded for inspection.",
+    "",
+  )
+
+  if (filesToModify.length > 0) {
+    fixPlanLines.push(
+      "## Target Files",
+      "",
+      ...filesToModify.map(f => `- \`${f}\``),
+      "",
+    )
+  }
+
+  if (verificationCommand) {
+    fixPlanLines.push(
+      "## Verification Command",
+      "",
+      "```bash",
+      verificationCommand,
+      "```",
+      "",
+    )
+  }
+
+  const fixPlan = fixPlanLines.join("\n")
+
+  return {
+    changeId,
+    fixPlan,
+    filesToModify,
+    verificationCommand,
+  }
+}
+
 // ── Code review input builder (Task 7.12) ────────────────────────
 
 /**
