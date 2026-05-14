@@ -130,10 +130,14 @@ export {
   resolveVerificationCommand,
   runVerification,
   appendFailureLog,
+  runVerificationFixLoop,
 } from "../extensions/zflow-change-workflows/verification.js"
 
 export type {
   VerificationResult,
+  FixLoopOptions,
+  FixLoopResult,
+  FixAttempt,
 } from "../extensions/zflow-change-workflows/verification.js"
 
 export type {

@@ -1,8 +1,9 @@
 /**
- * verification.ts — Verification command resolution and execution for pi-zflow.
+ * verification.ts — Verification command resolution, execution, and bounded fix-loop orchestration.
  *
  * Provides verification command resolution (profile → repo config → auto-detect),
- * execution with output capture, and failure-log integration.
+ * execution with output capture, failure-log integration, and a bounded fix loop
+ * for automated recovery from verification failures.
  *
  * ## Verification command resolution policy
  *
@@ -16,6 +17,14 @@
  *    - `cargo test` when `Cargo.toml` exists
  *    - `pytest` when `pyproject.toml` or `setup.py` exists
  *    - otherwise return null (prompt user or explicitly skip)
+ *
+ * ## Fix loop policy
+ *
+ * The `runVerificationFixLoop` function provides limited automated recovery:
+ * - Default bound: max 3 fix iterations or ~15 minutes, whichever comes first
+ * - Starts with the cheapest suitable worker lane/model
+ * - Stops and asks the user after the bound is exhausted
+ * - Supports analysis-only mode if chosen
  *
  * @module pi-zflow-change-workflows/verification
  */
@@ -228,6 +237,154 @@ export async function appendFailureLog(
     // Ensure parent directory exists
     await fs.mkdir(path.dirname(failureLogPath), { recursive: true })
     await fs.appendFile(failureLogPath, entry, "utf-8")
+  }
+}
+
+// ── Bounded verification fix loop ──────────────────────────────
+
+/**
+ * Options for the bounded verification fix loop.
+ */
+export interface FixLoopOptions {
+  /** Maximum number of fix iterations (default: 3). */
+  maxIterations?: number
+  /** Maximum wall-clock minutes for the loop (default: 15). */
+  maxMinutes?: number
+  /** Absolute path to the repository root. */
+  repoRoot: string
+  /** Optional verification command override (e.g. from profile). */
+  profileCommand?: string
+  /** Working directory for runtime state dir resolution (optional). */
+  cwd?: string
+}
+
+/**
+ * Record of a single fix iteration attempt.
+ */
+export interface FixAttempt {
+  /** 1-based iteration number. */
+  iteration: number
+  /** Verification result before the fix was applied. */
+  verificationBefore: VerificationResult
+  /** Whether a fix was actually applied. */
+  fixApplied: boolean
+  /** Verification result after the fix was applied (may be same as before if no fix). */
+  verificationAfter: VerificationResult
+}
+
+/**
+ * Result of a complete fix loop run.
+ */
+export interface FixLoopResult {
+  /** Whether final verification passed. */
+  success: boolean
+  /** Number of fix iterations that were attempted. */
+  iterations: number
+  /** Total wall-clock minutes spent in the loop. */
+  totalMinutes: number
+  /** Final verification result after the loop completed or was exhausted. */
+  finalVerification: VerificationResult
+  /** Detailed record of each fix attempt. */
+  fixAttempts: FixAttempt[]
+  /** If true, the loop was stopped because the time bound was reached. */
+  timedOut: boolean
+}
+
+/**
+ * Run a bounded verification fix loop.
+ *
+ * Policy:
+ * - Default bound: max 3 fix iterations or ~15 minutes, whichever comes first.
+ * - Loop exits early when verification passes.
+ * - After the bound is exhausted, the loop stops and returns the last result.
+ * - The caller receives a detailed `FixLoopResult` with every attempt recorded.
+ * - The caller should present the result to the user and let them choose
+ *   the next action (manual review, analysis-only, etc.).
+ *
+ * The `fixHandler` callback is called with the failed verification result and
+ * must return `true` if a fix was applied, or `false` if the handler chose
+ * not to fix (e.g. analysis-only mode).
+ *
+ * @param options - Fix loop configuration (repoRoot required).
+ * @param fixHandler - Async callback that attempts to fix the issue. Receives
+ *                     the failed verification result, returns true if a fix
+ *                     was attempted.
+ * @returns A detailed `FixLoopResult` with all attempt records.
+ */
+export async function runVerificationFixLoop(
+  options: FixLoopOptions,
+  fixHandler: (verificationResult: VerificationResult) => Promise<boolean>,
+): Promise<FixLoopResult> {
+  const maxIterations = options.maxIterations ?? 3
+  const maxMinutes = options.maxMinutes ?? 15
+  const startTime = Date.now()
+
+  const fixAttempts: FixAttempt[] = []
+  let finalVerification: VerificationResult = {
+    pass: false,
+    command: "",
+    output: "",
+    duration: 0,
+  }
+  let timedOut = false
+
+  for (let i = 0; i < maxIterations; i++) {
+    const elapsedMinutes = (Date.now() - startTime) / (1000 * 60)
+    if (elapsedMinutes >= maxMinutes) {
+      timedOut = true
+      break
+    }
+
+    // Resolve and run the verification command
+    const command = resolveVerificationCommand(options.repoRoot, options.profileCommand)
+    if (!command) {
+      finalVerification = {
+        pass: true,
+        command: "(none)",
+        output: "No verification command resolved. Skipping verification.",
+        duration: 0,
+      }
+      break
+    }
+
+    const verificationBefore = await runVerification(command, options.repoRoot)
+
+    if (verificationBefore.pass) {
+      finalVerification = verificationBefore
+      break
+    }
+
+    // Attempt fix via the caller-provided handler
+    const fixApplied = await fixHandler(verificationBefore)
+
+    // Re-run verification after the fix attempt
+    const verificationAfter = fixApplied
+      ? await runVerification(command, options.repoRoot)
+      : verificationBefore
+
+    fixAttempts.push({
+      iteration: i + 1,
+      verificationBefore,
+      fixApplied,
+      verificationAfter,
+    })
+
+    finalVerification = verificationAfter
+
+    if (verificationAfter.pass) {
+      break
+    }
+  }
+
+  const totalMinutes = (Date.now() - startTime) / (1000 * 60)
+
+  return {
+    success: finalVerification.pass,
+    iterations: fixAttempts.length,
+    totalMinutes,
+    finalVerification,
+    fixAttempts,
+    timedOut,
   }
 }
 

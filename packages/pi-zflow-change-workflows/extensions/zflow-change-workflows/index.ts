@@ -132,9 +132,6 @@ import {
   buildPlanApprovalQuestions,
   buildImplementationGateQuestions,
   parseInterviewResponse,
-  buildPlanApprovalQuestions,
-  buildImplementationGateQuestions,
-  parseInterviewResponse,
 } from "./orchestration.js"
 
 import {
@@ -161,10 +158,14 @@ import {
   resolveVerificationCommand,
   runVerification,
   appendFailureLog,
+  runVerificationFixLoop,
 } from "./verification.js"
 
 import type {
   VerificationResult,
+  FixLoopOptions,
+  FixLoopResult,
+  FixAttempt,
 } from "./verification.js"
 
 export {
@@ -187,6 +188,7 @@ export {
   resolveVerificationCommand,
   runVerification,
   appendFailureLog,
+  runVerificationFixLoop,
 }
 
 export type {
@@ -199,6 +201,9 @@ export type {
   ImplementWorkflowOptions,
   ImplementWorkflowResult,
   VerificationResult,
+  FixLoopOptions,
+  FixLoopResult,
+  FixAttempt,
 }
 
 // ── Extension activation ────────────────────────────────────────
