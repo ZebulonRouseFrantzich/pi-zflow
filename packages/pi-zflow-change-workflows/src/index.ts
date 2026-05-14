@@ -290,6 +290,16 @@ export {
   buildToolDeniedReminder,
 } from "../extensions/zflow-change-workflows/path-guard.js"
 
+// Failure-log readback helpers (Phase 8 — selective failure-log context for planning)
+export {
+  loadRecentFailureLogEntries,
+  formatFailureLogReadback,
+} from "./failure-log-helpers.js"
+
+export type {
+  FailureLogReadbackOptions,
+} from "./failure-log-helpers.js"
+
 export type {
   GuardResult,
   GuardIntent,
