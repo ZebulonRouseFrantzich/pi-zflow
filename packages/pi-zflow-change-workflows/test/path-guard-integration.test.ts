@@ -58,6 +58,24 @@ describe("path-guard integration — .git/pi-zflow/ runtime state dir", () => {
       `Expected write to .git/pi-zflow/state-index.json to be allowed, got: ${result.message}`)
   })
 
+  it("allows writes to the exact runtime state directory path", () => {
+    const result = guardWrite(
+      RUNTIME_STATE_DIR,
+      makeOptions(),
+    )
+    assert.ok(result.allowed,
+      `Expected write to exact runtime state dir to be allowed, got: ${result.message}`)
+  })
+
+  it("does not allow runtime state prefix tricks", () => {
+    const result = guardWrite(
+      `${RUNTIME_STATE_DIR}-evil/state-index.json`,
+      makeOptions(),
+    )
+    assert.ok(!result.allowed,
+      `Expected runtime-state prefix trick to be blocked, got: ${result.message}`)
+  })
+
   it("allows writes to .git/pi-zflow even when runtimeStateDir is not explicitly set", () => {
     // Without runtimeStateDir in options, the guard should resolve it
     // via resolveRuntimeStateDir (which calls git rev-parse).
@@ -158,6 +176,26 @@ describe("path-guard integration — .pi directory", () => {
   })
 })
 
+describe("path-guard integration — allowed root boundaries", () => {
+  it("allows the exact project root path", () => {
+    const result = guardWrite(
+      PROJECT_ROOT,
+      makeOptions(),
+    )
+    assert.ok(result.allowed,
+      `Expected exact project root path to be allowed, got: ${result.message}`)
+  })
+
+  it("does not allow project-root prefix tricks", () => {
+    const result = guardWrite(
+      `${PROJECT_ROOT}-evil/src/file.ts`,
+      makeOptions(),
+    )
+    assert.ok(!result.allowed,
+      `Expected project-root prefix trick to be blocked, got: ${result.message}`)
+  })
+})
+
 describe("path-guard integration — guardBashCommand", () => {
   it("blocks bash write to blocked path via redirection", () => {
     const result = guardBashCommand(
@@ -196,6 +234,16 @@ describe("path-guard integration — GuardIntent", () => {
     )
     assert.ok(result.allowed,
       `Expected planner-artifact inside plans dir to be allowed, got: ${result.message}`)
+  })
+
+  it("blocks planner-artifact plans-dir prefix tricks", () => {
+    const plansDir = path.join(RUNTIME_STATE_DIR, "plans")
+    const result = guardWrite(
+      `${plansDir}-evil/ch42/design.md`,
+      makeOptions({ intent: "planner-artifact" }),
+    )
+    assert.ok(!result.allowed,
+      `Expected planner-artifact plans-dir prefix trick to be blocked, got: ${result.message}`)
   })
 })
 

@@ -206,7 +206,7 @@ export async function installAgentsAndChains(
   let agentsUpToDate = 0
 
   for (const file of agentFiles) {
-    const result = await idempotentCopy(srcAgents, destAgents, file, options.force ?? false, srcHashes, options.update ?? false)
+    const result = await idempotentCopy(srcAgents, destAgents, file, options.force ?? false, srcHashes, isUpdate)
     if (result.copied) {
       agentsInstalled++
     } else if (result.skipped) {
@@ -225,7 +225,7 @@ export async function installAgentsAndChains(
   let chainsUpToDate = 0
 
   for (const file of chainFiles) {
-    const result = await idempotentCopy(srcChains, destChains, file, options.force ?? false, srcHashes, options.update ?? false)
+    const result = await idempotentCopy(srcChains, destChains, file, options.force ?? false, srcHashes, isUpdate)
     if (result.copied) {
       chainsInstalled++
     } else if (result.skipped) {

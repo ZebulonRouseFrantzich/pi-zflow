@@ -119,6 +119,17 @@ export function buildAllowedRoots(
   return [...new Set(roots.map((r) => realpathSafe(r, projectRoot) || path.resolve(r)))]
 }
 
+/**
+ * Return true when `candidatePath` is exactly `rootPath` or contained under it.
+ *
+ * This avoids unsafe string-prefix checks where `/repo-evil` would otherwise
+ * be treated as contained in `/repo`.
+ */
+function isPathWithinOrEqual(rootPath: string, candidatePath: string): boolean {
+  const relative = path.relative(path.resolve(rootPath), path.resolve(candidatePath))
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))
+}
+
 // ---------------------------------------------------------------------------
 // Core guard functions
 // ---------------------------------------------------------------------------
@@ -155,7 +166,27 @@ export function guardWrite(
   // runtime state directory (e.g. <git-dir>/pi-zflow/), allow it regardless
   // of blocked patterns.  This ensures runtime artifacts can always be written.
   const runtimeStateDir = options.runtimeStateDir ?? resolveRuntimeStateDir(options.projectRoot)
-  if (resolvedPath.startsWith(runtimeStateDir)) {
+
+  // Planner artifact writes are intentionally narrower than general runtime
+  // state writes: planners may write only plan artifacts under plans/.
+  if (intent === "planner-artifact") {
+    const plansDir = path.join(runtimeStateDir, "plans")
+    if (!isPathWithinOrEqual(plansDir, resolvedPath)) {
+      return {
+        allowed: false,
+        message: `Planner artifact write denied: path "${resolvedPath}" is outside the plans directory "${plansDir}". ` +
+          `Use zflow_write_plan_artifact instead.`,
+        resolvedPath,
+      }
+    }
+    return {
+      allowed: true,
+      message: `Planner artifact write allowed to "${resolvedPath}".`,
+      resolvedPath,
+    }
+  }
+
+  if (isPathWithinOrEqual(runtimeStateDir, resolvedPath)) {
     return {
       allowed: true,
       message: `Write allowed to runtime state directory "${resolvedPath}".`,
@@ -176,10 +207,7 @@ export function guardWrite(
 
   // 2. Check allowlist: must be within project root or worktree paths
   const allowedRoots = buildAllowedRoots(projectRoot, options.worktreePaths)
-  const withinAllowed = allowedRoots.some((root) => {
-    const relative = path.relative(root, resolvedPath)
-    return !!relative && !relative.startsWith("..") && !path.isAbsolute(relative)
-  })
+  const withinAllowed = allowedRoots.some((root) => isPathWithinOrEqual(root, resolvedPath))
 
   if (!withinAllowed) {
     return {
@@ -190,25 +218,7 @@ export function guardWrite(
     }
   }
 
-  // 3. Planner artifact policy: planner may only write to runtime-state-dir/plans
-  if (intent === "planner-artifact") {
-    const plansDir = path.join(runtimeStateDir, "plans")
-    if (!resolvedPath.startsWith(plansDir)) {
-      return {
-        allowed: false,
-        message: `Planner artifact write denied: path "${resolvedPath}" is outside the plans directory "${plansDir}". ` +
-          `Use zflow_write_plan_artifact instead.`,
-        resolvedPath,
-      }
-    }
-    return {
-      allowed: true,
-      message: `Planner artifact write allowed to "${resolvedPath}".`,
-      resolvedPath,
-    }
-  }
-
-  // 4. Non-planner/report agents should not write arbitrary files
+  // 3. Non-planner/report agents should not write arbitrary files
   if (intent === "implement" && options.plannerMode) {
     return {
       allowed: false,
