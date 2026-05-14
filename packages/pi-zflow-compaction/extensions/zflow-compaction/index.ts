@@ -81,6 +81,20 @@ export default function activateZflowCompactionExtension(pi: ExtensionAPI): void
   // receives the compaction-handoff reminder.
   let pendingCompactionHandoff = false
 
+  // ── State for proactive compaction guard ─────────────────────────
+
+  // Guards against repeatedly triggering compaction within the same high-usage
+  // period.  Set when we proactively call ctx.compact(); cleared on
+  // session_compact so a new cycle can be triggered after the compaction
+  // finishes and usage climbs again.
+  let compactionInProgress = false
+
+  // Minimum token count that must have been consumed *after* the last
+  // compaction before we consider triggering another one.  Avoids rapid
+  // cycles when usage hovers just above the threshold.
+  let lastCompactionTokens: number | null = null
+  const MIN_TOKEN_DELTA = 5_000
+
   // ── Bootstrap: check rtk availability at startup ─────────────────
 
   // Non-blocking: alert the user if rtk is missing, but do not prevent
@@ -89,23 +103,92 @@ export default function activateZflowCompactionExtension(pi: ExtensionAPI): void
     // Silently ignore startup check failures — already alerted via console.warn
   })
 
+  // ── Proactive compaction trigger (turn_end) ─────────────────────
+  //
+  // After every turn, check whether context usage has reached the
+  // proactive threshold (60 %).  If so, kick off compaction via
+  // ctx.compact() so that the session manager fires
+  // session_before_compact on the *next* opportunity rather than waiting
+  // until overflow.
+  //
+  // A guard flag (compactionInProgress) prevents repeated triggers
+  // while a compaction is already underway.  The minimum-token-delta
+  // check prevents rapid cycles when usage hovers just above the
+  // threshold.
+
+  pi.on("turn_end", (_event, ctx) => {
+    if (compactionInProgress) {
+      // A compaction we requested is still in flight or has just
+      // finished — let usage climb again before re-evaluating.
+      return {}
+    }
+
+    const threshold = getCompactionThreshold()
+
+    // Check usage via the official context-usage API if available.
+    const usage = ctx.getContextUsage()
+
+    let shouldTrigger = false
+
+    if (usage && usage.percent !== null) {
+      shouldTrigger = usage.percent / 100 >= threshold
+    } else if (usage && usage.tokens !== null && usage.contextWindow > 0) {
+      // Fallback: compute ratio from raw token count.
+      shouldTrigger = usage.tokens / usage.contextWindow >= threshold
+    }
+    // else: no usage data yet — skip this turn.
+
+    if (!shouldTrigger) return {}
+
+    // Minimum-token-delta guard: avoid re-compacting immediately.
+    if (lastCompactionTokens !== null && usage && usage.tokens !== null) {
+      const delta = usage.tokens - lastCompactionTokens
+      if (delta < MIN_TOKEN_DELTA) {
+        return {}
+      }
+    }
+
+    // Trigger compaction.  The custom instruction tells the compaction
+    // pipeline to preserve canonical artifact references.
+    compactionInProgress = true
+    if (usage && usage.tokens !== null) {
+      lastCompactionTokens = usage.tokens
+    }
+
+    ctx.compact({
+      customInstructions:
+        "Preserve references to canonical artifacts (plan-state, repo-map, " +
+        "reconnaissance, failure-log) so the model rereads them after compaction.",
+    })
+
+    return {}
+  })
+
   // ── session_before_compact hook ─────────────────────────────────
 
   pi.on("session_before_compact", async (event, ctx) => {
     const { preparation, signal } = event
     const { tokensBefore, firstKeptEntryId, previousSummary, messagesToSummarize } = preparation
 
-    // Check if proactive compaction is warranted
-    // Use a heuristic: compare tokensBefore against a large context window estimate
-    // (e.g. 100k tokens as a rough default context window). When we reach 60%+,
-    // trigger proactive compaction.
+    // Use ctx.getContextUsage() to determine whether proactive compaction
+    // is warranted.  This is more accurate than the old hard-coded 100k
+    // window heuristic.  When the provider exposes usage data we rely on
+    // that; otherwise we fall back to tokensBefore / contextWindow.
     const threshold = getCompactionThreshold()
-    const estimatedContextWindow = 100_000 // conservative default context window
-    const usageRatio = estimatedContextWindow > 0
-      ? tokensBefore / estimatedContextWindow
-      : 0
+    const usage = ctx.getContextUsage()
 
-    if (usageRatio < threshold) {
+    let shouldCustomize = false
+
+    if (usage && usage.percent !== null) {
+      shouldCustomize = usage.percent / 100 >= threshold
+    } else if (usage && usage.contextWindow > 0) {
+      shouldCustomize = tokensBefore / usage.contextWindow >= threshold
+    } else {
+      // Fallback only when we have no context-usage data at all.
+      shouldCustomize = tokensBefore > 30_000
+    }
+
+    if (!shouldCustomize) {
       // Below threshold — let default compaction handle it if needed
       return {}
     }
@@ -221,6 +304,10 @@ export default function activateZflowCompactionExtension(pi: ExtensionAPI): void
     // After successful compaction, flag that the next agent start should
     // receive the compaction-handoff reminder so it rereads canonical artifacts.
     pendingCompactionHandoff = true
+
+    // Reset the proactive-trigger guard so a new compaction can be
+    // triggered once usage climbs back above threshold.
+    compactionInProgress = false
   })
 
   // ── before_agent_start hook ─────────────────────────────────────
