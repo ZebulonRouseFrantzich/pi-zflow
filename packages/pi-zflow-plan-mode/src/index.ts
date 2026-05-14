@@ -20,3 +20,13 @@ export type {
   PlanModeState,
   PlanModeStatus,
 } from "../extensions/zflow-plan-mode/state.js"
+
+// Re-export bash policy helpers
+// Also importable directly from "pi-zflow-plan-mode/bash-policy"
+export {
+  validatePlanModeBash,
+} from "../extensions/zflow-plan-mode/bash-policy.js"
+
+export type {
+  BashPolicyResult,
+} from "../extensions/zflow-plan-mode/bash-policy.js"

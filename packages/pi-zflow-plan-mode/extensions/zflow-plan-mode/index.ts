@@ -33,6 +33,7 @@ import {
   getPlanModeStatus,
   isPlanModeActive,
 } from "./state.js"
+import { validatePlanModeBash } from "./bash-policy.js"
 
 export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
   const registry = getZflowRegistry()
@@ -60,6 +61,63 @@ export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
   }
 
   registry.provide("plan-mode", planModeService)
+
+  // ── Tool restriction hooks ──────────────────────────────────────
+
+  // When plan mode is active, reduce available tools to read-only exploration
+  // and intercept bash commands to reject mutations.
+  pi.on("before_agent_start", (event) => {
+    if (!isPlanModeActive()) {
+      return {}
+    }
+
+    // Restrict available tools: exclude edit, write, and mutation-capable tools
+    const restrictedTools = [
+      "read", "bash", "grep", "find", "ls",
+      "web_search", "code_search", "fetch_content",
+      "get_search_content", "interview", "subagent",
+      "read_notebook", "contact_supervisor", "intercom",
+    ]
+
+    return {
+      systemPrompt: event.systemPrompt +
+        "\n\n## Plan Mode Active\n" +
+        "You are in read-only plan mode. Source code mutations are blocked. " +
+        "Focus on analysis, exploration, and planning. Do not attempt to edit or write files. " +
+        "Use `bash` for read-only exploration commands only. " +
+        "Do NOT try to circumvent tool restrictions — they are enforced by the Pi runtime.",
+      selectedTools: restrictedTools,
+    }
+  })
+
+  // Intercept tool calls to enforce plan mode restrictions
+  pi.on("before_tool_call", (event) => {
+    if (!isPlanModeActive()) {
+      return {}
+    }
+
+    // Block edit and write tools entirely
+    if (event.toolName === "edit" || event.toolName === "write") {
+      return {
+        blocked: true,
+        message: `Tool "${event.toolName}" is blocked in plan mode. Use read-only exploration (read, grep, find, bash).`,
+      }
+    }
+
+    // Intercept bash commands to reject mutations
+    if (event.toolName === "bash") {
+      const command = event.args?.command ?? ""
+      const result = validatePlanModeBash(command)
+      if (!result.allowed) {
+        return {
+          blocked: true,
+          message: `Blocked in plan mode: ${result.reason}\n\nCommand: ${command}\n\nUse read-only commands (cat, ls, grep, find, git log, git diff, git status) instead.`,
+        }
+      }
+    }
+
+    return {}
+  })
 
   // ── Command: /zflow-plan ────────────────────────────────────────
 
