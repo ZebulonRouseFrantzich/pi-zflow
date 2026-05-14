@@ -153,7 +153,19 @@ import type {
   PrepareWorkflowOptions,
   PrepareWorkflowResult,
   ImplementationHandoff,
+  ImplementWorkflowOptions,
+  ImplementWorkflowResult,
 } from "./orchestration.js"
+
+import {
+  resolveVerificationCommand,
+  runVerification,
+  appendFailureLog,
+} from "./verification.js"
+
+import type {
+  VerificationResult,
+} from "./verification.js"
 
 export {
   discoverUnfinishedWork,
@@ -162,6 +174,7 @@ export {
   updatePlanState,
   bumpPlanVersion,
   markPlanVersionState,
+  runChangeImplementWorkflow,
   loadFragment,
   buildReminderInjection,
   buildModeInjection,
@@ -171,6 +184,9 @@ export {
   deserializeHandoff,
   buildHandoffPromptPrefix,
   canForkSession,
+  resolveVerificationCommand,
+  runVerification,
+  appendFailureLog,
 }
 
 export type {
@@ -180,6 +196,9 @@ export type {
   PrepareWorkflowOptions,
   PrepareWorkflowResult,
   ImplementationHandoff,
+  ImplementWorkflowOptions,
+  ImplementWorkflowResult,
+  VerificationResult,
 }
 
 // ── Extension activation ────────────────────────────────────────

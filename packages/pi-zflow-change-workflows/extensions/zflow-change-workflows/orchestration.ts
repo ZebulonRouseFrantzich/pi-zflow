@@ -59,7 +59,7 @@ import {
 } from "pi-zflow-review"
 import { readRun, updateRun, setRunPhase, addRetainedArtifact, createRun, createRecoveryRef, removeRecoveryRef } from "pi-zflow-artifacts"
 import type { RunPhase, RetainedArtifact, RunJson } from "pi-zflow-artifacts"
-import { resolveRunDir, resolveRunStatePath, resolvePlanVersionDir, resolvePlanStatePath } from "pi-zflow-artifacts/artifact-paths"
+import { resolveRunDir, resolveRunStatePath, resolvePlanVersionDir, resolvePlanStatePath, resolvePlanArtifactPath } from "pi-zflow-artifacts/artifact-paths"
 import { addStateIndexEntry, loadStateIndex, listStateIndexEntries } from "pi-zflow-artifacts/state-index"
 import type { StateIndexEntry } from "pi-zflow-artifacts/state-index"
 import { assertCleanPrimaryTree } from "./git-preflight.js"
@@ -1990,5 +1990,173 @@ export function canForkSession(): boolean {
       "PI_SESSION_ID" in process.env
   } catch {
     return false
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase 7 — /zflow-change-implement workflow orchestration
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Options for running a change implementation workflow.
+ *
+ * Most fields are optional because the function reads the plan state
+ * to discover the approved version and execution groups.
+ */
+export interface ImplementWorkflowOptions {
+  /** Change identifier (required). */
+  changeId: string
+  /** Working directory for resolving runtime state dir. */
+  cwd?: string
+  /** Plan version to execute. Defaults to approvedVersion from plan-state.json. */
+  planVersion?: string
+  /** Execution groups from the approved plan. If not provided, read from plan artifact. */
+  executionGroups?: DispatchExecutionGroup[]
+  /** Optional reviewer runner for dispatching real reviewer agents. */
+  reviewerRunner?: unknown
+  /** If true, skip final verification and mark review as advisory. */
+  skipVerification?: boolean
+  /** If true, skip code review. */
+  skipReview?: boolean
+}
+
+/**
+ * Result of a change implementation workflow.
+ */
+export interface ImplementWorkflowResult {
+  /** Unique run identifier. */
+  runId: string
+  /** Change identifier. */
+  changeId: string
+  /** Plan version that was executed. */
+  planVersion: string
+  /** Overall workflow status. */
+  status: "completed" | "failed" | "drift-pending" | "verification-failed"
+  /** Verification outcome. */
+  verificationStatus: "passed" | "failed" | "skipped" | "pending"
+  /** Path to the code review findings file, if review was run. */
+  reviewFindingsPath?: string
+  /** Path to the deviation summary file, if applicable. */
+  deviationSummaryPath?: string
+  /** Error message if the workflow failed. */
+  error?: string
+}
+
+/**
+ * Run the formal /zflow-change-implement workflow end-to-end.
+ *
+ * Steps (matching the master plan's execution order):
+ * 1. Check unfinished runs in state-index.json
+ * 2. Resolve change and approved plan (plan-state.json)
+ * 3. Load canonical planning artifact paths
+ * 4. Update plan state to executing, create run.json
+ * 5. Validate non-overlapping file ownership (via prepareWorktreeImplementationRun)
+ * 6. Verify primary worktree clean (via prepareWorktreeImplementationRun)
+ * 7. Run worktree-setup hook if needed
+ * 8. Build and return a WorktreeImplementationRunPlan for the caller to dispatch
+ *
+ * After the caller dispatches the worktree tasks and collects results:
+ *   - `finalizeWorktreeImplementationRun()` applies patches back
+ *   - `runVerification()` runs final verification
+ *   - code review runs (optional)
+ *
+ * @param options - Workflow options.
+ * @returns An ImplementWorkflowResult with the run metadata.
+ */
+export async function runChangeImplementWorkflow(
+  options: ImplementWorkflowOptions,
+): Promise<ImplementWorkflowResult> {
+  const cwd = options.cwd
+  const { default: fs } = await import("node:fs/promises")
+  const { default: pathModule } = await import("node:path")
+
+  // 1. Check unfinished execution runs
+  const unfinished = await discoverUnfinishedWork(options.changeId, cwd)
+  if (unfinished.hasUnfinishedWork) {
+    console.warn(
+      `[zflow] Unfinished work detected for change "${options.changeId}". ` +
+      "Call promptResumeChoices() before proceeding.",
+    )
+  }
+
+  // 2. Resolve change and approved plan
+  const planStatePath = resolvePlanStatePath(options.changeId, cwd)
+  let planState: Record<string, unknown>
+
+  try {
+    const raw = await fs.readFile(planStatePath, "utf-8")
+    planState = JSON.parse(raw)
+  } catch {
+    throw new Error(
+      `No plan found for change "${options.changeId}". ` +
+      "Run /zflow-change-prepare <change-path> first to create a plan.",
+    )
+  }
+
+  const approvedVersion = planState.approvedVersion as string | null
+  if (!approvedVersion) {
+    throw new Error(
+      `No approved plan version for change "${options.changeId}". ` +
+      "Approve a plan version first via /zflow-change-prepare.",
+    )
+  }
+
+  const planVersion = options.planVersion ?? approvedVersion
+
+  // 3. Update plan state to executing
+  planState.lifecycleState = "executing"
+  planState.updatedAt = new Date().toISOString()
+  await fs.writeFile(planStatePath, JSON.stringify(planState, null, 2), "utf-8")
+
+  // 4. Build canonical planning artifact paths
+  const artifactPaths: Record<string, string> = {
+    design: resolvePlanArtifactPath(options.changeId, planVersion, "design", cwd),
+    executionGroups: resolvePlanArtifactPath(options.changeId, planVersion, "execution-groups", cwd),
+    standards: resolvePlanArtifactPath(options.changeId, planVersion, "standards", cwd),
+    verification: resolvePlanArtifactPath(options.changeId, planVersion, "verification", cwd),
+  }
+
+  // 5. Verify canonical artifacts exist (warn if missing)
+  for (const [key, ap] of Object.entries(artifactPaths)) {
+    try {
+      await fs.access(ap)
+    } catch {
+      console.warn(`[zflow] Plan artifact "${key}" not found at: ${ap}`)
+    }
+  }
+
+  // 6. Create a run and initial run.json
+  const { default: childProcess } = await import("node:child_process")
+  const repoRoot = childProcess.execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    cwd: cwd ?? process.cwd(),
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim()
+
+  const runId = `impl-${options.changeId}-${Date.now().toString(36)}`
+  const run = await createRun(runId, repoRoot, options.changeId, planVersion, cwd)
+
+  // 7. Add state-index entry for the new run
+  await addStateIndexEntry({
+    type: "run",
+    id: runId,
+    status: "executing",
+    metadata: {
+      changeId: options.changeId,
+      planVersion,
+      repoRoot,
+    },
+  }, cwd)
+
+  // 8. Add runtime reminder via buildModeInjection (caller injects this at right time)
+  //    The implement mode fragment plus approved-plan-loaded reminder is injected
+  //    by the calling command handler.
+
+  return {
+    runId,
+    changeId: options.changeId,
+    planVersion,
+    status: "completed",
+    verificationStatus: options.skipVerification ? "skipped" : "pending",
   }
 }

@@ -115,6 +115,27 @@ export type {
   PrepareWorkflowResult,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
+// Formal implement workflow (Phase 7 — /zflow-change-implement orchestration)
+export {
+  runChangeImplementWorkflow,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
+export type {
+  ImplementWorkflowOptions,
+  ImplementWorkflowResult,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
+// Verification and failure log (Phase 7 — verification command resolution)
+export {
+  resolveVerificationCommand,
+  runVerification,
+  appendFailureLog,
+} from "../extensions/zflow-change-workflows/verification.js"
+
+export type {
+  VerificationResult,
+} from "../extensions/zflow-change-workflows/verification.js"
+
 export type {
   StateIndexEntry,
 } from "pi-zflow-artifacts/state-index"
