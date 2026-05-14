@@ -2993,19 +2993,28 @@ export async function buildReconnaissance(
     }
   }
 
-  // Recent failure-log entries
+  // Recent failure-log entries — relevance-based, not just first N
   try {
-    const failureLogModule = await import("./failure-log.js")
-    const entries = await failureLogModule.readFailureLog(cwd)
-    if (entries.length > 0) {
+    const { loadRecentFailureLogEntries, formatFailureLogReadback } =
+      await import(
+        "pi-zflow-change-workflows"
+      )
+
+    // Use change path as search context; fall back to generic planning context
+    const searchContext = changePath
+      ? `planning implementation for ${pathModule.basename(changePath)}`
+      : "codebase exploration and planning"
+
+    const relevantEntries = await loadRecentFailureLogEntries({
+      context: searchContext,
+      limit: 3,
+      maxAge: 30,
+      cwd,
+    })
+
+    if (relevantEntries.length > 0) {
       lines.push("## Recent failure-log entries", "")
-      for (const entry of entries.slice(0, 5)) {
-        lines.push(`- **${entry.timestamp}**: ${entry.context || "unknown"}`)
-        if (entry.rootCause) lines.push(`  - Root cause: ${entry.rootCause}`)
-      }
-      if (entries.length > 5) {
-        lines.push(`- ... and ${entries.length - 5} more`)
-      }
+      lines.push(formatFailureLogReadback(relevantEntries))
       lines.push("")
     }
   } catch {
