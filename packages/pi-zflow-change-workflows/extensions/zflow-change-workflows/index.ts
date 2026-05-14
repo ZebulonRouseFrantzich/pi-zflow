@@ -168,6 +168,14 @@ import {
   runVerificationFixLoop,
 } from "./verification.js"
 
+import {
+  readFailureLog,
+  findRelevantFailures,
+  appendFailureEntry,
+  formatFailureLogEntries,
+  parseFailureLog,
+} from "./failure-log.js"
+
 import type {
   VerificationResult,
   FixLoopOptions,
@@ -202,6 +210,11 @@ export {
   buildCodeReviewInputFromContext,
   runChangeAuditWorkflow,
   runChangeFixWorkflow,
+  readFailureLog,
+  findRelevantFailures,
+  appendFailureEntry,
+  formatFailureLogEntries,
+  parseFailureLog,
 }
 
 export type {
@@ -223,6 +236,7 @@ export type {
   AuditWorkflowResult,
   FixWorkflowOptions,
   FixWorkflowResult,
+  FailureLogEntry,
 }
 
 // ── Extension activation ────────────────────────────────────────

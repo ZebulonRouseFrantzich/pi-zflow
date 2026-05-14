@@ -160,6 +160,19 @@ export type {
   FixAttempt,
 } from "../extensions/zflow-change-workflows/verification.js"
 
+// Failure log — structured entry management (Phase 7 — read, search, append, format)
+export {
+  readFailureLog,
+  findRelevantFailures,
+  appendFailureEntry,
+  formatFailureLogEntries,
+  parseFailureLog,
+} from "../extensions/zflow-change-workflows/failure-log.js"
+
+export type {
+  FailureLogEntry,
+} from "../extensions/zflow-change-workflows/failure-log.js"
+
 export type {
   StateIndexEntry,
 } from "pi-zflow-artifacts/state-index"
