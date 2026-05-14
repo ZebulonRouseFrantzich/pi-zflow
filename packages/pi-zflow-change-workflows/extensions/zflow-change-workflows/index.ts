@@ -135,6 +135,10 @@ import {
   runChangeAuditWorkflow,
   runChangeFixWorkflow,
   runCleanWorkflow,
+  detectResumeContext,
+  resumeWorkflow,
+  abandonWorkflow,
+  buildResumePrompt,
 } from "./orchestration.js"
 
 import {
@@ -162,6 +166,7 @@ import type {
   FixWorkflowResult,
   CleanWorkflowOptions,
   CleanWorkflowResult,
+  ResumeContext,
 } from "./orchestration.js"
 
 import {
@@ -207,6 +212,10 @@ export {
   runVerification,
   appendFailureLog,
   runVerificationFixLoop,
+  detectResumeContext,
+  resumeWorkflow,
+  abandonWorkflow,
+  buildResumePrompt,
   handlePlanDrift,
   createPlanAmendment,
   buildDriftDetectedReminder,
@@ -243,6 +252,7 @@ export type {
   CleanWorkflowOptions,
   CleanWorkflowResult,
   FailureLogEntry,
+  ResumeContext,
 }
 
 // ── Extension activation ────────────────────────────────────────

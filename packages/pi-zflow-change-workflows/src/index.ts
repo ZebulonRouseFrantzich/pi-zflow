@@ -265,4 +265,16 @@ export type {
   CleanWorkflowResult,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
+// Startup/resume recovery flows (Phase 7 — detect unfinished work, resume, abandon)
+export {
+  detectResumeContext,
+  resumeWorkflow,
+  abandonWorkflow,
+  buildResumePrompt,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
+export type {
+  ResumeContext,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
 

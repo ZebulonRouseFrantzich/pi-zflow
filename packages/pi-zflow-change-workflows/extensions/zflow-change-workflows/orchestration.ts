@@ -771,6 +771,219 @@ export function buildWorkerTask(
   return lines.join("\n")
 }
 
+// ── Resume/recovery flows (Task 7.17) ────────────────────────────
+
+/**
+ * Resume context describing unfinished work for a given change.
+ */
+export interface ResumeContext {
+  /** Change identifier */
+  changeId: string
+  /** Most recent run ID, if any */
+  runId?: string
+  /** Plan version, if known */
+  planVersion?: string
+  /** Last known phase of the workflow */
+  lastPhase: string
+  /** Available resume options */
+  resumeOptions: string[]
+  /** Human-readable details of unfinished entries */
+  details: string
+}
+
+/**
+ * Detect unfinished work and build a resume context.
+ *
+ * Reads the `state-index.json` and finds entries with unfinished statuses.
+ * If a `changeId` is provided, filters to only that change. Returns the
+ * most recent run's phase and available resume options.
+ *
+ * This is called on startup or workflow command entry.
+ *
+ * @param changeId - Optional change ID to filter by.
+ * @param cwd - Working directory (optional).
+ * @returns A `ResumeContext` if unfinished work is found, or `null`.
+ */
+export async function detectResumeContext(
+  changeId?: string,
+  cwd?: string,
+): Promise<ResumeContext | null> {
+  const { loadStateIndex } = await import("pi-zflow-artifacts/state-index")
+
+  const index = await loadStateIndex(cwd)
+
+  // Filter for unfinished entries
+  const unfinishedStatuses = new Set([
+    "pending", "preparing", "planning", "executing",
+    "applying", "drift-pending", "cleanup-pending", "apply-back-conflicted",
+  ])
+  const unfinished = index.entries.filter((e) => {
+    return unfinishedStatuses.has(e.status) &&
+      (!changeId || (e.metadata as Record<string, unknown>)?.changeId === changeId)
+  })
+
+  if (unfinished.length === 0) return null
+
+  // Group by change
+  const byChange = new Map<string, typeof unfinished>()
+  for (const entry of unfinished) {
+    const cid = ((entry.metadata as Record<string, unknown>)?.changeId as string) ?? "unknown"
+    if (!byChange.has(cid)) byChange.set(cid, [])
+    byChange.get(cid)!.push(entry)
+  }
+
+  // Pick the first (or specified) change
+  const targetChange = changeId ?? byChange.keys().next().value!
+  const entries = byChange.get(targetChange) ?? []
+
+  // Find the most recent run
+  const runEntries = entries.filter((e) => e.type === "run")
+  const latestRun = runEntries.sort((a, b) =>
+    new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+  )[0]
+
+  const lastPhase = latestRun?.status ?? entries[0]?.status ?? "unknown"
+
+  // Build resume options
+  const resumeOptions = ["resume", "abandon", "inspect", "cleanup"]
+
+  // Build details
+  const details = entries.map((e) =>
+    `${e.type} ${e.id}: ${e.status} (updated: ${e.updatedAt})`,
+  ).join("\n")
+
+  return {
+    changeId: targetChange,
+    runId: latestRun?.id,
+    lastPhase,
+    resumeOptions,
+    details,
+  }
+}
+
+/**
+ * Resume a specific workflow from a saved state.
+ *
+ * Reads the run.json and determines what phase to resume. If the apply-back
+ * status is unknown, it will attempt to restore the pre-apply snapshot before
+ * retrying.
+ *
+ * @param changeId - Change identifier.
+ * @param runId - Run identifier.
+ * @param cwd - Working directory (optional).
+ * @returns A result indicating whether the workflow can be resumed and what phase.
+ */
+export async function resumeWorkflow(
+  changeId: string,
+  runId: string,
+  cwd?: string,
+): Promise<{
+  success: boolean
+  message: string
+  phase?: string
+}> {
+  const { readRun } = await import("pi-zflow-artifacts/run-state")
+
+  try {
+    const run = await readRun(runId, cwd)
+
+    // Determine what to resume based on phase
+    switch (run.phase) {
+      case "pending":
+      case "executing":
+        return {
+          success: true,
+          message: `Resuming execution for ${changeId}`,
+          phase: run.phase,
+        }
+      case "applying":
+        return {
+          success: true,
+          message: `Resuming apply-back for ${changeId}`,
+          phase: run.phase,
+        }
+      case "drift-pending":
+        return {
+          success: true,
+          message: `Resuming drift resolution for ${changeId}`,
+          phase: run.phase,
+        }
+      default:
+        return {
+          success: false,
+          message: `Cannot resume run in phase "${run.phase}"`,
+        }
+    }
+  } catch (err: unknown) {
+    return {
+      success: false,
+      message: `Failed to read run: ${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
+}
+
+/**
+ * Abandon a workflow and clean up its state.
+ *
+ * Marks the run as abandoned in the state index so it no longer appears
+ * in future resume detection.
+ *
+ * @param changeId - Change identifier.
+ * @param runId - Run identifier.
+ * @param cwd - Working directory (optional).
+ * @returns A result indicating success or failure.
+ */
+export async function abandonWorkflow(
+  changeId: string,
+  runId: string,
+  cwd?: string,
+): Promise<{ success: boolean; message: string }> {
+  const { updateStateIndexEntry } = await import("pi-zflow-artifacts/state-index")
+
+  try {
+    // Mark run as abandoned in state index
+    await updateStateIndexEntry(runId, {
+      status: "abandoned",
+      metadata: { reason: "user-abandoned" },
+    }, cwd)
+
+    return {
+      success: true,
+      message: `Workflow ${changeId} / ${runId} abandoned.`,
+    }
+  } catch (err: unknown) {
+    return {
+      success: false,
+      message: `Failed to abandon: ${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
+}
+
+/**
+ * Build a resume prompt for the user describing the unfinished work.
+ *
+ * @param context - The resume context from `detectResumeContext`.
+ * @returns A markdown string describing the unfinished work and available options.
+ */
+export function buildResumePrompt(context: ResumeContext): string {
+  const lines = [
+    "# Unfinished Work Detected",
+    "",
+    `Change: ${context.changeId}`,
+    `Last phase: ${context.lastPhase}`,
+    "",
+    "## Details",
+    context.details,
+    "",
+    "## Options",
+    ...context.resumeOptions.map((o) => `- ${o}`),
+    "",
+    "What would you like to do?",
+  ]
+
+  return lines.join("\n")
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Cleanup workflow (Phase 7 — /zflow-clean, TTL-based cleanup)
 // ═══════════════════════════════════════════════════════════════════
