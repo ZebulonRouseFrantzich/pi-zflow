@@ -1,16 +1,12 @@
 ---
 name: synthesizer
 package: zflow
-description: |
-  Synthesise findings from multiple reviewers into a consolidated
-  report. Deduplicates findings, records support/dissent, groups by
-  severity, notes coverage gaps, and produces a go/no-go
-  recommendation.
+description: Synthesise findings from multiple reviewers into a consolidated report. Deduplicates findings, records support/dissent, groups by severity, notes coverage gaps, and produces a go/no-go recommendation.
 tools: read, grep, find, ls
 thinking: medium
+# model is resolved via the profile system at launch time; placeholder means "must be overridden by profile"
 model: placeholder
-fallbackModels:
-  - placeholder
+fallbackModels: placeholder
 systemPromptMode: replace
 inheritProjectContext: false
 inheritSkills: false

@@ -26,9 +26,9 @@ export async function readManifest(): Promise<InstallManifest | null> {
     const raw = await fs.readFile(INSTALL_MANIFEST_PATH, "utf-8")
     const parsed = JSON.parse(raw) as Partial<InstallManifest>
 
-    // Basic validation: version is required
-    if (!parsed.version) {
-      throw new Error("Install manifest is missing required field: version")
+    // Basic validation: packageVersion is required
+    if (!parsed.packageVersion) {
+      throw new Error("Install manifest is missing required field: packageVersion")
     }
 
     // Coerce missing or malformed array fields for backward compatibility
@@ -109,7 +109,7 @@ export function diffManifest(
   knownAgentFiles: string[],
   knownChainFiles: string[],
 ): ManifestDiff {
-  const versionChanged = manifest.version !== packageVersion
+  const versionChanged = manifest.packageVersion !== packageVersion
 
   // Find missing agents/chains
   const missingAgents = knownAgentFiles.filter(
@@ -129,7 +129,7 @@ export function diffManifest(
 
   return {
     versionChanged,
-    oldVersion: manifest.version,
+    oldVersion: manifest.packageVersion,
     newVersion: packageVersion,
     missingAgents,
     missingChains,

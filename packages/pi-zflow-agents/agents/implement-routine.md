@@ -1,15 +1,12 @@
 ---
 name: implement-routine
 package: zflow
-description: |
-  Execute approved plan groups for routine implementation work.
-  Reads tests first, implements changes, runs scoped verification.
-  Files deviation reports when the plan is infeasible.
+description: Execute approved plan groups for routine implementation work. Reads tests first, implements changes, runs scoped verification.
 tools: read, grep, find, ls, bash, edit, write
 thinking: medium
+# model is resolved via the profile system at launch time; placeholder means "must be overridden by profile"
 model: placeholder
-fallbackModels:
-  - placeholder
+fallbackModels: placeholder
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false

@@ -147,3 +147,29 @@ export function checkToolNaming(name: string): string | null {
   }
   return null
 }
+
+/**
+ * Assert that a changeId string is a safe kebab-case identifier.
+ *
+ * ChangeId values are used as directory names in the runtime state path.
+ * Only lowercase letters, digits, and hyphens are allowed to prevent
+ * path traversal and cross-platform filesystem issues.
+ *
+ * @param changeId - The change identifier to validate.
+ * @throws Error if the changeId contains unsafe characters.
+ */
+export function assertSafeChangeId(changeId: string): void {
+  if (typeof changeId !== "string" || changeId.length === 0) {
+    throw new Error(
+      `Invalid changeId: must be a non-empty string, got ${typeof changeId === "string" ? "empty string" : typeof changeId}`,
+    )
+  }
+  // Allow lowercase letters, digits, hyphens — safe for directory names on all platforms
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(changeId)) {
+    throw new Error(
+      `Unsafe changeId: "${changeId}". ` +
+      "ChangeId must be a non-empty kebab-case string matching [a-z0-9][a-z0-9-]*. " +
+      "Use only lowercase letters, digits, and hyphens.",
+    )
+  }
+}

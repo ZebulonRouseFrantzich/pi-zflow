@@ -1,15 +1,12 @@
 ---
 name: review-integration
 package: zflow
-description: |
-  Review code changes for integration soundness: API contracts,
-  cross-module coupling, data flow between changed areas, and
-  consistency with existing interfaces and patterns.
+description: Review code changes for integration soundness: API contracts, cross-module coupling, data flow between changed areas, and consistency with existing interfaces and patterns.
 tools: read, grep, find, ls
 thinking: high
+# model is resolved via the profile system at launch time; placeholder means "must be overridden by profile"
 model: placeholder
-fallbackModels:
-  - placeholder
+fallbackModels: placeholder
 systemPromptMode: replace
 inheritProjectContext: false
 inheritSkills: false

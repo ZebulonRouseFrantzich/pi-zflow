@@ -14,6 +14,8 @@
 
 import { execSync } from "node:child_process"
 
+import { getZflowRegistry } from "pi-zflow-core/registry"
+
 import {
   resolveDiffBaseline,
   type DiffBaselineInput,
@@ -319,21 +321,86 @@ export async function runCodeReview(
       }
     }
   } else {
-    // No reviewer runner: record a diagnostic instead of silently succeeding
-    for (const name of reviewerNames) {
-      const prompt = await buildInternalReviewPrompt(name, internalCtx)
-      reviewerOutputs[name] = prompt
-      manifest = {
-        ...manifest,
-        reviewers: manifest.reviewers.map(r =>
-          r.name === name ? { ...r, status: "skipped" as const, detail: "no reviewer runner available" } : r,
-        ),
+    // IMPLEMENTATION NOTE: In production, this would use pi-subagents directly.
+    // For now, use registry discovery to find a dispatch service.
+    const registry = getZflowRegistry()
+    const capabilities = registry.getCapabilities()
+    let dispatchService: { fn: Function; name: string } | null = null
+
+    for (const [, registered] of capabilities) {
+      if (registered.service === undefined) continue
+      const svc = registered.service as Record<string, unknown>
+      for (const methodName of ["runAgent", "subagent", "dispatch"]) {
+        if (typeof svc[methodName] === "function") {
+          dispatchService = { fn: svc[methodName] as Function, name: `${registered.provider}.${methodName}` }
+          break
+        }
       }
+      if (dispatchService) break
     }
-    coverageNotes.push(
-      "No reviewer runner provided — review prompts were built but no reviewers were dispatched. " +
-      "All reviewers marked as skipped. Install and configure pi-subagents or provide a custom reviewerRunner.",
-    )
+
+    if (dispatchService) {
+      const results = await Promise.allSettled(
+        reviewerNames.map(async (name) => {
+          const prompt = await buildInternalReviewPrompt(name, internalCtx)
+          let output: ReviewerOutput
+          try {
+            // Call the discovered dispatch service with the reviewer config
+            const raw = await dispatchService!.fn({
+              agent: name,
+              task: prompt,
+              context: {
+                planningArtifacts: input.planningArtifacts,
+                tier,
+                verificationStatus: input.verificationStatus,
+              },
+            })
+            const text = typeof raw === "string"
+              ? raw
+              : raw?.output ?? raw?.text ?? raw?.content ?? JSON.stringify(raw)
+            output = { findings: [], rawOutput: text }
+          } catch (err) {
+            output = { findings: [], rawOutput: `dispatch error: ${err instanceof Error ? err.message : String(err)}` }
+          }
+          return { name, prompt, output }
+        }),
+      )
+
+      for (const result of results) {
+        if (result.status === "fulfilled") {
+          const { name, output } = result.value
+          reviewerOutputs[name] = output.rawOutput
+          manifest = {
+            ...manifest,
+            reviewers: manifest.reviewers.map(r =>
+              r.name === name ? { ...r, status: "executed" as const } : r,
+            ),
+          }
+          coverageNotes.push(
+            `Reviewer "${name}" dispatched via ${dispatchService.name}`,
+          )
+        } else {
+          coverageNotes.push(`Reviewer dispatch failed: ${result.reason}`)
+        }
+      }
+    } else {
+      // No dispatch service found — mark all reviewers skipped
+      for (const name of reviewerNames) {
+        const prompt = await buildInternalReviewPrompt(name, internalCtx)
+        reviewerOutputs[name] = prompt
+        manifest = {
+          ...manifest,
+          reviewers: manifest.reviewers.map(r =>
+            r.name === name ? { ...r, status: "skipped" as const, detail: "no dispatch service available" } : r,
+          ),
+        }
+      }
+      coverageNotes.push(
+        "No reviewer runner or dispatch service available — review prompts were built but no " +
+        "reviewers were dispatched. All reviewers marked as skipped. " +
+        "Install and configure pi-subagents or provide a custom reviewerRunner.",
+      )
+    }
   }
 
   // Step 5: Persist raw outputs

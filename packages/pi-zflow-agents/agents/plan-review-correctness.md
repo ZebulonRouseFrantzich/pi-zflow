@@ -1,16 +1,12 @@
 ---
 name: plan-review-correctness
 package: zflow
-description: |
-  Review planning artifacts for logical correctness. Checks that the
-  design accurately addresses the change request, execution groups
-  produce the intended outcome, dependencies are sound, and edge
-  cases are accounted for in the plan.
+description: Review planning artifacts for logical correctness. Checks that the design accurately addresses the change request, execution groups produce the intended outcome, dependencies are sound, and edge cases are accounted for in the plan.
 tools: read, grep, find, ls
 thinking: high
+# model is resolved via the profile system at launch time; placeholder means "must be overridden by profile"
 model: placeholder
-fallbackModels:
-  - placeholder
+fallbackModels: placeholder
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false

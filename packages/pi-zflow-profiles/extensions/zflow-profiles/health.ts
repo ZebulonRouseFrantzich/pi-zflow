@@ -225,9 +225,13 @@ function checkLaneModelHealth(
  *
  * @param resolved - The resolved profile to check.
  * @param registry - Optional model registry. When provided, lane models
- *                   are verified against it. When omitted, models are
- *                   assumed healthy (caller should provide a registry
- *                   for meaningful checks).
+ *                   are verified against it (model exists in registry AND
+ *                   has auth configured). When omitted, ALL resolved lanes
+ *                   are unconditionally reported as healthy — no
+ *                   availability or auth checking occurs.
+ *                   Callers SHOULD provide a registry for meaningful
+ *                   preflight checks. Without it, the check is a no-op
+ *                   that always succeeds.
  * @param requiredLanes - Optional subset of lanes to check. When omitted,
  *                        all non-disabled lanes are checked.
  * @returns A `LaneHealthReport` summarising the health of all checked lanes.

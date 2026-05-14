@@ -9,7 +9,7 @@ description: |
   invokes it once for each group in the approved plan.
 ---
 
-## builtin:context-builder
+## context-builder
 
 reads: false
 progress: false

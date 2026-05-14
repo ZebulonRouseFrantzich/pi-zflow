@@ -1,16 +1,12 @@
 ---
 name: plan-review-feasibility
 package: zflow
-description: |
-  Review planning artifacts for practical feasibility. Checks that
-  the proposed approach is implementable given the actual codebase
-  structure, available tools, and project constraints. May verify
-  file paths and module existence.
+description: Review planning artifacts for practical feasibility. Checks that the proposed approach is implementable given the actual codebase structure, available tools, and project constraints.
 tools: read, grep, find, ls, bash
 thinking: high
+# model is resolved via the profile system at launch time; placeholder means "must be overridden by profile"
 model: placeholder
-fallbackModels:
-  - placeholder
+fallbackModels: placeholder
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false

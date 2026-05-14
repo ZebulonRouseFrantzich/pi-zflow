@@ -9,7 +9,7 @@ description: |
   requires deeper algorithmic or system-level analysis.
 ---
 
-## Orchestrator notes — optional reviewer selection
+### Orchestrator notes — optional reviewer selection
 
 The base reviewers (`zflow.review-correctness`, `zflow.review-integration`,
 `zflow.review-security`) always run. The optional reviewers

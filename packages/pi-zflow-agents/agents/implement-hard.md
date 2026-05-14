@@ -1,16 +1,12 @@
 ---
 name: implement-hard
 package: zflow
-description: |
-  Execute approved plan groups for complex or high-risk implementation
-  work. Has delegation capability for sub-tasks and deeper context
-  gathering. Follows the same discipline as implement-routine but with
-  greater analytical depth.
+description: Execute approved plan groups for complex or high-risk implementation work. Has delegation capability for sub-tasks and deeper context gathering.
 tools: read, grep, find, ls, bash, edit, write, subagent
 thinking: high
+# model is resolved via the profile system at launch time; placeholder means "must be overridden by profile"
 model: placeholder
-fallbackModels:
-  - placeholder
+fallbackModels: placeholder
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false

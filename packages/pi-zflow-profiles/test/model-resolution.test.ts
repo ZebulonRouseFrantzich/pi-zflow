@@ -612,21 +612,22 @@ describe("integration — resolve with example config", () => {
 
   it("resolves all lanes with a fully available model registry", () => {
     // Create a registry where every model in the example config is available
+    // Uses the actual provider names from profiles.example.json (openai-codex/*, opencode-go/*)
     const allModels: ModelInfo[] = [
-      model("openai/gpt-4o-mini", { thinkingCapability: "low" }),
-      model("anthropic/claude-3-haiku", { thinkingCapability: "low" }),
-      model("google/gemini-2.0-flash", { thinkingCapability: "medium" }),
+      // scout-cheap models
+      model("opencode-go/deepseek-v4-flash", { thinkingCapability: "low" }),
+      model("opencode-go/qwen3.6-plus", { thinkingCapability: "medium" }),
       // planning-frontier models
-      model("openai/gpt-5.4", { thinkingCapability: "high" }),
-      model("anthropic/claude-4-opus", { thinkingCapability: "high" }),
-      model("google/gemini-2.5-pro", { thinkingCapability: "high" }),
+      model("openai-codex/gpt-5.4", { thinkingCapability: "high" }),
+      model("opencode-go/mimo-v2.5-pro", { thinkingCapability: "high" }),
       // worker-cheap models
-      model("openai/gpt-4o", { thinkingCapability: "medium" }),
-      model("anthropic/claude-3.5-sonnet", { thinkingCapability: "medium" }),
+      model("openai-codex/gpt-5.4-mini", { thinkingCapability: "medium" }),
       // worker-strong
-      model("openai/gpt-5.4-codex", { thinkingCapability: "high" }),
-      // review models
-      model("anthropic/claude-4-sonnet", { thinkingCapability: "medium" }),
+      model("opencode-go/mimo-v2.5-pro", { thinkingCapability: "high" }),
+      // review models (Codex models support high thinking/reasoning)
+      model("openai-codex/gpt-5.3-codex", { thinkingCapability: "high" }),
+      // synthesis-frontier
+      model("opencode-go/mimo-v2.5-pro", { thinkingCapability: "high" }),
     ]
     const reg = makeRegistry(allModels)
     const profile = loadExampleProfile()

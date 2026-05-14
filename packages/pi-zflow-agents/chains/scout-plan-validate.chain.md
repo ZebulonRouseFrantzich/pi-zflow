@@ -9,7 +9,7 @@ description: |
   the plan is complex or high-risk.
 ---
 
-## Orchestrator notes — conditional plan-review stages
+### Orchestrator notes — conditional plan-review stages
 
 The plan-review stages at the end of this chain (`zflow.plan-review-correctness`
 and `zflow.plan-review-feasibility`) are **conditional** — the orchestrator

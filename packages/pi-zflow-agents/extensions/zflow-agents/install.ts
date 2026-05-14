@@ -23,8 +23,8 @@ import { readManifest, writeManifest, diffManifest, type ManifestDiff } from "./
 function getPackageRoot(): string {
   const extRoot = dirname(fileURLToPath(import.meta.url))
   // Extension is at <pkg>/extensions/zflow-agents/install.ts
-  // Package root is three levels up
-  return resolve(extRoot, "..", "..", "..")
+  // Package root is two levels up
+  return resolve(extRoot, "..", "..")
 }
 
 /**
@@ -246,7 +246,7 @@ export async function installAgentsAndChains(
 
   const now = new Date().toISOString()
   const manifest: InstallManifest = {
-    version: packageVersion,
+    packageVersion,
     source: `npm:pi-zflow-agents@${packageVersion}`,
     installedAt: existingManifest?.installedAt ?? now,
     updatedAt: now,

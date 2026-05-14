@@ -1,15 +1,12 @@
 ---
 name: repo-mapper
 package: zflow
-description: |
-  Generate high-level repository maps for orientation, planning
-  context, and agent handoff. Produces concise tree-structured
-  overviews of project directory layout with annotations.
+description: Generate high-level repository maps for orientation, planning context, and agent handoff. Produces concise tree-structured overviews of project directory layout with annotations.
 tools: read, grep, find, ls, bash
 thinking: low
+# model is resolved via the profile system at launch time; placeholder means "must be overridden by profile"
 model: placeholder
-fallbackModels:
-  - placeholder
+fallbackModels: placeholder
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false

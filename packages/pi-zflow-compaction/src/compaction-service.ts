@@ -62,11 +62,51 @@ const COMPACTION_THRESHOLD = 0.6
 /**
  * Default canonical artifact paths relative to `<runtime-state-dir>`.
  * These are preserved after compaction for exact rereads.
+ *
+ * ## Canonical artifact paths preserved during compaction
+ *
+ * These files remain backed by actual file content on disk and
+ * should NOT be fully summarised — instead, agents reread them
+ * directly from disk after a compaction cycle.
+ *
+ * ### Mandatory rereads (every agent after compaction)
+ *
+ * | Artifact       | Path pattern                            | Description                                    |
+ * |----------------|-----------------------------------------|------------------------------------------------|
+ * | Repo map       | `<runtime-state-dir>/repo-map.md`       | Repository structure overview                  |
+ * | Reconnaissance | `<runtime-state-dir>/reconnaissance.md` | Codebase reconnaissance output                 |
+ * | Failure log    | `<runtime-state-dir>/failure-log.md`    | Recent failure entries                         |
+ * | Plan state     | `<runtime-state-dir>/plans/`            | Current plan phase, version, completion flags  |
+ *
+ * ### Optional rereads (role-specific)
+ *
+ * | Artifact       | Path pattern                              | Description                |
+ * |----------------|-------------------------------------------|----------------------------|
+ * | Review findings| `<runtime-state-dir>/findings.md`         | Code or plan review finds  |
+ * | Workflow state | `<runtime-state-dir>/workflow-state.json` | Active workflow mode/reminder metadata |
+ *
+ * ### Rationale
+ *
+ * - Plan state directories track lifecycle transitions (draft → reviewed →
+ *   approved → executing → completed). After compaction the model must know
+ *   which phase the workflow is in to continue correctly.
+ * - Approved plan artifacts (design, execution-groups, standards, verification)
+ *   are the authoritative source of what to implement and how to verify it.
+ *   They must be reread rather than reconstructed from a compacted summary.
+ * - The failure log must be reread so the model sees the exact error messages
+ *   and root causes, not a paraphrased compacted reference.
+ * - Findings and workflow-state are role-specific: review agents need findings,
+ *   orchestrators need workflow state.
+ *
+ * These identifiers match `CANONICAL_ARTIFACTS` in `reread-policy.ts`.
  */
 const DEFAULT_ARTIFACT_PATHS: string[] = [
   "repo-map.md",
   "reconnaissance.md",
   "failure-log.md",
+  "plans/",
+  "findings.md",
+  "workflow-state.json",
 ]
 
 // ── Implementation ──────────────────────────────────────────────

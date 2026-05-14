@@ -90,6 +90,9 @@ export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
       "read_notebook", "contact_supervisor", "intercom",
     ]
 
+    // Apply tool restriction via Pi's API
+    pi.setActiveTools(restrictedTools)
+
     // Load the plan-mode prompt fragment for injection
     let planModeFragment = ""
     try {
@@ -104,12 +107,11 @@ export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
 
     return {
       systemPrompt: event.systemPrompt + `\n\n${planModeFragment}`,
-      selectedTools: restrictedTools,
     }
   })
 
   // Intercept tool calls to enforce plan mode restrictions
-  pi.on("before_tool_call", (event) => {
+  pi.on("tool_call", (event) => {
     if (!isPlanModeActive()) {
       return {}
     }
@@ -117,19 +119,19 @@ export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
     // Block edit and write tools entirely
     if (event.toolName === "edit" || event.toolName === "write") {
       return {
-        blocked: true,
-        message: `Tool "${event.toolName}" is blocked in plan mode. Use read-only exploration (read, grep, find, bash).`,
+        block: true,
+        reason: `Tool "${event.toolName}" is blocked in plan mode. Use read-only exploration (read, grep, find, bash).`,
       }
     }
 
     // Intercept bash commands to reject mutations
     if (event.toolName === "bash") {
-      const command = event.args?.command ?? ""
+      const command = event.input.command ?? ""
       const result = validatePlanModeBash(command)
       if (!result.allowed) {
         return {
-          blocked: true,
-          message: `Blocked in plan mode: ${result.reason}\n\nCommand: ${command}\n\nUse read-only commands (cat, ls, grep, find, git log, git diff, git status) instead.`,
+          block: true,
+          reason: `Blocked in plan mode: ${result.reason}\n\nCommand: ${command}\n\nUse read-only commands (cat, ls, grep, find, git log, git diff, git status) instead.`,
         }
       }
     }

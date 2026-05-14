@@ -1,15 +1,12 @@
 ---
 name: verifier
 package: zflow
-description: |
-  Run scoped verification from approved plan groups. Executes
-  verification commands, compares results against expected outcomes,
-  and reports pass/fail status. Does not modify source files.
+description: Run scoped verification from approved plan groups. Executes verification commands, compares results against expected outcomes, and reports pass/fail status. Does not modify source files.
 tools: read, grep, find, ls, bash
 thinking: medium
+# model is resolved via the profile system at launch time; placeholder means "must be overridden by profile"
 model: placeholder
-fallbackModels:
-  - placeholder
+fallbackModels: placeholder
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false

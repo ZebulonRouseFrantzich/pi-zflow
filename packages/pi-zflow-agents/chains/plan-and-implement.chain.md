@@ -66,7 +66,7 @@ only when the plan's reviewTags indicate integration-level review is
 needed. Check cross-module impacts, API contracts, and data flow
 between changed areas. Return structured findings with severity.
 
-## builtin:context-builder
+## context-builder
 
 reads: false
 progress: false
@@ -119,7 +119,7 @@ Synthesise review findings into a consolidated report. Deduplicate,
 record support/dissent, note coverage gaps, produce go/no-go
 recommendation.
 
-## apply-back
+### apply-back
 
 output: false
 worktree: true

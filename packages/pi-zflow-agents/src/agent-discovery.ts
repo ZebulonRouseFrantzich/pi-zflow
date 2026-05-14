@@ -447,7 +447,7 @@ export function installAll(options: InstallOptions = {}): InstallResult {
  * @param manifest - Install manifest data.
  */
 export function writeInstallManifest(manifest: {
-  version: string
+  packageVersion: string
   source: string
   installedAgents: string[]
   installedChains: string[]
@@ -465,7 +465,7 @@ export function writeInstallManifest(manifest: {
   }
 
   const fullManifest = {
-    version: manifest.version,
+    packageVersion: manifest.packageVersion,
     source: manifest.source || "local:pi-zflow-agents",
     installedAt: existing.installedAt || now,
     updatedAt: now,

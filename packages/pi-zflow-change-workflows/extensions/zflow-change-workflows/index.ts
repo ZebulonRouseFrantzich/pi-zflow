@@ -353,6 +353,32 @@ export interface InterviewableContext {
     /** Non-blocking notification. */
     notify: (message: string, type?: "info" | "warning" | "error") => void
   }
+  /**
+   * The Pi runtime model registry, available when the handler runs inside
+   * a Pi extension command context. Provides model discovery and auth checks.
+   *
+   * When present, profile resolution can check lane models against
+   * real model availability. When absent, lane-health checks are skipped
+   * and all resolved lanes are assumed healthy.
+   */
+  modelRegistry?: {
+    getAll(): Array<{
+      provider: string
+      id: string
+      api?: string
+      baseUrl?: string
+      reasoning?: boolean
+      input?: string[]
+      contextWindow?: number
+      maxTokens?: number
+      [key: string]: unknown
+    }>
+    hasConfiguredAuth(model: {
+      provider: string
+      id: string
+      [key: string]: unknown
+    }): boolean
+  }
 }
 
 /**
@@ -562,12 +588,19 @@ export function resetWorkflowState(): void {
  */
 async function ensureProfileResolved(ctx: InterviewableContext): Promise<boolean> {
   const notify = ctx.ui?.notify ?? (() => {})
-  const registry = getZflowRegistry()
-  if (registry.has("profiles")) {
-    const profileService = registry.optional<{ ensureResolved?: () => Promise<unknown> }>("profiles")
+  const reg = getZflowRegistry()
+  if (reg.has("profiles")) {
+    const profileService = reg.optional<{ ensureResolved?: (...args: unknown[]) => Promise<unknown> }>("profiles")
     if (profileService && typeof profileService.ensureResolved === "function") {
       try {
-        await profileService.ensureResolved()
+        // Convert the Pi model registry if available, so lane-health preflight
+        // can check real model availability and authentication.
+        let options: Record<string, unknown> = {}
+        if (ctx.modelRegistry) {
+          const { createPiModelRegistryAdapter } = await import("pi-zflow-profiles")
+          options.registry = createPiModelRegistryAdapter(ctx.modelRegistry)
+        }
+        await profileService.ensureResolved(undefined, options)
         notify("✅ Profile resolved.", "info")
         return true
       } catch (err: unknown) {
@@ -584,7 +617,9 @@ async function ensureProfileResolved(ctx: InterviewableContext): Promise<boolean
   }
   notify(
     "ℹ️ No profile service found in registry. Proceeding without explicit profile. " +
-    "Run a profile setup command first or configure via pi-zflow-profiles. " +
+    (ctx.modelRegistry
+      ? "Run /zflow-profile default to resolve a profile with lane-health checks."
+      : "Run a profile setup command first or configure via pi-zflow-profiles. ") +
     "Verification will fall back to auto-detection.",
     "info",
   )
@@ -885,6 +920,18 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           "info",
         )
 
+        // Check if RuneContext was detected as canonical — notify the user
+        const planStateRuneContext = (result.initialPlanState as Record<string, unknown>)?.runeContext as Record<string, unknown> | undefined
+        if (planStateRuneContext && (planStateRuneContext as Record<string, unknown>).canonical === true) {
+          const docs = (planStateRuneContext as Record<string, unknown>).canonicalDocs as string[] | undefined
+          ctx.ui.notify(
+            `📋 RuneContext detected for "${changePath}".\n` +
+            `   Canonical RuneContext docs will be used as the requirements source.\n` +
+            (docs && docs.length > 0 ? `   Available docs: ${docs.join(", ")}` : ""),
+            "info",
+          )
+        }
+
         // Step 2: Validate plan artifacts
         ctx.ui.notify(`🔍 Validating plan artifacts for "${result.changeId}" v${result.planVersion}...`, "info")
         const validation = await runPlanValidation(result.changeId, result.planVersion)
@@ -1055,9 +1102,17 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
   pi.registerCommand("zflow-change-implement", {
     description: "Execute the approved plan for a change — worktree dispatch, verification, review",
     handler: async (args: string, ctx: InterviewableContext): Promise<void> => {
-      const changeId = args.trim()
+      // Parse --force flag from args
+      const parts = args.trim().split(/\s+/)
+      const force = parts.includes("--force")
+      const changeId = parts.filter(p => p !== "--force").join(" ")
+
       if (!changeId) {
-        ctx.ui.notify("Usage: /zflow-change-implement <change-id>", "warning")
+        ctx.ui.notify(
+          "Usage: /zflow-change-implement <change-id> [--force]\n\n" +
+          "  --force    Proceed even if the primary worktree has uncommitted changes.",
+          "warning",
+        )
         return
       }
 
@@ -1111,7 +1166,16 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
 
         const result = await runChangeImplementWorkflow({
           changeId,
+          force,
         })
+
+        if (force) {
+          ctx.ui.notify(
+            "⚠️ Dirty worktree — proceeding because --force was passed. " +
+            "Uncommitted changes may interfere with worktree isolation.",
+            "warning",
+          )
+        }
 
         ctx.ui.notify(
           `⚙️ Implementation for "${result.changeId}" (${result.planVersion}) ` +

@@ -1,15 +1,12 @@
 ---
 name: review-logic
 package: zflow
-description: |
-  Review code changes for algorithmic soundness: state transitions,
-  invariant preservation, off-by-one errors, termination properties,
-  and logical completeness of conditional branches.
+description: Review code changes for algorithmic soundness: state transitions, invariant preservation, off-by-one errors, termination properties, and logical completeness of conditional branches.
 tools: read, grep, find, ls
 thinking: high
+# model is resolved via the profile system at launch time; placeholder means "must be overridden by profile"
 model: placeholder
-fallbackModels:
-  - placeholder
+fallbackModels: placeholder
 systemPromptMode: replace
 inheritProjectContext: false
 inheritSkills: false

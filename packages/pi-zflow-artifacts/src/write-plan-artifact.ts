@@ -70,5 +70,153 @@
  * @module pi-zflow-artifacts/write-plan-artifact
  */
 
-export {}
+import * as fs from "node:fs/promises"
+import * as path from "node:path"
+import { assertSafeChangeId } from "pi-zflow-core/ids"
+import { resolvePlanArtifactPath } from "./artifact-paths.js"
+import {
+  assertValidPlanVersion,
+  assertValidArtifactType,
+  computeContentHash,
+  recordArtifactMetadata,
+} from "./plan-state.js"
+
+/**
+ * Result of a successful plan artifact write.
+ */
+export interface WritePlanArtifactResult {
+  /** Whether the write succeeded. */
+  ok: boolean
+  /** Absolute path to the written artifact file. */
+  path: string
+  /** Artifact type that was written. */
+  artifact: string
+  /** SHA-256 hex digest of the written content. */
+  hash: string
+  /** Modification timestamp (ms since epoch) after the write. */
+  mtime: number
+  /** Error message if ok is false. */
+  error?: string
+}
+
+/**
+ * Write a plan artifact atomically to the runtime state directory.
+ *
+ * Validates all parameters before any file I/O, resolves the target path,
+ * creates parent directories, writes content to a `.tmp` file, renames it
+ * atomically to the target path, and records the content hash + mtime in
+ * plan-state.json.
+ *
+ * @param params - The artifact write parameters.
+ * @param params.changeId - Kebab-case change identifier.
+ * @param params.planVersion - Plan version label (e.g. "v1").
+ * @param params.artifact - Artifact type.
+ * @param params.content - Markdown content of the artifact.
+ * @param cwd - Optional working directory for runtime state path resolution.
+ * @returns A result object with ok, path, artifact, hash, mtime, and optional error.
+ */
+export async function writePlanArtifact(
+  params: {
+    changeId: string
+    planVersion: string
+    artifact: string
+    content: string
+  },
+  cwd?: string,
+): Promise<WritePlanArtifactResult> {
+  const { changeId, planVersion, artifact, content } = params
+
+  // 1. Validate changeId (kebab-case, safe for directory names)
+  try {
+    assertSafeChangeId(changeId)
+  } catch (err: unknown) {
+    return {
+      ok: false,
+      path: "",
+      artifact,
+      hash: "",
+      mtime: 0,
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+
+  // 2. Validate planVersion (must match /^v\d+$/)
+  try {
+    assertValidPlanVersion(planVersion)
+  } catch (err: unknown) {
+    return {
+      ok: false,
+      path: "",
+      artifact,
+      hash: "",
+      mtime: 0,
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+
+  // 3. Validate artifact type (must be one of the four approved kinds)
+  let validatedArtifact: "design" | "execution-groups" | "standards" | "verification"
+  try {
+    assertValidArtifactType(artifact)
+    validatedArtifact = artifact as "design" | "execution-groups" | "standards" | "verification"
+  } catch (err: unknown) {
+    return {
+      ok: false,
+      path: "",
+      artifact,
+      hash: "",
+      mtime: 0,
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+
+  // 4. Resolve target path
+  const targetPath = resolvePlanArtifactPath(changeId, planVersion, validatedArtifact, cwd)
+
+  // 5. Compute content hash before writing
+  const hash = computeContentHash(content)
+
+  // 6. Write atomically: temp file then rename
+  try {
+    await fs.mkdir(path.dirname(targetPath), { recursive: true })
+    const tmpPath = targetPath + ".tmp"
+    await fs.writeFile(tmpPath, content, "utf-8")
+    await fs.rename(tmpPath, targetPath)
+  } catch (err: unknown) {
+    return {
+      ok: false,
+      path: targetPath,
+      artifact,
+      hash,
+      mtime: 0,
+      error: `Failed to write artifact: ${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
+
+  // 7. Get mtime after write
+  let mtime: number
+  try {
+    const stat = await fs.stat(targetPath)
+    mtime = stat.mtimeMs
+  } catch {
+    mtime = Date.now()
+  }
+
+  // 8. Record metadata in plan-state.json (non-blocking -- failure is non-fatal)
+  try {
+    await recordArtifactMetadata(changeId, planVersion, validatedArtifact, hash, cwd)
+  } catch {
+    // Metadata recording failure does not invalidate the write
+  }
+
+  return {
+    ok: true,
+    path: targetPath,
+    artifact,
+    hash,
+    mtime,
+  }
+}
+
+
 

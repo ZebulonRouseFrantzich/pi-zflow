@@ -1,15 +1,12 @@
 ---
 name: review-correctness
 package: zflow
-description: |
-  Review code changes for correctness: logic errors, edge cases, type
-  safety, concurrency issues, and regressions. Produces structured
-  findings with file/line references and severity classification.
+description: Review code changes for correctness: logic errors, edge cases, type safety, concurrency issues, and regressions. Produces structured findings with file/line references and severity classification.
 tools: read, grep, find, ls
 thinking: high
+# model is resolved via the profile system at launch time; placeholder means "must be overridden by profile"
 model: placeholder
-fallbackModels:
-  - placeholder
+fallbackModels: placeholder
 systemPromptMode: replace
 inheritProjectContext: false
 inheritSkills: false

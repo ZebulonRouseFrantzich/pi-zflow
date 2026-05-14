@@ -87,3 +87,7 @@ export {
 export type {
   MaxOutputValidationResult,
 } from "./output-limits.js"
+
+// Pi model registry adapter — needed by sibling packages (e.g. change-workflows)
+// to pass the Pi runtime model registry into profile resolution.
+export { createPiModelRegistryAdapter } from "../extensions/zflow-profiles/pi-registry-adapter.js"

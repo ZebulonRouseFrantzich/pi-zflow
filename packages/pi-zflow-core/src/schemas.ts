@@ -78,7 +78,7 @@ export interface ChainDefinition {
 /** Install manifest recording deployed agents, chains, and skills. */
 export interface InstallManifest {
   /** Package version that was installed (matches package.json version) */
-  version: string
+  packageVersion: string
   /** Source reference (npm package name, local path, or git ref) */
   source: string
   /** ISO 8601 timestamp of initial installation */
