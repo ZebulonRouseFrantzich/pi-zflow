@@ -138,4 +138,17 @@ export type {
   RecoveryOptions,
 } from "../extensions/zflow-change-workflows/apply-back.js"
 
+// Prompt fragment loading (Phase 7 — mode-fragment and runtime-reminder injection)
+export {
+  loadFragment,
+  buildReminderInjection,
+  buildModeInjection,
+  fragmentExists,
+} from "../extensions/zflow-change-workflows/prompt-fragments.js"
+
+export type {
+  ReminderId,
+  ModeFragment,
+} from "../extensions/zflow-change-workflows/prompt-fragments.js"
+
 

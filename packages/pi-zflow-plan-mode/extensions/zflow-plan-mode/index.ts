@@ -34,6 +34,7 @@ import {
   isPlanModeActive,
 } from "./state.js"
 import { validatePlanModeBash } from "./bash-policy.js"
+import { loadFragment } from "pi-zflow-change-workflows"
 
 export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
   const registry = getZflowRegistry()
@@ -66,7 +67,7 @@ export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
 
   // When plan mode is active, reduce available tools to read-only exploration
   // and intercept bash commands to reject mutations.
-  pi.on("before_agent_start", (event) => {
+  pi.on("before_agent_start", async (event) => {
     if (!isPlanModeActive()) {
       return {}
     }
@@ -79,13 +80,20 @@ export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
       "read_notebook", "contact_supervisor", "intercom",
     ]
 
-    return {
-      systemPrompt: event.systemPrompt +
-        "\n\n## Plan Mode Active\n" +
+    // Load the plan-mode prompt fragment for injection
+    let planModeFragment = ""
+    try {
+      planModeFragment = await loadFragment("plan-mode")
+    } catch {
+      // Fallback: inject a simple reminder if the fragment file is unavailable
+      planModeFragment = "## Plan Mode Active\n\n" +
         "You are in read-only plan mode. Source code mutations are blocked. " +
         "Focus on analysis, exploration, and planning. Do not attempt to edit or write files. " +
-        "Use `bash` for read-only exploration commands only. " +
-        "Do NOT try to circumvent tool restrictions — they are enforced by the Pi runtime.",
+        "Use `bash` for read-only exploration commands only."
+    }
+
+    return {
+      systemPrompt: event.systemPrompt + `\n\n${planModeFragment}`,
       selectedTools: restrictedTools,
     }
   })

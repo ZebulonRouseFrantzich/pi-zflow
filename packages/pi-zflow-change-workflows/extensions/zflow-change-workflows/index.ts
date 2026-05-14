@@ -127,13 +127,31 @@ import {
   promptResumeChoices,
 } from "./orchestration.js"
 
+import {
+  loadFragment,
+  buildReminderInjection,
+  buildModeInjection,
+  fragmentExists,
+} from "./prompt-fragments.js"
+
+import type {
+  ReminderId,
+  ModeFragment,
+} from "./prompt-fragments.js"
+
 export {
   discoverUnfinishedWork,
   promptResumeChoices,
+  loadFragment,
+  buildReminderInjection,
+  buildModeInjection,
+  fragmentExists,
 }
 
 export type {
   StateIndexEntry,
+  ReminderId,
+  ModeFragment,
 }
 
 // ── Extension activation ────────────────────────────────────────
