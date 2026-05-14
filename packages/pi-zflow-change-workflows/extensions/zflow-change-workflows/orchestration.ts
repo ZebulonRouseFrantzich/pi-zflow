@@ -772,6 +772,129 @@ export function buildWorkerTask(
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Cleanup workflow (Phase 7 — /zflow-clean, TTL-based cleanup)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Options for the /zflow-clean workflow.
+ */
+export interface CleanWorkflowOptions {
+  /** Working directory for runtime state dir resolution. */
+  cwd?: string
+  /** If true, only preview what would be deleted; do not actually remove. */
+  dryRun?: boolean
+  /** If true, also clean orphaned artifacts not tied to known state-index entries. */
+  orphans?: boolean
+  /** Override TTL for stale artifacts in days (default: 14). */
+  olderThan?: number
+}
+
+/**
+ * Result of the /zflow-clean workflow.
+ */
+export interface CleanWorkflowResult {
+  /** Whether this was a dry run (no actual deletions). */
+  dryRun: boolean
+  /** Cleanup candidates that were found (or processed). */
+  candidates: Array<{ path: string; description: string }>
+  /** Number of artifacts cleaned. */
+  cleaned: number
+  /** Number of artifacts kept (skipped or errors). */
+  kept: number
+  /** Error messages from failed cleanup operations. */
+  errors: string[]
+  /** Human-readable summary of the cleanup operation. */
+  summary: string
+}
+
+/**
+ * Run the /zflow-clean workflow.
+ *
+ * Scans the runtime state directory for artifacts that exceed TTL
+ * policies, optionally cross-references against the state index for
+ * orphan detection, and performs cleanup (or dry-run preview).
+ *
+ * Default retention:
+ * - Stale runtime/patch artifacts: 14 days
+ * - Failed/interrupted worktrees: 7 days
+ * - Successful worktrees: removed immediately after verified apply-back
+ *   (not handled here; this is for leftovers)
+ *
+ * @param options - Cleanup options (dry-run, TTL overrides, orphan detection).
+ * @returns The cleanup result with summary.
+ */
+export async function runCleanWorkflow(
+  options: CleanWorkflowOptions = {},
+): Promise<CleanWorkflowResult> {
+  const { scanForCleanup, cleanupArtifacts, formatCleanupSummary } =
+    await import("pi-zflow-artifacts/cleanup-metadata")
+  const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+
+  const runtimeDir = resolveRuntimeStateDir(options.cwd)
+  const dryRun = options.dryRun ?? false
+
+  // Scan for cleanup candidates
+  const rawCandidates = await scanForCleanup(runtimeDir, {
+    staleDays: options.olderThan ?? 14,
+    failedWorktreeDays: 7,
+  })
+
+  // Filter candidates if orphan-only mode
+  const candidates = options.orphans
+    ? await filterOrphanCandidates(rawCandidates, options.cwd)
+    : rawCandidates
+
+  // Execute cleanup (or dry-run preview)
+  const result = await cleanupArtifacts(candidates, { dryRun })
+  const summary = formatCleanupSummary(candidates)
+
+  return {
+    dryRun,
+    candidates: candidates.map((c) => ({
+      path: c.path,
+      description: c.description,
+    })),
+    cleaned: result.cleaned,
+    kept: result.kept,
+    errors: result.errors,
+    summary,
+  }
+}
+
+/**
+ * Filter candidates to only those not referenced in the state index.
+ *
+ * Cross-references candidate paths against known plan/run/review/artifact
+ * IDs in the state index. Candidates whose paths do not match any known
+ * entry are considered "orphans" and returned.
+ *
+ * @param candidates - Cleanup candidates from the scanner.
+ * @param cwd - Working directory for state index resolution.
+ * @returns Candidates that are orphans (not in the state index).
+ */
+async function filterOrphanCandidates(
+  candidates: Awaited<ReturnType<typeof import("pi-zflow-artifacts/cleanup-metadata").scanForCleanup>>,
+  cwd?: string,
+): Promise<typeof candidates> {
+  const { loadStateIndex } = await import("pi-zflow-artifacts/state-index")
+
+  let knownIds: string[] = []
+  try {
+    const index = await loadStateIndex(cwd)
+    knownIds = index.entries.map((e) => e.id)
+  } catch {
+    // If state index can't be loaded, treat all candidates as orphans
+    return candidates
+  }
+
+  return candidates.filter((candidate) => {
+    // A candidate is an orphan if its path doesn't contain any known ID
+    const pathLower = candidate.path.toLowerCase()
+    return !knownIds.some((id) => pathLower.includes(id.toLowerCase()))
+  })
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Phase 7 — /zflow-change-audit and /zflow-change-fix wrappers
 // ═══════════════════════════════════════════════════════════════════
 

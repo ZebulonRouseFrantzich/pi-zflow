@@ -255,4 +255,14 @@ export type {
   FixWorkflowResult,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
+// Cleanup workflow (Phase 7 — /zflow-clean, TTL-based cleanup)
+export {
+  runCleanWorkflow,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
+export type {
+  CleanWorkflowOptions,
+  CleanWorkflowResult,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
 

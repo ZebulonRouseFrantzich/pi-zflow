@@ -134,6 +134,7 @@ import {
   parseInterviewResponse,
   runChangeAuditWorkflow,
   runChangeFixWorkflow,
+  runCleanWorkflow,
 } from "./orchestration.js"
 
 import {
@@ -159,6 +160,8 @@ import type {
   AuditWorkflowResult,
   FixWorkflowOptions,
   FixWorkflowResult,
+  CleanWorkflowOptions,
+  CleanWorkflowResult,
 } from "./orchestration.js"
 
 import {
@@ -210,6 +213,7 @@ export {
   buildCodeReviewInputFromContext,
   runChangeAuditWorkflow,
   runChangeFixWorkflow,
+  runCleanWorkflow,
   readFailureLog,
   findRelevantFailures,
   appendFailureEntry,
@@ -236,6 +240,8 @@ export type {
   AuditWorkflowResult,
   FixWorkflowOptions,
   FixWorkflowResult,
+  CleanWorkflowOptions,
+  CleanWorkflowResult,
   FailureLogEntry,
 }
 
@@ -243,4 +249,72 @@ export type {
 
 export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI): void {
   // Registration logic will be added in subsequent Phase 7 tasks
+
+  pi.registerCommand("zflow-clean", {
+    description: "Clean stale runtime artifacts, orphaned worktrees, and expired metadata",
+    handler: async (args: string, ctx: {
+      ui: { notify: (message: string, type?: "info" | "warning" | "error") => void }
+    }): Promise<void> => {
+      // Parse arguments
+      const parts = args.trim().split(/\s+/)
+      const options: CleanWorkflowOptions = {}
+      for (let i = 0; i < parts.length; i++) {
+        switch (parts[i]) {
+          case "--dry-run":
+            options.dryRun = true
+            break
+          case "--orphans":
+            options.orphans = true
+            break
+          case "--older-than":
+            i++
+            if (i < parts.length) {
+              options.olderThan = parseInt(parts[i], 10)
+              if (isNaN(options.olderThan)) {
+                ctx.ui.notify(`Invalid --older-than value: ${parts[i]}`, "error")
+                return
+              }
+            }
+            break
+          default:
+            ctx.ui.notify(`Unknown option: ${parts[i]}`, "warning")
+            break
+        }
+      }
+
+      ctx.ui.notify(
+        options.dryRun
+          ? "🧹 Dry-run cleanup — previewing stale artifacts..."
+          : "🧹 Running cleanup...",
+      )
+
+      try {
+        const result = await runCleanWorkflow(options)
+
+        ctx.ui.notify(result.summary, "info")
+
+        if (options.dryRun) {
+          ctx.ui.notify(
+            `Preview: ${result.cleaned} artifact(s) would be cleaned, ${result.kept} kept.`,
+            "info",
+          )
+          ctx.ui.notify("Run without --dry-run to actually clean.", "info")
+        } else {
+          if (result.errors.length > 0) {
+            ctx.ui.notify(
+              `Cleaned ${result.cleaned} artifact(s). ${result.errors.length} error(s) occurred.`,
+              result.errors.length > 0 ? "warning" : "info",
+            )
+          } else {
+            ctx.ui.notify(`Cleaned ${result.cleaned} artifact(s).`, "info")
+          }
+        }
+      } catch (err: unknown) {
+        ctx.ui.notify(
+          `Cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+          "error",
+        )
+      }
+    },
+  })
 }
