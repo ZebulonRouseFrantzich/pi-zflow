@@ -60,7 +60,8 @@ import {
 import { readRun, updateRun, setRunPhase, addRetainedArtifact, createRun, createRecoveryRef, removeRecoveryRef } from "pi-zflow-artifacts"
 import type { RunPhase, RetainedArtifact, RunJson } from "pi-zflow-artifacts"
 import { resolveRunDir, resolveRunStatePath } from "pi-zflow-artifacts/artifact-paths"
-import { addStateIndexEntry } from "pi-zflow-artifacts/state-index"
+import { addStateIndexEntry, loadStateIndex, listStateIndexEntries } from "pi-zflow-artifacts/state-index"
+import type { StateIndexEntry } from "pi-zflow-artifacts/state-index"
 import { assertCleanPrimaryTree } from "./git-preflight.js"
 import type { GitPreflightResult } from "./git-preflight.js"
 import { validateOwnershipAndDependencies, topoSortGroups } from "./ownership-validator.js"
@@ -1280,3 +1281,107 @@ export async function finalizeWorktreeImplementationRun(
  * const results = await collectGroupResults(plan.runId, plan.groups, ...)
  * const final = await finalizeWorktreeImplementationRun(plan.runId, results, ...)
  */
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase 7 — state-index lifecycle and unfinished-run discovery
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Status values that count as "unfinished" for a run or plan.
+ */
+const UNFINISHED_STATUSES = new Set([
+  "pending",
+  "preparing",
+  "planning",
+  "reviewing",
+  "executing",
+  "applying",
+  "drift-pending",
+  "cleanup-pending",
+  "apply-back-conflicted",
+])
+
+/**
+ * Discover unfinished work for a given change ID.
+ *
+ * Loads the state index and filters entries whose `metadata.changeId`
+ * matches the given changeId. Returns arrays of unfinished runs and
+ * plans, plus a convenience boolean.
+ *
+ * @param changeId - The change identifier to look up.
+ * @param cwd - Working directory (optional).
+ * @returns Object with unfinished runs, unfinished plans, and a convenience boolean.
+ */
+export async function discoverUnfinishedWork(
+  changeId: string,
+  cwd?: string,
+): Promise<{
+  unfinishedRuns: StateIndexEntry[]
+  unfinishedPlans: StateIndexEntry[]
+  hasUnfinishedWork: boolean
+}> {
+  const index = await loadStateIndex(cwd)
+
+  const changeEntries = index.entries.filter(
+    (e) => e.metadata && typeof e.metadata === "object" && "changeId" in e.metadata!
+      && e.metadata!.changeId === changeId,
+  )
+
+  const unfinishedRuns = changeEntries.filter(
+    (e) => e.type === "run" && UNFINISHED_STATUSES.has(e.status),
+  )
+  const unfinishedPlans = changeEntries.filter(
+    (e) => e.type === "plan" && UNFINISHED_STATUSES.has(e.status),
+  )
+
+  return {
+    unfinishedRuns,
+    unfinishedPlans,
+    hasUnfinishedWork: unfinishedRuns.length > 0 || unfinishedPlans.length > 0,
+  }
+}
+
+/**
+ * Produce a human-readable summary of unfinished work for a change.
+ *
+ * Lists each unfinished entry with its type, ID, status, and creation
+ * time, followed by suggested next actions.
+ *
+ * @param unfinished - The result of `discoverUnfinishedWork()`.
+ * @returns A formatted string describing the unfinished work.
+ */
+export function promptResumeChoices(unfinished: {
+  unfinishedRuns: StateIndexEntry[]
+  unfinishedPlans: StateIndexEntry[]
+}): string {
+  const lines: string[] = []
+
+  const allUnfinished = [
+    ...unfinished.unfinishedPlans.map((e) => ({ ...e, _label: "plan" })),
+    ...unfinished.unfinishedRuns.map((e) => ({ ...e, _label: "run" })),
+  ]
+
+  if (allUnfinished.length === 0) {
+    return "No unfinished work found for this change."
+  }
+
+  lines.push("## Unfinished work detected")
+  lines.push("")
+  lines.push("| Type | ID | Status | Created |")
+  lines.push("|------|----|--------|---------|")
+  for (const entry of allUnfinished) {
+    const created = entry.createdAt ? new Date(entry.createdAt).toISOString().slice(0, 19).replace("T", " ") : "(unknown)"
+    lines.push(`| ${entry._label} | ${entry.id} | ${entry.status} | ${created} |`)
+  }
+  lines.push("")
+  lines.push("### Available actions")
+  lines.push("")
+  lines.push("- `resume` — Continue the most recent unfinished run/plan")
+  lines.push("- `abandon` — Mark unfinished work as cancelled and start fresh")
+  lines.push("- `inspect` — Show detailed state of each unfinished item")
+  lines.push("- `cleanup` — Remove stale artifacts associated with unfinished work")
+  lines.push("")
+  lines.push("Enter one of the above to proceed, or `skip` to ignore and continue.")
+
+  return lines.join("\n")
+}

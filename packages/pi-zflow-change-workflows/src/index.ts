@@ -89,6 +89,16 @@ export type {
   WorktreeImplementationRunPlan,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
+// State-index lifecycle (Phase 7 — unfinished-run discovery)
+export {
+  discoverUnfinishedWork,
+  promptResumeChoices,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
+export type {
+  StateIndexEntry,
+} from "pi-zflow-artifacts/state-index"
+
 // Worktree setup hook (Phase 5 — fail-fast hook integration)
 export {
   repoNeedsWorktreeSetup,

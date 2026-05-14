@@ -117,6 +117,25 @@ export function resolveRunPaths(
   }
 }
 
+// ── State-index lifecycle helpers ─────────────────────────────────
+
+import { loadStateIndex, listStateIndexEntries } from "pi-zflow-artifacts/state-index"
+import type { StateIndexEntry } from "pi-zflow-artifacts/state-index"
+
+import {
+  discoverUnfinishedWork,
+  promptResumeChoices,
+} from "./orchestration.js"
+
+export {
+  discoverUnfinishedWork,
+  promptResumeChoices,
+}
+
+export type {
+  StateIndexEntry,
+}
+
 // ── Extension activation ────────────────────────────────────────
 
 export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI): void {
