@@ -26,7 +26,7 @@ import { getZflowRegistry, PI_ZFLOW_REVIEW_VERSION } from "pi-zflow-core"
 import { parsePrUrl, validatePrUrl, checkAuthStatus, fetchPrDiff, checkSubmissionCapability } from "./pr.js"
 
 import type { ResolvedPrTarget } from "./pr.js"
-import type { PrReviewInput } from "./orchestration.js"
+import type { CodeReviewInput, PrReviewInput } from "./orchestration.js"
 
 import {
   createManifest,
@@ -326,9 +326,6 @@ export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
         : "unknown"
 
       try {
-        // Dynamically import review orchestration to avoid eager loading
-        const { runCodeReview } = await import("./orchestration.js")
-
         const input: CodeReviewInput = {
           source: "Manual code review via /zflow-review-code",
           repoPath: repoRoot,

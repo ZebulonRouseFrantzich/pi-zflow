@@ -94,6 +94,7 @@ async function idempotentCopy(
   fileName: string,
   force: boolean,
   knownHashes?: Map<string, string>,
+  update?: boolean,
 ): Promise<{ copied: boolean; error?: string; skipped?: string }> {
   const srcPath = path.join(srcDir, fileName)
   const destPath = path.join(destDir, fileName)
@@ -112,14 +113,14 @@ async function idempotentCopy(
       return { copied: false } // Files are identical, nothing to do
     }
 
-    if (srcHash !== null && !force) {
-      // Files differ — warn and recommend update flow instead of silently overwriting
+    if (srcHash !== null && !force && !update) {
+      // Files differ and this is not an update — protect potential user edits
       return {
         copied: false,
         skipped: `"${fileName}" exists with different content. Use /zflow-update-agents or --force to overwrite.`,
       }
     }
-    // force=true or hash unavailable — proceed to overwrite
+    // force=true, update=true, or hash unavailable — proceed to overwrite
   }
 
   // Copy the file
@@ -205,7 +206,7 @@ export async function installAgentsAndChains(
   let agentsUpToDate = 0
 
   for (const file of agentFiles) {
-    const result = await idempotentCopy(srcAgents, destAgents, file, options.force ?? false, srcHashes)
+    const result = await idempotentCopy(srcAgents, destAgents, file, options.force ?? false, srcHashes, options.update ?? false)
     if (result.copied) {
       agentsInstalled++
     } else if (result.skipped) {
@@ -224,7 +225,7 @@ export async function installAgentsAndChains(
   let chainsUpToDate = 0
 
   for (const file of chainFiles) {
-    const result = await idempotentCopy(srcChains, destChains, file, options.force ?? false, srcHashes)
+    const result = await idempotentCopy(srcChains, destChains, file, options.force ?? false, srcHashes, options.update ?? false)
     if (result.copied) {
       chainsInstalled++
     } else if (result.skipped) {

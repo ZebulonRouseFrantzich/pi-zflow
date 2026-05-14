@@ -33,7 +33,7 @@
 
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
-import { fileURLToPath } from "node:url"
+import { createRequire } from "node:module"
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -62,23 +62,19 @@ export type ModeFragment =
 
 // ── Fragment directory resolution ──────────────────────────────
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
-
 /**
- * Resolve the prompt-fragments directory relative to this extension's
- * location in the monorepo.
+ * Resolve the prompt-fragments directory by locating the installed
+ * pi-zflow-agents package via require resolution.
  *
- * From: packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/
- * To:   packages/pi-zflow-agents/prompt-fragments/
+ * This works both in monorepo mode (npm workspaces symlinks) and
+ * when pi-zflow-change-workflows is installed from npm, because
+ * pi-zflow-agents is a declared dependency.
  */
 function resolveFragmentsDir(): string {
-  return path.resolve(
-    __dirname,
-    "..", "..", "..",       // up to packages/
-    "pi-zflow-agents",
-    "prompt-fragments",
-  )
+  const _require = createRequire(import.meta.url)
+  const agentsPkgPath = _require.resolve("pi-zflow-agents/package.json")
+  const agentsRoot = path.dirname(agentsPkgPath)
+  return path.join(agentsRoot, "prompt-fragments")
 }
 
 /**

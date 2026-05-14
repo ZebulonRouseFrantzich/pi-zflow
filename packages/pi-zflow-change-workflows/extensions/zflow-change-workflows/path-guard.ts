@@ -78,7 +78,7 @@ export interface GuardOptions {
  */
 const BLOCKED_PATH_PATTERNS: RegExp[] = [
   // Git internals — allow .git/pi-zflow/ (runtime state dir)
-  /(?:^|[/\\])\.git\/(?!pi-zflow\/)/,
+  /(?:^|[/\\])\.git[\\/](?!pi-zflow[\\/])/,
   // Node modules
   /\bnode_modules\b/,
   // Environment files
@@ -154,7 +154,7 @@ export function guardWrite(
   // Runtime state dir override: if the resolved path is under the known
   // runtime state directory (e.g. <git-dir>/pi-zflow/), allow it regardless
   // of blocked patterns.  This ensures runtime artifacts can always be written.
-  const runtimeStateDir = options.runtimeStateDir ?? resolveRuntimeStateDir()
+  const runtimeStateDir = options.runtimeStateDir ?? resolveRuntimeStateDir(options.projectRoot)
   if (resolvedPath.startsWith(runtimeStateDir)) {
     return {
       allowed: true,
@@ -176,7 +176,10 @@ export function guardWrite(
 
   // 2. Check allowlist: must be within project root or worktree paths
   const allowedRoots = buildAllowedRoots(projectRoot, options.worktreePaths)
-  const withinAllowed = allowedRoots.some((root) => resolvedPath.startsWith(root))
+  const withinAllowed = allowedRoots.some((root) => {
+    const relative = path.relative(root, resolvedPath)
+    return !!relative && !relative.startsWith("..") && !path.isAbsolute(relative)
+  })
 
   if (!withinAllowed) {
     return {
