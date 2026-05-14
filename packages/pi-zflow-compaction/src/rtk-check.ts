@@ -56,7 +56,21 @@ export async function checkRtkAvailability(): Promise<RtkCheckResult> {
       timeout: 5000,
     })
     const version = stdout.trim().split("\n")[0]
-    return { available: true, version }
+
+    // Resolve the full path to the rtk binary via `which`.
+    // Gracefully degrade if path resolution fails — the version
+    // check already confirmed availability.
+    let resolvedPath: string | undefined
+    try {
+      const { stdout: pathStdout } = await execFileAsync("which", ["rtk"], {
+        timeout: 3000,
+      })
+      resolvedPath = pathStdout.trim().split("\n")[0] || undefined
+    } catch {
+      // Path resolution failed; return result without path.
+    }
+
+    return { available: true, version, path: resolvedPath }
   } catch {
     return { available: false }
   }

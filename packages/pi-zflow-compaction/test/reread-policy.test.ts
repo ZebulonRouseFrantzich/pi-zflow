@@ -96,6 +96,22 @@ describe("reread-policy", () => {
     assert.ok(ids.includes("findings"), "Synthesizer should include findings")
   })
 
+  it('getRereadsForRole("zflow.synthesizer") namespaced name includes findings', async () => {
+    const mod = await importModule("ns-synth")
+    const forSynth = mod.getRereadsForRole("zflow.synthesizer")
+
+    const ids = forSynth.map((a: { id: string }) => a.id)
+    assert.ok(ids.includes("findings"), "Namespaced synthesizer should include findings")
+  })
+
+  it('getRereadsForRole("zflow.synthesizer-summarize") namespaced variant includes findings', async () => {
+    const mod = await importModule("ns-synth-sum")
+    const forSynth = mod.getRereadsForRole("zflow.synthesizer-summarize")
+
+    const ids = forSynth.map((a: { id: string }) => a.id)
+    assert.ok(ids.includes("findings"), "Namespaced synthesizer-summarize should include findings")
+  })
+
   it('getRereadsForRole("orchestrator") includes workflow-state', async () => {
     const mod = await importModule("orchestrator")
     const forOrch = mod.getRereadsForRole("orchestrator")
@@ -172,6 +188,31 @@ describe("reread-policy", () => {
     assert.ok(
       reminder.includes("No canonical artifacts"),
       "Should indicate no artifacts are tracked",
+    )
+  })
+
+  it('buildCompactionHandoffSection with namespaced "zflow.synthesizer" agent includes findings in output', async () => {
+    const mod = await importModule("handoff-synth")
+    const output = await mod.buildCompactionHandoffSection("zflow.synthesizer")
+
+    assert.equal(typeof output, "string")
+    assert.ok(output.startsWith("## Compaction Handoff"), "Should start with handoff heading")
+    // The role-specific reread reminder should reference findings.md for synthesizer role
+    assert.ok(
+      output.includes("findings.md"),
+      "Should include findings.md in reminder for namespaced synthesizer agent",
+    )
+  })
+
+  it('buildCompactionHandoffSection with namespaced "builtin:synthesizer" agent includes findings in output', async () => {
+    const mod = await importModule("handoff-builtin-synth")
+    const output = await mod.buildCompactionHandoffSection("builtin:synthesizer")
+
+    assert.equal(typeof output, "string")
+    assert.ok(output.startsWith("## Compaction Handoff"), "Should start with handoff heading")
+    assert.ok(
+      output.includes("findings.md"),
+      "Should include findings.md in reminder for builtin:synthesizer agent",
     )
   })
 })

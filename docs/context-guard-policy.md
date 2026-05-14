@@ -63,12 +63,12 @@ rg "TODO" src | head -60
 ## Default configuration
 
 | Setting           | Default | Description                                 |
-| ----------------- | ------- | ------------------------------------------- | ------------------------------- |
+| ----------------- | ------- | ------------------------------------------- |
 | `read` auto-limit | `120`   | Lines to read when no limit is specified    |
 | `rg` head limit   | `60`    | Lines to cap raw rg/grep output             |
 | Read guard        | enabled | Auto-insert `limit` parameter               |
 | Read dedup guard  | enabled | Suppress duplicate reads of unchanged files |
-| Raw `rg` guard    | enabled | Append `                                    | head -60` to unbounded rg calls |
+| Raw `rg` guard    | enabled | Append `\| head -60` to unbounded rg calls  |
 
 ## Policy rules
 
@@ -126,7 +126,7 @@ handle what escapes this first filter.
   the guard being installed to prevent unbounded reads during implementation steps.
 - Subagent worktrees each get independent dedup caches; the guard does not
   interfere with cross-worktree isolation.
-- After compaction, the compilation-handoff reminder tells agents to reread
+- After compaction, the compaction-handoff reminder tells agents to reread
   canonical artifacts. Since the guard's dedup only applies within the same
   process to unchanged files, a file-backed artifact that was read before
   compaction could still be served from cache if it has not changed. For

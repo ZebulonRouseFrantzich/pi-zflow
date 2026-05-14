@@ -32,6 +32,7 @@ describe("rtk-check", () => {
     // verify the shape and that available is a boolean.
     if (result.available) {
       assert.ok(typeof result.version === "string")
+      assert.ok(typeof result.path === "string")
     } else {
       // When unavailable, version and path are undefined
       assert.equal(result.version, undefined)
@@ -72,9 +73,10 @@ describe("rtk-check", () => {
     // Must return an RtkCheckResult
     assert.ok(typeof result === "object" && result !== null)
     assert.equal(typeof result.available, "boolean")
-    // If rtk is available, it should also have a version
+    // If rtk is available, it should also have a version and path
     if (result.available) {
       assert.ok(typeof result.version === "string")
+      assert.ok(typeof result.path === "string")
     }
   })
 })

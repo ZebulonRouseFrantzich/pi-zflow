@@ -126,7 +126,7 @@ export function getRereadsForRole(role: string): ArtifactEntry[] {
   const result = [...mandatory]
 
   // Reviewer and synthesizer roles need findings
-  if (lowerRole.includes("review") || lowerRole === "synthesizer") {
+  if (lowerRole.includes("review") || lowerRole.includes("synthesizer")) {
     const findings = CANONICAL_ARTIFACTS.find((a) => a.id === "findings")
     if (findings) result.push(findings)
   }
@@ -217,12 +217,12 @@ export async function buildCompactionHandoffSection(
   // Append role-specific artifact reread section
   let role: string | undefined
   if (agentName) {
-    if (agentName.includes("review") || agentName === "synthesizer") role = "reviewer"
+    if (agentName.includes("review") || agentName.includes("synthesizer")) role = "reviewer"
     else if (agentName.includes("orchestrat") || agentName.includes("change-implement")) role = "orchestrator"
     else if (agentName.includes("planner")) role = "planner"
   }
 
-  const artifacts = role ? getRereadsForRole(role) : getMandatoryRereads()
+  const artifacts = role ? getRereadsForRole(role) : [...CANONICAL_ARTIFACTS]
   const reminderBody = formatRereadReminder(artifacts)
 
   parts.push("", reminderBody)

@@ -324,7 +324,7 @@ export async function injectAgentGuidanceFragments(
 ): Promise<string> {
   const parts: string[] = []
 
-  if (agentName.includes("scout") || agentName === "builtin:scout" || agentName === "context-builder") {
+  if (agentName.includes("scout") || agentName.includes("context-builder")) {
     try {
       const { loadFragment } = await import("pi-zflow-agents")
       const fragment = await loadFragment("scout-reconnaissance" as any)
@@ -2748,7 +2748,7 @@ export async function resolveProfileIfAvailable(
  */
 export async function buildRepoMap(cwd?: string): Promise<{ path: string; entries: number }> {
   // Check cache freshness first — reuse existing map if repo structure is unchanged
-  const { fresh, reason: freshnessReason } = await isRepoMapFresh(cwd)
+  const { fresh } = await isRepoMapFresh(cwd)
   if (fresh) {
     const cached = await (await import("./repo-map-cache.js")).readRepoMapCache(cwd)
     if (cached) {
@@ -2918,17 +2918,6 @@ export async function buildRepoMap(cwd?: string): Promise<{ path: string; entrie
 
   // Depth-3 directory tree
   if (repoRoot) {
-    try {
-      const { execFileSync: execSync } = await import("node:child_process")
-      // Use find with depth and dir filtering, exclude noise
-      const treeOutput = execSync("find", [
-        repoRoot, "-maxdepth", "3", "-not", "-path", "*/node_modules/*",
-        "-not", "-path", "*/.git/*", "-not", "-path", "*/dist/*",
-        "-not", "-path", "*/build/*", "-not", "-path", "*/.next/*",
-        "|", "sort",
-      ].slice(0, 100), { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }).trim() // Use slice to avoid issues with pipe
-      // Actually, use a safer approach with separate commands
-    } catch { /* skip */ }
     try {
       // Safer: list dirs depth-2 via find
       const dirsOutput = execFileSync("find", [
@@ -3161,7 +3150,7 @@ export async function buildReconnaissance(
   try {
     const { loadRecentFailureLogEntries, formatFailureLogReadback } =
       await import(
-        "pi-zflow-change-workflows"
+        "../../src/failure-log-helpers.js"
       )
 
     // Use change path as search context; fall back to generic planning context

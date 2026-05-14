@@ -229,10 +229,11 @@ gracefully with a visible warning and that output compaction still functions.
    which rtk
    ```
 
-   If it is available, temporarily rename or move it:
+   If it is available, capture its path and temporarily rename or move it:
 
    ```bash
-   mv "$(which rtk)" /tmp/rtk-backup
+   RTK_PATH="$(command -v rtk)"
+   mv "$RTK_PATH" /tmp/rtk-backup
    ```
 
 2. **Start a new Pi session** (or reload the current one) so the
@@ -258,7 +259,7 @@ gracefully with a visible warning and that output compaction still functions.
 6. **Restore `rtk`**:
 
    ```bash
-   mv /tmp/rtk-backup "$(dirname "$(which rtk)")/rtk"
+   mv /tmp/rtk-backup "$RTK_PATH"
    ```
 
 ### Expected results

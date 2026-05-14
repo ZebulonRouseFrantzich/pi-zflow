@@ -25,7 +25,7 @@
  * @module pi-zflow-change-workflows/failure-log-helpers
  */
 
-import { readFailureLog, findRelevantFailures } from "../extensions/zflow-change-workflows/failure-log.js"
+import { findRelevantFailures } from "../extensions/zflow-change-workflows/failure-log.js"
 import type { FailureLogEntry } from "../extensions/zflow-change-workflows/failure-log.js"
 
 // ── Types ───────────────────────────────────────────────────────
