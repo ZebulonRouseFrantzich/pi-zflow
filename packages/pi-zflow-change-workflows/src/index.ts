@@ -103,6 +103,13 @@ export {
   markPlanVersionState,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
+// Interview gates (Phase 7 — structured human checkpoints with pi-interview)
+export {
+  buildPlanApprovalQuestions,
+  buildImplementationGateQuestions,
+  parseInterviewResponse,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
 export type {
   PrepareWorkflowOptions,
   PrepareWorkflowResult,

@@ -1692,3 +1692,138 @@ export async function runChangePrepareWorkflow(
     initialPlanState,
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase 7 — Structured approval/revision/cancel interview gates
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Build a JSON interview questions payload for plan approval.
+ *
+ * Presents the user with three structured choices (approve, request revisions,
+ * cancel) for a plan version. The caller passes the returned JSON string to
+ * `pi.interview()` or `ctx.interview()` to get a structured user decision.
+ *
+ * @param changeId - Change identifier.
+ * @param version - Plan version label (e.g. "v2").
+ * @param summary - Short human-readable summary of what this plan does.
+ * @returns A JSON string suitable for the interview tool.
+ */
+export function buildPlanApprovalQuestions(
+  changeId: string,
+  version: string,
+  summary: string,
+): string {
+  return JSON.stringify({
+    title: `Plan Review: ${changeId} ${version}`,
+    description: `Review plan version ${version} for change "${changeId}".\n\n${summary}`,
+    questions: [
+      {
+        id: "decision",
+        type: "single",
+        question: "How would you like to proceed with this plan?",
+        options: [
+          {
+            label: "Approve",
+            content: "Plan looks good. Approve and proceed to implementation.",
+          },
+          {
+            label: "Request Revisions",
+            content: "Plan needs changes. Create a new version with revisions.",
+          },
+          {
+            label: "Cancel",
+            content: "Cancel this planning session. No changes will be made.",
+          },
+        ],
+        recommended: "Approve",
+      },
+      {
+        id: "revisionNotes",
+        type: "text",
+        question: "If requesting revisions, describe what needs to change:",
+      },
+    ],
+  })
+}
+
+/**
+ * Build a JSON interview questions payload for implementation/review gates.
+ *
+ * Provides context-appropriate structured choices for drift detection,
+ * verification failure, and review findings gates.
+ *
+ * @param changeId - Change identifier.
+ * @param gateType - Which gate triggered the decision point.
+ * @param context - Human-readable context describing the current state.
+ * @returns A JSON string suitable for the interview tool.
+ */
+export function buildImplementationGateQuestions(
+  changeId: string,
+  gateType: "drift" | "verification-failure" | "review-findings",
+  context: string,
+): string {
+  const gateTitles: Record<string, string> = {
+    drift: "Plan Drift Detected",
+    "verification-failure": "Verification Failed",
+    "review-findings": "Review Findings",
+  }
+
+  const gateOptions: Record<string, Array<{ label: string; content: string }>> = {
+    drift: [
+      { label: "Approve Amendment", content: "Approve the plan amendment and continue." },
+      { label: "Cancel", content: "Cancel the workflow." },
+      { label: "Inspect Artifacts", content: "Review retained artifacts before deciding." },
+    ],
+    "verification-failure": [
+      { label: "Auto-fix Loop", content: "Run automated fix attempts (max 3 iterations, ~15 min cap)." },
+      { label: "Manual Review", content: "Stop for manual investigation." },
+      { label: "Skip Verification", content: "Skip verification — review will be advisory." },
+    ],
+    "review-findings": [
+      { label: "Fix All", content: "Fix all findings." },
+      { label: "Fix Critical/Major", content: "Fix critical and major findings only." },
+      { label: "Dismiss", content: "Dismiss findings and proceed." },
+    ],
+  }
+
+  return JSON.stringify({
+    title: gateTitles[gateType] ?? "Decision Required",
+    description: `Change: ${changeId}\n\n${context}`,
+    questions: [
+      {
+        id: "action",
+        type: "single",
+        question: "How would you like to proceed?",
+        options: gateOptions[gateType] ?? [
+          { label: "Continue", content: "Proceed with the workflow." },
+          { label: "Cancel", content: "Cancel the workflow." },
+        ],
+      },
+    ],
+  })
+}
+
+/**
+ * Parse a structured interview response into a simple decision object.
+ *
+ * Handles both plan-approval format (field name `decision`) and gate
+ * format (field name `action`). Returns a default of `"cancel"` if
+ * parsing fails.
+ *
+ * @param response - The raw response string from the interview tool.
+ * @returns An object with the decision and optional revision notes.
+ */
+export function parseInterviewResponse(
+  response: string,
+): { decision: string; revisionNotes?: string } {
+  try {
+    const parsed = JSON.parse(response)
+    return {
+      decision: parsed.decision ?? parsed.action ?? "cancel",
+      revisionNotes: parsed.revisionNotes,
+    }
+  } catch {
+    return { decision: "cancel" }
+  }
+}
