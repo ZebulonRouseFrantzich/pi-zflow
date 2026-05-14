@@ -31,6 +31,114 @@
 
 import type { LaunchAgentConfig } from "./launch-config.js"
 
+// ── Web access tool validation ────────────────────────────────
+
+/**
+ * Web-access tool identifiers used by pi-web-access.
+ */
+const WEB_ACCESS_TOOLS = new Set([
+  "web_search",
+  "code_search",
+  "fetch_content",
+  "get_search_content",
+])
+
+/**
+ * Roles that are allowed to have web-access tools.
+ */
+const ROLES_ALLOWED_WEB_ACCESS = new Set([
+  "planner-frontier",
+  "plan-review",
+  "review-correctness",
+  "review-integration",
+  "review-security",
+  "review-logic",
+  "review-system",
+  "synthesizer",
+])
+
+/**
+ * Result of a web-access tool validation.
+ */
+export interface WebAccessValidationResult {
+  valid: boolean
+  agentName: string
+  allowed: boolean
+  reason?: string
+}
+
+/**
+ * Validate that an agent's tool list respects the web-access role policy.
+ *
+ * Implementation, verifier, and repo-mapper roles must not have web-access
+ * tools. Planner/reviewer/research roles may have them.
+ *
+ * @param agentName - The agent runtime name (e.g. "zflow.planner-frontier").
+ * @param tools - Comma-separated tool string or array from profile binding.
+ * @returns A validation result.
+ */
+export function validateWebAccessScope(
+  agentName: string,
+  tools: string | string[] | undefined,
+): WebAccessValidationResult {
+  if (!tools) {
+    return { valid: true, agentName, allowed: true }
+  }
+
+  const toolList = Array.isArray(tools) ? tools : tools.split(",").map(t => t.trim())
+  const hasWebTools = toolList.some(t => WEB_ACCESS_TOOLS.has(t))
+
+  if (!hasWebTools) {
+    return { valid: true, agentName, allowed: true }
+  }
+
+  // Strip namespace for role matching
+  const shortName = agentName
+    .replace("zflow.", "")
+    .replace("builtin:", "")
+
+  // Check if this role is allowed web access
+  let allowed = false
+  for (const allowedRole of ROLES_ALLOWED_WEB_ACCESS) {
+    if (shortName.includes(allowedRole) || shortName === allowedRole) {
+      allowed = true
+      break
+    }
+  }
+
+  if (allowed) {
+    return { valid: true, agentName, allowed: true }
+  }
+
+  return {
+    valid: false,
+    agentName,
+    allowed: false,
+    reason:
+      `Agent "${agentName}" has web-access tools (${[...toolList].filter(t => WEB_ACCESS_TOOLS.has(t)).join(", ")}) ` +
+      `but is not in an allowed role. Web-access is restricted to planner/review/research roles. ` +
+      `Remove the web-access tools from the agent frontmatter or profile binding.`,
+  }
+}
+
+/**
+ * Validate web-access scope for every agent in a set of launch configs.
+ *
+ * @param configs - A record of agent name → LaunchAgentConfig.
+ * @returns Record of validation results.
+ */
+export function validateAllWebAccessScopes(
+  configs: Record<string, LaunchAgentConfig>,
+): Record<string, WebAccessValidationResult> {
+  const results: Record<string, WebAccessValidationResult> = {}
+
+  for (const [agentName, config] of Object.entries(configs)) {
+    results[agentName] = validateWebAccessScope(agentName, config.tools)
+  }
+
+  return results
+}
+
 // ── Types ───────────────────────────────────────────────────────
 
 /**
