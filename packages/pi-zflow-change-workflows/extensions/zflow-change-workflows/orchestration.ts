@@ -74,6 +74,11 @@ import { writeDeviationSummary, readDeviationReports } from "./deviations.js"
 import { getCurrentBranch } from "./git-preflight.js"
 import { getZflowRegistry } from "pi-zflow-core/registry"
 import {
+  isRepoMapFresh,
+  writeRepoMapCache,
+  computeRepoStructureHash,
+} from "./repo-map-cache.js"
+import {
   resolveVerificationCommand,
   runVerification,
   appendFailureLog,
@@ -2697,6 +2702,15 @@ export async function resolveProfileIfAvailable(
  * @returns An object with the output path and entry count.
  */
 export async function buildRepoMap(cwd?: string): Promise<{ path: string; entries: number }> {
+  // Check cache freshness first — reuse existing map if repo structure is unchanged
+  const { fresh, reason: freshnessReason } = await isRepoMapFresh(cwd)
+  if (fresh) {
+    const cached = await (await import("./repo-map-cache.js")).readRepoMapCache(cwd)
+    if (cached) {
+      return { path: cached.path, entries: cached.entryCount }
+    }
+  }
+
   const { default: fs } = await import("node:fs/promises")
   const { default: path } = await import("node:path")
   const { execFileSync } = await import("node:child_process")
@@ -2835,6 +2849,15 @@ export async function buildRepoMap(cwd?: string): Promise<{ path: string; entrie
 
   await fs.mkdir(runtimeStateDir, { recursive: true })
   await fs.writeFile(outputPath, content, "utf-8")
+
+  // Cache the new repo-map for future freshness checks
+  const hash = computeRepoStructureHash(cwd)
+  await writeRepoMapCache({
+    hash,
+    generatedAt: new Date().toISOString(),
+    entryCount: topLevelDirs.length,
+    path: outputPath,
+  }, cwd)
 
   return { path: outputPath, entries: topLevelDirs.length }
 }
