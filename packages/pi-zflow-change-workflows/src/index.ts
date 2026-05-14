@@ -171,4 +171,17 @@ export type {
   ModeFragment,
 } from "../extensions/zflow-change-workflows/prompt-fragments.js"
 
+// Implementation session fork handoff (Phase 7 — planning→implementation handoff)
+export {
+  buildImplementationHandoff,
+  serializeHandoff,
+  deserializeHandoff,
+  buildHandoffPromptPrefix,
+  canForkSession,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
+export type {
+  ImplementationHandoff,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
 

@@ -1827,3 +1827,168 @@ export function parseInterviewResponse(
     return { decision: "cancel" }
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase 7 — Implementation session fork handoff
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Handoff metadata for an implementation session.
+ *
+ * Stored in the plan-state.json or as a session metadata entry to
+ * preserve the approved plan pointer across session boundaries.
+ * This is intentionally separate from git branching — the handoff
+ * is a Pi session fork, not a branch creation.
+ */
+export interface ImplementationHandoff {
+  /** Change identifier from the plan */
+  changeId: string
+  /** Approved plan version label (e.g. "v2") */
+  approvedVersion: string
+  /** Absolute path to the runtime state directory */
+  runtimeStateDir: string
+  /** Session ID of the planning session that forked this handoff */
+  sourceSessionId?: string
+  /** ISO timestamp when the handoff was created */
+  forkedAt: string
+  /** Canonical plan artifact paths for context injection */
+  planArtifactPaths: Record<string, string>
+}
+
+/**
+ * Build the handoff metadata when transitioning from planning to implementation.
+ *
+ * Creates an `ImplementationHandoff` object with the approved plan pointer
+ * and canonical artifact paths. The caller stores this in the forked
+ * session's metadata or in plan-state.json.
+ *
+ * @param changeId - Change identifier from the plan.
+ * @param approvedVersion - Approved plan version label (e.g. "v2").
+ * @param runtimeStateDir - Absolute path to the runtime state directory.
+ * @param planArtifactPaths - Record of artifact name → absolute file path.
+ * @param sourceSessionId - Optional source planning session ID.
+ * @returns An ImplementationHandoff object.
+ */
+export function buildImplementationHandoff(
+  changeId: string,
+  approvedVersion: string,
+  runtimeStateDir: string,
+  planArtifactPaths: Record<string, string>,
+  sourceSessionId?: string,
+): ImplementationHandoff {
+  return {
+    changeId,
+    approvedVersion,
+    runtimeStateDir,
+    sourceSessionId,
+    forkedAt: new Date().toISOString(),
+    planArtifactPaths,
+  }
+}
+
+/**
+ * Serialize handoff metadata to a JSON string for session metadata storage.
+ *
+ * @param handoff - The handoff metadata to serialize.
+ * @returns Pretty-printed JSON string.
+ */
+export function serializeHandoff(handoff: ImplementationHandoff): string {
+  return JSON.stringify(handoff, null, 2)
+}
+
+/**
+ * Deserialize handoff metadata from a JSON string.
+ *
+ * @param data - JSON string produced by serializeHandoff.
+ * @returns The parsed ImplementationHandoff object.
+ * @throws If the input is not valid JSON or does not match the expected shape.
+ */
+export function deserializeHandoff(data: string): ImplementationHandoff {
+  const parsed = JSON.parse(data) as Partial<ImplementationHandoff>
+
+  // Validate required fields
+  if (!parsed.changeId || typeof parsed.changeId !== "string") {
+    throw new Error("Invalid handoff: missing or invalid 'changeId'")
+  }
+  if (!parsed.approvedVersion || typeof parsed.approvedVersion !== "string") {
+    throw new Error("Invalid handoff: missing or invalid 'approvedVersion'")
+  }
+  if (!parsed.runtimeStateDir || typeof parsed.runtimeStateDir !== "string") {
+    throw new Error("Invalid handoff: missing or invalid 'runtimeStateDir'")
+  }
+  if (!parsed.planArtifactPaths || typeof parsed.planArtifactPaths !== "object") {
+    throw new Error("Invalid handoff: missing or invalid 'planArtifactPaths'")
+  }
+
+  return {
+    changeId: parsed.changeId,
+    approvedVersion: parsed.approvedVersion,
+    runtimeStateDir: parsed.runtimeStateDir,
+    sourceSessionId: parsed.sourceSessionId,
+    forkedAt: parsed.forkedAt ?? new Date().toISOString(),
+    planArtifactPaths: parsed.planArtifactPaths,
+  }
+}
+
+/**
+ * Build the prompt prefix for an implementation session that received a handoff.
+ *
+ * This injects the approved plan context into the new session so the model
+ * knows exactly what plan to execute without needing the planning session's
+ * full transcript.
+ *
+ * The prompt explicitly distinguishes session forking from git branching.
+ *
+ * @param handoff - The handoff metadata from the planning session.
+ * @returns A markdown string to prepend to the implementation session prompt.
+ */
+export function buildHandoffPromptPrefix(handoff: ImplementationHandoff): string {
+  const lines: string[] = [
+    "# Implementation Session",
+    "",
+    `This session was forked from a planning session for change **${handoff.changeId}**.`,
+    "",
+    "## Approved Plan Context",
+    `- Change ID: ${handoff.changeId}`,
+    `- Approved Version: ${handoff.approvedVersion}`,
+    `- Runtime State Dir: ${handoff.runtimeStateDir}`,
+    `- Forked At: ${handoff.forkedAt}`,
+    "",
+    "## Plan Artifacts",
+  ]
+
+  for (const [key, filePath] of Object.entries(handoff.planArtifactPaths)) {
+    lines.push(`- ${key}: \`${filePath}\``)
+  }
+
+  lines.push(
+    "",
+    "## Handoff Rules",
+    `- This is a **session fork**, not a git branch creation.`,
+    `- No git branches have been created by this handoff.`,
+    `- The planning session remains available via session tree/resume.`,
+    "",
+    `Use \`/zflow-change-implement ${handoff.changeId}\` to begin implementation.`,
+  )
+
+  return lines.join("\n")
+}
+
+/**
+ * Check whether session fork capability is available.
+ *
+ * Returns true if `pi.forkSession` or equivalent session fork API
+ * is available. This is a best-effort check; the caller should
+ * handle the case where forking is not available gracefully.
+ */
+export function canForkSession(): boolean {
+  // Session forking depends on Pi runtime version and available APIs.
+  // At minimum, check that we're in a Pi session environment.
+  try {
+    return typeof process !== "undefined" &&
+      typeof process.env !== "undefined" &&
+      "PI_SESSION_ID" in process.env
+  } catch {
+    return false
+  }
+}

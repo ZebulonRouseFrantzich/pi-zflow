@@ -152,6 +152,7 @@ import type {
 import type {
   PrepareWorkflowOptions,
   PrepareWorkflowResult,
+  ImplementationHandoff,
 } from "./orchestration.js"
 
 export {
@@ -165,6 +166,11 @@ export {
   buildReminderInjection,
   buildModeInjection,
   fragmentExists,
+  buildImplementationHandoff,
+  serializeHandoff,
+  deserializeHandoff,
+  buildHandoffPromptPrefix,
+  canForkSession,
 }
 
 export type {
@@ -173,6 +179,7 @@ export type {
   ModeFragment,
   PrepareWorkflowOptions,
   PrepareWorkflowResult,
+  ImplementationHandoff,
 }
 
 // ── Extension activation ────────────────────────────────────────
