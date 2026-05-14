@@ -31,81 +31,81 @@ artifact rereads) before it can be adopted.
 
 ### `pi-dcp`
 
-| Attribute | Description |
-|-----------|-------------|
-| **What it does** | Data-centric processing framework for structured context extraction and transformation. |
-| **Why deferred** | Not needed in the v1 foundation. The existing compaction and prompt-assembly layers handle context construction adequately for the planned workflow scope. |
-| **Re-evaluation trigger** | If workflows require structured, cross-session context extraction beyond what compaction summaries and canonical artifact rereads provide. |
-| **Alternative** | Canonical artifact rereads (compacted summaries + file-backed artifacts) provide cross-session context continuity without introducing a new framework. |
+| Attribute                 | Description                                                                                                                                                |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **What it does**          | Data-centric processing framework for structured context extraction and transformation.                                                                    |
+| **Why deferred**          | Not needed in the v1 foundation. The existing compaction and prompt-assembly layers handle context construction adequately for the planned workflow scope. |
+| **Re-evaluation trigger** | If workflows require structured, cross-session context extraction beyond what compaction summaries and canonical artifact rereads provide.                 |
+| **Alternative**           | Canonical artifact rereads (compacted summaries + file-backed artifacts) provide cross-session context continuity without introducing a new framework.     |
 
 ---
 
 ### `pi-observational-memory`
 
-| Attribute | Description |
-|-----------|-------------|
-| **What it does** | External memory stack for persisting agent observations, decisions, and state across sessions. |
-| **Why deferred** | External memory stacks remain deferred pilots per the master plan. The v1 foundation relies on file-backed canonical artifacts (plan-state, repo-map, reconnaissance, failure-log) for cross-session state, which is simpler and more transparent. |
-| **Re-evaluation trigger** | If workflows require persistent cross-session learning or memory that file-backed artifacts cannot support — for example, accumulating project-wide conventions over many sessions. |
-| **Alternative** | File-backed canonical artifacts (`plan-state.json`, `repo-map.md`, `reconnaissance.md`, `failure-log.md`) in `<runtime-state-dir>`. These are explicit, inspectable, and do not introduce opaque memory stacks. |
+| Attribute                 | Description                                                                                                                                                                                                                                        |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **What it does**          | External memory stack for persisting agent observations, decisions, and state across sessions.                                                                                                                                                     |
+| **Why deferred**          | External memory stacks remain deferred pilots per the master plan. The v1 foundation relies on file-backed canonical artifacts (plan-state, repo-map, reconnaissance, failure-log) for cross-session state, which is simpler and more transparent. |
+| **Re-evaluation trigger** | If workflows require persistent cross-session learning or memory that file-backed artifacts cannot support — for example, accumulating project-wide conventions over many sessions.                                                                |
+| **Alternative**           | File-backed canonical artifacts (`plan-state.json`, `repo-map.md`, `reconnaissance.md`, `failure-log.md`) in `<runtime-state-dir>`. These are explicit, inspectable, and do not introduce opaque memory stacks.                                    |
 
 ---
 
 ### `manifest.build`
 
-| Attribute | Description |
-|-----------|-------------|
-| **What it does** | Build manifest generation and dependency tracking for repository analysis. |
-| **Why deferred** | Not part of the first-pass foundation. Repo-map generation and code-skeleton usage cover the common orientation and dependency-tracking use cases without the complexity of a full build-manifest system. |
+| Attribute                 | Description                                                                                                                                                                                                              |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **What it does**          | Build manifest generation and dependency tracking for repository analysis.                                                                                                                                               |
+| **Why deferred**          | Not part of the first-pass foundation. Repo-map generation and code-skeleton usage cover the common orientation and dependency-tracking use cases without the complexity of a full build-manifest system.                |
 | **Re-evaluation trigger** | If the repo-map approach proves insufficient for understanding complex multi-package dependency graphs, or if build-aware planning (e.g., "which packages are affected by this change?") becomes a workflow requirement. |
-| **Alternative** | Repository maps (`repo-map.md` generated by `buildRepoMap()`) and code skeletons (via the `code-skeleton` skill) provide structural and dependency overview without a build-manifest framework. |
+| **Alternative**           | Repository maps (`repo-map.md` generated by `buildRepoMap()`) and code skeletons (via the `code-skeleton` skill) provide structural and dependency overview without a build-manifest framework.                          |
 
 ---
 
 ### `nono`
 
-| Attribute | Description |
-|-----------|-------------|
-| **What it does** | Rule-based policy enforcement and constraint checking for code generation and modification. |
-| **Why deferred** | Not part of the first-pass foundation. The existing plan-validator, deviation protocol (`plan-drift-protocol` skill), and verification/fix-loop workflow provide a lighter-weight constraint-enforcement path. |
+| Attribute                 | Description                                                                                                                                                                                                                             |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **What it does**          | Rule-based policy enforcement and constraint checking for code generation and modification.                                                                                                                                             |
+| **Why deferred**          | Not part of the first-pass foundation. The existing plan-validator, deviation protocol (`plan-drift-protocol` skill), and verification/fix-loop workflow provide a lighter-weight constraint-enforcement path.                          |
 | **Re-evaluation trigger** | If rule-based policy enforcement becomes a frequent workflow need that the existing validation and deviation-checking layers cannot satisfy — for example, enforcing project-wide coding standards or API constraints programmatically. |
-| **Alternative** | Plan validation (`zflow.plan-validator`), deviation reports (`plan-drift-protocol` skill), and structured verification (verification/fix-loop in `pi-zflow-change-workflows`). |
+| **Alternative**           | Plan validation (`zflow.plan-validator`), deviation reports (`plan-drift-protocol` skill), and structured verification (verification/fix-loop in `pi-zflow-change-workflows`).                                                          |
 
 ---
 
 ### Indexed code navigation foundation
 
-| Attribute | Description |
-|-----------|-------------|
-| **What it does** | Full indexed code navigation (cross-reference index, symbol search, dependency graph) for precise codebase understanding. |
-| **Why deferred** | Complexity is not justified in v1. The combination of repository maps, code skeletons, grep/find/bash exploration, and scout reconnaissance provides adequate codebase understanding for the planned workflow scope. |
+| Attribute                 | Description                                                                                                                                                                                                                                |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **What it does**          | Full indexed code navigation (cross-reference index, symbol search, dependency graph) for precise codebase understanding.                                                                                                                  |
+| **Why deferred**          | Complexity is not justified in v1. The combination of repository maps, code skeletons, grep/find/bash exploration, and scout reconnaissance provides adequate codebase understanding for the planned workflow scope.                       |
 | **Re-evaluation trigger** | If the existing exploration tools (repo-map, scout, grep/find) prove insufficient for navigating very large codebases (>100k files) or for tasks requiring precise cross-reference resolution (e.g., "find all callers of this function"). |
-| **Alternative** | Layered approach: repo maps for orientation → code skeletons for structure → targeted `grep`/`find`/`rg` for precise queries → scout for task-specific reconnaissance. |
+| **Alternative**           | Layered approach: repo maps for orientation → code skeletons for structure → targeted `grep`/`find`/`rg` for precise queries → scout for task-specific reconnaissance.                                                                     |
 
 ---
 
 ### `codemapper` stack
 
-| Attribute | Description |
-|-----------|-------------|
-| **What it does** | Symbol-indexing and code-navigation stack that provides cross-reference databases and query interfaces. |
-| **Why deferred** | Not part of the indexed-navigation foundation per the master plan. The `codemapper` stack is intentionally excluded from the v1 foundation to avoid premature commitment to a specific indexing architecture. |
-| **Re-evaluation trigger** | Same as indexed code navigation above. If indexed navigation is later piloted, a thin wrapper around `cymbal` should be preferred over adopting `codemapper` as a foundation. |
-| **Alternative** | Same layered approach as indexed code navigation above. If indexed navigation is piloted later, use a thin wrapper around **`cymbal`** rather than `codemapper`. |
+| Attribute                 | Description                                                                                                                                                                                                   |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **What it does**          | Symbol-indexing and code-navigation stack that provides cross-reference databases and query interfaces.                                                                                                       |
+| **Why deferred**          | Not part of the indexed-navigation foundation per the master plan. The `codemapper` stack is intentionally excluded from the v1 foundation to avoid premature commitment to a specific indexing architecture. |
+| **Re-evaluation trigger** | Same as indexed code navigation above. If indexed navigation is later piloted, a thin wrapper around `cymbal` should be preferred over adopting `codemapper` as a foundation.                                 |
+| **Alternative**           | Same layered approach as indexed code navigation above. If indexed navigation is piloted later, use a thin wrapper around **`cymbal`** rather than `codemapper`.                                              |
 
 ## Relationship to current context management layers
 
 The Phase 8 context management layers handle the use cases that these deferred
 systems would address, using simpler, more transparent mechanisms:
 
-| Deferred system | Phase 8 equivalent | Why simpler |
-|-----------------|-------------------|-------------|
-| `pi-dcp` | Compaction summaries + canonical artifact rereads | No new framework; leverages existing Pi compaction hooks |
-| `pi-observational-memory` | File-backed artifacts in `<runtime-state-dir>` | Explicit, inspectable, no opaque memory stack |
-| `manifest.build` | Repo maps + code skeletons | No build-analysis dependency; pure file-tree + grep |
-| `nono` | Plan validation + deviation protocol + verification loops | Lighter weight; no rule engine needed |
-| Indexed code nav | Repo maps + scout + grep/find | No index build/maintenance cost; sufficient for v1 scope |
-| `codemapper` stack | Same layered approach; `cymbal` wrapper if needed later | Avoids premature architecture commitment |
+| Deferred system           | Phase 8 equivalent                                        | Why simpler                                              |
+| ------------------------- | --------------------------------------------------------- | -------------------------------------------------------- |
+| `pi-dcp`                  | Compaction summaries + canonical artifact rereads         | No new framework; leverages existing Pi compaction hooks |
+| `pi-observational-memory` | File-backed artifacts in `<runtime-state-dir>`            | Explicit, inspectable, no opaque memory stack            |
+| `manifest.build`          | Repo maps + code skeletons                                | No build-analysis dependency; pure file-tree + grep      |
+| `nono`                    | Plan validation + deviation protocol + verification loops | Lighter weight; no rule engine needed                    |
+| Indexed code nav          | Repo maps + scout + grep/find                             | No index build/maintenance cost; sufficient for v1 scope |
+| `codemapper` stack        | Same layered approach; `cymbal` wrapper if needed later   | Avoids premature architecture commitment                 |
 
 ## When to revisit
 

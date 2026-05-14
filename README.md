@@ -910,14 +910,14 @@ The following context-management and navigation systems are **intentionally excl
 from the v1 foundation. They must not be added without explicit
 re-evaluation against the Phase 8 baseline:
 
-| System | Status | Alternative |
-|--------|--------|-------------|
-| `pi-dcp` | Deferred | Compaction summaries + canonical artifact rereads |
-| `pi-observational-memory` | Deferred | File-backed artifacts in `<runtime-state-dir>` |
-| `manifest.build` | Deferred | Repo maps + code skeletons |
-| `nono` | Deferred | Plan validation + deviation protocol + verification loops |
-| Indexed code navigation | Deferred | Repo maps + scout + grep/find |
-| `codemapper` stack | Deferred | Cymbal wrapper if indexed nav needed later |
+| System                    | Status   | Alternative                                               |
+| ------------------------- | -------- | --------------------------------------------------------- |
+| `pi-dcp`                  | Deferred | Compaction summaries + canonical artifact rereads         |
+| `pi-observational-memory` | Deferred | File-backed artifacts in `<runtime-state-dir>`            |
+| `manifest.build`          | Deferred | Repo maps + code skeletons                                |
+| `nono`                    | Deferred | Plan validation + deviation protocol + verification loops |
+| Indexed code navigation   | Deferred | Repo maps + scout + grep/find                             |
+| `codemapper` stack        | Deferred | Cymbal wrapper if indexed nav needed later                |
 
 See `docs/deferred-pilots.md` for the full deferral details, rationale, and
 re-evaluation criteria.
