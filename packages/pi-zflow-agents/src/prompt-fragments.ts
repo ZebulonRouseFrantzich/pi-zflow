@@ -38,7 +38,8 @@ import type { ReminderId } from "./prompt-assembly.js"
 // ── Types ──────────────────────────────────────────────────────
 
 /**
- * Supported mode fragment identifiers — mirrors the set in prompt-assembly.ts.
+ * Supported mode fragment identifiers — mirrors the set in prompt-assembly.ts,
+ * extended with guidance fragments that are also stored under modes/.
  */
 export type ModeFragment =
   | "change-prepare"
@@ -46,6 +47,8 @@ export type ModeFragment =
   | "plan-mode"
   | "review-pr"
   | "zflow-clean"
+  | "scout-reconnaissance"
+  | "code-skeleton-guide"
 
 // ── Fragment directory resolution ──────────────────────────────
 
@@ -82,6 +85,7 @@ function resolveFragmentPath(name: ModeFragment | ReminderId | "root-orchestrato
   const modeNames: ModeFragment[] = [
     "change-prepare", "change-implement", "plan-mode",
     "review-pr", "zflow-clean",
+    "scout-reconnaissance", "code-skeleton-guide",
   ]
   if ((modeNames as string[]).includes(name)) {
     return path.join(base, "modes", `${name}.md`)

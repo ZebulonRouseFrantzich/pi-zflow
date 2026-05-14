@@ -74,6 +74,11 @@ import { writeDeviationSummary, readDeviationReports } from "./deviations.js"
 import { getCurrentBranch } from "./git-preflight.js"
 import { getZflowRegistry } from "pi-zflow-core/registry"
 import {
+  isRepoMapFresh,
+  writeRepoMapCache,
+  computeRepoStructureHash,
+} from "./repo-map-cache.js"
+import {
   resolveVerificationCommand,
   runVerification,
   appendFailureLog,
@@ -301,6 +306,51 @@ export function buildAllSubagentLaunchPlans(
   }
 
   return plans
+}
+
+/**
+ * Inject agent-specific guidance fragments into a subagent prompt.
+ *
+ * For scout/context-builder agents, appends the scout-reconnaissance guide.
+ * For planner/review agents, appends the code-skeleton guide.
+ *
+ * @param agentName - The agent runtime name (e.g. "builtin:scout", "zflow.planner-frontier").
+ * @param prompt - The base prompt to extend.
+ * @returns The prompt with guidance fragment appended, or original prompt if none applies.
+ */
+export async function injectAgentGuidanceFragments(
+  agentName: string,
+  prompt: string,
+): Promise<string> {
+  const parts: string[] = []
+
+  if (agentName.includes("scout") || agentName.includes("context-builder")) {
+    try {
+      const { loadFragment } = await import("pi-zflow-agents")
+      const fragment = await loadFragment("scout-reconnaissance")
+      parts.push(fragment.trim())
+    } catch {
+      // Fragment not available — skip
+    }
+  }
+
+  if (
+    agentName.includes("planner") ||
+    agentName.includes("plan-review") ||
+    agentName.includes("review-")
+  ) {
+    try {
+      const { loadFragment } = await import("pi-zflow-agents")
+      const fragment = await loadFragment("code-skeleton-guide")
+      parts.push(fragment.trim())
+    } catch {
+      // Fragment not available — skip
+    }
+  }
+
+  if (parts.length === 0) return prompt
+
+  return prompt + "\n\n" + parts.join("\n\n")
 }
 
 // ── Workflow execution plan builder ─────────────────────────────
@@ -2697,6 +2747,15 @@ export async function resolveProfileIfAvailable(
  * @returns An object with the output path and entry count.
  */
 export async function buildRepoMap(cwd?: string): Promise<{ path: string; entries: number }> {
+  // Check cache freshness first — reuse existing map if repo structure is unchanged
+  const { fresh } = await isRepoMapFresh(cwd)
+  if (fresh) {
+    const cached = await (await import("./repo-map-cache.js")).readRepoMapCache(cwd)
+    if (cached) {
+      return { path: cached.path, entries: cached.entryCount }
+    }
+  }
+
   const { default: fs } = await import("node:fs/promises")
   const { default: path } = await import("node:path")
   const { execFileSync } = await import("node:child_process")
@@ -2786,7 +2845,59 @@ export async function buildRepoMap(cwd?: string): Promise<{ path: string; entrie
     }
   }
 
-  // Build the content
+  // Collect additional metadata for enriched content
+  let entryPoints: string[] = []
+  let configFiles: string[] = []
+  let keyExports: string[] = []
+
+  if (repoRoot) {
+    try {
+      const { execFileSync: execSync } = await import("node:child_process")
+
+      // Entry points: common entry file patterns
+      const entryPatterns = ["index.ts", "index.js", "main.ts", "main.js", "cli.ts", "cli.js"]
+      for (const pattern of entryPatterns) {
+        try {
+          execSync("git", ["ls-files", `*${pattern}`], {
+            cwd: repoRoot, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"],
+          }).trim().split("\n").filter(Boolean).forEach(f => {
+            if (!entryPoints.includes(f)) entryPoints.push(f)
+          })
+        } catch { /* skip */ }
+      }
+
+      // Config files
+      const configPatterns = ["package.json", "tsconfig.json", ".env*", "Dockerfile*", "docker-compose*", "Makefile", "*.config.ts", "*.config.js", ".gitignore", ".eslintrc*", ".prettierrc*", "jest.config*"]
+      for (const pattern of configPatterns) {
+        try {
+          const matches = execSync("find", [repoRoot, "-maxdepth", "2", "-name", pattern, "-not", "-path", "*/node_modules/*", "-not", "-path", "*/.git/*"], {
+            encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"],
+          }).trim().split("\n").filter(Boolean)
+          matches.forEach(f => {
+            const relative = f.startsWith(repoRoot) ? f.slice(repoRoot.length + 1) : f
+            if (!configFiles.includes(relative)) configFiles.push(relative)
+          })
+        } catch { /* skip */ }
+      }
+
+      // Key exports: look for `export` in key index files
+      for (const entryFile of entryPoints.slice(0, 5)) {
+        try {
+          const content = execSync("head", ["-40", path.join(repoRoot, entryFile)], {
+            encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"],
+          }).trim()
+          const exports = content.split("\n").filter(l => l.includes("export ") && !l.includes("export type"))
+            .map(l => l.trim()).slice(0, 10)
+          if (exports.length > 0) {
+            keyExports.push(`### ${entryFile}`)
+            exports.forEach(e => keyExports.push(`- \`${e}\``))
+          }
+        } catch { /* skip */ }
+      }
+    } catch { /* tools unavailable */ }
+  }
+
+  // Build enriched content — target ~200 lines max
   const lines: string[] = [
     "# Repository Map",
     "",
@@ -2805,21 +2916,94 @@ export async function buildRepoMap(cwd?: string): Promise<{ path: string; entrie
     lines.push(`- **Workspaces**: ${workspaces.join(", ")}`, "")
   }
 
-  if (topLevelDirs.length > 0) {
-    lines.push("## Top-level structure", "")
-    for (const entry of topLevelDirs.slice(0, 50)) {
-      lines.push(`- ${entry}`)
+  // Depth-3 directory tree — in-process bounded traversal (no shell find)
+  if (repoRoot) {
+    try {
+      const MAX_TREE_FILES = 80
+      const MAX_DEPTH = 3
+      const excludeDirNames = new Set(["node_modules", ".git"])
+      const collectedFiles: string[] = []
+
+      const walkDir = async (dir: string, depth: number): Promise<void> => {
+        if (depth > MAX_DEPTH || collectedFiles.length >= MAX_TREE_FILES) return
+        let entries
+        try {
+          entries = await fs.readdir(dir, { withFileTypes: true })
+        } catch {
+          return
+        }
+        for (const entry of entries) {
+          if (collectedFiles.length >= MAX_TREE_FILES) break
+          const fullPath = path.join(dir, entry.name)
+          if (entry.isDirectory()) {
+            if (excludeDirNames.has(entry.name)) continue
+            await walkDir(fullPath, depth + 1)
+          } else if (entry.isFile()) {
+            const relative = fullPath.startsWith(repoRoot)
+              ? fullPath.slice(repoRoot.length + 1)
+              : fullPath
+            collectedFiles.push(relative)
+          }
+        }
+      }
+
+      await walkDir(repoRoot, 0)
+
+      if (collectedFiles.length > 0) {
+        lines.push("## Directory structure", "")
+        // Build a tree-like representation
+        const tree = new Map<string, string[]>()
+        for (const relative of collectedFiles) {
+          const parts = relative.split("/")
+          if (parts.length > 1) {
+            const dir = parts.slice(0, -1).join("/")
+            if (!tree.has(dir)) tree.set(dir, [])
+            tree.get(dir)!.push(parts[parts.length - 1])
+          }
+        }
+        for (const [dir, entries] of [...tree.entries()].slice(0, 30)) {
+          lines.push(`- \`${dir}/\``)
+          for (const entry of entries.slice(0, 5)) {
+            lines.push(`  - ${entry}`)
+          }
+          if (entries.length > 5) lines.push(`  - ... (${entries.length - 5} more)`)
+        }
+        lines.push("")
+      }
+    } catch { /* skip */ }
+  }
+
+  // Entry points and config files
+  if (entryPoints.length > 0) {
+    lines.push("## Entry points", "")
+    for (const ep of entryPoints.slice(0, 15)) {
+      lines.push(`- \`${ep}\``)
     }
-    if (topLevelDirs.length > 50) {
-      lines.push(`- ... and ${topLevelDirs.length - 50} more items`)
+    lines.push("")
+  }
+
+  if (configFiles.length > 0) {
+    lines.push("## Config files", "")
+    for (const cf of configFiles.slice(0, 15)) {
+      lines.push(`- \`${cf}\``)
     }
+    lines.push("")
+  }
+
+  // Key module exports
+  if (keyExports.length > 0) {
+    lines.push("## Key exports", "")
+    lines.push(...keyExports)
     lines.push("")
   }
 
   if (changedFiles.length > 0) {
     lines.push("## Changed files", "")
-    for (const file of changedFiles.slice(0, 50)) {
+    for (const file of changedFiles.slice(0, 20)) {
       lines.push(`- \`${file}\``)
+    }
+    if (changedFiles.length > 20) {
+      lines.push(`- ... and ${changedFiles.length - 20} more`)
     }
     lines.push("")
   } else {
@@ -2831,10 +3015,24 @@ export async function buildRepoMap(cwd?: string): Promise<{ path: string; entrie
     lines.push(`- **Detected command**: \`${verificationCommand}\``, "")
   }
 
-  const content = lines.join("\n")
+  // Ensure content doesn't exceed ~250 lines
+  let content = lines.join("\n")
+  const contentLines = content.split("\n")
+  if (contentLines.length > 250) {
+    content = contentLines.slice(0, 245).join("\n") + "\n\n_(content truncated at 250 lines)_\n"
+  }
 
   await fs.mkdir(runtimeStateDir, { recursive: true })
   await fs.writeFile(outputPath, content, "utf-8")
+
+  // Cache the new repo-map for future freshness checks
+  const hash = computeRepoStructureHash(cwd)
+  await writeRepoMapCache({
+    hash,
+    generatedAt: new Date().toISOString(),
+    entryCount: topLevelDirs.length,
+    path: outputPath,
+  }, cwd)
 
   return { path: outputPath, entries: topLevelDirs.length }
 }
@@ -2857,9 +3055,17 @@ export async function buildReconnaissance(
   const { default: fs } = await import("node:fs/promises")
   const { default: pathModule } = await import("node:path")
   const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+  const { isReconFresh, writeReconCache, computeRepoStructureHash: reconHash } =
+    await import("./recon-cache.js")
 
   const runtimeStateDir = resolveRuntimeStateDir(cwd)
   const outputPath = pathModule.join(runtimeStateDir, "reconnaissance.md")
+
+  // Check cache freshness — skip regeneration if still fresh
+  const { fresh } = await isReconFresh(changePath, cwd)
+  if (fresh) {
+    return { path: outputPath }
+  }
 
   // Resolve repo root for git-based context
   let repoRoot = ""
@@ -2962,19 +3168,28 @@ export async function buildReconnaissance(
     }
   }
 
-  // Recent failure-log entries
+  // Recent failure-log entries — relevance-based, not just first N
   try {
-    const failureLogModule = await import("./failure-log.js")
-    const entries = await failureLogModule.readFailureLog(cwd)
-    if (entries.length > 0) {
+    const { loadRecentFailureLogEntries, formatFailureLogReadback } =
+      await import(
+        "../../src/failure-log-helpers.js"
+      )
+
+    // Use change path as search context; fall back to generic planning context
+    const searchContext = changePath
+      ? `planning implementation for ${pathModule.basename(changePath)}`
+      : "codebase exploration and planning"
+
+    const relevantEntries = await loadRecentFailureLogEntries({
+      context: searchContext,
+      limit: 3,
+      maxAge: 30,
+      cwd,
+    })
+
+    if (relevantEntries.length > 0) {
       lines.push("## Recent failure-log entries", "")
-      for (const entry of entries.slice(0, 5)) {
-        lines.push(`- **${entry.timestamp}**: ${entry.context || "unknown"}`)
-        if (entry.rootCause) lines.push(`  - Root cause: ${entry.rootCause}`)
-      }
-      if (entries.length > 5) {
-        lines.push(`- ... and ${entries.length - 5} more`)
-      }
+      lines.push(formatFailureLogReadback(relevantEntries))
       lines.push("")
     }
   } catch {
@@ -2986,7 +3201,113 @@ export async function buildReconnaissance(
   await fs.mkdir(runtimeStateDir, { recursive: true })
   await fs.writeFile(outputPath, content, "utf-8")
 
+  // Cache the new reconnaissance for future freshness checks
+  await writeReconCache({
+    hash: reconHash(cwd),
+    generatedAt: new Date().toISOString(),
+    changePath: changePath ?? null,
+    path: outputPath,
+  }, cwd)
+
   return { path: outputPath }
+}
+
+// ── Compaction reanchor helpers ───────────────────────────────────
+
+/**
+ * Resolve canonical artifact paths for post-compaction rereading.
+ *
+ * Returns a record of well-known artifact identifiers mapped to their
+ * resolved absolute file paths in the runtime state directory.
+ * Callers use these to inject into agent context after compaction.
+ *
+ * @param options - Optional change ID/cwd pair. For backwards compatibility,
+ *   a single string argument is treated as `cwd`; pass `{ changeId, cwd }` or
+ *   `(changeId, cwd)` to include plan-state.
+ * @param cwd - Working directory when passing `changeId` as the first argument.
+ * @returns Record of artifact ID → absolute path.
+ */
+export async function buildCompactionReanchorArtifacts(
+  options?: { changeId?: string; cwd?: string } | string,
+  cwd?: string,
+): Promise<Record<string, string>> {
+  const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+  const { default: pathModule } = await import("node:path")
+  const { default: fs } = await import("node:fs/promises")
+
+  const changeId = typeof options === "object" ? options.changeId : cwd ? options : undefined
+  const resolvedCwd = typeof options === "object" ? options.cwd : cwd ?? options
+  const runtimeStateDir = resolveRuntimeStateDir(resolvedCwd)
+  const paths: Record<string, string> = {}
+
+  // Well-known artifacts that exist if generated
+  const wellKnown: Record<string, string> = {
+    "repo-map": "repo-map.md",
+    "reconnaissance": "reconnaissance.md",
+    "failure-log": "failure-log.md",
+    "findings": "findings.md",
+    "workflow-state": "workflow-state.json",
+  }
+
+  for (const [id, relativePath] of Object.entries(wellKnown)) {
+    const absPath = pathModule.join(runtimeStateDir, relativePath)
+    try {
+      await fs.access(absPath)
+      paths[id] = absPath
+    } catch {
+      // Artifact not yet generated — skip
+    }
+  }
+
+  // Plan-state resolves via artifact-paths only when changeId is provided
+  if (changeId) {
+    try {
+      const { resolvePlanStatePath } = await import("pi-zflow-artifacts/artifact-paths")
+      const planPath = resolvePlanStatePath(changeId, resolvedCwd)
+      try {
+        await fs.access(planPath)
+        paths["plan-state"] = planPath
+      } catch { /* not created yet */ }
+    } catch {
+      // pi-zflow-artifacts not available — skip plan-state
+    }
+  }
+
+  return paths
+}
+
+/**
+ * Merge compaction-handoff metadata into existing agent launch options.
+ *
+ * Adds the `"compaction-handoff"` reminder ID and canonical artifact paths
+ * to an existing options object without dropping existing entries.
+ * This is designed to be called after compaction/resume before building a
+ * subagent launch plan.
+ *
+ * @param options - Existing launch options (optional).
+ * @returns A new options object with compaction-handoff merged in.
+ */
+export function withCompactionHandoff(
+  options?: {
+    activeReminders?: string[]
+    artifactPaths?: Record<string, string>
+  },
+): {
+  activeReminders: string[]
+  artifactPaths?: Record<string, string>
+} {
+  const base = options?.activeReminders ?? []
+
+  // Add compaction-handoff if not already present
+  const activeReminders = base.includes("compaction-handoff")
+    ? base
+    : [...base, "compaction-handoff"]
+
+  // Preserve existing artifact paths (caller should merge via
+  // buildCompactionReanchorArtifacts separately if desired)
+  const artifactPaths = options?.artifactPaths
+
+  return { activeReminders, artifactPaths }
 }
 
 // ═══════════════════════════════════════════════════════════════════
