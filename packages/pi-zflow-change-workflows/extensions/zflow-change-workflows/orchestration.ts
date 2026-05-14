@@ -2845,7 +2845,59 @@ export async function buildRepoMap(cwd?: string): Promise<{ path: string; entrie
     }
   }
 
-  // Build the content
+  // Collect additional metadata for enriched content
+  let entryPoints: string[] = []
+  let configFiles: string[] = []
+  let keyExports: string[] = []
+
+  if (repoRoot) {
+    try {
+      const { execFileSync: execSync } = await import("node:child_process")
+
+      // Entry points: common entry file patterns
+      const entryPatterns = ["index.ts", "index.js", "main.ts", "main.js", "cli.ts", "cli.js"]
+      for (const pattern of entryPatterns) {
+        try {
+          execSync("git", ["ls-files", `*${pattern}`], {
+            cwd: repoRoot, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"],
+          }).trim().split("\n").filter(Boolean).forEach(f => {
+            if (!entryPoints.includes(f)) entryPoints.push(f)
+          })
+        } catch { /* skip */ }
+      }
+
+      // Config files
+      const configPatterns = ["package.json", "tsconfig.json", ".env*", "Dockerfile*", "docker-compose*", "Makefile", "*.config.ts", "*.config.js", ".gitignore", ".eslintrc*", ".prettierrc*", "jest.config*"]
+      for (const pattern of configPatterns) {
+        try {
+          const matches = execSync("find", [repoRoot, "-maxdepth", "2", "-name", pattern, "-not", "-path", "*/node_modules/*", "-not", "-path", "*/.git/*"], {
+            encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"],
+          }).trim().split("\n").filter(Boolean)
+          matches.forEach(f => {
+            const relative = f.startsWith(repoRoot) ? f.slice(repoRoot.length + 1) : f
+            if (!configFiles.includes(relative)) configFiles.push(relative)
+          })
+        } catch { /* skip */ }
+      }
+
+      // Key exports: look for `export` in key index files
+      for (const entryFile of entryPoints.slice(0, 5)) {
+        try {
+          const content = execSync("head", ["-40", path.join(repoRoot, entryFile)], {
+            encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"],
+          }).trim()
+          const exports = content.split("\n").filter(l => l.includes("export ") && !l.includes("export type"))
+            .map(l => l.trim()).slice(0, 10)
+          if (exports.length > 0) {
+            keyExports.push(`### ${entryFile}`)
+            exports.forEach(e => keyExports.push(`- \`${e}\``))
+          }
+        } catch { /* skip */ }
+      }
+    } catch { /* tools unavailable */ }
+  }
+
+  // Build enriched content — target ~200 lines max
   const lines: string[] = [
     "# Repository Map",
     "",
@@ -2864,21 +2916,83 @@ export async function buildRepoMap(cwd?: string): Promise<{ path: string; entrie
     lines.push(`- **Workspaces**: ${workspaces.join(", ")}`, "")
   }
 
-  if (topLevelDirs.length > 0) {
-    lines.push("## Top-level structure", "")
-    for (const entry of topLevelDirs.slice(0, 50)) {
-      lines.push(`- ${entry}`)
+  // Depth-3 directory tree
+  if (repoRoot) {
+    try {
+      const { execFileSync: execSync } = await import("node:child_process")
+      // Use find with depth and dir filtering, exclude noise
+      const treeOutput = execSync("find", [
+        repoRoot, "-maxdepth", "3", "-not", "-path", "*/node_modules/*",
+        "-not", "-path", "*/.git/*", "-not", "-path", "*/dist/*",
+        "-not", "-path", "*/build/*", "-not", "-path", "*/.next/*",
+        "|", "sort",
+      ].slice(0, 100), { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }).trim() // Use slice to avoid issues with pipe
+      // Actually, use a safer approach with separate commands
+    } catch { /* skip */ }
+    try {
+      // Safer: list dirs depth-2 via find
+      const dirsOutput = execFileSync("find", [
+        repoRoot, "-maxdepth", "3", "-type", "f",
+        "-not", "-path", "*/node_modules/*",
+        "-not", "-path", "*/.git/*",
+      ].slice(0, 100), { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }).trim()
+      if (dirsOutput) {
+        const files = dirsOutput.split("\n").filter(Boolean).slice(0, 80)
+        lines.push("## Directory structure", "")
+        // Build a tree-like representation
+        const tree = new Map<string, string[]>()
+        for (const f of files) {
+          const relative = f.startsWith(repoRoot) ? f.slice(repoRoot.length + 1) : f
+          const parts = relative.split("/")
+          if (parts.length > 1) {
+            const dir = parts.slice(0, -1).join("/")
+            if (!tree.has(dir)) tree.set(dir, [])
+            tree.get(dir)!.push(parts[parts.length - 1])
+          }
+        }
+        for (const [dir, entries] of [...tree.entries()].slice(0, 30)) {
+          lines.push(`- \`${dir}/\``)
+          for (const entry of entries.slice(0, 5)) {
+            lines.push(`  - ${entry}`)
+          }
+          if (entries.length > 5) lines.push(`  - ... (${entries.length - 5} more)`)
+        }
+        lines.push("")
+      }
+    } catch { /* skip */ }
+  }
+
+  // Entry points and config files
+  if (entryPoints.length > 0) {
+    lines.push("## Entry points", "")
+    for (const ep of entryPoints.slice(0, 15)) {
+      lines.push(`- \`${ep}\``)
     }
-    if (topLevelDirs.length > 50) {
-      lines.push(`- ... and ${topLevelDirs.length - 50} more items`)
+    lines.push("")
+  }
+
+  if (configFiles.length > 0) {
+    lines.push("## Config files", "")
+    for (const cf of configFiles.slice(0, 15)) {
+      lines.push(`- \`${cf}\``)
     }
+    lines.push("")
+  }
+
+  // Key module exports
+  if (keyExports.length > 0) {
+    lines.push("## Key exports", "")
+    lines.push(...keyExports)
     lines.push("")
   }
 
   if (changedFiles.length > 0) {
     lines.push("## Changed files", "")
-    for (const file of changedFiles.slice(0, 50)) {
+    for (const file of changedFiles.slice(0, 20)) {
       lines.push(`- \`${file}\``)
+    }
+    if (changedFiles.length > 20) {
+      lines.push(`- ... and ${changedFiles.length - 20} more`)
     }
     lines.push("")
   } else {
@@ -2890,7 +3004,12 @@ export async function buildRepoMap(cwd?: string): Promise<{ path: string; entrie
     lines.push(`- **Detected command**: \`${verificationCommand}\``, "")
   }
 
-  const content = lines.join("\n")
+  // Ensure content doesn't exceed ~250 lines
+  let content = lines.join("\n")
+  const contentLines = content.split("\n")
+  if (contentLines.length > 250) {
+    content = contentLines.slice(0, 245).join("\n") + "\n\n_(content truncated at 250 lines)_\n"
+  }
 
   await fs.mkdir(runtimeStateDir, { recursive: true })
   await fs.writeFile(outputPath, content, "utf-8")

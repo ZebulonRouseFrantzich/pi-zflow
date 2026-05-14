@@ -149,6 +149,7 @@ export function computeRepoStructureHash(cwd?: string): string {
   let branch = ""
   let headSha = ""
   let topLevelEntries: string[] = []
+  let statusEntries: string[] = []
 
   try {
     const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -176,6 +177,14 @@ export function computeRepoStructureHash(cwd?: string): string {
     }).trim()
 
     topLevelEntries = lsTree ? lsTree.split("\n").filter(Boolean) : []
+
+    // Include uncommitted structural changes (new/deleted/modified files)
+    const rawStatus = execFileSync("git", ["status", "--porcelain"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+      cwd: repoRoot,
+    }).trim()
+    statusEntries = rawStatus ? rawStatus.split("\n").filter(Boolean).sort() : []
   } catch {
     // Not in a git repo — hash will be unique per call (always stale)
     const ts = Date.now().toString()
@@ -187,6 +196,7 @@ export function computeRepoStructureHash(cwd?: string): string {
     `branch=${branch}`,
     `head=${headSha}`,
     ...topLevelEntries.sort(),
+    ...statusEntries, // uncommitted changes
   ].join("\n")
 
   return crypto.createHash("sha256").update(canonical).digest("hex")
