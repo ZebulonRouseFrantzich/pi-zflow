@@ -189,6 +189,9 @@ export {
   runVerification,
   appendFailureLog,
   runVerificationFixLoop,
+  handlePlanDrift,
+  createPlanAmendment,
+  buildDriftDetectedReminder,
 }
 
 export type {
@@ -204,6 +207,7 @@ export type {
   FixLoopOptions,
   FixLoopResult,
   FixAttempt,
+  DriftResolution,
 }
 
 // ── Extension activation ────────────────────────────────────────

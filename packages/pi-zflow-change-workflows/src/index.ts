@@ -125,6 +125,17 @@ export type {
   ImplementWorkflowResult,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
+// Plan-drift handling (Phase 7 — versioned replanning on deviation)
+export {
+  handlePlanDrift,
+  createPlanAmendment,
+  buildDriftDetectedReminder,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
+export type {
+  DriftResolution,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
 // Verification and failure log (Phase 7 — verification command resolution)
 export {
   resolveVerificationCommand,

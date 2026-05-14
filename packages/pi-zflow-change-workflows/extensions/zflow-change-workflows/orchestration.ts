@@ -2160,3 +2160,175 @@ export async function runChangeImplementWorkflow(
     verificationStatus: options.skipVerification ? "skipped" : "pending",
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase 7 — Plan-drift handling within the orchestrated workflow
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Result of a drift-resolution flow.
+ */
+export interface DriftResolution {
+  /** The chosen action. */
+  action: "amend" | "cancel" | "inspect"
+  /** Optional notes about the amendment. */
+  amendmentNotes?: string
+}
+
+/**
+ * Handle plan drift detected during implementation.
+ *
+ * Called when the implementation workflow enters a drift-pending state.
+ * This function:
+ * 1. Synthesizes deviation reports into a summary.
+ * 2. Presents the user with structured choices (amend, cancel, inspect).
+ * 3. If amendment is approved, creates v{n+1}, reruns validation/review,
+ *    and prepares for restarting execution.
+ * 4. Marks the previous plan version as superseded.
+ *
+ * @param changeId - The change identifier.
+ * @param currentVersion - The plan version that drifted (e.g. "v1").
+ * @param cwd - Working directory (optional).
+ * @returns A result indicating whether replanning is needed.
+ */
+export async function handlePlanDrift(
+  changeId: string,
+  currentVersion: string,
+  cwd?: string,
+): Promise<{
+  /** Whether replanning (amendment + validation) is needed. */
+  needsReplan: boolean
+  /** The new version string if an amendment was created. */
+  newVersion?: string
+  /** Path to the deviation summary file. */
+  deviationSummaryPath?: string
+}> {
+  // Dynamic import to avoid circular dependency
+  const { readDeviationReports, synthesizeDeviationSummary, writeDeviationSummary } =
+    await import("./deviations.js")
+
+  // 1. Read existing deviation reports for this change/version
+  const reports = await readDeviationReports(changeId, currentVersion, cwd)
+  if (reports.length === 0) {
+    // No deviations to process — return without changes
+    return { needsReplan: false }
+  }
+
+  // 2. Synthesize the deviation reports into a structured summary
+  const summary = synthesizeDeviationSummary(
+    `drift-${changeId}`,
+    changeId,
+    currentVersion,
+    reports,
+  )
+  const summaryPath = await writeDeviationSummary(summary, cwd)
+
+  // 3. Build a gate-prompt for the user to decide what to do
+  //    (the caller uses this with pi-interview to get a decision)
+  const driftContext = [
+    `Change: ${changeId}`,
+    `Version: ${currentVersion}`,
+    `Deviation reports: ${reports.length}`,
+    `Summary path: ${summaryPath}`,
+  ].join("\n")
+
+  void buildImplementationGateQuestions(changeId, "drift", driftContext)
+
+  // 4. Mark the drifted version as superseded in plan-state.json
+  try {
+    await updatePlanState(changeId, {
+      lifecycleState: "drifted",
+      versions: {
+        [currentVersion]: {
+          state: "superseded",
+          createdAt: new Date().toISOString(),
+        },
+      },
+    }, cwd)
+  } catch {
+    // plan-state.json may not exist yet; that's OK
+    console.warn(
+      `[zflow] Could not update plan-state for change "${changeId}" — ` +
+      "plan-state.json may not exist yet.",
+    )
+  }
+
+  return {
+    needsReplan: true,
+    deviationSummaryPath: summaryPath,
+  }
+}
+
+/**
+ * Create a plan amendment after drift resolution.
+ *
+ * Bumps the version number, marks the old version as superseded,
+ * and marks the new version as draft for replanning.
+ *
+ * @param changeId - The change identifier.
+ * @param currentVersion - The version to supersede (e.g. "v1").
+ * @param cwd - Working directory (optional).
+ * @returns The new version string (e.g. "v2").
+ */
+export async function createPlanAmendment(
+  changeId: string,
+  currentVersion: string,
+  cwd?: string,
+): Promise<string> {
+  // Bump the plan version to create a new draft version
+  const newVersion = await bumpPlanVersion(changeId, cwd)
+
+  // Mark the old version as superseded in plan-state.json
+  await markPlanVersionState(changeId, currentVersion, "superseded", cwd)
+
+  // The new version is already marked as "draft" by bumpPlanVersion
+
+  return newVersion
+}
+
+/**
+ * Build the drift-detected runtime reminder string.
+ *
+ * This reminder is injected into the model's context when a run
+ * enters the drift-pending phase. It tells the model where to find
+ * deviation reports and what to do next.
+ *
+ * @param changeId - The change identifier.
+ * @param version - The plan version that drifted.
+ * @param deviationCount - Number of deviation reports found.
+ * @param summaryPath - Optional path to the deviation summary file.
+ * @returns A markdown-formatted reminder string.
+ */
+export function buildDriftDetectedReminder(
+  changeId: string,
+  version: string,
+  deviationCount: number,
+  summaryPath?: string,
+): string {
+  const lines: string[] = [
+    "## Drift Detected",
+    "",
+    `Plan drift detected for change **${changeId}** (version ${version}).`,
+    `Found ${deviationCount} deviation report(s).`,
+  ]
+
+  if (summaryPath) {
+    lines.push(
+      "",
+      `- Summary: \`${summaryPath}\``,
+    )
+  }
+
+  lines.push(
+    "",
+    "Execution is halted until drift is resolved.",
+    "Use the plan approval gate to approve an amendment, cancel, or inspect artifacts.",
+    "",
+    "**Available actions:**",
+    "- **Approve Amendment** — create v{n+1}, re-run validation and review, restart execution",
+    "- **Cancel** — stop the implementation workflow",
+    "- **Inspect Artifacts** — review retained deviation reports and worktree artifacts before deciding",
+  )
+
+  return lines.join("\n")
+}
