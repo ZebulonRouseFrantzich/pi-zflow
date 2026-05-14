@@ -277,4 +277,18 @@ export type {
   ResumeContext,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
+// Path guard integration (Phase 7 — mutation-capable workflow safety enforcement)
+export {
+  guardWrite,
+  guardBashCommand,
+  isGitWriteCommand,
+  buildToolDeniedReminder,
+} from "../extensions/zflow-change-workflows/path-guard.js"
+
+export type {
+  GuardResult,
+  GuardIntent,
+  GuardOptions,
+} from "../extensions/zflow-change-workflows/path-guard.js"
+
 

@@ -182,7 +182,26 @@ import {
   appendFailureEntry,
   formatFailureLogEntries,
   parseFailureLog,
+  guardWrite,
+  guardBashCommand,
+  isGitWriteCommand,
+  buildToolDeniedReminder,
 } from "./failure-log.js"
+
+// ── Path guard helpers ────────────────────────────────────────────
+
+import {
+  guardWrite,
+  guardBashCommand,
+  isGitWriteCommand,
+  buildToolDeniedReminder,
+} from "./path-guard.js"
+
+import type {
+  GuardResult,
+  GuardIntent,
+  GuardOptions,
+} from "./path-guard.js"
 
 import type {
   VerificationResult,
@@ -253,6 +272,9 @@ export type {
   CleanWorkflowResult,
   FailureLogEntry,
   ResumeContext,
+  GuardResult,
+  GuardIntent,
+  GuardOptions,
 }
 
 // ── Extension activation ────────────────────────────────────────
