@@ -152,6 +152,7 @@ import type {
   ImplementationHandoff,
   ImplementWorkflowOptions,
   ImplementWorkflowResult,
+  CodeReviewInputContext,
 } from "./orchestration.js"
 
 import {
@@ -192,6 +193,7 @@ export {
   handlePlanDrift,
   createPlanAmendment,
   buildDriftDetectedReminder,
+  buildCodeReviewInputFromContext,
 }
 
 export type {
@@ -208,6 +210,7 @@ export type {
   FixLoopResult,
   FixAttempt,
   DriftResolution,
+  CodeReviewInputContext,
 }
 
 // ── Extension activation ────────────────────────────────────────

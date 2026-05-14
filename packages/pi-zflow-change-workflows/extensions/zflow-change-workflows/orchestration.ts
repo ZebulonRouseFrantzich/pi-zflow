@@ -71,6 +71,7 @@ import type { GroupResult, GroupVerificationResult } from "./group-result.js"
 import { executeApplyBack } from "./apply-back.js"
 import type { ApplyBackResult } from "./apply-back.js"
 import { writeDeviationSummary, readDeviationReports } from "./deviations.js"
+import { getCurrentBranch } from "./git-preflight.js"
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -768,6 +769,62 @@ export function buildWorkerTask(
   )
 
   return lines.join("\n")
+}
+
+// ── Code review input builder (Task 7.12) ────────────────────────
+
+/**
+ * Input shape for code review, matching the CodeReviewInput interface
+ * from pi-zflow-review's runCodeReview.
+ */
+export interface CodeReviewInputContext {
+  source: string
+  repoPath: string
+  branch: string
+  planningArtifacts: {
+    design: string
+    executionGroups: string
+    standards: string
+    verification: string
+  }
+  verificationStatus: "passed" | "failed" | "skipped" | "unknown"
+  cwd?: string
+}
+
+/**
+ * Build a code review input from the current implementation context.
+ *
+ * Resolves the four canonical plan artifact paths for the given change
+ * and version, and returns an input object ready to pass to
+ * `runCodeReview` from `pi-zflow-review`.
+ *
+ * @param changeId - The change identifier.
+ * @param planVersion - The approved plan version (e.g. "v2").
+ * @param repoRoot - Absolute path to the repository root.
+ * @param verificationStatus - Current verification status. Defaults to "passed".
+ * @param cwd - Working directory for runtime-state resolution (optional).
+ * @returns A code review input object.
+ */
+export function buildCodeReviewInputFromContext(
+  changeId: string,
+  planVersion: string,
+  repoRoot: string,
+  verificationStatus: "passed" | "failed" | "skipped" | "unknown" = "passed",
+  cwd?: string,
+): CodeReviewInputContext {
+  return {
+    source: `Implementation of ${changeId} ${planVersion}`,
+    repoPath: repoRoot,
+    branch: getCurrentBranch(repoRoot),
+    planningArtifacts: {
+      design: resolvePlanArtifactPath(changeId, planVersion, "design", cwd),
+      executionGroups: resolvePlanArtifactPath(changeId, planVersion, "execution-groups", cwd),
+      standards: resolvePlanArtifactPath(changeId, planVersion, "standards", cwd),
+      verification: resolvePlanArtifactPath(changeId, planVersion, "verification", cwd),
+    },
+    verificationStatus,
+    cwd,
+  }
 }
 
 /**

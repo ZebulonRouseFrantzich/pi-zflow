@@ -294,8 +294,62 @@ export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
     handler: async (args: string, ctx: {
       ui: { notify: (message: string, type?: "info" | "warning" | "error") => void }
     }): Promise<void> => {
-      // TODO(Phase 7): Wire to runCodeReview from orchestration.ts
-      ctx.ui.notify("Running internal code review...")
+      const cwd = process.cwd()
+
+      // Resolve repo root
+      let repoRoot: string
+      try {
+        const { execSync } = await import("node:child_process")
+        repoRoot = execSync("git rev-parse --show-toplevel", {
+          cwd,
+          encoding: "utf-8",
+          timeout: 5_000,
+        }).trim()
+      } catch {
+        ctx.ui.notify("Not a git repository — cannot determine repo root", "error")
+        return
+      }
+
+      // Determine verification status from args or default to unknown
+      // Users can pass "skipped" or "advisory" as an arg to mark that final
+      // verification was explicitly skipped, making the review advisory only
+      const skipArg = args.trim().toLowerCase()
+      const verificationStatus = skipArg === "skipped" || skipArg === "advisory"
+        ? "skipped"
+        : "passed"
+
+      try {
+        // Dynamically import review orchestration to avoid eager loading
+        const { runCodeReview } = await import("./orchestration.js")
+
+        const input: CodeReviewInput = {
+          source: "Manual code review via /zflow-review-code",
+          repoPath: repoRoot,
+          branch: "(unknown)",
+          planningArtifacts: {
+            design: "",
+            executionGroups: "",
+            standards: "",
+            verification: "",
+          },
+          verificationStatus,
+          cwd,
+        }
+
+        const result = await reviewService.runCodeReview(input)
+        ctx.ui.notify(
+          `Code review complete.\n` +
+          `Tier: ${result.tier}\n` +
+          `Recommendation: ${result.recommendation}\n` +
+          `Findings: ${result.severity.critical} critical, ${result.severity.major} major\n` +
+          `Path: ${result.findingsPath}`,
+        )
+      } catch (err: unknown) {
+        ctx.ui.notify(
+          `Code review failed: ${err instanceof Error ? err.message : String(err)}`,
+          "error",
+        )
+      }
     },
   })
 

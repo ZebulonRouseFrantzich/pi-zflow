@@ -136,6 +136,15 @@ export type {
   DriftResolution,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
+// Code review input builder (Phase 7 — build review input from implementation context)
+export {
+  buildCodeReviewInputFromContext,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
+export type {
+  CodeReviewInputContext,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
 // Verification and failure log (Phase 7 — verification command resolution)
 export {
   resolveVerificationCommand,
