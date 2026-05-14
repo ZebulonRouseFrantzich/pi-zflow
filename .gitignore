@@ -6,3 +6,6 @@ dist/
 
 # Pi agent project-local state (cached absolute paths, compiled extensions, runtime state)
 .pi/
+
+# Agent workflow scratchpads — transient task tracking, not project documentation
+progress.md
