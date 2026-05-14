@@ -308,6 +308,51 @@ export function buildAllSubagentLaunchPlans(
   return plans
 }
 
+/**
+ * Inject agent-specific guidance fragments into a subagent prompt.
+ *
+ * For scout/context-builder agents, appends the scout-reconnaissance guide.
+ * For planner/review agents, appends the code-skeleton guide.
+ *
+ * @param agentName - The agent runtime name (e.g. "builtin:scout", "zflow.planner-frontier").
+ * @param prompt - The base prompt to extend.
+ * @returns The prompt with guidance fragment appended, or original prompt if none applies.
+ */
+export async function injectAgentGuidanceFragments(
+  agentName: string,
+  prompt: string,
+): Promise<string> {
+  const parts: string[] = []
+
+  if (agentName.includes("scout") || agentName === "builtin:scout" || agentName === "context-builder") {
+    try {
+      const { loadFragment } = await import("pi-zflow-agents")
+      const fragment = await loadFragment("scout-reconnaissance" as any)
+      parts.push(fragment.trim())
+    } catch {
+      // Fragment not available — skip
+    }
+  }
+
+  if (
+    agentName.includes("planner") ||
+    agentName.includes("plan-review") ||
+    agentName.includes("review-")
+  ) {
+    try {
+      const { loadFragment } = await import("pi-zflow-agents")
+      const fragment = await loadFragment("code-skeleton-guide" as any)
+      parts.push(fragment.trim())
+    } catch {
+      // Fragment not available — skip
+    }
+  }
+
+  if (parts.length === 0) return prompt
+
+  return prompt + "\n\n" + parts.join("\n\n")
+}
+
 // ── Workflow execution plan builder ─────────────────────────────
 
 let _workflowIdCounter = 0
