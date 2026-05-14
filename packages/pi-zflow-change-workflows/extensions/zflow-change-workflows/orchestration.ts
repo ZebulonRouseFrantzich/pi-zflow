@@ -1423,6 +1423,120 @@ export interface PrepareWorkflowResult {
 }
 
 /**
+ * Bump the plan version for a change.
+ *
+ * Reads the current plan-state.json, increments the current version
+ * (v1 → v2, v2 → v3, etc.), marks the old version as "superseded"
+ * in the versions map, creates the new version directory, and returns
+ * the new version string.
+ *
+ * @param changeId - The change identifier.
+ * @param cwd - Working directory (optional).
+ * @returns The new version string (e.g. "v2").
+ * @throws If the plan-state.json does not exist or cannot be parsed.
+ */
+export async function bumpPlanVersion(
+  changeId: string,
+  cwd?: string,
+): Promise<string> {
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+  const planStatePath = resolvePlanStatePath(changeId, cwd)
+
+  // Read current plan state
+  const raw = await fs.readFile(planStatePath, "utf-8")
+  const planState = JSON.parse(raw) as {
+    currentVersion: string
+    approvedVersion: string | null
+    lifecycleState: string
+    versions: Record<string, { state: string; createdAt?: string }>
+  }
+
+  const oldVersion = planState.currentVersion
+  const oldVersionNum = parseInt(oldVersion.replace(/^v/, ""), 10)
+  const newVersionNum = oldVersionNum + 1
+  const newVersion = `v${newVersionNum}`
+
+  // Mark old version as superseded
+  if (!planState.versions) {
+    planState.versions = {}
+  }
+  planState.versions[oldVersion] = {
+    ...planState.versions[oldVersion],
+    state: "superseded",
+  }
+
+  // Add new version entry
+  const now = new Date().toISOString()
+  planState.versions[newVersion] = {
+    state: "draft",
+    createdAt: now,
+  }
+
+  // Update current version and lifecycle state
+  planState.currentVersion = newVersion
+  planState.lifecycleState = "draft"
+  planState.updatedAt = now
+
+  // Write updated plan state
+  await fs.writeFile(planStatePath, JSON.stringify(planState, null, 2), "utf-8")
+
+  // Create the new version directory
+  const versionDir = resolvePlanVersionDir(changeId, newVersion, cwd)
+  await fs.mkdir(versionDir, { recursive: true })
+
+  return newVersion
+}
+
+/**
+ * Update the state of a specific plan version.
+ *
+ * Updates the state of a given version in plan-state.json's versions map.
+ * Only processes the "versions" sub-map — does not change lifecycleState
+ * or currentVersion.
+ *
+ * Valid states: "draft", "validated", "reviewed", "approved", "superseded"
+ *
+ * @param changeId - The change identifier.
+ * @param version - The version label (e.g. "v1", "v2").
+ * @param state - The new state for this version.
+ * @param cwd - Working directory (optional).
+ * @throws If the plan-state.json does not exist or the version is not found.
+ */
+export async function markPlanVersionState(
+  changeId: string,
+  version: string,
+  state: "draft" | "validated" | "reviewed" | "approved" | "superseded",
+  cwd?: string,
+): Promise<void> {
+  const { default: fs } = await import("node:fs/promises")
+  const planStatePath = resolvePlanStatePath(changeId, cwd)
+
+  // Read current plan state
+  const raw = await fs.readFile(planStatePath, "utf-8")
+  const planState = JSON.parse(raw) as {
+    versions: Record<string, { state: string; createdAt?: string }>
+  }
+
+  // Validate version exists
+  if (!planState.versions || !planState.versions[version]) {
+    throw new Error(
+      `Version "${version}" not found in plan-state for change "${changeId}". ` +
+      `Available versions: ${Object.keys(planState.versions ?? {}).join(", ")}`,
+    )
+  }
+
+  // Update the version's state
+  planState.versions[version] = {
+    ...planState.versions[version],
+    state,
+  }
+
+  // Write updated plan state
+  await fs.writeFile(planStatePath, JSON.stringify(planState, null, 2), "utf-8")
+}
+
+/**
  * Generate a deterministic but unique change identifier.
  *
  * If a `changePath` is provided, derives a slug from it and appends a

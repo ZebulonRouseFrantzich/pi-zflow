@@ -127,6 +127,8 @@ import {
   promptResumeChoices,
   runChangePrepareWorkflow,
   updatePlanState,
+  bumpPlanVersion,
+  markPlanVersionState,
 } from "./orchestration.js"
 
 import {
@@ -151,6 +153,8 @@ export {
   promptResumeChoices,
   runChangePrepareWorkflow,
   updatePlanState,
+  bumpPlanVersion,
+  markPlanVersionState,
   loadFragment,
   buildReminderInjection,
   buildModeInjection,

@@ -99,6 +99,8 @@ export {
 export {
   runChangePrepareWorkflow,
   updatePlanState,
+  bumpPlanVersion,
+  markPlanVersionState,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
 export type {

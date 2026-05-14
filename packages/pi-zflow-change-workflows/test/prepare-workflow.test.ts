@@ -11,6 +11,8 @@ import { execFileSync } from "node:child_process"
 import {
   runChangePrepareWorkflow,
   updatePlanState,
+  bumpPlanVersion,
+  markPlanVersionState,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
 import type {
