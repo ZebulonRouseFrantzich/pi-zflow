@@ -71,15 +71,15 @@ This is enforced across all agents:
 
 ### Current skill sizes
 
-| Skill                          | Size   | Status                                                          |
-| ------------------------------ | ------ | --------------------------------------------------------------- |
-| `change-doc-workflow`          | 4.4KB  | ✅ Under 5KB                                                    |
-| `code-skeleton`                | 3.4KB  | ✅ Under 5KB                                                    |
-| `implementation-orchestration` | 3.4KB  | ✅ Under 5KB                                                    |
-| `multi-model-code-review`      | 4.5KB  | ✅ Under 5KB                                                    |
-| `plan-drift-protocol`          | 4.1KB  | ✅ Under 5KB                                                    |
-| `repository-map`               | 3.6KB  | ✅ Under 5KB                                                    |
-| `runecontext-workflow`         | 29.5KB | ⚠️ **Known outlier** — covers RuneContext detection, change-doc parsing, and write-back. Loaded **only** for planner-frontier and plan-review-correctness. Consider splitting when RuneContext features stabilize.
+| Skill                          | Size   | Status                                                                                                                                                                                                             |
+| ------------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `change-doc-workflow`          | 4.4KB  | ✅ Under 5KB                                                                                                                                                                                                       |
+| `code-skeleton`                | 3.4KB  | ✅ Under 5KB                                                                                                                                                                                                       |
+| `implementation-orchestration` | 3.4KB  | ✅ Under 5KB                                                                                                                                                                                                       |
+| `multi-model-code-review`      | 4.5KB  | ✅ Under 5KB                                                                                                                                                                                                       |
+| `plan-drift-protocol`          | 4.1KB  | ✅ Under 5KB                                                                                                                                                                                                       |
+| `repository-map`               | 3.6KB  | ✅ Under 5KB                                                                                                                                                                                                       |
+| `runecontext-workflow`         | 29.5KB | ⚠️ **Known outlier** — covers RuneContext detection, change-doc parsing, and write-back. Loaded **only** for planner-frontier and plan-review-correctness. Consider splitting when RuneContext features stabilize. |
 
 ### Prompt fragment sizes
 

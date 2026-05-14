@@ -323,8 +323,7 @@ export default function activateZflowCompactionExtension(pi: ExtensionAPI): void
 
     // Build the enhanced compaction-handoff section with real fragment +
     // role-specific artifact reread reminders.
-    const agentName = typeof event.agent === "string" ? event.agent : undefined
-    const handoffSection = await buildCompactionHandoffSection(agentName)
+    const handoffSection = await buildCompactionHandoffSection()
 
     return {
       systemPrompt: event.systemPrompt + `\n\n${handoffSection}`,
