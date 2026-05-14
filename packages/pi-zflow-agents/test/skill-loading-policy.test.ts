@@ -148,12 +148,17 @@ describe("skill-size-budgets", () => {
         large.push(`${path.basename(path.dirname(f))}: ${content.length} bytes — should be split`)
       }
     }
-    // This is informational, not a hard failure — runecontext-workflow is expected to be large
+    // Known exception: runecontext-workflow (29KB) is large by design —
+    // covers RuneContext detection, change-doc parsing, canonical doc
+    // resolution, and write-back support. Loaded only for planning agents.
+    // All other skills must be under 10KB.
+    const nonRunecontext = large.filter(l => !l.startsWith("runecontext"))
+    assert.equal(nonRunecontext.length, 0,
+      `Skills exceeding 10KB (excluding known exception): ${nonRunecontext.join(", ")}`)
+    // Still log runecontext as informational warning
     if (large.length > 0) {
       console.warn(`Skills exceeding 10KB (consider splitting):\n${large.join("\n")}`)
     }
-    // At minimum runecontext-workflow should be flagged
-    assert.ok(large.length >= 1, "Expected at least one skill over 10KB (runecontext-workflow)")
   })
 })
 

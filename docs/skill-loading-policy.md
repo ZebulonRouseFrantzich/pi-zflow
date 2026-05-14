@@ -79,7 +79,7 @@ This is enforced across all agents:
 | `multi-model-code-review`      | 4.5KB  | ✅ Under 5KB                                                    |
 | `plan-drift-protocol`          | 4.1KB  | ✅ Under 5KB                                                    |
 | `repository-map`               | 3.6KB  | ✅ Under 5KB                                                    |
-| `runecontext-workflow`         | 29.5KB | ⚠️ **Exceeds 5KB significantly — should be reviewed and split** |
+| `runecontext-workflow`         | 29.5KB | ⚠️ **Known outlier** — covers RuneContext detection, change-doc parsing, and write-back. Loaded **only** for planner-frontier and plan-review-correctness. Consider splitting when RuneContext features stabilize.
 
 ### Prompt fragment sizes
 
