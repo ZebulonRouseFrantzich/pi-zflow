@@ -13,3 +13,16 @@ export {
   ensureRtkOrAlert,
 } from "./rtk-check.js"
 export type { RtkCheckResult } from "./rtk-check.js"
+
+// Re-export compaction service
+export {
+  createCompactionService,
+  getCompactionThreshold,
+  chooseCheapCompactionModel,
+  buildCompactionPrompt,
+  getDefaultArtifactPaths,
+} from "./compaction-service.js"
+export type {
+  CompactionService,
+  ModelRegistryLike,
+} from "./compaction-service.js"
