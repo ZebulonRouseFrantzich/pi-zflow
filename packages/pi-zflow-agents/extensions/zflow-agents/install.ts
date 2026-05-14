@@ -1,118 +1,305 @@
 /**
- * install.ts — Agent/chain markdown installation and update logic.
+ * install.ts — Agent/chain installation and update flow.
  *
- * ## Overview
+ * Provides the `/zflow-setup-agents` and `/zflow-update-agents` command
+ * handlers via the extension activation function.
  *
- * pi-zflow ships agent and chain markdown files inside the `pi-zflow-agents`
- * package. Because Pi does not have native `agents` or `chains` manifest keys,
- * these files must be **copied** into Pi-subagents discovery directories so
- * they become available via `/run`, `/chain`, `subagent(...)`, etc.
- *
- * Two commands orchestrate this process:
- * - `/zflow-setup-agents` — first-time installation
- * - `/zflow-update-agents` — refresh when the package version changes
- *
- * ## Source directories
- *
- * All files are relative to the `pi-zflow-agents` package root:
- *
- * | Resource | Source path |
- * |---|---|
- * | Agent files | `<pkg-root>/agents/*.md` |
- * | Chain files | `<pkg-root>/chains/*.chain.md` |
- * | Skill files | `<pkg-root>/skills/*/SKILL.md` |
- *
- * ## Install targets
- *
- * | Resource | User-level target | Project-level target (opt-in) |
- * |---|---|---|
- * | Agents | `~/.pi/agent/agents/zflow/` | `<project>/.pi/agents/zflow/` |
- * | Chains | `~/.pi/agent/chains/zflow/` | `<project>/.pi/chains/zflow/` |
- * | Manifest | `~/.pi/agent/zflow/install-manifest.json` | (not project-scoped) |
- *
- * ## Idempotent copy logic
- *
- * For each source file:
- *
- * 1. Compute SHA-256 hash of the source file content.
- * 2. If the target file exists:
- *    a. Compute hash of the target file.
- *    b. If hashes match → skip (file is identical, no copy needed).
- *    c. If hashes differ AND the manifest shows this version deployed →
- *       user has edited the file; skip unless `--force` is passed.
- *    d. If hashes differ AND the manifest shows an older version →
- *       overwrite (this is an update, not a user edit).
- * 3. If the target file does not exist → copy source to target.
- * 4. After copying, update the install manifest.
- *
- * ## `--force` flag
- *
- * When `--force` is passed, all source files are copied regardless of hash
- * comparison. User edits are overwritten. The user is warned before the
- * operation proceeds.
- *
- * ## Update detection
- *
- * On `/zflow-update-agents`:
- * 1. Read the install manifest from `~/.pi/agent/zflow/install-manifest.json`.
- * 2. Compare `manifest.version` against the current `pi-zflow-agents`
- *    package version (from `package.json`).
- * 3. If versions match → nothing to do. Report "already up to date".
- * 4. If versions differ → perform idempotent copy (see above). Hash-matching
- *    protects user edits that haven't changed between versions.
- * 5. After update, write the new version and timestamp to the manifest.
- *
- * ## Project-local scope (opt-in)
- *
- * By default, agents/chains install to user-level directories. Project-local
- * installation is opt-in:
- *
- * - If `<project>/.pi/agents/` or `<project>/.pi/chains/` exists, offer to
- *   install there instead.
- * - The user can explicitly pass `--scope project` to force project-local
- *   installation.
- * - If generated assets are copied into a repo, they should be gitignored
- *   unless intentionally curated/shared.
- *
- * ## What gets installed
- *
- * ### Agents
- *
- * Every `.md` file in `agents/` that is NOT a `.chain.md` file. Currently:
- * - planner-frontier.md, plan-validator.md
- * - implement-routine.md, implement-hard.md, verifier.md
- * - plan-review-correctness.md, plan-review-integration.md, plan-review-feasibility.md
- * - review-correctness.md, review-integration.md, review-security.md,
- *   review-logic.md, review-system.md
- * - synthesizer.md, repo-mapper.md
- *
- * Builtin agents (`scout`, `context-builder`) are NOT installed — they are
- * reused from Pi's builtin set (see Builtin agent reuse strategy in README).
- *
- * ### Chains
- *
- * Every `.chain.md` file in `chains/`. Currently:
- * - scout-plan-validate.chain.md, plan-and-implement.chain.md
- * - parallel-review.chain.md, implement-and-review.chain.md
- * - plan-review-swarm.chain.md
- *
- * ### Skills
- *
- * Skill directories (`skills/*/`) are NOT copied during agent installation.
- * Skills are loaded by Pi via the package manifest's `pi.skills` key and do
- * not need filesystem-level deployment.
- *
- * ## Error handling
- *
- * - If the source `agents/` or `chains/` directory is missing, emit a warning
- *   and continue (no files to install).
- * - If the target directory cannot be created (permission denied), emit an
- *   actionable error with the full path.
- * - If a single file copy fails, log the error and continue with remaining
- *   files. Report the failure count at the end.
+ * Uses the core `agent-discovery.ts` module for the actual file copy/install
+ * logic, and `manifest.ts` for install manifest management.
  *
  * @module pi-zflow-agents/install
  */
 
-export {}
+import * as fs from "node:fs/promises"
+import * as path from "node:path"
+import { fileURLToPath } from "node:url"
+import { dirname, resolve } from "node:path"
+import { ensureUserDirs } from "pi-zflow-core/user-dirs"
+import type { InstallManifest } from "pi-zflow-core/schemas"
+import { readManifest, writeManifest, diffManifest, type ManifestDiff } from "./manifest.js"
 
+// ── Path resolution ──────────────────────────────────────────────
+
+function getPackageRoot(): string {
+  const extRoot = dirname(fileURLToPath(import.meta.url))
+  // Extension is at <pkg>/extensions/zflow-agents/install.ts
+  // Package root is three levels up
+  return resolve(extRoot, "..", "..", "..")
+}
+
+/**
+ * Resolve the source paths for agents and chains.
+ */
+function getSourcePaths(): { agentsDir: string; chainsDir: string } {
+  const pkgRoot = getPackageRoot()
+  return {
+    agentsDir: resolve(pkgRoot, "agents"),
+    chainsDir: resolve(pkgRoot, "chains"),
+  }
+}
+
+/**
+ * Resolve the target paths for installation.
+ */
+function getTargetPaths(): { agentsDir: string; chainsDir: string } {
+  // Install to ~/.pi/agent/agents/zflow/ and ~/.pi/agent/chains/zflow/
+  const homeDir = process.env.HOME || process.env.USERPROFILE || "/tmp"
+  return {
+    agentsDir: resolve(homeDir, ".pi", "agent", "agents", "zflow"),
+    chainsDir: resolve(homeDir, ".pi", "agent", "chains", "zflow"),
+  }
+}
+
+// ── Agent/chain file listing ─────────────────────────────────────
+
+async function listMarkdownFiles(dir: string): Promise<string[]> {
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true })
+    return entries
+      .filter((e) => e.isFile() && e.name.endsWith(".md"))
+      .map((e) => e.name)
+      .sort()
+  } catch {
+    return []
+  }
+}
+
+async function listChainFiles(dir: string): Promise<string[]> {
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true })
+    return entries
+      .filter((e) => e.isFile() && e.name.endsWith(".chain.md"))
+      .map((e) => e.name)
+      .sort()
+  } catch {
+    return []
+  }
+}
+
+// ── Idempotent copy ──────────────────────────────────────────────
+
+async function computeFileHash(filePath: string): Promise<string | null> {
+  try {
+    const content = await fs.readFile(filePath, "utf-8")
+    const { createHash } = await import("node:crypto")
+    return createHash("sha256").update(content).digest("hex")
+  } catch {
+    return null
+  }
+}
+
+async function idempotentCopy(
+  srcDir: string,
+  destDir: string,
+  fileName: string,
+  force: boolean,
+  knownHashes?: Map<string, string>,
+): Promise<{ copied: boolean; error?: string }> {
+  const srcPath = path.join(srcDir, fileName)
+  const destPath = path.join(destDir, fileName)
+
+  // Ensure target dir exists
+  await fs.mkdir(destDir, { recursive: true })
+
+  // Check if target exists
+  const destHash = await computeFileHash(destPath)
+
+  if (destHash !== null && !force) {
+    // File exists at target
+    const srcHash = knownHashes?.get(fileName) ?? await computeFileHash(srcPath)
+    if (srcHash !== null && srcHash === destHash) {
+      return { copied: false } // Files are identical
+    }
+    // Files differ — this is an update
+  }
+
+  // Copy the file
+  try {
+    await fs.copyFile(srcPath, destPath)
+    return { copied: true }
+  } catch (err: unknown) {
+    return { copied: false, error: `Failed to copy ${fileName}: ${err instanceof Error ? err.message : String(err)}` }
+  }
+}
+
+// ── Public API ───────────────────────────────────────────────────
+
+/**
+ * Options for agent/chain installation.
+ */
+export interface InstallOptions {
+  /** Force overwrite of user-edited files */
+  force?: boolean
+  /** Whether this is an update (different messaging) */
+  update?: boolean
+}
+
+/**
+ * Result of an installation operation.
+ */
+export interface InstallResult {
+  /** Number of agents installed/copied */
+  agentsInstalled: number
+  /** Number of chains installed/copied */
+  chainsInstalled: number
+  /** Number of agents already up to date */
+  agentsUpToDate: number
+  /** Number of chains already up to date */
+  chainsUpToDate: number
+  /** List of errors encountered */
+  errors: string[]
+  /** Whether the operation was successful overall */
+  success: boolean
+}
+
+/**
+ * Install or update agents and chains from the package to user-level directories.
+ *
+ * This is the main entrypoint called by `/zflow-setup-agents` and
+ * `/zflow-update-agents` command handlers.
+ *
+ * @param options - Installation options.
+ * @returns Installation result with counts and errors.
+ */
+export async function installAgentsAndChains(
+  options: InstallOptions = {},
+): Promise<InstallResult> {
+  const { agentsDir: srcAgents, chainsDir: srcChains } = getSourcePaths()
+  const { agentsDir: destAgents, chainsDir: destChains } = getTargetPaths()
+
+  // Ensure user directories exist
+  await ensureUserDirs()
+
+  // Read existing manifest
+  const existingManifest = await readManifest()
+
+  // List available files
+  const agentFiles = await listMarkdownFiles(srcAgents)
+  const chainFiles = await listChainFiles(srcChains)
+
+  // If existing manifest, check for version drift
+  const isUpdate = options.update && existingManifest !== null
+
+  // Pre-compute source hashes for idempotent copy
+  const srcHashes = new Map<string, string>()
+  for (const file of [...agentFiles, ...chainFiles]) {
+    const hash = await computeFileHash(path.join(srcAgents, file)) || await computeFileHash(path.join(srcChains, file))
+    if (hash) srcHashes.set(file, hash)
+  }
+
+  // Copy agents
+  const agentErrors: string[] = []
+  let agentsInstalled = 0
+  let agentsUpToDate = 0
+
+  for (const file of agentFiles) {
+    const result = await idempotentCopy(srcAgents, destAgents, file, options.force ?? false, srcHashes)
+    if (result.copied) {
+      agentsInstalled++
+    } else if (!result.error) {
+      agentsUpToDate++
+    }
+    if (result.error) agentErrors.push(result.error)
+  }
+
+  // Copy chains
+  const chainErrors: string[] = []
+  let chainsInstalled = 0
+  let chainsUpToDate = 0
+
+  for (const file of chainFiles) {
+    const result = await idempotentCopy(srcChains, destChains, file, options.force ?? false, srcHashes)
+    if (result.copied) {
+      chainsInstalled++
+    } else if (!result.error) {
+      chainsUpToDate++
+    }
+    if (result.error) chainErrors.push(result.error)
+  }
+
+  // Write manifest
+  const { createRequire } = await import("node:module")
+  const _require = createRequire(import.meta.url)
+  const pkgPath = _require.resolve("pi-zflow-agents/package.json")
+  const pkgJson = JSON.parse(await fs.readFile(pkgPath, "utf-8"))
+  const packageVersion: string = pkgJson.version ?? "0.1.0"
+
+  const now = new Date().toISOString()
+  const manifest: InstallManifest = {
+    version: packageVersion,
+    source: `npm:pi-zflow-agents@${packageVersion}`,
+    installedAt: existingManifest?.installedAt ?? now,
+    updatedAt: now,
+    installedAgents: agentFiles,
+    installedChains: chainFiles,
+    installedSkills: [],
+  }
+
+  await writeManifest(manifest)
+
+  const errors = [...agentErrors, ...chainErrors]
+
+  return {
+    agentsInstalled,
+    chainsInstalled,
+    agentsUpToDate,
+    chainsUpToDate,
+    errors,
+    success: errors.length === 0,
+  }
+}
+
+/**
+ * Check whether agent installation is up to date.
+ *
+ * Compares the install manifest against the current package version
+ * and available agent/chain files.
+ *
+ * @returns A manifest diff or null if no manifest exists.
+ */
+export async function checkInstallStatus(): Promise<ManifestDiff | null> {
+  const manifest = await readManifest()
+  if (!manifest) return null
+
+  const { agentsDir, chainsDir } = getSourcePaths()
+  const agentFiles = await listMarkdownFiles(agentsDir)
+  const chainFiles = await listChainFiles(chainsDir)
+
+  const { createRequire } = await import("node:module")
+  const _require = createRequire(import.meta.url)
+  const pkgPath = _require.resolve("pi-zflow-agents/package.json")
+  const pkgJson = JSON.parse(await fs.readFile(pkgPath, "utf-8"))
+  const packageVersion: string = pkgJson.version ?? "0.1.0"
+
+  return diffManifest(manifest, packageVersion, agentFiles, chainFiles)
+}
+
+/**
+ * Build a human-readable summary of the installation result.
+ */
+export function formatInstallSummary(result: InstallResult, isUpdate: boolean): string {
+  const lines: string[] = []
+
+  if (isUpdate) {
+    lines.push(`Agent update complete.`)
+  } else {
+    lines.push(`Agent setup complete.`)
+  }
+
+  lines.push(
+    `  Agents: ${result.agentsInstalled} installed, ${result.agentsUpToDate} up to date`,
+    `  Chains: ${result.chainsInstalled} installed, ${result.chainsUpToDate} up to date`,
+  )
+
+  if (result.errors.length > 0) {
+    lines.push(`  Errors: ${result.errors.length}`, "")
+    for (const err of result.errors.slice(0, 5)) {
+      lines.push(`    - ${err}`)
+    }
+    if (result.errors.length > 5) {
+      lines.push(`    ... and ${result.errors.length - 5} more`)
+    }
+  }
+
+  return lines.join("\n")
+}

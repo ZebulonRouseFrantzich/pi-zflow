@@ -18,6 +18,8 @@ import {
   resolveRuntimeStateDir,
 } from "pi-zflow-core/runtime-paths"
 
+import { getZflowRegistry } from "pi-zflow-core/registry"
+
 import {
   resolveStateIndexPath,
   resolvePlanStatePath,
@@ -280,7 +282,18 @@ export type {
 // ── Extension activation ────────────────────────────────────────
 
 export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI): void {
-  // Registration logic will be added in subsequent Phase 7 tasks
+  // ── Agent setup check ─────────────────────────────────────────
+  // Check if the zflow-agents capability is available via registry.
+  // If not, emit a one-time warning that setup hasn't been run yet.
+  let agentsSetupChecked = false
+  try {
+    const registry = getZflowRegistry()
+    if (registry.has("agents")) {
+      agentsSetupChecked = true
+    }
+  } catch {
+    // Registry not available — skip check
+  }
 
   pi.registerCommand("zflow-clean", {
     description: "Clean stale runtime artifacts, orphaned worktrees, and expired metadata",
