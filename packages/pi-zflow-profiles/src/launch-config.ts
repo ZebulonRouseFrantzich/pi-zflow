@@ -35,6 +35,7 @@
  */
 
 import type { ResolvedProfile } from "../extensions/zflow-profiles/profiles.js"
+import { validateWebAccessScope } from "./builtin-overrides.js"
 
 // ── Launch config type ──────────────────────────────────────────
 
@@ -89,7 +90,7 @@ export function buildLaunchConfig(
   // does not override it explicitly
   const resolvedLane = resolvedProfile.resolvedLanes[binding.lane]
 
-  return {
+  const config: LaunchAgentConfig = {
     agent: agentName,
     model: binding.resolvedModel,
     // Binding-level override falls back to lane-level thinking
@@ -98,6 +99,13 @@ export function buildLaunchConfig(
     maxSubagentDepth: binding.maxSubagentDepth,
     thinking: resolvedLane?.thinking,
   }
+
+  const webAccessValidation = validateWebAccessScope(agentName, config.tools)
+  if (!webAccessValidation.valid) {
+    throw new Error(webAccessValidation.reason)
+  }
+
+  return config
 }
 
 /**

@@ -5,6 +5,8 @@ import * as assert from "node:assert"
 import { describe, it } from "node:test"
 
 import { validateWebAccessScope } from "../src/builtin-overrides.js"
+import { buildLaunchConfig } from "../src/launch-config.js"
+import type { ResolvedProfile } from "../extensions/zflow-profiles/profiles.js"
 
 const IMPLEMENTATION_AGENTS = [
   "zflow.implement-routine",
@@ -24,6 +26,36 @@ const ALLOWED_AGENTS = [
   "zflow.review-logic",
   "zflow.review-system",
 ]
+
+function makeResolvedProfile(agentName: string, tools: string): ResolvedProfile {
+  return {
+    profileName: "test-profile",
+    sourcePath: "/tmp/profile.json",
+    resolvedAt: "2026-05-14T00:00:00.000Z",
+    resolvedLanes: {
+      "worker-cheap": {
+        lane: "worker-cheap",
+        model: "openai/gpt-5.4-mini",
+        required: true,
+        optional: false,
+        thinking: "low",
+        status: "resolved",
+      },
+    },
+    agentBindings: {
+      [agentName]: {
+        agent: agentName,
+        lane: "worker-cheap",
+        resolvedModel: "openai/gpt-5.4-mini",
+        optional: false,
+        tools,
+        maxOutput: 8000,
+        maxSubagentDepth: 0,
+        status: "resolved",
+      },
+    },
+  }
+}
 
 describe("web-access validation", () => {
   it("rejects web tools on implementation/verifier/repo-mapper agents", () => {
@@ -71,5 +103,29 @@ describe("web-access validation", () => {
       ["read", "grep", "web_search"],
     )
     assert.equal(result.valid, false)
+  })
+
+  it("buildLaunchConfig rejects profile bindings that grant web tools to implementation agents", () => {
+    const profile = makeResolvedProfile(
+      "zflow.implement-routine",
+      "read, grep, find, ls, bash, edit, write, web_search",
+    )
+
+    assert.throws(
+      () => buildLaunchConfig("zflow.implement-routine", profile),
+      /web-access tools.*not in an allowed role/,
+    )
+  })
+
+  it("buildLaunchConfig allows profile bindings that grant web tools to planner agents", () => {
+    const profile = makeResolvedProfile(
+      "zflow.planner-frontier",
+      "read, grep, find, ls, bash, web_search, fetch_content",
+    )
+
+    const config = buildLaunchConfig("zflow.planner-frontier", profile)
+
+    assert.ok(config)
+    assert.equal(config.tools, "read, grep, find, ls, bash, web_search, fetch_content")
   })
 })
