@@ -2880,9 +2880,17 @@ export async function buildReconnaissance(
   const { default: fs } = await import("node:fs/promises")
   const { default: pathModule } = await import("node:path")
   const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+  const { isReconFresh, writeReconCache, computeRepoStructureHash: reconHash } =
+    await import("./recon-cache.js")
 
   const runtimeStateDir = resolveRuntimeStateDir(cwd)
   const outputPath = pathModule.join(runtimeStateDir, "reconnaissance.md")
+
+  // Check cache freshness — skip regeneration if still fresh
+  const { fresh } = await isReconFresh(changePath, cwd)
+  if (fresh) {
+    return { path: outputPath }
+  }
 
   // Resolve repo root for git-based context
   let repoRoot = ""
@@ -3008,6 +3016,14 @@ export async function buildReconnaissance(
 
   await fs.mkdir(runtimeStateDir, { recursive: true })
   await fs.writeFile(outputPath, content, "utf-8")
+
+  // Cache the new reconnaissance for future freshness checks
+  await writeReconCache({
+    hash: reconHash(cwd),
+    generatedAt: new Date().toISOString(),
+    changePath: changePath ?? null,
+    path: outputPath,
+  }, cwd)
 
   return { path: outputPath }
 }
