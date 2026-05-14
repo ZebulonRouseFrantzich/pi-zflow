@@ -470,8 +470,12 @@ void describe("parsePrFilesResponse", () => {
     assert.equal(files[0].path, "src/feature.ts")
     assert.equal(files[0].status, "added")
     assert.ok(files[0].patch)
+    assert.equal(files[0].additions, 1)
+    assert.equal(files[0].deletions, 0)
     assert.equal(files[1].path, "src/old.ts")
     assert.equal(files[1].status, "removed")
+    assert.equal(files[1].additions, 0)
+    assert.equal(files[1].deletions, 1)
   })
 
   it("should handle empty file list", () => {

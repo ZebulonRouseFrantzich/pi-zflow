@@ -343,13 +343,17 @@ export function parsePrFilesResponse(
   }
 
   // GitLab
-  return (data as Record<string, unknown>[]).map((entry) => ({
-    path: (entry.new_path as string) ?? (entry.path as string) ?? "",
-    status: normalizeFileStatus(entry.new_file ? "added" : entry.renamed_file ? "renamed" : entry.deleted_file ? "removed" : entry.status as string ?? "modified"),
-    additions: 0,
-    deletions: 0,
-    patch: (entry.diff as string) ?? undefined,
-  }))
+  return (data as Record<string, unknown>[]).map((entry) => {
+    const diff = (entry.diff as string) ?? undefined
+    const { additions, deletions } = countDiffLines(diff)
+    return {
+      path: (entry.new_path as string) ?? (entry.path as string) ?? "",
+      status: normalizeFileStatus(entry.new_file ? "added" : entry.renamed_file ? "renamed" : entry.deleted_file ? "removed" : entry.status as string ?? "modified"),
+      additions,
+      deletions,
+      patch: diff,
+    }
+  })
 }
 
 /**
@@ -361,6 +365,34 @@ function normalizeFileStatus(status: string): PrFile["status"] {
   if (s === "removed" || s === "deleted" || s === "deletion") return "removed"
   if (s === "renamed" || s === "rename") return "renamed"
   return "modified"
+}
+
+/**
+ * Count additions and deletions from a unified diff string.
+ *
+ * Counts lines starting with `+` (excluding `+++`) as additions,
+ * and lines starting with `-` (excluding `---`) as deletions.
+ * Handles undefined/null by returning 0/0.
+ *
+ * @param diff - Unified diff string, or undefined/null.
+ * @returns Object with addition and deletion counts.
+ */
+export function countDiffLines(
+  diff: string | undefined | null,
+): { additions: number; deletions: number } {
+  if (!diff) return { additions: 0, deletions: 0 }
+
+  let additions = 0
+  let deletions = 0
+
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+++")) continue
+    if (line.startsWith("---")) continue
+    if (line.startsWith("+")) additions++
+    if (line.startsWith("-")) deletions++
+  }
+
+  return { additions, deletions }
 }
 
 /**

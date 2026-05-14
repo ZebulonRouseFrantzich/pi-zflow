@@ -144,6 +144,7 @@ export {
   buildFetchCommands,
   parsePrMetadataResponse,
   parsePrFilesResponse,
+  countDiffLines,
   combineDiffContent,
   fetchPrDiff,
   fetchAllPrFiles,
@@ -293,6 +294,7 @@ export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
     handler: async (args: string, ctx: {
       ui: { notify: (message: string, type?: "info" | "warning" | "error") => void }
     }): Promise<void> => {
+      // TODO(Phase 7): Wire to runCodeReview from orchestration.ts
       ctx.ui.notify("Running internal code review...")
     },
   })
@@ -302,6 +304,7 @@ export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
     handler: async (args: string, ctx: {
       ui: { notify: (message: string, type?: "info" | "warning" | "error") => void }
     }): Promise<void> => {
+      // TODO(Phase 7): Wire to runPrReview from orchestration.ts
       const url = args.trim()
       if (!url) {
         ctx.ui.notify(

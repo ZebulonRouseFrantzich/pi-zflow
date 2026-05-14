@@ -12,10 +12,7 @@
  * @module pi-zflow-review/orchestration
  */
 
-import * as path from "node:path"
-import * as fs from "node:fs/promises"
 import { execSync } from "node:child_process"
-import { resolveRuntimeStateDir } from "pi-zflow-core/runtime-paths"
 
 import {
   resolveDiffBaseline,
@@ -40,6 +37,7 @@ import {
   buildExternalReviewPrompt,
   type InternalReviewContext,
   type ExternalReviewContext,
+  type PrMetadata,
 } from "./review-context.js"
 
 import {
@@ -160,6 +158,7 @@ export interface PrReviewInput {
   metadata: {
     title: string
     description: string
+    state: string
     headSha: string
     baseSha: string
   }
@@ -316,7 +315,6 @@ export async function runCodeReview(
         }
         coverageNotes.push(`Reviewer "${name}" executed`)
       } else {
-        const name = "(unknown)"
         coverageNotes.push(`Reviewer failed: ${result.reason}`)
       }
     }
@@ -425,13 +423,14 @@ export async function runPrReview(
   const chunkCount = chunkResult.chunkCount
 
   // Build external review prompts with diff-only instructions
-  const prMetadata = {
+  const prMetadata: PrMetadata = {
     platform: input.target.platform,
     owner: input.target.owner,
     repo: input.target.repo,
     number: input.target.number,
     title: input.metadata.title,
     description: input.metadata.description,
+    state: "open",
     headSha: input.metadata.headSha,
     baseSha: input.metadata.baseSha,
     url: input.target.url,
@@ -456,12 +455,12 @@ export async function runPrReview(
     const runner = input.reviewerRunner
     const chunkResults = await Promise.allSettled(
       chunkResult.chunks.map(async (chunk) => {
-        const prompt = buildExternalReviewPrompt("pr-reviewer", {
+        const promptStr = await buildExternalReviewPrompt("pr-reviewer", {
           diffChunks: [chunk],
-          prMetadata: prMetadata as any,
+          prMetadata,
           diffOnlyInstructions: diffOnlyInstruction,
         })
-        return { chunkId: chunk.chunkId, prompt: await prompt, output: await runner("pr-reviewer", await prompt) }
+        return { chunkId: chunk.chunkId, prompt: promptStr, output: await runner("pr-reviewer", promptStr) }
       }),
     )
 

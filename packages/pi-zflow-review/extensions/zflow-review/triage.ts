@@ -158,17 +158,6 @@ export function processTriageResponses(
     responseMap.set(r.findingId, r)
   }
 
-  // Build a mapping from index to findingId (same algorithm as buildTriageQuestions)
-  const indexToFindingId = new Map<number, string>()
-  for (let i = 0; i < findings.length; i++) {
-    indexToFindingId.set(i, makeFindingId(i))
-  }
-  // Build reverse mapping from findingId to index
-  const findingIdToIndex = new Map<string, number>()
-  for (const [idx, fid] of indexToFindingId) {
-    findingIdToIndex.set(fid, idx)
-  }
-
   const submitFindings: PrReviewFinding[] = []
   const dismissedFindings: PrReviewFinding[] = []
   let hadEdits = false
