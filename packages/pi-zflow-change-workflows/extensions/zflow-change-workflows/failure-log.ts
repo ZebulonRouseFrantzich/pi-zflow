@@ -162,7 +162,7 @@ export function parseFailureLog(content: string): FailureLogEntry[] {
         const value = match[2].trim()
         const key = FIELD_LABEL_TO_KEY[label]
         if (key && value) {
-          ;(entry as Record<string, unknown>)[key] = value
+          ;(entry as unknown as Record<string, unknown>)[key] = value
         }
       }
       // Lines that are not field markers are silently ignored (e.g.,

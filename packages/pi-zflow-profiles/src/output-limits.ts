@@ -70,7 +70,10 @@ export const EXPECTED_MAX_OUTPUT: Record<string, number> = {
   // Synthesis tier
   "zflow.synthesizer": 12000,
 
-  // Builtin agents (reference; enforced via builtin-overrides module)
+  // Builtin agents (reference; enforced via builtin-overrides module).
+  // Support both historical dash names and Pi runtime colon names.
+  "builtin-scout": 6000,
+  "builtin-context-builder": 6000,
   "builtin:scout": 6000,
   "builtin:context-builder": 6000,
 } as const
@@ -80,13 +83,15 @@ export const EXPECTED_MAX_OUTPUT: Record<string, number> = {
 /**
  * Strip namespace prefixes from an agent name, returning just the short name.
  *
- * Handles both `zflow.*` (e.g. "zflow.planner-frontier" → "planner-frontier")
- * and `builtin:*` (e.g. "builtin:scout" → "scout") prefixes.
+ * Handles `zflow.*` (e.g. "zflow.planner-frontier" → "planner-frontier"),
+ * `builtin:*` (e.g. "builtin:scout" → "scout"), and historical
+ * `builtin-*` (e.g. "builtin-scout" → "scout") prefixes.
  */
 function shortName(agentName: string): string {
   let name = agentName
   if (name.startsWith("zflow.")) name = name.slice(6)
   if (name.startsWith("builtin:")) name = name.slice(8)
+  if (name.startsWith("builtin-")) name = name.slice(8)
   return name
 }
 

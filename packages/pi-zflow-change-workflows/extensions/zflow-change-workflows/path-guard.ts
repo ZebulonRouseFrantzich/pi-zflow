@@ -77,17 +77,15 @@ export interface GuardOptions {
  * These protect critical infrastructure, secrets, and package manager state.
  */
 const BLOCKED_PATH_PATTERNS: RegExp[] = [
-  // Git internals
-  /\b\.git\b/,
+  // Git internals — allow .git/pi-zflow/ (runtime state dir)
+  /(?:^|[/\\])\.git\/(?!pi-zflow\/)/,
   // Node modules
   /\bnode_modules\b/,
   // Environment files
-  /\b\.env\b/,
-  /\b\.env\.\w+/,
-  // Home directory dotfiles
+  /(?:^|[/\\])\.env\b/,
+  /(?:^|[/\\])\.env\.\w+/,
+  // Home directory dotfiles (includes ~/.pi, ~/.ssh, etc.)
   /^\/(home|Users)\/[^/]+\/\.[a-zA-Z]/,
-  // Pi agent user dir
-  /\b\.pi\b/,
   // Secret-like files
   /\b(?:id_rsa|id_ed25519|credentials\.json|service-account\.json|\.netrc)\b/,
   // Package lock files
@@ -118,7 +116,7 @@ export function buildAllowedRoots(
   }
 
   // Deduplicate and resolve to real paths
-  return [...new Set(roots.map((r) => realpathSafe(r) || path.resolve(r)))]
+  return [...new Set(roots.map((r) => realpathSafe(r, projectRoot) || path.resolve(r)))]
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +149,19 @@ export function guardWrite(
     : path.resolve(projectRoot, targetPath)
 
   // Symlink/traversal safety: resolve real path
-  const resolvedPath = realpathSafe(absolutePath) || absolutePath
+  const resolvedPath = realpathSafe(absolutePath, projectRoot) || absolutePath
+
+  // Runtime state dir override: if the resolved path is under the known
+  // runtime state directory (e.g. <git-dir>/pi-zflow/), allow it regardless
+  // of blocked patterns.  This ensures runtime artifacts can always be written.
+  const runtimeStateDir = options.runtimeStateDir ?? resolveRuntimeStateDir()
+  if (resolvedPath.startsWith(runtimeStateDir)) {
+    return {
+      allowed: true,
+      message: `Write allowed to runtime state directory "${resolvedPath}".`,
+      resolvedPath,
+    }
+  }
 
   // 1. Check blocked patterns
   for (const pattern of BLOCKED_PATH_PATTERNS) {
@@ -179,7 +189,6 @@ export function guardWrite(
 
   // 3. Planner artifact policy: planner may only write to runtime-state-dir/plans
   if (intent === "planner-artifact") {
-    const runtimeStateDir = options.runtimeStateDir ?? resolveRuntimeStateDir()
     const plansDir = path.join(runtimeStateDir, "plans")
     if (!resolvedPath.startsWith(plansDir)) {
       return {

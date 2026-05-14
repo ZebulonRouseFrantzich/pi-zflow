@@ -94,7 +94,7 @@ async function idempotentCopy(
   fileName: string,
   force: boolean,
   knownHashes?: Map<string, string>,
-): Promise<{ copied: boolean; error?: string }> {
+): Promise<{ copied: boolean; error?: string; skipped?: string }> {
   const srcPath = path.join(srcDir, fileName)
   const destPath = path.join(destDir, fileName)
 
@@ -104,13 +104,22 @@ async function idempotentCopy(
   // Check if target exists
   const destHash = await computeFileHash(destPath)
 
-  if (destHash !== null && !force) {
+  if (destHash !== null) {
     // File exists at target
     const srcHash = knownHashes?.get(fileName) ?? await computeFileHash(srcPath)
+
     if (srcHash !== null && srcHash === destHash) {
-      return { copied: false } // Files are identical
+      return { copied: false } // Files are identical, nothing to do
     }
-    // Files differ — this is an update
+
+    if (srcHash !== null && !force) {
+      // Files differ — warn and recommend update flow instead of silently overwriting
+      return {
+        copied: false,
+        skipped: `"${fileName}" exists with different content. Use /zflow-update-agents or --force to overwrite.`,
+      }
+    }
+    // force=true or hash unavailable — proceed to overwrite
   }
 
   // Copy the file
@@ -148,6 +157,8 @@ export interface InstallResult {
   chainsUpToDate: number
   /** List of errors encountered */
   errors: string[]
+  /** List of warnings (e.g. skipped files due to content drift) */
+  warnings: string[]
   /** Whether the operation was successful overall */
   success: boolean
 }
@@ -189,6 +200,7 @@ export async function installAgentsAndChains(
 
   // Copy agents
   const agentErrors: string[] = []
+  const agentWarnings: string[] = []
   let agentsInstalled = 0
   let agentsUpToDate = 0
 
@@ -196,6 +208,9 @@ export async function installAgentsAndChains(
     const result = await idempotentCopy(srcAgents, destAgents, file, options.force ?? false, srcHashes)
     if (result.copied) {
       agentsInstalled++
+    } else if (result.skipped) {
+      agentWarnings.push(result.skipped)
+      agentsUpToDate++
     } else if (!result.error) {
       agentsUpToDate++
     }
@@ -204,6 +219,7 @@ export async function installAgentsAndChains(
 
   // Copy chains
   const chainErrors: string[] = []
+  const chainWarnings: string[] = []
   let chainsInstalled = 0
   let chainsUpToDate = 0
 
@@ -211,6 +227,9 @@ export async function installAgentsAndChains(
     const result = await idempotentCopy(srcChains, destChains, file, options.force ?? false, srcHashes)
     if (result.copied) {
       chainsInstalled++
+    } else if (result.skipped) {
+      chainWarnings.push(result.skipped)
+      chainsUpToDate++
     } else if (!result.error) {
       chainsUpToDate++
     }
@@ -238,6 +257,7 @@ export async function installAgentsAndChains(
   await writeManifest(manifest)
 
   const errors = [...agentErrors, ...chainErrors]
+  const warnings = [...agentWarnings, ...chainWarnings]
 
   return {
     agentsInstalled,
@@ -245,6 +265,7 @@ export async function installAgentsAndChains(
     agentsUpToDate,
     chainsUpToDate,
     errors,
+    warnings,
     success: errors.length === 0,
   }
 }
@@ -290,6 +311,24 @@ export function formatInstallSummary(result: InstallResult, isUpdate: boolean): 
     `  Agents: ${result.agentsInstalled} installed, ${result.agentsUpToDate} up to date`,
     `  Chains: ${result.chainsInstalled} installed, ${result.chainsUpToDate} up to date`,
   )
+
+  if (result.warnings.length > 0) {
+    lines.push(
+      `  Warnings: ${result.warnings.length}`,
+      "",
+      `  ⚠️  The following files differ from the source and were NOT overwritten:`,
+    )
+    for (const w of result.warnings.slice(0, 5)) {
+      lines.push(`    - ${w}`)
+    }
+    if (result.warnings.length > 5) {
+      lines.push(`    ... and ${result.warnings.length - 5} more`)
+    }
+    lines.push(
+      "",
+      `  To overwrite with package versions, run with --force.`,
+    )
+  }
 
   if (result.errors.length > 0) {
     lines.push(`  Errors: ${result.errors.length}`, "")

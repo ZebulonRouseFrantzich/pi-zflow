@@ -4,10 +4,9 @@
  * Registers `/zflow-setup-agents`, `/zflow-update-agents`, and prompt helper commands.
  * Also injects platform documentation paths into the system prompt via `before_agent_start`.
  *
- * TODO(phase-4): Implement agent/chain setup flow.
- *   - claim("agents", ...) via getZflowRegistry()
- *   - provide("agents", agentsService) with install/update/manifest logic
- *   - Register `/zflow-setup-agents`, `/zflow-update-agents` commands
+ * Provides the "agents" capability service with install/update/manifest operations
+ * so sibling packages can check agent setup status or trigger installs via the
+ * shared capability registry (see `registry.optional("agents")`).
  *
  * @module pi-zflow-agents
  */
@@ -27,6 +26,21 @@ import { createRequire } from "node:module"
 import { existsSync } from "node:fs"
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import {
+  installAgentsAndChains,
+  checkInstallStatus,
+  formatInstallSummary,
+} from "./install.js"
+import type {
+  InstallOptions,
+  InstallResult,
+} from "./install.js"
+import {
+  readManifest,
+  writeManifest,
+  diffManifest,
+} from "./manifest.js"
+import type { ManifestDiff } from "./manifest.js"
 
 // ── Path resolution helpers ──────────────────────────────────────
 
@@ -131,6 +145,28 @@ function resolvePiDocPaths(): PiDocPaths {
   }
 }
 
+// ── Agents service interface ───────────────────────────────────
+
+/**
+ * Service interface exposed through the zflow registry for sibling
+ * packages that need agent/chain installation status and operations
+ * without importing the agents module directly.
+ */
+export interface AgentsService {
+  /** Install or update agents and chains from the package to user-level directories. */
+  installAgentsAndChains: typeof installAgentsAndChains
+  /** Check whether agent installation is up to date. */
+  checkInstallStatus: typeof checkInstallStatus
+  /** Build a human-readable summary of the installation result. */
+  formatInstallSummary: typeof formatInstallSummary
+  /** Read the install manifest from disk. */
+  readManifest: typeof readManifest
+  /** Write the install manifest to disk atomically. */
+  writeManifest: typeof writeManifest
+  /** Compare the manifest against the current package state. */
+  diffManifest: typeof diffManifest
+}
+
 // ── Extension factory ────────────────────────────────────────────
 
 export default function activateZflowAgentsExtension(pi: ExtensionAPI): void {
@@ -184,6 +220,25 @@ export default function activateZflowAgentsExtension(pi: ExtensionAPI): void {
   })
 
   if (!claimed) return
+
+  // If the capability already has a service, another compatible
+  // instance already initialised fully. No-op to avoid duplicate
+  // command registration (coexistence rule 7).
+  if (claimed.service !== undefined) {
+    return
+  }
+
+  // ── Build and provide the agents service ──────────────────────
+  const agentsService: AgentsService = {
+    installAgentsAndChains,
+    checkInstallStatus,
+    formatInstallSummary,
+    readManifest,
+    writeManifest,
+    diffManifest,
+  }
+
+  registry.provide("agents", agentsService)
 
   pi.registerCommand("zflow-setup-agents", {
     description: "Install pi-zflow agent markdown files and chains into Pi-subagents discovery directories",

@@ -45,6 +45,35 @@ export interface StateIndexEntry {
 }
 
 /**
+ * Per-change lifecycle tracking.
+ *
+ * Tracks the full lifecycle of a change across all its runs, worktrees,
+ * and artifacts. Used by cleanup policies, resume detection, and HITL
+ * resume prompts.
+ */
+export interface ChangeLifecycle {
+  /** Unique change identifier (kebab-case). */
+  changeId: string
+  /** Last known phase of the change workflow. */
+  lastPhase: "draft" | "validated" | "reviewed" | "approved" | "executing" | "drifted" | "superseded" | "completed" | "cancelled"
+  /** Run IDs that are not yet completed or abandoned. */
+  unfinishedRuns: string[]
+  /** Worktree paths retained for inspection. */
+  retainedWorktrees: string[]
+  /** Known artifact paths for this change. */
+  artifactPaths: string[]
+  /** Cleanup metadata for stale-artifact policies. */
+  cleanupMetadata: {
+    /** ISO timestamp when artifacts became stale. */
+    staleSince?: string
+    /** Number of days to retain artifacts. */
+    retentionDays?: number
+    /** Whether this is a dry-run preview. */
+    dryRunPreview?: boolean
+  }
+}
+
+/**
  * The full state index document.
  */
 export interface StateIndex {
@@ -52,6 +81,8 @@ export interface StateIndex {
   version: number
   /** All tracked entries */
   entries: StateIndexEntry[]
+  /** Per-change lifecycle records, keyed by changeId. */
+  changes: Record<string, ChangeLifecycle>
 }
 
 // ---------------------------------------------------------------------------
@@ -59,8 +90,9 @@ export interface StateIndex {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_INDEX: StateIndex = {
-  version: 1,
+  version: 2,
   entries: [],
+  changes: {},
 }
 
 // ---------------------------------------------------------------------------
@@ -81,9 +113,12 @@ export async function loadStateIndex(cwd?: string): Promise<StateIndex> {
   try {
     const raw = await fs.readFile(indexPath, "utf-8")
     const parsed = JSON.parse(raw) as StateIndex
-    // Defensive: ensure version and entries exist
+    // Defensive: ensure required fields exist
     if (typeof parsed.version !== "number") parsed.version = DEFAULT_INDEX.version
     if (!Array.isArray(parsed.entries)) parsed.entries = []
+    if (!parsed.changes || typeof parsed.changes !== "object" || Array.isArray(parsed.changes)) {
+      parsed.changes = {}
+    }
     return parsed
   } catch (err: unknown) {
     // ENOENT: file doesn't exist yet — return default
@@ -140,6 +175,92 @@ export async function addStateIndexEntry(
 
   index.entries.push(newEntry)
   await saveStateIndex(index, cwd)
+}
+
+// ---------------------------------------------------------------------------
+// Change lifecycle CRUD
+// ---------------------------------------------------------------------------
+
+/**
+ * Insert or update a change lifecycle record.
+ *
+ * Adds the record to the `changes` map keyed by `changeLifecycle.changeId`.
+ * If a record already exists for that changeId, it is merged with the
+ * provided fields (shallow merge, with arrays replaced wholesale).
+ *
+ * @param changeLifecycle - The change lifecycle data to upsert.
+ * @param cwd - Working directory (optional).
+ */
+export async function upsertChangeLifecycle(
+  changeLifecycle: ChangeLifecycle,
+  cwd?: string,
+): Promise<void> {
+  const index = await loadStateIndex(cwd)
+  const existing = index.changes[changeLifecycle.changeId]
+
+  if (existing) {
+    // Merge: keep existing fields that aren't overwritten
+    index.changes[changeLifecycle.changeId] = {
+      ...existing,
+      ...changeLifecycle,
+    }
+  } else {
+    index.changes[changeLifecycle.changeId] = { ...changeLifecycle }
+  }
+
+  await saveStateIndex(index, cwd)
+}
+
+/**
+ * Retrieve a change lifecycle record by changeId.
+ *
+ * @param changeId - The change identifier to look up.
+ * @param cwd - Working directory (optional).
+ * @returns The ChangeLifecycle, or `null` if not found.
+ */
+export async function getChangeLifecycle(
+  changeId: string,
+  cwd?: string,
+): Promise<ChangeLifecycle | null> {
+  const index = await loadStateIndex(cwd)
+  return index.changes[changeId] ?? null
+}
+
+/**
+ * Remove a change lifecycle record by changeId.
+ *
+ * @param changeId - The change identifier to remove.
+ * @param cwd - Working directory (optional).
+ * @throws If no record exists for the given changeId.
+ */
+export async function removeChangeLifecycle(
+  changeId: string,
+  cwd?: string,
+): Promise<void> {
+  const index = await loadStateIndex(cwd)
+  if (!index.changes[changeId]) {
+    throw new Error(`Change lifecycle not found: ${changeId}`)
+  }
+  delete index.changes[changeId]
+  await saveStateIndex(index, cwd)
+}
+
+/**
+ * List all change lifecycle records that have unfinished runs.
+ *
+ * A change is considered unfinished when its `unfinishedRuns` array
+ * is non-empty.
+ *
+ * @param cwd - Working directory (optional).
+ * @returns Array of ChangeLifecycle records with non-empty unfinishedRuns.
+ */
+export async function listUnfinishedChanges(
+  cwd?: string,
+): Promise<ChangeLifecycle[]> {
+  const index = await loadStateIndex(cwd)
+  return Object.values(index.changes).filter(
+    (cl) => cl.unfinishedRuns.length > 0,
+  )
 }
 
 /**

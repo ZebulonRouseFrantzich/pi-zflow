@@ -5,6 +5,7 @@ command surface. These are **manual smoke tests** intended to verify
 that the complete system works as a coherent whole.
 
 > **Prerequisites:**
+>
 > - pi-zflow-change-workflows is installed as a Pi extension
 > - pi-zflow-agents is installed and agents are set up (`/zflow-setup-agents`)
 > - A git repository with profiles configured
@@ -16,17 +17,21 @@ that the complete system works as a coherent whole.
 **Goal:** Verify ad-hoc read-only plan mode can be toggled.
 
 1. In a project directory, run:
+
    ```
    /zflow-plan
    ```
+
    **Expected:** Plan mode becomes active. A plan-mode widget/status
    indicator is visible. Attempting `write` or `edit` tool calls is
    blocked by the bash policy.
 
 2. Run:
+
    ```
    /zflow-plan status
    ```
+
    **Expected:** Shows plan mode is active with the timestamp of
    activation.
 
@@ -45,9 +50,11 @@ that the complete system works as a coherent whole.
 **Goal:** Verify the formal planning workflow produces durable artifacts.
 
 1. Run:
+
    ```
    /zflow-change-prepare feature-x
    ```
+
    **Expected:**
    - Profile resolution completes (`Profile.ensureResolved()`)
    - No unfinished runs are detected (clean workspace)
@@ -62,9 +69,11 @@ that the complete system works as a coherent whole.
    - On approve, plan state is marked `approved` in `plan-state.json`
 
 2. Verify the created plan structure:
+
    ```
    ls -la <git-dir>/pi-zflow/plans/feature-x/v1/
    ```
+
    **Expected:** At minimum, `design.md`, `execution-groups.md`,
    `standards.md`, and `verification.md` exist.
 
@@ -130,9 +139,11 @@ from git branching.
 
 1. Ensure an approved plan exists (Scenario 2).
 2. Run:
+
    ```
    /zflow-change-implement feature-x
    ```
+
    **Expected:**
    - Profile resolution and lane-health preflight pass
    - No unfinished runs exist
@@ -194,9 +205,11 @@ in-place improvisation.
 
 1. Make some local changes in a branch.
 2. Run:
+
    ```
    /zflow-review-code
    ```
+
    **Expected:**
    - Repo root and review baseline are resolved
    - Diff is computed against the baseline
@@ -245,9 +258,11 @@ findings.
 **Goal:** Verify cleanup is explicit and state-driven.
 
 1. Run:
+
    ```
    /zflow-clean --dry-run
    ```
+
    **Expected:**
    - Scans `<runtime-state-dir>` for stale artifacts
    - Cross-references against `state-index.json`

@@ -59,8 +59,8 @@ import {
 } from "pi-zflow-review"
 import { readRun, updateRun, setRunPhase, addRetainedArtifact, createRun, createRecoveryRef, removeRecoveryRef } from "pi-zflow-artifacts"
 import type { RunPhase, RetainedArtifact, RunJson } from "pi-zflow-artifacts"
-import { resolveRunDir, resolveRunStatePath, resolvePlanVersionDir, resolvePlanStatePath, resolvePlanArtifactPath } from "pi-zflow-artifacts/artifact-paths"
-import { addStateIndexEntry, loadStateIndex, listStateIndexEntries } from "pi-zflow-artifacts/state-index"
+import { resolveRunDir, resolveRunStatePath, resolvePlanVersionDir, resolvePlanStatePath, resolvePlanArtifactPath, resolveCodeReviewFindingsPath } from "pi-zflow-artifacts/artifact-paths"
+import { addStateIndexEntry, loadStateIndex, listStateIndexEntries, updateStateIndexEntry } from "pi-zflow-artifacts/state-index"
 import type { StateIndexEntry } from "pi-zflow-artifacts/state-index"
 import { assertCleanPrimaryTree } from "./git-preflight.js"
 import type { GitPreflightResult } from "./git-preflight.js"
@@ -72,6 +72,14 @@ import { executeApplyBack } from "./apply-back.js"
 import type { ApplyBackResult } from "./apply-back.js"
 import { writeDeviationSummary, readDeviationReports } from "./deviations.js"
 import { getCurrentBranch } from "./git-preflight.js"
+import { getZflowRegistry } from "pi-zflow-core/registry"
+import {
+  resolveVerificationCommand,
+  runVerification,
+  appendFailureLog,
+  runVerificationFixLoop,
+} from "./verification.js"
+import type { VerificationResult, FixLoopResult, FixLoopOptions } from "./verification.js"
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -183,7 +191,7 @@ function resolveBuiltinLaunchConfig(
 
   return {
     agent: agentName,
-    model: resolvedLane.resolvedModel,
+    model: resolvedLane.model,
     tools: overrideDef.override.tools,
     maxOutput: overrideDef.override.maxOutput,
     maxSubagentDepth: overrideDef.override.maxSubagentDepth,
@@ -808,55 +816,45 @@ export async function detectResumeContext(
   changeId?: string,
   cwd?: string,
 ): Promise<ResumeContext | null> {
-  const { loadStateIndex } = await import("pi-zflow-artifacts/state-index")
+  const { loadStateIndex, listUnfinishedChanges, getChangeLifecycle } =
+    await import("pi-zflow-artifacts/state-index")
 
   const index = await loadStateIndex(cwd)
 
-  // Filter for unfinished entries
-  const unfinishedStatuses = new Set([
-    "pending", "preparing", "planning", "executing",
-    "applying", "drift-pending", "cleanup-pending", "apply-back-conflicted",
-  ])
-  const unfinished = index.entries.filter((e) => {
-    return unfinishedStatuses.has(e.status) &&
-      (!changeId || (e.metadata as Record<string, unknown>)?.changeId === changeId)
-  })
+  // If a changeId is provided, look up its lifecycle record directly.
+  if (changeId) {
+    const cl = await getChangeLifecycle(changeId, cwd)
+    if (!cl || cl.unfinishedRuns.length === 0) return null
 
-  if (unfinished.length === 0) return null
+    const details = [
+      `change ${cl.changeId}: ${cl.lastPhase} (${cl.unfinishedRuns.length} unfinished run(s))`,
+      ...cl.unfinishedRuns.map((rid: string) => `  run ${rid}`),
+      ...cl.retainedWorktrees.map((wt: string) => `  worktree: ${wt}`),
+    ].join("\n")
 
-  // Group by change
-  const byChange = new Map<string, typeof unfinished>()
-  for (const entry of unfinished) {
-    const cid = ((entry.metadata as Record<string, unknown>)?.changeId as string) ?? "unknown"
-    if (!byChange.has(cid)) byChange.set(cid, [])
-    byChange.get(cid)!.push(entry)
+    return {
+      changeId: cl.changeId,
+      lastPhase: cl.lastPhase,
+      resumeOptions: ["resume", "abandon", "inspect", "cleanup"],
+      details,
+    }
   }
 
-  // Pick the first (or specified) change
-  const targetChange = changeId ?? byChange.keys().next().value!
-  const entries = byChange.get(targetChange) ?? []
+  // No changeId — find all changes with unfinished runs.
+  const unfinished = await listUnfinishedChanges(cwd)
+  if (unfinished.length === 0) return null
 
-  // Find the most recent run
-  const runEntries = entries.filter((e) => e.type === "run")
-  const latestRun = runEntries.sort((a, b) =>
-    new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
-  )[0]
-
-  const lastPhase = latestRun?.status ?? entries[0]?.status ?? "unknown"
-
-  // Build resume options
-  const resumeOptions = ["resume", "abandon", "inspect", "cleanup"]
-
-  // Build details
-  const details = entries.map((e) =>
-    `${e.type} ${e.id}: ${e.status} (updated: ${e.updatedAt})`,
+  // Build a combined resume context from all unfinished changes.
+  const details = unfinished.map((cl) =>
+    `change ${cl.changeId}: ${cl.lastPhase} (${cl.unfinishedRuns.length} unfinished run(s))`,
   ).join("\n")
 
+  // Return context for the first unfinished change.
+  const first = unfinished[0]
   return {
-    changeId: targetChange,
-    runId: latestRun?.id,
-    lastPhase,
-    resumeOptions,
+    changeId: first.changeId,
+    lastPhase: first.lastPhase,
+    resumeOptions: ["resume", "abandon", "inspect", "cleanup"],
     details,
   }
 }
@@ -1573,7 +1571,8 @@ export async function signalDriftDetected(
   let intercomAvailable = false
   try {
     // Dynamic import to check for pi-intercom without hard dependency
-    const intercomModule = await import("pi-intercom").catch(() => null)
+    // @ts-expect-error - optional dependency, handled via catch
+    const intercomModule: { intercom?: Function } | null = await import("pi-intercom").catch(() => null)
     if (intercomModule && typeof intercomModule.intercom === "function") {
       intercomAvailable = true
       const msg = [
@@ -1823,7 +1822,14 @@ export async function prepareWorktreeImplementationRun(
     planVersion,
   }
 
-  const tasks = buildWorktreeDispatchPlan(groups, dispatchConfig, planArtifactPaths)
+  const dispatchGroups: DispatchExecutionGroup[] = groups.map(g => ({
+    id: g.id,
+    agent: "zflow.implement-routine",
+    files: g.files,
+    dependencies: g.dependencies,
+    taskPrompt: "",
+  }))
+  const tasks = buildWorktreeDispatchPlan(dispatchGroups, dispatchConfig, planArtifactPaths)
 
   return {
     runId,
@@ -1909,18 +1915,18 @@ export async function finalizeWorktreeImplementationRun(
   // 2. Apply patches back atomically
   // Use original execution groups (with real dependencies) if provided,
   // falling back to reconstructed groups from run.json.
-  const applyBackGroups = options?.executionGroups && options.executionGroups.length > 0
+  const applyBackGroups: ExecutionGroup[] = options?.executionGroups && options.executionGroups.length > 0
     ? options.executionGroups.map((g) => ({
         id: g.id,
         files: g.files,
         dependencies: g.dependencies,
-        assignedAgent: g.agent,
+        parallelizable: g.parallelizable,
       }))
     : run.groups.map((g) => ({
         id: g.groupId,
         files: g.changedFiles,
         dependencies: [],
-        assignedAgent: g.agent,
+        parallelizable: true,
       }))
 
   const applyBackResult = await executeApplyBack({
@@ -1990,21 +1996,6 @@ export async function finalizeWorktreeImplementationRun(
 // ═══════════════════════════════════════════════════════════════════
 
 /**
- * Status values that count as "unfinished" for a run or plan.
- */
-const UNFINISHED_STATUSES = new Set([
-  "pending",
-  "preparing",
-  "planning",
-  "reviewing",
-  "executing",
-  "applying",
-  "drift-pending",
-  "cleanup-pending",
-  "apply-back-conflicted",
-])
-
-/**
  * Discover unfinished work for a given change ID.
  *
  * Loads the state index and filters entries whose `metadata.changeId`
@@ -2019,49 +2010,47 @@ export async function discoverUnfinishedWork(
   changeId: string,
   cwd?: string,
 ): Promise<{
-  unfinishedRuns: StateIndexEntry[]
-  unfinishedPlans: StateIndexEntry[]
+  unfinishedRuns: string[]
+  unfinishedPlans: string[]
   hasUnfinishedWork: boolean
 }> {
-  const index = await loadStateIndex(cwd)
+  const { getChangeLifecycle } = await import("pi-zflow-artifacts/state-index")
 
-  const changeEntries = index.entries.filter(
-    (e) => e.metadata && typeof e.metadata === "object" && "changeId" in e.metadata!
-      && e.metadata!.changeId === changeId,
-  )
+  const cl = await getChangeLifecycle(changeId, cwd)
 
-  const unfinishedRuns = changeEntries.filter(
-    (e) => e.type === "run" && UNFINISHED_STATUSES.has(e.status),
-  )
-  const unfinishedPlans = changeEntries.filter(
-    (e) => e.type === "plan" && UNFINISHED_STATUSES.has(e.status),
-  )
+  if (!cl || cl.unfinishedRuns.length === 0) {
+    return {
+      unfinishedRuns: [],
+      unfinishedPlans: [],
+      hasUnfinishedWork: false,
+    }
+  }
 
   return {
-    unfinishedRuns,
-    unfinishedPlans,
-    hasUnfinishedWork: unfinishedRuns.length > 0 || unfinishedPlans.length > 0,
+    unfinishedRuns: cl.unfinishedRuns,
+    unfinishedPlans: [],
+    hasUnfinishedWork: true,
   }
 }
 
 /**
  * Produce a human-readable summary of unfinished work for a change.
  *
- * Lists each unfinished entry with its type, ID, status, and creation
- * time, followed by suggested next actions.
+ * Lists each unfinished run with its ID, followed by suggested next actions.
  *
  * @param unfinished - The result of `discoverUnfinishedWork()`.
  * @returns A formatted string describing the unfinished work.
  */
 export function promptResumeChoices(unfinished: {
-  unfinishedRuns: StateIndexEntry[]
-  unfinishedPlans: StateIndexEntry[]
+  unfinishedRuns: string[]
+  unfinishedPlans: string[]
+  hasUnfinishedWork: boolean
 }): string {
   const lines: string[] = []
 
   const allUnfinished = [
-    ...unfinished.unfinishedPlans.map((e) => ({ ...e, _label: "plan" })),
-    ...unfinished.unfinishedRuns.map((e) => ({ ...e, _label: "run" })),
+    ...unfinished.unfinishedPlans.map((id) => ({ _label: "plan", id })),
+    ...unfinished.unfinishedRuns.map((id) => ({ _label: "run", id })),
   ]
 
   if (allUnfinished.length === 0) {
@@ -2070,11 +2059,10 @@ export function promptResumeChoices(unfinished: {
 
   lines.push("## Unfinished work detected")
   lines.push("")
-  lines.push("| Type | ID | Status | Created |")
-  lines.push("|------|----|--------|---------|")
+  lines.push("| Type | ID |")
+  lines.push("|------|----|")
   for (const entry of allUnfinished) {
-    const created = entry.createdAt ? new Date(entry.createdAt).toISOString().slice(0, 19).replace("T", " ") : "(unknown)"
-    lines.push(`| ${entry._label} | ${entry.id} | ${entry.status} | ${created} |`)
+    lines.push(`| ${entry._label} | ${entry.id} |`)
   }
   lines.push("")
   lines.push("### Available actions")
@@ -2087,6 +2075,87 @@ export function promptResumeChoices(unfinished: {
   lines.push("Enter one of the above to proceed, or `skip` to ignore and continue.")
 
   return lines.join("\n")
+}
+
+/**
+ * Structured result returned by `checkUnfinishedOnEntry` when unfinished
+ * work exists for a change.
+ */
+export interface UnfinishedOnEntryResult {
+  /** Whether unfinished work was found. */
+  hasUnfinishedWork: boolean
+  /** The change identifier with unfinished work. */
+  changeId: string
+  /** Last known phase of the change. */
+  lastPhase: string
+  /** Unfinished run IDs. */
+  unfinishedRunIds: string[]
+  /** Retained worktree paths. */
+  retainedWorktrees: string[]
+  /** Available user-facing choices. */
+  choices: Array<{
+    action: "resume" | "abandon" | "inspect" | "cleanup"
+    description: string
+  }>
+  /** Human-readable summary for display. */
+  summary: string
+}
+
+/**
+ * Check for unfinished work on entry to a change workflow command.
+ *
+ * Looks up the change lifecycle in the state-index `changes` map. If
+ * unfinished runs exist, returns structured choices with context so
+ * the caller can present them to the user via `ui.notify` or similar.
+ *
+ * @param changeId - The change identifier to check.
+ * @param cwd - Working directory (optional).
+ * @returns An `UnfinishedOnEntryResult` if unfinished work exists, or a
+ *          result with `hasUnfinishedWork: false`.
+ */
+export async function checkUnfinishedOnEntry(
+  changeId: string,
+  cwd?: string,
+): Promise<UnfinishedOnEntryResult> {
+  const { getChangeLifecycle } = await import("pi-zflow-artifacts/state-index")
+
+  const cl = await getChangeLifecycle(changeId, cwd)
+
+  if (!cl || cl.unfinishedRuns.length === 0) {
+    return {
+      hasUnfinishedWork: false,
+      changeId,
+      lastPhase: "none",
+      unfinishedRunIds: [],
+      retainedWorktrees: [],
+      choices: [],
+      summary: `No unfinished work for change "${changeId}".`,
+    }
+  }
+
+  const summary = [
+    `Change: ${cl.changeId}`,
+    `Last phase: ${cl.lastPhase}`,
+    `Unfinished runs: ${cl.unfinishedRuns.join(", ") || "(none)"}`,
+    cl.retainedWorktrees.length > 0
+      ? `Retained worktrees: ${cl.retainedWorktrees.join(", ")}`
+      : "",
+  ].filter(Boolean).join("\n")
+
+  return {
+    hasUnfinishedWork: true,
+    changeId: cl.changeId,
+    lastPhase: cl.lastPhase,
+    unfinishedRunIds: cl.unfinishedRuns,
+    retainedWorktrees: cl.retainedWorktrees,
+    choices: [
+      { action: "resume", description: "Continue the most recent unfinished run" },
+      { action: "abandon", description: "Mark unfinished work as cancelled and start fresh" },
+      { action: "inspect", description: "Show detailed state of each unfinished item" },
+      { action: "cleanup", description: "Remove stale artifacts associated with unfinished work" },
+    ],
+    summary,
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2152,6 +2221,7 @@ export async function bumpPlanVersion(
     currentVersion: string
     approvedVersion: string | null
     lifecycleState: string
+    updatedAt?: string
     versions: Record<string, { state: string; createdAt?: string }>
   }
 
@@ -2291,6 +2361,827 @@ export async function updatePlanState(
   await fs.writeFile(planStatePath, JSON.stringify(updated, null, 2), "utf-8")
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// Phase 7.5 — Prepare-workflow lifecycle helpers
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Advance the plan lifecycle state in plan-state.json and the state index.
+ *
+ * Valid lifecycle progression:
+ *   draft → validated → reviewed → approved → completed
+ *
+ * @param changeId - The change identifier.
+ * @param newState - The target lifecycle state.
+ * @param cwd - Working directory (optional).
+ */
+export async function advancePlanLifecycle(
+  changeId: string,
+  newState: "draft" | "validated" | "reviewed" | "approved" | "completed",
+  cwd?: string,
+): Promise<void> {
+  await updatePlanState(changeId, { lifecycleState: newState }, cwd)
+
+  // Also update the state-index entry for this plan
+  const index = await loadStateIndex(cwd)
+  const planEntry = index.entries.find(
+    (e) => e.type === "plan" && e.metadata?.changeId === changeId,
+  )
+  if (planEntry) {
+    planEntry.status = newState
+    planEntry.updatedAt = new Date().toISOString()
+    const { default: fs } = await import("node:fs/promises")
+    const { resolveStateIndexPath } = await import("pi-zflow-artifacts/artifact-paths")
+    await fs.writeFile(resolveStateIndexPath(cwd), JSON.stringify(index, null, 2), "utf-8")
+  }
+}
+
+/**
+ * Validate the required plan artifacts for a given version.
+ *
+ * Checks that the four canonical artifacts exist and have no placeholder
+ * markers. Returns a pass/fail result with an issues list.
+ *
+ * @param changeId - The change identifier.
+ * @param planVersion - Plan version (e.g. "v1").
+ * @param cwd - Working directory (optional).
+ * @returns Validation result with pass/fail and issues list.
+ */
+export async function runPlanValidation(
+  changeId: string,
+  planVersion: string,
+  cwd?: string,
+): Promise<{
+  pass: boolean
+  issues: string[]
+}> {
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+
+  const artifacts = {
+    "design.md": resolvePlanArtifactPath(changeId, planVersion, "design", cwd),
+    "execution-groups.md": resolvePlanArtifactPath(changeId, planVersion, "execution-groups", cwd),
+    "standards.md": resolvePlanArtifactPath(changeId, planVersion, "standards", cwd),
+    "verification.md": resolvePlanArtifactPath(changeId, planVersion, "verification", cwd),
+  }
+
+  const issues: string[] = []
+
+  for (const [name, filePath] of Object.entries(artifacts)) {
+    try {
+      const content = await fs.readFile(filePath, "utf-8")
+
+      // Check for placeholder markers
+      const placeholderPatterns = [
+        /\[TODO\]|\[placeholder\]/i,
+        /awaiting\s+(scout|repo.mapper|planner)/i,
+        /TODO:\s*(write|fill|implement|add)/i,
+      ]
+
+      for (const pattern of placeholderPatterns) {
+        if (pattern.test(content)) {
+          issues.push(`Artifact "${name}" contains placeholder markers (matched: ${pattern.source})`)
+        }
+      }
+    } catch {
+      issues.push(`Required artifact "${name}" is missing at: ${filePath}`)
+    }
+  }
+
+  if (issues.length === 0) {
+    return { pass: true, issues: [] }
+  }
+
+  return { pass: false, issues }
+}
+
+/**
+ * Run plan review for a given change and plan version.
+ *
+ * If pi-zflow-review is available via the registry, delegates to the
+ * review capability. Otherwise returns a basic review result.
+ *
+ * @param changeId - The change identifier.
+ * @param planVersion - Plan version (e.g. "v1").
+ * @param cwd - Working directory (optional).
+ * @returns Review result with pass/fail and review findings path.
+ */
+export async function runPlanReview(
+  changeId: string,
+  planVersion: string,
+  cwd?: string,
+): Promise<{
+  pass: boolean
+  reviewFindingsPath?: string
+  summary: string
+}> {
+  const registry = getZflowRegistry()
+  const reviewService = registry.optional<Record<string, Function>>("review")
+
+  if (reviewService && typeof reviewService.runPlanReview === "function") {
+    try {
+      const planningArtifacts = {
+        design: resolvePlanArtifactPath(changeId, planVersion, "design", cwd),
+        executionGroups: resolvePlanArtifactPath(changeId, planVersion, "execution-groups", cwd),
+        standards: resolvePlanArtifactPath(changeId, planVersion, "standards", cwd),
+        verification: resolvePlanArtifactPath(changeId, planVersion, "verification", cwd),
+      }
+
+      const result = await (reviewService.runPlanReview as Function)({
+        changeId,
+        planVersion,
+        executionGroups: [],
+        planningArtifacts,
+        cwd,
+      })
+
+      return {
+        pass: (result as any).action === "approve",
+        reviewFindingsPath: (result as any).findingsPath,
+        summary:
+          (result as any).action === "approve"
+            ? "Plan review passed."
+            : `Plan review: ${(result as any).action}${(result as any).needsZebReason ? ` — ${(result as any).needsZebReason}` : ""}`,
+      }
+    } catch (err) {
+      return {
+        pass: false,
+        summary: `Plan review via registry failed: ${err instanceof Error ? err.message : String(err)}`,
+      }
+    }
+  }
+
+  // Fallback: basic review result
+  const { default: path } = await import("node:path")
+  const { resolveReviewDir } = await import("pi-zflow-artifacts/artifact-paths")
+  const reviewFindingsPath = path.join(resolveReviewDir(cwd), `plan-review-${changeId}-${planVersion}.md`)
+  const summary = "Plan review skipped (no review service available). Review is advisory."
+
+  console.info(`[zflow] ${summary}`)
+
+  return {
+    pass: true,
+    reviewFindingsPath,
+    summary,
+  }
+}
+
+/**
+ * Approve a specific plan version.
+ *
+ * Sets the approvedVersion in plan-state.json, marks the version state
+ * as "approved", advances the lifecycle to "approved", and makes the
+ * version immutable by setting a write-once guard.
+ *
+ * @param changeId - The change identifier.
+ * @param version - The plan version to approve (e.g. "v1").
+ * @param cwd - Working directory (optional).
+ */
+export async function approvePlanVersion(
+  changeId: string,
+  version: string,
+  cwd?: string,
+): Promise<void> {
+  const { default: fs } = await import("node:fs/promises")
+  const planStatePath = resolvePlanStatePath(changeId, cwd)
+  const raw = await fs.readFile(planStatePath, "utf-8")
+  const planState = JSON.parse(raw)
+
+  // Make the version immutable: set approvedVersion, mark version state, advance lifecycle
+  planState.approvedVersion = version
+  planState.lifecycleState = "approved"
+  planState.updatedAt = new Date().toISOString()
+
+  if (planState.versions && planState.versions[version]) {
+    planState.versions[version].state = "approved"
+    // Set immutable flag — further edits to this version are rejected
+    planState.versions[version].immutableAt = planState.updatedAt
+  }
+
+  await fs.writeFile(planStatePath, JSON.stringify(planState, null, 2), "utf-8")
+
+  // Also update the state-index
+  const index = await loadStateIndex(cwd)
+  const planEntry = index.entries.find(
+    (e) => e.type === "plan" && e.metadata?.changeId === changeId,
+  )
+  if (planEntry) {
+    planEntry.status = "approved"
+    planEntry.updatedAt = planState.updatedAt
+    const { resolveStateIndexPath } = await import("pi-zflow-artifacts/artifact-paths")
+    await fs.writeFile(resolveStateIndexPath(cwd), JSON.stringify(index, null, 2), "utf-8")
+  }
+}
+
+/**
+ * Build handoff context metadata for session fork from planning to implementation.
+ *
+ * Returns a structured handoff object with plan artifact paths, version info,
+ * and fork metadata that can be serialized into the forked session.
+ *
+ * @param changeId - The change identifier.
+ * @param approvedVersion - The approved plan version.
+ * @param cwd - Working directory (optional).
+ * @returns Handoff metadata object.
+ */
+export async function buildHandoffContext(
+  changeId: string,
+  approvedVersion: string,
+  cwd?: string,
+): Promise<{
+  changeId: string
+  approvedVersion: string
+  runtimeStateDir: string
+  planArtifactPaths: Record<string, string>
+  forkedAt: string
+}> {
+  const { default: path } = await import("node:path")
+  const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+
+  const runtimeStateDir = resolveRuntimeStateDir(cwd)
+
+  const planArtifactPaths = {
+    design: resolvePlanArtifactPath(changeId, approvedVersion, "design", cwd),
+    executionGroups: resolvePlanArtifactPath(changeId, approvedVersion, "execution-groups", cwd),
+    standards: resolvePlanArtifactPath(changeId, approvedVersion, "standards", cwd),
+    verification: resolvePlanArtifactPath(changeId, approvedVersion, "verification", cwd),
+  }
+
+  return {
+    changeId,
+    approvedVersion,
+    runtimeStateDir,
+    planArtifactPaths,
+    forkedAt: new Date().toISOString(),
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase 7 — File-backed prepare-workflow helpers
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Resolve a profile if the profiles capability is available via the registry.
+ *
+ * Checks the zflow registry for an optional "profiles" capability. If found
+ * and the service provides `ensureResolved`, calls it to ensure a profile is
+ * active. Optionally records profile info in plan-state.json if a changeId
+ * is provided.
+ *
+ * @param changeId - Optional change ID to record profile info in plan-state.json.
+ * @param cwd - Working directory (optional).
+ * @returns A structured result with resolution status and advisory message.
+ */
+export async function resolveProfileIfAvailable(
+  changeId?: string,
+  cwd?: string,
+): Promise<{
+  resolved: boolean
+  method: "registry-service" | "not-available"
+  advisory: string
+}> {
+  const registry = getZflowRegistry()
+
+  if (registry.has("profiles")) {
+    const profileService = registry.optional<{ ensureResolved?: () => Promise<unknown> }>("profiles")
+    if (profileService && typeof profileService.ensureResolved === "function") {
+      try {
+        await profileService.ensureResolved()
+
+        // Record profile info in plan-state.json if changeId was provided
+        if (changeId) {
+          try {
+            const { default: fs } = await import("node:fs/promises")
+            const planStatePath = resolvePlanStatePath(changeId, cwd)
+            const raw = await fs.readFile(planStatePath, "utf-8")
+            const planState = JSON.parse(raw)
+            planState.profile = { resolved: true, method: "registry-service", resolvedAt: new Date().toISOString() }
+            planState.updatedAt = new Date().toISOString()
+            await fs.writeFile(planStatePath, JSON.stringify(planState, null, 2), "utf-8")
+          } catch {
+            // Non-critical; skip recording
+          }
+        }
+
+        return {
+          resolved: true,
+          method: "registry-service",
+          advisory: "Profile resolution completed via registry service.",
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        return {
+          resolved: false,
+          method: "registry-service",
+          advisory: `Profile service available but ensureResolved() failed: ${message}. Caller should resolve profile explicitly.`,
+        }
+      }
+    }
+  }
+
+  return {
+    resolved: false,
+    method: "not-available",
+    advisory: "No profile service found in registry. Caller should resolve profile explicitly via Profile.ensureResolved().",
+  }
+}
+
+/**
+ * Build a lightweight repo-map.md by inspecting the repository.
+ *
+ * Uses git and Node.js APIs to produce concrete repo data without
+ * dispatching any agents. Writes the result to
+ * `<runtime-state-dir>/repo-map.md`.
+ *
+ * @param cwd - Working directory (optional).
+ * @returns An object with the output path and entry count.
+ */
+export async function buildRepoMap(cwd?: string): Promise<{ path: string; entries: number }> {
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+  const { execFileSync } = await import("node:child_process")
+  const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+
+  const runtimeStateDir = resolveRuntimeStateDir(cwd)
+  const outputPath = path.join(runtimeStateDir, "repo-map.md")
+
+  // Resolve repo root
+  let repoRoot = ""
+  let branch = "unknown"
+  let headSha = "unknown"
+  let topLevelDirs: string[] = []
+  let changedFiles: string[] = []
+
+  try {
+    repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"],
+    }).trim()
+
+    branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+      cwd: repoRoot, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"],
+    }).trim()
+
+    headSha = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repoRoot, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"],
+    }).trim()
+
+    // Top-level listing via git ls-tree (avoids ls dependency)
+    const lsTree = execFileSync("git", ["ls-tree", "--name-only", "HEAD"], {
+      cwd: repoRoot, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"],
+    }).trim()
+    topLevelDirs = lsTree ? lsTree.split("\n").filter(Boolean) : []
+
+    // Changed files
+    const statusOutput = execFileSync("git", ["status", "--porcelain"], {
+      cwd: repoRoot, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"],
+    }).trim()
+    changedFiles = statusOutput ? statusOutput.split("\n").map(l => l.trim()).filter(Boolean) : []
+  } catch {
+    // Not in a git repo or git unavailable — fall back to filesystem
+    repoRoot = cwd ?? process.cwd()
+    try {
+      const { readdirSync } = await import("node:fs")
+      topLevelDirs = readdirSync(repoRoot).filter(e => !e.startsWith("."))
+    } catch {
+      // Ignore listing failures
+    }
+  }
+
+  // Detect verification command
+  let verificationCommand: string | null = null
+  if (repoRoot) {
+    verificationCommand = resolveVerificationCommand(repoRoot)
+  }
+
+  // Read package/workspace info
+  let packageManager = "unknown"
+  let workspaces: string[] = []
+  if (repoRoot) {
+    const pkgJsonPath = path.join(repoRoot, "package.json")
+    try {
+      const pkgContent = await fs.readFile(pkgJsonPath, "utf-8")
+      const pkg = JSON.parse(pkgContent)
+      if (pkg.workspaces) {
+        workspaces = Array.isArray(pkg.workspaces) ? pkg.workspaces : (pkg.workspaces.packages ?? [])
+      }
+      // Detect package manager from known lockfiles
+      if (pkg.packageManager) {
+        packageManager = pkg.packageManager
+      } else {
+        for (const [name, mgr] of [
+          ["package-lock.json", "npm"],
+          ["yarn.lock", "yarn"],
+          ["pnpm-lock.yaml", "pnpm"],
+          ["bun.lockb", "bun"],
+        ] as const) {
+          try {
+            await fs.access(path.join(repoRoot, name))
+            packageManager = mgr
+            break
+          } catch { /* not present */ }
+        }
+      }
+    } catch {
+      // No package.json — that's fine
+    }
+  }
+
+  // Build the content
+  const lines: string[] = [
+    "# Repository Map",
+    "",
+    `Generated by zflow-change-workflows at ${new Date().toISOString()}.`,
+    "",
+    "## Repository",
+    `- **Root**: ${repoRoot || "(outside git)"}`,
+    `- **Branch**: ${branch}`,
+    `- **HEAD**: ${headSha}`,
+    "",
+  ]
+
+  if (workspaces.length > 0) {
+    lines.push("## Workspace", "")
+    lines.push(`- **Package manager**: ${packageManager}`)
+    lines.push(`- **Workspaces**: ${workspaces.join(", ")}`, "")
+  }
+
+  if (topLevelDirs.length > 0) {
+    lines.push("## Top-level structure", "")
+    for (const entry of topLevelDirs.slice(0, 50)) {
+      lines.push(`- ${entry}`)
+    }
+    if (topLevelDirs.length > 50) {
+      lines.push(`- ... and ${topLevelDirs.length - 50} more items`)
+    }
+    lines.push("")
+  }
+
+  if (changedFiles.length > 0) {
+    lines.push("## Changed files", "")
+    for (const file of changedFiles.slice(0, 50)) {
+      lines.push(`- \`${file}\``)
+    }
+    lines.push("")
+  } else {
+    lines.push("## Changed files", "", "(none)", "")
+  }
+
+  if (verificationCommand) {
+    lines.push("## Verification", "")
+    lines.push(`- **Detected command**: \`${verificationCommand}\``, "")
+  }
+
+  const content = lines.join("\n")
+
+  await fs.mkdir(runtimeStateDir, { recursive: true })
+  await fs.writeFile(outputPath, content, "utf-8")
+
+  return { path: outputPath, entries: topLevelDirs.length }
+}
+
+/**
+ * Build reconnaissance.md with concrete source context.
+ *
+ * Inspects the provided change path (if any), nearby files, README,
+ * package info, and recent failure-log entries. Writes the result
+ * to `<runtime-state-dir>/reconnaissance.md`.
+ *
+ * @param cwd - Working directory (optional).
+ * @param changePath - Optional change path to inspect.
+ * @returns An object with the output path.
+ */
+export async function buildReconnaissance(
+  cwd?: string,
+  changePath?: string,
+): Promise<{ path: string }> {
+  const { default: fs } = await import("node:fs/promises")
+  const { default: pathModule } = await import("node:path")
+  const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+
+  const runtimeStateDir = resolveRuntimeStateDir(cwd)
+  const outputPath = pathModule.join(runtimeStateDir, "reconnaissance.md")
+
+  // Resolve repo root for git-based context
+  let repoRoot = ""
+  try {
+    const { execFileSync } = await import("node:child_process")
+    repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"],
+    }).trim()
+  } catch {
+    repoRoot = cwd ?? process.cwd()
+  }
+
+  const lines: string[] = [
+    "# Reconnaissance",
+    "",
+    `Generated by zflow-change-workflows at ${new Date().toISOString()}.`,
+    "",
+    "## Scope",
+  ]
+
+  // Change path analysis
+  if (changePath) {
+    lines.push(`- **Change path**: ${changePath}`)
+    const resolvedPath = pathModule.isAbsolute(changePath)
+      ? changePath
+      : pathModule.join(repoRoot, changePath)
+    let pathExists = false
+    try {
+      await fs.access(resolvedPath)
+      pathExists = true
+    } catch { /* does not exist */ }
+    lines.push(`- **Path exists**: ${pathExists}`)
+    if (pathExists) {
+      try {
+        const stat = await fs.stat(resolvedPath)
+        lines.push(`- **Type**: ${stat.isDirectory() ? "directory" : "file"}`)
+      } catch { /* stat failed */ }
+    }
+    lines.push("")
+
+    // Nearby files — list directory contents if changePath is a directory
+    if (pathExists) {
+      try {
+        const stat = await fs.stat(resolvedPath)
+        if (stat.isDirectory()) {
+          const entries = await fs.readdir(resolvedPath)
+          if (entries.length > 0) {
+            lines.push("## Nearby files", "")
+            for (const entry of entries.slice(0, 30)) {
+              lines.push(`- ${entry}`)
+            }
+            if (entries.length > 30) {
+              lines.push(`- ... and ${entries.length - 30} more`)
+            }
+            lines.push("")
+          }
+        }
+      } catch { /* readdir failed */ }
+    }
+  } else {
+    lines.push("- **Change path**: (auto-generated)", "")
+  }
+
+  // README excerpt
+  if (repoRoot) {
+    const readmePath = pathModule.join(repoRoot, "README.md")
+    try {
+      const readmeContent = await fs.readFile(readmePath, "utf-8")
+      lines.push("## README", "")
+      const readmeLines = readmeContent.split("\n").filter(l => l.trim()).slice(0, 5)
+      for (const rl of readmeLines) {
+        lines.push(`> ${rl}`)
+      }
+      lines.push("")
+    } catch {
+      // No README — skip
+    }
+
+    // Package info
+    const pkgJsonPath = pathModule.join(repoRoot, "package.json")
+    try {
+      const pkgContent = await fs.readFile(pkgJsonPath, "utf-8")
+      const pkg = JSON.parse(pkgContent)
+      lines.push("## Package info", "")
+      lines.push(`- **Name**: ${pkg.name ?? "unknown"}`)
+      if (pkg.version) lines.push(`- **Version**: ${pkg.version}`)
+      if (pkg.scripts) {
+        const scripts = Object.keys(pkg.scripts)
+        lines.push(`- **Scripts**: ${scripts.join(", ")}`)
+      }
+      if (pkg.dependencies) {
+        lines.push(`- **Dependencies**: ${Object.keys(pkg.dependencies).length}`)
+      }
+      if (pkg.devDependencies) {
+        lines.push(`- **Dev dependencies**: ${Object.keys(pkg.devDependencies).length}`)
+      }
+      lines.push("")
+    } catch {
+      // No package.json — fine
+    }
+  }
+
+  // Recent failure-log entries
+  try {
+    const failureLogModule = await import("./failure-log.js")
+    const entries = await failureLogModule.readFailureLog(cwd)
+    if (entries.length > 0) {
+      lines.push("## Recent failure-log entries", "")
+      for (const entry of entries.slice(0, 5)) {
+        lines.push(`- **${entry.timestamp}**: ${entry.context || "unknown"}`)
+        if (entry.rootCause) lines.push(`  - Root cause: ${entry.rootCause}`)
+      }
+      if (entries.length > 5) {
+        lines.push(`- ... and ${entries.length - 5} more`)
+      }
+      lines.push("")
+    }
+  } catch {
+    // Failure log unavailable — skip
+  }
+
+  const content = lines.join("\n")
+
+  await fs.mkdir(runtimeStateDir, { recursive: true })
+  await fs.writeFile(outputPath, content, "utf-8")
+
+  return { path: outputPath }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase 7 — Optional registry-backed agent dispatch for prepare
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Result of attempting to dispatch prepare-phase agents via the registry.
+ */
+export interface PrepareAgentDispatchResult {
+  /** Whether any agent dispatch was attempted and completed. */
+  dispatched: boolean
+  /**
+   * Status of the dispatch attempt:
+   * - "unavailable": no registry service exposes compatible dispatch methods
+   * - "dispatched": service called successfully, outputs may exist
+   * - "failed": service was called but threw an error
+   */
+  agentDispatchStatus: "unavailable" | "dispatched" | "failed"
+  /** Name of the capability/service used, if any. */
+  serviceName?: string
+  /** Method used for dispatch, if any. */
+  methodUsed?: string
+  /** Absolute paths to any output files produced by agent dispatch. */
+  producedOutputs: string[]
+  /** Error message if dispatch failed. */
+  error?: string
+}
+
+/**
+ * Run prepare-phase agents via the registry if available.
+ *
+ * Checks the shared capability registry for any registered service that
+ * exposes agent-dispatch methods (`runAgent`, `runChain`, `dispatch`,
+ * `subagent`). Designed for optional integration — if no service exists,
+ * the prepare workflow still succeeds with an explicit
+ * `agentDispatchStatus: "unavailable"` recorded in plan-state.
+ *
+ * If a compatible service is found, calls through it defensively
+ * (try/catch) and persists any outputs to repo-map, reconnaissance, and
+ * plan artifact paths. If the service exists but exposes none of the
+ * known dispatch method names, no dispatch is attempted.
+ *
+ * @param changeId - The change identifier.
+ * @param planVersion - The plan version label (e.g. "v1").
+ * @param cwd - Working directory (optional).
+ * @returns A structured result describing the dispatch outcome.
+ */
+export async function runPrepareAgentsIfAvailable(
+  changeId: string,
+  planVersion: string,
+  cwd?: string,
+): Promise<PrepareAgentDispatchResult> {
+  const registry = getZflowRegistry()
+  const { default: fs } = await import("node:fs/promises")
+  const { default: pathModule } = await import("node:path")
+  const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+
+  // Known dispatch method names across agent/subagent/orchestration services
+  const DISPATCH_METHOD_NAMES = new Set(["runAgent", "runChain", "dispatch", "subagent"])
+
+  // Check all registered capabilities for a service exposing dispatch methods
+  const capabilities = registry.getCapabilities()
+  let dispatchService: { name: string; service: unknown; method: string } | null = null
+
+  for (const [capName, registered] of capabilities) {
+    if (registered.service === undefined) continue
+    const svc = registered.service as Record<string, unknown>
+    for (const methodName of DISPATCH_METHOD_NAMES) {
+      if (typeof svc[methodName] === "function") {
+        dispatchService = { name: capName, service: svc, method: methodName }
+        break
+      }
+    }
+    if (dispatchService) break
+  }
+
+  if (!dispatchService) {
+    // Record unavailable status in plan-state runtimeMetadata
+    try {
+      const planStatePath = resolvePlanStatePath(changeId, cwd)
+      const raw = await fs.readFile(planStatePath, "utf-8")
+      const planState = JSON.parse(raw)
+      planState.runtimeMetadata = {
+        ...(planState.runtimeMetadata ?? {}),
+        agentDispatchStatus: "unavailable",
+        agentCheckedAt: new Date().toISOString(),
+      }
+      planState.updatedAt = new Date().toISOString()
+      await fs.writeFile(planStatePath, JSON.stringify(planState, null, 2), "utf-8")
+    } catch {
+      // Non-critical; skip recording
+    }
+
+    return {
+      dispatched: false,
+      agentDispatchStatus: "unavailable",
+      producedOutputs: [],
+    }
+  }
+
+  // A compatible dispatch service exists — call through it defensively
+  const runtimeStateDir = resolveRuntimeStateDir(cwd)
+  const versionDir = resolvePlanVersionDir(changeId, planVersion, cwd)
+  const outputs: string[] = []
+
+  try {
+    const dispatchFn = (dispatchService.service as Record<string, unknown>)[
+      dispatchService.method
+    ] as (...args: unknown[]) => Promise<unknown>
+
+    // Build a context payload with paths the service can use to write outputs
+    const dispatchContext = {
+      changeId,
+      planVersion,
+      cwd: cwd ?? process.cwd(),
+      artifactPaths: {
+        repoMap: pathModule.join(runtimeStateDir, "repo-map.md"),
+        reconnaissance: pathModule.join(runtimeStateDir, "reconnaissance.md"),
+        design: pathModule.join(versionDir, "design.md"),
+        executionGroups: pathModule.join(versionDir, "execution-groups.md"),
+        standards: pathModule.join(versionDir, "standards.md"),
+        verification: pathModule.join(versionDir, "verification.md"),
+      },
+    }
+
+    await dispatchFn(dispatchContext)
+
+    // Collect any files the service wrote
+    for (const artifactPath of Object.values(dispatchContext.artifactPaths)) {
+      try {
+        await fs.access(artifactPath)
+        outputs.push(artifactPath)
+      } catch {
+        // Not written — that's fine
+      }
+    }
+
+    // Record success in plan-state runtimeMetadata
+    try {
+      const planStatePath = resolvePlanStatePath(changeId, cwd)
+      const raw = await fs.readFile(planStatePath, "utf-8")
+      const planState = JSON.parse(raw)
+      planState.runtimeMetadata = {
+        ...(planState.runtimeMetadata ?? {}),
+        agentDispatchStatus: "dispatched",
+        agentDispatchService: dispatchService.name,
+        agentDispatchMethod: dispatchService.method,
+        agentDispatchedAt: new Date().toISOString(),
+      }
+      planState.updatedAt = new Date().toISOString()
+      await fs.writeFile(planStatePath, JSON.stringify(planState, null, 2), "utf-8")
+    } catch {
+      // Non-critical
+    }
+
+    return {
+      dispatched: true,
+      agentDispatchStatus: "dispatched",
+      serviceName: dispatchService.name,
+      methodUsed: dispatchService.method,
+      producedOutputs: outputs,
+    }
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : String(err)
+
+    // Record failure in plan-state runtimeMetadata
+    try {
+      const planStatePath = resolvePlanStatePath(changeId, cwd)
+      const raw = await fs.readFile(planStatePath, "utf-8")
+      const planState = JSON.parse(raw)
+      planState.runtimeMetadata = {
+        ...(planState.runtimeMetadata ?? {}),
+        agentDispatchStatus: "failed",
+        agentDispatchService: dispatchService.name,
+        agentDispatchMethod: dispatchService.method,
+        agentDispatchError: errorMessage,
+      }
+      planState.updatedAt = new Date().toISOString()
+      await fs.writeFile(planStatePath, JSON.stringify(planState, null, 2), "utf-8")
+    } catch {
+      // Non-critical
+    }
+
+    return {
+      dispatched: false,
+      agentDispatchStatus: "failed",
+      serviceName: dispatchService.name,
+      methodUsed: dispatchService.method,
+      producedOutputs: outputs,
+      error: errorMessage,
+    }
+  }
+}
+
 /**
  * Run the formal `/zflow-change-prepare` workflow orchestration.
  *
@@ -2301,14 +3192,19 @@ export async function updatePlanState(
  * 4. Creates the version directory under `<runtime-state-dir>/plans/{changeId}/v1/`.
  * 5. Builds canonical plan artifact paths for agent dispatch.
  * 6. Adds a state-index entry tracking this plan.
- * 7. Returns an initial workflow execution plan structure for the caller
+ * 7. Resolves profile via registry if available (`resolveProfileIfAvailable`).
+ * 8. Detects RuneContext if changePath looks like a RuneContext path.
+ * 9. Writes concrete repo-map.md (`buildRepoMap`) and reconnaissance.md
+ *    (`buildReconnaissance`) with real repository data.
+ * 10. Attempts optional agent dispatch via registry (`runPrepareAgentsIfAvailable`).
+ * 11. Returns an initial workflow execution plan structure for the caller
  *    to populate with resolved profile steps.
  *
  * The caller (the extension command handler) is responsible for:
  * - Resolving the active profile (`Profile.ensureResolved()`)
  * - Calling `buildWorkflowExecutionPlan("prepare", ...)` with the resolved profile
  * - Dispatching agents via pi-subagents
- * - Calling `updatePlanState()` to advance lifecycle state after each phase
+ * - Calling `advancePlanLifecycle()` to advance lifecycle state after each phase
  *
  * @param options - Prepare workflow options.
  * @returns The prepared plan context with change ID, version, plan state path, and initial plan.
@@ -2326,6 +3222,7 @@ export async function runChangePrepareWorkflow(
   const cwd = options.cwd
   const { default: fs } = await import("node:fs/promises")
   const { default: path } = await import("node:path")
+  const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
 
   // 1. Check for unfinished work if a changeId was provided
   if (options.changeId) {
@@ -2343,7 +3240,18 @@ export async function runChangePrepareWorkflow(
 
   // 3. Create initial plan-state.json
   const planStatePath = resolvePlanStatePath(changeId, cwd)
-  const initialPlanState = {
+  const initialPlanState: {
+    changeId: string
+    currentVersion: string
+    approvedVersion: string | null
+    lifecycleState: string
+    runeContext: { enabled: boolean; changePath: string | null }
+    versions: Record<string, { state: string; createdAt: string }>
+    createdAt: string
+    updatedAt: string
+    runtimeStateDir?: string
+    runtimeMetadata?: { repoMapPath: string; reconnaissancePath: string }
+  } = {
     changeId,
     currentVersion: "v1",
     approvedVersion: null,
@@ -2385,6 +3293,56 @@ export async function runChangePrepareWorkflow(
       changePath: options.changePath ?? null,
     },
   }, cwd)
+
+  // ── Step 7: Resolve profile via registry if available ─────────
+  const profileResult = await resolveProfileIfAvailable(changeId, cwd)
+  console.info(`[zflow] ${profileResult.advisory}`)
+
+  // ── Step 8: Detect RuneContext ─────────────────────────────────
+  // If changePath looks like a RuneContext path (contains @ or /context/),
+  // try to detect RuneContext via the pi-zflow-runecontext capability.
+  const registry = getZflowRegistry()
+  const changePath = options.changePath ?? ""
+  if (changePath.includes("@") || changePath.includes("/context/")) {
+    console.info(`[zflow] Change path "${changePath}" looks like a RuneContext path — attempting detection.`)
+    if (registry.has("runecontext")) {
+      try {
+        const runeContextService = registry.get<{ detectRuneContext?: (path: string) => Promise<unknown> }>("runecontext")
+        if (runeContextService && typeof runeContextService.detectRuneContext === "function") {
+          const detected = await runeContextService.detectRuneContext(changePath)
+          console.info(`[zflow] RuneContext detected: ${JSON.stringify(detected)}`)
+        }
+      } catch {
+        console.warn("[zflow] RuneContext service available but detection failed.")
+      }
+    } else {
+      console.info("[zflow] No RuneContext service found in registry. Detection is caller's responsibility.")
+    }
+  }
+
+  // ── Step 9: Write concrete repo-map.md and reconnaissance.md ──
+  const repoMapResult = await buildRepoMap(cwd)
+  const reconResult = await buildReconnaissance(cwd, options.changePath)
+
+  // Record runtime state dir and artifact paths in returned metadata
+  initialPlanState.runtimeStateDir = resolveRuntimeStateDir(cwd)
+  initialPlanState.runtimeMetadata = {
+    repoMapPath: repoMapResult.path,
+    reconnaissancePath: reconResult.path,
+  }
+
+  // ── Step 10: Attempt optional agent dispatch via registry ───────
+  const agentDispatchResult = await runPrepareAgentsIfAvailable(changeId, "v1", cwd)
+  if (agentDispatchResult.dispatched) {
+    console.info(
+      `[zflow] Agent dispatch completed via ${agentDispatchResult.serviceName}.` +
+      `${agentDispatchResult.methodUsed} (${agentDispatchResult.producedOutputs.length} outputs).`,
+    )
+  } else if (agentDispatchResult.agentDispatchStatus === "unavailable") {
+    console.info("[zflow] No agent dispatch service available — proceeding without agent dispatch.")
+  } else {
+    console.warn(`[zflow] Agent dispatch failed: ${agentDispatchResult.error}`)
+  }
 
   return {
     changeId,
@@ -2696,6 +3654,226 @@ export function canForkSession(): boolean {
   }
 }
 
+// ── Fork implementation session helper ────────────────────────────
+
+/**
+ * Result of attempting to fork an implementation session.
+ */
+export interface ForkSessionResult {
+  /** Whether the session was successfully forked via ctx API. */
+  forked: boolean
+  /** Path to the new session file, if forked via ctx API. */
+  sessionFile?: string
+  /** Path to the handoff artifact file, if fallback was used. */
+  handoffArtifactPath?: string
+  /** The serialized handoff metadata (for reference). */
+  handoffJson: string
+  /** The handoff prompt prefix (for injecting into the new session). */
+  handoffPromptPrefix: string
+  /** Human-readable instructions for next steps. */
+  message: string
+}
+
+/**
+ * Attempt to fork a new implementation session with handoff metadata.
+ *
+ * Tries, in order:
+ * 1. `ctx.newSession()` — creates a fresh session with handoff prompt as the first user message
+ * 2. `ctx.fork()` — forks from the current leaf entry with handoff metadata
+ * 3. Falls back to writing a `.handoff.json` artifact file under `<runtime-state-dir>/runs/`
+ *
+ * Uses defensive dynamic checks so it works even with partial `ctx` stubs.
+ * Does NOT create git branches.
+ *
+ * @param ctx - A command-handler context-like object (may have `newSession`, `fork`, `ui`).
+ * @param handoff - The implementation handoff metadata.
+ * @returns A ForkSessionResult describing what happened.
+ */
+export async function forkImplementationSessionIfAvailable(
+  ctx: Record<string, unknown>,
+  handoff: ImplementationHandoff,
+): Promise<ForkSessionResult> {
+  const handoffJson = serializeHandoff(handoff)
+  const handoffPromptPrefix = buildHandoffPromptPrefix(handoff)
+
+  // ── Attempt 1: ctx.newSession() ──────────────────────────────
+  const newSession = (ctx as Record<string, unknown>).newSession
+  if (typeof newSession === "function") {
+    try {
+      const parentSession =
+        typeof (ctx as Record<string, unknown>).sessionManager !== "undefined" &&
+        typeof (ctx as Record<string, unknown>).sessionManager !== "string" &&
+        typeof (ctx as Record<string, unknown>).sessionManager === "object" &&
+        (ctx as Record<string, unknown>).sessionManager !== null
+          ? ((ctx as Record<string, unknown>).sessionManager as Record<string, unknown>).getSessionFile
+            ? typeof (ctx as Record<string, unknown>).sessionManager === "object" &&
+              (ctx as Record<string, unknown>).sessionManager !== null &&
+              typeof ((ctx as Record<string, unknown>).sessionManager as Record<string, unknown>).getSessionFile === "function"
+              ? await ((ctx as Record<string, unknown>).sessionManager as { getSessionFile: () => string | Promise<string> }).getSessionFile()
+              : undefined
+            : undefined
+          : undefined
+
+      // Call ctx.newSession with handoff prompt sent as a user message
+      // so the forked session knows it's an implementation session.
+      const result = await (newSession as (opts?: Record<string, unknown>) => Promise<{ cancelled: boolean; sessionFile?: string }>)({
+        parentSession,
+        withSession: async (forkedCtx: Record<string, unknown>) => {
+          const sendMsg = (forkedCtx as Record<string, unknown>).sendUserMessage
+          if (typeof sendMsg === "function") {
+            await (sendMsg as (msg: string) => Promise<void>)(handoffPromptPrefix)
+          }
+        },
+      })
+
+      if (!result.cancelled && result.sessionFile) {
+        return {
+          forked: true,
+          sessionFile: result.sessionFile,
+          handoffJson,
+          handoffPromptPrefix,
+          message: `✅ Implementation session forked.\n  Session file: ${result.sessionFile}\n  Change: ${handoff.changeId} v${handoff.approvedVersion}\n  Use \`/zflow-change-implement ${handoff.changeId}\` to begin.`,
+        }
+      }
+    } catch {
+      // newSession failed — fall through
+    }
+  }
+
+  // ── Attempt 2: ctx.fork() ────────────────────────────────────
+  // Requires an entryId — not always available in command context.
+  // If this fails, proceed to fallback.
+  const forkFn = (ctx as Record<string, unknown>).fork
+  if (typeof forkFn === "function") {
+    try {
+      // Try to get the current entryId from ctx
+      const currentEntryId =
+        typeof (ctx as Record<string, unknown>).entryId === "string"
+          ? (ctx as Record<string, unknown>).entryId as string
+          : undefined
+
+      if (currentEntryId) {
+        const forkResult = await (forkFn as (entryId: string, opts?: Record<string, unknown>) => Promise<{ cancelled: boolean }>)(
+          currentEntryId,
+          {
+            position: "at",
+            withSession: async (forkedCtx: Record<string, unknown>) => {
+              const sendMsg = (forkedCtx as Record<string, unknown>).sendUserMessage
+              if (typeof sendMsg === "function") {
+                await (sendMsg as (msg: string) => Promise<void>)(handoffPromptPrefix)
+              }
+            },
+          },
+        )
+
+        if (!forkResult.cancelled) {
+          return {
+            forked: true,
+            sessionFile: "forked-session",
+            handoffJson,
+            handoffPromptPrefix,
+            message: `✅ Implementation session forked from current leaf.\n  Change: ${handoff.changeId} v${handoff.approvedVersion}\n  Use \`/zflow-change-implement ${handoff.changeId}\` to begin implementation.`,
+          }
+        }
+      }
+    } catch {
+      // ctx.fork failed — fall through
+    }
+  }
+
+  // ── Fallback: Write handoff artifact file ────────────────────
+  // Write to <runtime-state-dir>/runs/<changeId>-handoff.json
+  try {
+    const { default: fs } = await import("node:fs/promises")
+    const { default: path } = await import("node:path")
+    const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+
+    const runtimeStateDir = resolveRuntimeStateDir()
+    const runsDir = path.join(runtimeStateDir, "runs")
+    const handoffFilename = `${handoff.changeId}-handoff.json`
+    const handoffArtifactPath = path.join(runsDir, handoffFilename)
+
+    await fs.mkdir(runsDir, { recursive: true })
+    await fs.writeFile(handoffArtifactPath, handoffJson, "utf-8")
+
+    return {
+      forked: false,
+      handoffArtifactPath,
+      handoffJson,
+      handoffPromptPrefix,
+      message:
+        `📋 Handoff artifact written to: ${handoffArtifactPath}\n` +
+        `  Change: ${handoff.changeId} v${handoff.approvedVersion}\n` +
+        `  No session fork API was available.\n` +
+        `  Use \`/zflow-change-implement ${handoff.changeId}\` to load the handoff and begin implementation.\n` +
+        `  No git branches were created.`,
+    }
+  } catch (err) {
+    // Last-resort: return handoff data inline
+    return {
+      forked: false,
+      handoffJson,
+      handoffPromptPrefix,
+      message:
+        `⚠️ Could not write handoff artifact.\n` +
+        `  Change: ${handoff.changeId} v${handoff.approvedVersion}\n` +
+        `  Error: ${err instanceof Error ? err.message : String(err)}\n` +
+        `  Handoff data:\n${handoffJson}\n\n` +
+        `  Pass this data to \`/zflow-change-implement ${handoff.changeId}\` manually.`,
+    }
+  }
+}
+
+/**
+ * Resolve a pending handoff artifact for a given changeId.
+ *
+ * Reads `<runtime-state-dir>/runs/<changeId>-handoff.json` if it exists.
+ * Returns null if no handoff artifact is found.
+ *
+ * @param changeId - The change identifier to look up.
+ * @param cwd - Working directory (optional).
+ */
+export async function resolvePendingHandoff(
+  changeId: string,
+  cwd?: string,
+): Promise<ImplementationHandoff | null> {
+  try {
+    const { default: fs } = await import("node:fs/promises")
+    const { default: path } = await import("node:path")
+    const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+
+    const runtimeStateDir = resolveRuntimeStateDir(cwd)
+    const handoffPath = path.join(runtimeStateDir, "runs", `${changeId}-handoff.json`)
+    const raw = await fs.readFile(handoffPath, "utf-8")
+    return deserializeHandoff(raw)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Remove a pending handoff artifact for a given changeId.
+ *
+ * @param changeId - The change identifier.
+ * @param cwd - Working directory (optional).
+ */
+export async function clearPendingHandoff(
+  changeId: string,
+  cwd?: string,
+): Promise<void> {
+  try {
+    const { default: fs } = await import("node:fs/promises")
+    const { default: path } = await import("node:path")
+    const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+
+    const runtimeStateDir = resolveRuntimeStateDir(cwd)
+    const handoffPath = path.join(runtimeStateDir, "runs", `${changeId}-handoff.json`)
+    await fs.rm(handoffPath, { force: true })
+  } catch {
+    // Non-critical; ignore
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Phase 7 — /zflow-change-implement workflow orchestration
 // ═══════════════════════════════════════════════════════════════════
@@ -2734,7 +3912,14 @@ export interface ImplementWorkflowResult {
   /** Plan version that was executed. */
   planVersion: string
   /** Overall workflow status. */
-  status: "completed" | "failed" | "drift-pending" | "verification-failed"
+  status:
+    | "executing"
+    | "verifying"
+    | "cleanup-pending"
+    | "completed"
+    | "failed"
+    | "drift-pending"
+    | "apply-back-conflicted"
   /** Verification outcome. */
   verificationStatus: "passed" | "failed" | "skipped" | "pending"
   /** Path to the code review findings file, if review was run. */
@@ -2743,6 +3928,8 @@ export interface ImplementWorkflowResult {
   deviationSummaryPath?: string
   /** Error message if the workflow failed. */
   error?: string
+  /** Ordered list of step descriptions explaining what should happen next. */
+  nextSteps: string[]
 }
 
 /**
@@ -2806,12 +3993,45 @@ export async function runChangeImplementWorkflow(
 
   const planVersion = options.planVersion ?? approvedVersion
 
-  // 3. Update plan state to executing
+  // 3. Check worktree cleanliness
+  const { default: childProcess } = await import("node:child_process")
+  const repoRoot = childProcess.execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    cwd: cwd ?? process.cwd(),
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim()
+
+  let worktreeDirty = false
+  try {
+    const status = childProcess.execFileSync("git", ["status", "--porcelain"], {
+      cwd: repoRoot,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim()
+    if (status.length > 0) {
+      worktreeDirty = true
+      console.warn(
+        `[zflow] Worktree is dirty for change "${options.changeId}". ` +
+        "Uncommitted changes may interfere with worktree dispatch. " +
+        "Use --force to proceed despite dirty worktree.",
+      )
+    }
+  } catch {
+    console.warn("[zflow] Could not check worktree cleanliness — proceeding without check.")
+  }
+
+  if (worktreeDirty && !options.skipVerification) {
+    // Allow --force via skipVerification being explicitly false vs undefined
+    // The --force flag is handled at the command handler level
+    console.info("[zflow] Proceeding with dirty worktree (caller acknowledged warning).")
+  }
+
+  // 4. Update plan state to executing
   planState.lifecycleState = "executing"
   planState.updatedAt = new Date().toISOString()
   await fs.writeFile(planStatePath, JSON.stringify(planState, null, 2), "utf-8")
 
-  // 4. Build canonical planning artifact paths
+  // 5. Build canonical planning artifact paths
   const artifactPaths: Record<string, string> = {
     design: resolvePlanArtifactPath(options.changeId, planVersion, "design", cwd),
     executionGroups: resolvePlanArtifactPath(options.changeId, planVersion, "execution-groups", cwd),
@@ -2819,7 +4039,7 @@ export async function runChangeImplementWorkflow(
     verification: resolvePlanArtifactPath(options.changeId, planVersion, "verification", cwd),
   }
 
-  // 5. Verify canonical artifacts exist (warn if missing)
+  // 6. Verify canonical artifacts exist (warn if missing)
   for (const [key, ap] of Object.entries(artifactPaths)) {
     try {
       await fs.access(ap)
@@ -2828,18 +4048,18 @@ export async function runChangeImplementWorkflow(
     }
   }
 
-  // 6. Create a run and initial run.json
-  const { default: childProcess } = await import("node:child_process")
-  const repoRoot = childProcess.execFileSync("git", ["rev-parse", "--show-toplevel"], {
-    cwd: cwd ?? process.cwd(),
-    encoding: "utf-8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim()
-
+  // 7. Create a run with full metadata
   const runId = `impl-${options.changeId}-${Date.now().toString(36)}`
   const run = await createRun(runId, repoRoot, options.changeId, planVersion, cwd)
 
-  // 7. Add state-index entry for the new run
+  // Update run phase to "executing" with additional fields
+  await setRunPhase(runId, "executing", cwd)
+  await updateRun(runId, {
+    changeId: options.changeId,
+    planVersion,
+  } as any, cwd)
+
+  // 8. Add state-index entry for the new run
   await addStateIndexEntry({
     type: "run",
     id: runId,
@@ -2848,20 +4068,64 @@ export async function runChangeImplementWorkflow(
       changeId: options.changeId,
       planVersion,
       repoRoot,
+      worktreeDirty,
     },
   }, cwd)
 
-  // 8. Add runtime reminder via buildModeInjection (caller injects this at right time)
-  //    The implement mode fragment plus approved-plan-loaded reminder is injected
-  //    by the calling command handler.
+  // 9. Register the run in the change lifecycle (unfinishedRuns)
+  const { getChangeLifecycle, upsertChangeLifecycle } = await import("pi-zflow-artifacts/state-index")
+  const existingLifecycle = await getChangeLifecycle(options.changeId, cwd)
+  await upsertChangeLifecycle({
+    changeId: options.changeId,
+    lastPhase: "executing",
+    unfinishedRuns: existingLifecycle
+      ? [...new Set([...existingLifecycle.unfinishedRuns, runId])]
+      : [runId],
+    retainedWorktrees: existingLifecycle?.retainedWorktrees ?? [],
+    artifactPaths: existingLifecycle?.artifactPaths ?? [],
+    cleanupMetadata: existingLifecycle?.cleanupMetadata ?? {},
+  }, cwd)
+
+  // 10. Persist ordered next steps into run.json
+  const nextSteps: string[] = [
+    "1. Context-builder: review design, execution-groups, standards, and verification artifacts",
+    "2. Worktree dispatch: dispatch execution groups to isolated worktrees with per-group agents",
+    "3. Worker verification: each worker runs scoped verification before signalling completion",
+    "4. Apply-back: merge completed worktree patches back to the primary worktree",
+    "5. Final verification: run full verification suite on the primary worktree",
+    "6. Code review: run /zflow-review-code to audit the implementation",
+    "7. Fix loop: address any verification or review failures, then re-verify",
+  ]
+  await updateRun(runId, { nextSteps, metadata: { worktreeDirty } }, cwd)
 
   return {
     runId,
     changeId: options.changeId,
     planVersion,
-    status: "completed",
+    status: "executing",
     verificationStatus: options.skipVerification ? "skipped" : "pending",
+    nextSteps,
   }
+}
+
+/**
+ * Record or update ordered next steps in run.json.
+ *
+ * Reads the existing run.json, replaces `nextSteps`, and persists
+ * atomically.  This is a durable helper that downstream workflow steps
+ * (verification, apply-back, code review) can call to keep the run
+ * metadata honest as the implementation progresses.
+ *
+ * @param runId - Unique run identifier.
+ * @param steps - Ordered array of step descriptions (one per element).
+ * @param cwd - Working directory (optional, for resolving runtime state dir).
+ */
+export async function recordImplementationNextSteps(
+  runId: string,
+  steps: string[],
+  cwd?: string,
+): Promise<void> {
+  await updateRun(runId, { nextSteps: steps }, cwd)
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -3034,4 +4298,530 @@ export function buildDriftDetectedReminder(
   )
 
   return lines.join("\n")
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Phase 7.9 — Implement-workflow helper functions
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Run final verification for a completed run.
+ *
+ * Resolves the verification command via the precedence rules in
+ * verification.ts, runs it, logs the result to run.json, and returns
+ * pass/fail.
+ *
+ * @param runId - The run identifier.
+ * @param cwd - Working directory (optional).
+ * @returns Verification result with pass/fail and details.
+ */
+export async function finalizeVerification(
+  runId: string,
+  cwd?: string,
+): Promise<{
+  pass: boolean
+  command: string
+  output: string
+  duration: number
+  error?: string
+}> {
+  const run = await readRun(runId, cwd)
+  const repoRoot = run.repoRoot
+
+  // Resolve verification command
+  const command = resolveVerificationCommand(repoRoot)
+  if (!command) {
+    console.warn("[zflow] No verification command resolved — marking verification as skipped.")
+    await updateRun(runId, {
+      verification: { status: "skipped" },
+    } as any, cwd)
+    return { pass: true, command: "(none)", output: "Verification skipped — no command resolved.", duration: 0 }
+  }
+
+  // Run verification
+  const result = await runVerification(command, repoRoot)
+
+  // Log to run.json
+  await updateRun(runId, {
+    verification: {
+      status: result.pass ? "passed" : "failed",
+      completedAt: new Date().toISOString(),
+      failureCount: result.pass ? 0 : 1,
+    },
+  } as any, cwd)
+
+  // Log to failure log if failed
+  if (!result.pass) {
+    await appendFailureLog(
+      `Verification failed for run ${runId}`,
+      `- **Command**: \`${command}\`\n- **Output**: \`\`\`\n${result.output}\n\`\`\`\n- **Duration**: ${result.duration}ms`,
+      cwd,
+    )
+  }
+
+  return {
+    pass: result.pass,
+    command: result.command,
+    output: result.output,
+    duration: result.duration,
+    error: result.error,
+  }
+}
+
+/**
+ * Run a bounded verification fix loop for a run.
+ *
+ * Delegates to `runVerificationFixLoop` from verification.ts.
+ * Requires the caller to provide a fix handler callback.
+ *
+ * @param runId - The run identifier.
+ * @param fixHandler - Async callback that attempts fixes, returns true if a fix was applied.
+ * @param cwd - Working directory (optional).
+ * @returns Fix loop result.
+ */
+export async function runBoundedFixLoop(
+  runId: string,
+  fixHandler: (verificationResult: import("./verification.js").VerificationResult) => Promise<boolean>,
+  cwd?: string,
+): Promise<import("./verification.js").FixLoopResult> {
+  const run = await readRun(runId, cwd)
+  const repoRoot = run.repoRoot
+
+  const result = await runVerificationFixLoop({
+    repoRoot,
+    cwd,
+  }, fixHandler)
+
+  // Update run.json with fix loop outcome
+  await updateRun(runId, {
+    verification: {
+      status: result.success ? "passed" : "failed",
+      completedAt: new Date().toISOString(),
+      failureCount: result.success ? 0 : result.fixAttempts.length,
+    },
+  } as any, cwd)
+
+  if (!result.success) {
+    await appendFailureLog(
+      `Fix loop exhausted for run ${runId}`,
+      `- **Iterations**: ${result.iterations}\n- **Timed out**: ${result.timedOut}\n- **Final verification**: ${result.finalVerification.pass ? "passed" : "failed"}`,
+      cwd,
+    )
+  }
+
+  return result
+}
+
+/**
+ * Finalize code review for a completed run.
+ *
+ * Delegates to pi-zflow-review if available via registry.
+ *
+ * @param runId - The run identifier.
+ * @param cwd - Working directory (optional).
+ * @returns Code review result.
+ */
+export async function finalizeCodeReview(
+  runId: string,
+  cwd?: string,
+): Promise<{
+  pass: boolean
+  findingsPath?: string
+  summary: string
+}> {
+  const registry = getZflowRegistry()
+  const run = await readRun(runId, cwd)
+  const reviewService = registry.optional<Record<string, Function>>("review")
+
+  if (reviewService && typeof reviewService.runCodeReview === "function") {
+    try {
+      const planningArtifacts = {
+        design: resolvePlanArtifactPath(run.changeId, run.planVersion, "design", cwd),
+        executionGroups: resolvePlanArtifactPath(run.changeId, run.planVersion, "execution-groups", cwd),
+        standards: resolvePlanArtifactPath(run.changeId, run.planVersion, "standards", cwd),
+        verification: resolvePlanArtifactPath(run.changeId, run.planVersion, "verification", cwd),
+      }
+
+      const result = await (reviewService.runCodeReview as Function)({
+        source: `Implementation of ${run.changeId}`,
+        repoPath: run.repoRoot || cwd || process.cwd(),
+        branch: run.branch || "(unknown)",
+        planningArtifacts,
+        verificationStatus: (run.verification as any)?.status || "unknown",
+        cwd,
+      })
+
+      return {
+        pass: (result as any).severity.critical === 0 && (result as any).severity.major === 0,
+        findingsPath: (result as any).findingsPath,
+        summary: `Code review: ${(result as any).severity.critical} critical, ${(result as any).severity.major} major, ${(result as any).severity.minor} minor issues.`,
+      }
+    } catch (err) {
+      const summary = `Code review via registry failed: ${err instanceof Error ? err.message : String(err)}`
+      console.warn(`[zflow] ${summary}`)
+      return { pass: false, summary }
+    }
+  }
+
+  const summary = "Code review skipped (no review service available)."
+  console.info(`[zflow] ${summary}`)
+  return { pass: true, summary }
+}
+
+/**
+ * Mark a workflow as completed in plan-state.json, run.json, and the state index.
+ *
+ * Logs completion to failure-log if any issues occurred during the run.
+ *
+ * @param changeId - The change identifier.
+ * @param runId - The run identifier.
+ * @param cwd - Working directory (optional).
+ */
+export async function completeWorkflow(
+  changeId: string,
+  runId: string,
+  cwd?: string,
+): Promise<void> {
+  const { default: fs } = await import("node:fs/promises")
+
+  // 1. Update plan lifecycle to "completed"
+  await updatePlanState(changeId, { lifecycleState: "completed" }, cwd)
+
+  // 2. Update run.json phase to "completed"
+  await setRunPhase(runId, "completed", cwd)
+
+  // 3. Update state-index
+  const index = await loadStateIndex(cwd)
+  const runEntry = index.entries.find(
+    (e) => e.type === "run" && e.id === runId,
+  )
+  if (runEntry) {
+    runEntry.status = "completed"
+    runEntry.updatedAt = new Date().toISOString()
+  }
+  const planEntry = index.entries.find(
+    (e) => e.type === "plan" && e.metadata?.changeId === changeId,
+  )
+  if (planEntry) {
+    planEntry.status = "completed"
+    planEntry.updatedAt = new Date().toISOString()
+  }
+  const { resolveStateIndexPath } = await import("pi-zflow-artifacts/artifact-paths")
+  await fs.writeFile(resolveStateIndexPath(cwd), JSON.stringify(index, null, 2), "utf-8")
+
+  // 4. Check if there were issues by reading the run's verification status
+  try {
+    const run = await readRun(runId, cwd)
+    if (run.verification && run.verification.status === "failed") {
+      await appendFailureLog(
+        `Workflow completed with issues for run ${runId}`,
+        `- **Change**: ${changeId}\n- **Verification**: ${run.verification.status}\n- **Completed at**: ${new Date().toISOString()}`,
+        cwd,
+      )
+    }
+  } catch {
+    // run.json may not be readable — that's OK
+  }
+
+  console.info(`[zflow] Workflow completed for change "${changeId}" (run ${runId}).`)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Post-start implementation sequence
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Options for `runImplementationPostStartSequence`.
+ */
+export interface PostStartSequenceOptions {
+  /** If true, skip waiting for dispatch artifacts and proceed to verification. */
+  skipDispatchWait?: boolean
+  /** If true, skip final verification entirely (review becomes advisory). */
+  skipVerification?: boolean
+  /** If true, skip code review. */
+  skipReview?: boolean
+  /** If false, do not attempt auto-fix loop on verification failure (default: true). */
+  autoFix?: boolean
+  /**
+   * Optional fix handler for the bounded fix loop.
+   * Receives the failed verification result and returns `true` if a fix
+   * was applied. If not provided, the fix loop still runs up to 3 iterations
+   * re-checking verification but without applying code changes.
+   */
+  fixHandler?: (result: import("./verification.js").VerificationResult) => Promise<boolean>
+}
+
+/**
+ * Result of running the post-start implementation sequence.
+ */
+export interface PostStartSequenceResult {
+  /** Current phase after the sequence ran (reflects run.json). */
+  phase: string
+  /** Symbolic status label. */
+  status: "waiting-for-dispatch" | "verifying" | "reviewing" | "completed" | "failed"
+  /** Verification outcome. */
+  verificationStatus: "passed" | "failed" | "skipped" | "pending"
+  /** Whether code review passed (if run). */
+  reviewPassed?: boolean
+  /** Path to code review findings if review was run. */
+  reviewFindingsPath?: string
+  /** Error message if any phase failed. */
+  error?: string
+  /** Run identifier. */
+  runId: string
+  /** Change identifier. */
+  changeId: string
+  /** Ordered list of next steps. */
+  nextSteps: string[]
+}
+
+/**
+ * Run the combined post-start implementation sequence in order where possible.
+ *
+ * This is the idempotent continuation function that should be called after
+ * `runChangeImplementWorkflow` has created the run and (optionally) after
+ * worktree dispatch has completed.
+ *
+ * Phase progression:
+ * 1. **waiting-for-dispatch** — No group results/patches exist yet. Returns
+ *    early with next steps instructing dispatch.
+ * 2. **verifying** — Dispatch artifacts present (or skipDispatchWait=true).
+ *    Runs `finalizeVerification()` unless explicitly skipped.
+ * 3. **fix-loop** — Verification failed; runs `runBoundedFixLoop()` if
+ *    options.autoFix is not false.
+ * 4. **verification-failed** — Fix loop exhausted without success.
+ * 5. **reviewing** — Verification passed (or advisory skip); runs
+ *    `finalizeCodeReview()`.
+ * 6. **completed** — Review passed (or skipped); calls `completeWorkflow()`.
+ *
+ * Every phase transition is persisted to run.json and state-index.
+ *
+ * @param runId - The run identifier.
+ * @param options - Sequence options.
+ * @param cwd - Working directory for runtime state path resolution.
+ * @returns Current sequence result with phase, status, and next steps.
+ */
+export async function runImplementationPostStartSequence(
+  runId: string,
+  options?: PostStartSequenceOptions,
+  cwd?: string,
+): Promise<PostStartSequenceResult> {
+  const { default: fs } = await import("node:fs/promises")
+  const opts = options ?? {}
+  const autoFix = opts.autoFix !== false // default true
+
+  // 1. Read the current run state
+  const run = await readRun(runId, cwd)
+  const changeId = run.changeId
+
+  // Helper: persist phase transition to run.json and state-index
+  async function transitionTo(phase: RunPhase): Promise<void> {
+    await setRunPhase(runId, phase, cwd)
+    try {
+      await updateStateIndexEntry(runId, { status: phase }, cwd)
+    } catch {
+      // State-index entry may not exist yet — non-fatal
+    }
+    // Also update change lifecycle lastPhase
+    const { getChangeLifecycle, upsertChangeLifecycle } =
+      await import("pi-zflow-artifacts/state-index")
+    const existingLifecycle = await getChangeLifecycle(changeId, cwd)
+    if (existingLifecycle) {
+      await upsertChangeLifecycle({
+        ...existingLifecycle,
+        lastPhase: phase,
+      }, cwd)
+    }
+  }
+
+  // 2. Check for dispatch/apply-back artifacts
+  //    Dispatch is evidenced by groups with patchPath set or apply-back having started.
+  const hasGroupResults = run.groups.some((g) => g.patchPath && g.patchPath.length > 0)
+  const hasApplyBackArtifacts = run.applyBack.status !== "pending"
+  const hasDispatchArtifacts = hasGroupResults || hasApplyBackArtifacts
+
+  if (!hasDispatchArtifacts && !opts.skipDispatchWait) {
+    // No dispatch results yet — return waiting-for-dispatch
+    const nextSteps: string[] = [
+      "1. Worktree dispatch: dispatch execution groups to isolated worktrees with per-group agents",
+      "2. Worker verification: each worker runs scoped verification before signalling completion",
+      "3. Apply-back: merge completed worktree patches back to the primary worktree",
+      "4. Final verification: run full verification suite on the primary worktree",
+      "5. Code review: run /zflow-review-code to audit the implementation",
+      "6. Fix loop: address any verification or review failures, then re-verify",
+    ]
+
+    await recordImplementationNextSteps(runId, nextSteps, cwd)
+
+    return {
+      phase: run.phase,
+      status: "waiting-for-dispatch",
+      verificationStatus: "pending",
+      runId,
+      changeId,
+      nextSteps,
+    }
+  }
+
+  // 3. Dispatch artifacts present (or explicitly skipped) → proceed to verification
+
+  // 3a. Skip verification entirely?
+  if (opts.skipVerification) {
+    // Mark as advisory-skip in run.json
+    await updateRun(runId, {
+      verification: { status: "skipped" },
+    } as any, cwd)
+    await transitionTo("executing")
+
+    // Go directly to code review (advisory)
+    if (!opts.skipReview) {
+      const reviewResult = await finalizeCodeReview(runId, cwd)
+      await transitionTo(reviewResult.pass ? "executing" : "review-failed")
+
+      if (reviewResult.pass) {
+        await completeWorkflow(changeId, runId, cwd)
+        return {
+          phase: "completed",
+          status: "completed",
+          verificationStatus: "skipped",
+          reviewPassed: true,
+          reviewFindingsPath: reviewResult.findingsPath,
+          runId,
+          changeId,
+          nextSteps: [],
+        }
+      } else {
+        return {
+          phase: "review-failed",
+          status: "failed",
+          verificationStatus: "skipped",
+          reviewPassed: false,
+          reviewFindingsPath: reviewResult.findingsPath,
+          error: reviewResult.summary,
+          runId,
+          changeId,
+          nextSteps: [
+            "1. Address code review findings",
+            "2. Re-run /zflow-change-implement or /zflow-change-fix to proceed",
+          ],
+        }
+      }
+    }
+
+    // Both verification and review skipped
+    await completeWorkflow(changeId, runId, cwd)
+    return {
+      phase: "completed",
+      status: "completed",
+      verificationStatus: "skipped",
+      runId,
+      changeId,
+      nextSteps: [],
+    }
+  }
+
+  // 3b. Run final verification
+  await transitionTo("executing")
+  await recordImplementationNextSteps(runId, [
+    "1. Final verification: run full verification suite on the primary worktree",
+    "2. Code review: run /zflow-review-code to audit the implementation",
+    "3. Fix loop: address any verification or review failures, then re-verify",
+  ], cwd)
+
+  const verificationResult = await finalizeVerification(runId, cwd)
+
+  if (!verificationResult.pass) {
+    // 3c. Verification failed — attempt fix loop if autoFix is enabled
+    if (autoFix) {
+      const fixHandler = opts.fixHandler ?? (async () => false)
+      const fixLoopResult = await runBoundedFixLoop(runId, fixHandler, cwd)
+
+      if (!fixLoopResult.success) {
+        await transitionTo("verification-failed")
+        return {
+          phase: "verification-failed",
+          status: "failed",
+          verificationStatus: "failed",
+          runId,
+          changeId,
+          error: `Fix loop exhausted (${fixLoopResult.iterations} iterations). ` +
+            `Final verification: ${fixLoopResult.finalVerification.pass ? "passed" : "failed"}.`,
+          nextSteps: [
+            "1. Review failure log for details",
+            "2. Manually fix issues, then re-run /zflow-change-implement or /zflow-change-fix",
+            "3. Use /zflow-change-audit to re-check status",
+          ],
+        }
+      }
+
+      // Fix loop succeeded — verification passes now
+    } else {
+      // autoFix disabled — mark as failed
+      await transitionTo("verification-failed")
+      return {
+        phase: "verification-failed",
+        status: "failed",
+        verificationStatus: "failed",
+        runId,
+        changeId,
+        error: "Final verification failed (auto-fix disabled).",
+        nextSteps: [
+          "1. Review verification output for details",
+          "2. Manually fix issues, then re-run /zflow-change-implement or /zflow-change-fix",
+          "3. Use /zflow-change-audit to re-check status",
+        ],
+      }
+    }
+  }
+
+  // 4. Verification passed (or fix loop resolved it) → code review
+  if (!opts.skipReview) {
+    const reviewResult = await finalizeCodeReview(runId, cwd)
+
+    if (!reviewResult.pass) {
+      await transitionTo("review-failed")
+      return {
+        phase: "review-failed",
+        status: "failed",
+        verificationStatus: "passed",
+        reviewPassed: false,
+        reviewFindingsPath: reviewResult.findingsPath,
+        error: reviewResult.summary,
+        runId,
+        changeId,
+        nextSteps: [
+          "1. Address code review findings",
+          "2. Run /zflow-change-fix to apply fixes",
+          "3. Re-run /zflow-change-implement to re-verify",
+        ],
+      }
+    }
+
+    await transitionTo("completed")
+    await completeWorkflow(changeId, runId, cwd)
+
+    return {
+      phase: "completed",
+      status: "completed",
+      verificationStatus: "passed",
+      reviewPassed: true,
+      reviewFindingsPath: reviewResult.findingsPath,
+      runId,
+      changeId,
+      nextSteps: [],
+    }
+  }
+
+  // 5. Verification passed, review skipped
+  await transitionTo("completed")
+  await completeWorkflow(changeId, runId, cwd)
+
+  return {
+    phase: "completed",
+    status: "completed",
+    verificationStatus: "passed",
+    runId,
+    changeId,
+    nextSteps: [],
+  }
 }

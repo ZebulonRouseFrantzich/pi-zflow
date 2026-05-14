@@ -66,3 +66,15 @@ export type {
   AgentRole,
   OutputConvention,
 } from "./output-conventions.js"
+
+// Prompt fragment loading (async helpers for hook injection)
+export {
+  loadFragment,
+  buildReminderInjection,
+  buildModeInjection,
+  fragmentExists,
+} from "./prompt-fragments.js"
+
+export type {
+  ModeFragment,
+} from "./prompt-fragments.js"

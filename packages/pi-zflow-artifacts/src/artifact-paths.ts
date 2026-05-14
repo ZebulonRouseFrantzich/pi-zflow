@@ -41,7 +41,7 @@ export function resolvePlanDir(
   version: string,
   cwd?: string,
 ): string {
-  return path.join(resolveChangeDir(changeId), `v${version}`)
+  return path.join(resolveChangeDir(changeId, cwd), `v${version}`)
 }
 
 /**
@@ -115,7 +115,7 @@ export function resolvePlanVersionDir(
  * Path: `<runtime-state-dir>/plans/{changeId}/plan-state.json
  */
 export function resolvePlanStatePath(changeId: string, cwd?: string): string {
-  return path.join(resolveChangeDir(changeId), "plan-state.json")
+  return path.join(resolveChangeDir(changeId, cwd), "plan-state.json")
 }
 
 // ---------------------------------------------------------------------------

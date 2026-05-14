@@ -26,6 +26,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { getZflowRegistry } from "pi-zflow-core/registry"
+import type { CapabilityClaim } from "pi-zflow-core/registry"
 import { PI_ZFLOW_PLAN_MODE_VERSION } from "pi-zflow-core"
 import {
   activatePlanMode,
@@ -34,23 +35,36 @@ import {
   isPlanModeActive,
 } from "./state.js"
 import { validatePlanModeBash } from "./bash-policy.js"
-import { loadFragment } from "pi-zflow-change-workflows"
+import { loadFragment } from "pi-zflow-agents"
 
 export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
   const registry = getZflowRegistry()
 
   // Claim the "plan-mode" capability — guards against duplicate loads
-  const claimed = registry.claim({
+  const claim: CapabilityClaim = {
     capability: "plan-mode",
     version: PI_ZFLOW_PLAN_MODE_VERSION,
     provider: "pi-zflow-plan-mode",
     sourcePath: import.meta.url,
-  })
+    compatibilityMode: "compatible",
+  }
 
-  if (!claimed) {
-    // Another compatible provider already claimed this capability
+  const registered = registry.claim(claim)
+
+  if (!registered) {
+    // Another incompatible provider already claimed this capability
     return
   }
+
+  // If the capability already has a service, another compatible instance
+  // already initialised fully. No-op to avoid duplicate registration.
+  if (registered.service !== undefined) {
+    return
+  }
+
+  // Provide a minimal service marker so subsequent duplicate loads see
+  // registered.service !== undefined and bail out early.
+  registry.provide("plan-mode", { activated: true })
 
   // ── Plan mode service ────────────────────────────────────────────
 

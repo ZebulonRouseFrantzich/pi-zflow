@@ -314,12 +314,16 @@ export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
       }
 
       // Determine verification status from args or default to unknown
-      // Users can pass "skipped" or "advisory" as an arg to mark that final
-      // verification was explicitly skipped, making the review advisory only
-      const skipArg = args.trim().toLowerCase()
-      const verificationStatus = skipArg === "skipped" || skipArg === "advisory"
-        ? "skipped"
-        : "passed"
+      // Accepted values: "passed", "failed", "skipped", "advisory", "unknown"
+      // - "passed": verification completed successfully
+      // - "failed": verification found issues
+      // - "skipped" or "advisory": final verification was explicitly skipped
+      // - "unknown" (default): verification status not yet determined
+      const statusArg = args.trim().toLowerCase()
+      const knownStatuses = ["passed", "failed", "skipped", "advisory", "unknown"] as const
+      const verificationStatus = knownStatuses.includes(statusArg as typeof knownStatuses[number])
+        ? (statusArg === "advisory" ? "skipped" : (statusArg as "passed" | "failed" | "skipped" | "unknown"))
+        : "unknown"
 
       try {
         // Dynamically import review orchestration to avoid eager loading

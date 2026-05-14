@@ -118,6 +118,7 @@ export type {
 // Formal implement workflow (Phase 7 — /zflow-change-implement orchestration)
 export {
   runChangeImplementWorkflow,
+  recordImplementationNextSteps,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
 export type {
@@ -236,10 +237,14 @@ export {
   deserializeHandoff,
   buildHandoffPromptPrefix,
   canForkSession,
+  forkImplementationSessionIfAvailable,
+  resolvePendingHandoff,
+  clearPendingHandoff,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
 export type {
   ImplementationHandoff,
+  ForkSessionResult,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
 // Audit and fix workflow wrappers (Phase 7 — /zflow-change-audit and /zflow-change-fix)
