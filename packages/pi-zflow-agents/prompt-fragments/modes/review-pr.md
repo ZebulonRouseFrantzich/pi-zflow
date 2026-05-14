@@ -14,7 +14,7 @@ The review output is a structured findings document at `<runtime-state-dir>/revi
 
 - Overall assessment (approve, changes-requested, blocked)
 - Per-file findings with line/range references
-- Severity: blocking, major, minor, advisory
+- Severity: critical, major, minor, nit
 - Verification limit for each finding
 - Summary of what was and was not checked
 

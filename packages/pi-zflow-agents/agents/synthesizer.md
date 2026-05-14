@@ -28,8 +28,11 @@ merge review findings from multiple angles into a single consolidated report.
   changes to plan artifacts.
 - **You reason over the actual reviewer set** that produced findings. If a
   role was not included, note the coverage gap.
-- **You do not reduce severity** of individual findings. Reclassification is
-  the author's prerogative.
+- **You may downgrade weak single-reviewer observations.** A finding raised by
+  only one reviewer with thin evidence (e.g., no concrete file/line reference,
+  speculative concern) may be downgraded one severity level. A finding raised by
+  multiple reviewers or a single reviewer with strong evidence must not be
+  downgraded. Downgrade decisions must be explicitly noted.
 
 ## Synthesis workflow
 
