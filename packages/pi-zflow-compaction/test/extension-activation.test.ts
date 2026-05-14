@@ -230,3 +230,67 @@ describe("proactive compaction trigger (turn_end)", () => {
       "ctx.compact() should NOT be called when no usage data at all")
   })
 })
+
+describe("before_agent_start compaction-handoff injection", () => {
+  afterEach(() => {
+    resetZflowRegistry()
+  })
+
+  it("injects enhanced compaction-handoff section after session_compact", async () => {
+    const stub = makePiStub()
+    activateZflowCompactionExtension(stub.pi as any)
+
+    const sessionCompactHandler = stub.eventHandlers.get("session_compact")![0]
+    const beforeAgentStartHandler = stub.eventHandlers.get("before_agent_start")![0]
+
+    // Simulate a compaction completing
+    sessionCompactHandler()
+
+    // Simulate the next agent start
+    const mockEvent = {
+      type: "before_agent_start" as const,
+      prompt: "do the thing",
+      systemPrompt: "You are a helpful assistant.",
+      systemPromptOptions: {} as any,
+    }
+
+    const result = await beforeAgentStartHandler(mockEvent)
+
+    assert.ok(result, "before_agent_start must return a result")
+    assert.ok(result.systemPrompt, "result must have systemPrompt")
+    assert.ok(
+      result.systemPrompt.includes("## Compaction Handoff"),
+      "systemPrompt must contain the enhanced Compaction Handoff section header",
+    )
+    assert.ok(
+      result.systemPrompt.includes("Mandatory rereads"),
+      "systemPrompt must contain mandatory reread artifact references",
+    )
+    assert.ok(
+      result.systemPrompt.length > mockEvent.systemPrompt.length + 100,
+      "systemPrompt must be substantially extended with the handoff section",
+    )
+  })
+
+  it("does not inject handoff when no compaction occurred", async () => {
+    const stub = makePiStub()
+    activateZflowCompactionExtension(stub.pi as any)
+
+    const beforeAgentStartHandler = stub.eventHandlers.get("before_agent_start")![0]
+
+    // No session_compact was called — pendingCompactionHandoff is false
+    const mockEvent = {
+      type: "before_agent_start" as const,
+      prompt: "continue work",
+      systemPrompt: "Current system prompt.",
+      systemPromptOptions: {} as any,
+    }
+
+    const result = await beforeAgentStartHandler(mockEvent)
+
+    // Should return empty object (no injection) because no compaction happened
+    assert.deepEqual(result, {},
+      "before_agent_start should return empty object when no compaction occurred",
+    )
+  })
+})

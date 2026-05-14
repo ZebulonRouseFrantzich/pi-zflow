@@ -3028,6 +3028,96 @@ export async function buildReconnaissance(
   return { path: outputPath }
 }
 
+// ── Compaction reanchor helpers ───────────────────────────────────
+
+/**
+ * Resolve canonical artifact paths for post-compaction rereading.
+ *
+ * Returns a record of well-known artifact identifiers mapped to their
+ * resolved absolute file paths in the runtime state directory.
+ * Callers use these to inject into agent context after compaction.
+ *
+ * @param cwd - Working directory (optional, for resolving runtime state dir).
+ * @returns Record of artifact ID → absolute path.
+ */
+export async function buildCompactionReanchorArtifacts(
+  cwd?: string,
+): Promise<Record<string, string>> {
+  const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+  const { default: pathModule } = await import("node:path")
+  const { default: fs } = await import("node:fs/promises")
+
+  const runtimeStateDir = resolveRuntimeStateDir(cwd)
+  const paths: Record<string, string> = {}
+
+  // Well-known artifacts that exist if generated
+  const wellKnown: Record<string, string> = {
+    "repo-map": "repo-map.md",
+    "reconnaissance": "reconnaissance.md",
+    "failure-log": "failure-log.md",
+    "findings": "findings.md",
+    "workflow-state": "workflow-state.json",
+  }
+
+  for (const [id, relativePath] of Object.entries(wellKnown)) {
+    const absPath = pathModule.join(runtimeStateDir, relativePath)
+    try {
+      await fs.access(absPath)
+      paths[id] = absPath
+    } catch {
+      // Artifact not yet generated — skip
+    }
+  }
+
+  // Plan-state resolves via artifact-paths if available
+  try {
+    const { resolvePlanStatePath } = await import("pi-zflow-artifacts/artifact-paths")
+    const planPath = resolvePlanStatePath(cwd)
+    try {
+      await fs.access(planPath)
+      paths["plan-state"] = planPath
+    } catch { /* not created yet */ }
+  } catch {
+    // pi-zflow-artifacts not available — skip plan-state
+  }
+
+  return paths
+}
+
+/**
+ * Merge compaction-handoff metadata into existing agent launch options.
+ *
+ * Adds the `"compaction-handoff"` reminder ID and canonical artifact paths
+ * to an existing options object without dropping existing entries.
+ * This is designed to be called after compaction/resume before building a
+ * subagent launch plan.
+ *
+ * @param options - Existing launch options (optional).
+ * @returns A new options object with compaction-handoff merged in.
+ */
+export function withCompactionHandoff(
+  options?: {
+    activeReminders?: string[]
+    artifactPaths?: Record<string, string>
+  },
+): {
+  activeReminders: string[]
+  artifactPaths?: Record<string, string>
+} {
+  const base = options?.activeReminders ?? []
+
+  // Add compaction-handoff if not already present
+  const activeReminders = base.includes("compaction-handoff")
+    ? base
+    : [...base, "compaction-handoff"]
+
+  // Preserve existing artifact paths (caller should merge via
+  // buildCompactionReanchorArtifacts separately if desired)
+  const artifactPaths = options?.artifactPaths
+
+  return { activeReminders, artifactPaths }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Phase 7 — Optional registry-backed agent dispatch for prepare
 // ═══════════════════════════════════════════════════════════════════

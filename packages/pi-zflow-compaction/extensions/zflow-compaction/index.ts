@@ -43,6 +43,7 @@ import {
   getDefaultArtifactPaths,
 } from "../../src/compaction-service.js"
 import { ensureRtkOrAlert } from "../../src/rtk-check.js"
+import { buildCompactionHandoffSection } from "../../src/reread-policy.js"
 
 export default function activateZflowCompactionExtension(pi: ExtensionAPI): void {
   const registry = getZflowRegistry()
@@ -320,18 +321,13 @@ export default function activateZflowCompactionExtension(pi: ExtensionAPI): void
     // Clear the flag so the reminder is only injected once
     pendingCompactionHandoff = false
 
-    // Inject the compaction-handoff reminder so the agent knows to reread
-    // file-backed artifacts for exact details rather than relying on the
-    // compaction summary alone.
-    const handoffReminder =
-      "**Compaction handoff.** A compaction cycle has completed. " +
-      "Do not rely on cached or summarised state from before compaction. " +
-      "Reread canonical artifacts — especially plan documents, " +
-      "`plan-state.json`, and the approved plan — for exact decisions " +
-      "and current state before continuing."
+    // Build the enhanced compaction-handoff section with real fragment +
+    // role-specific artifact reread reminders.
+    const agentName = typeof event.agent === "string" ? event.agent : undefined
+    const handoffSection = await buildCompactionHandoffSection(agentName)
 
     return {
-      systemPrompt: event.systemPrompt + `\n\n${handoffReminder}`,
+      systemPrompt: event.systemPrompt + `\n\n${handoffSection}`,
     }
   })
 }

@@ -179,11 +179,53 @@ export function formatRereadReminder(
     }
   }
 
-  sections.push("")
-  sections.push(
-    "The compaction summary provides orientation, but file-backed artifacts " +
-    "are the authoritative source for exact wording, paths, and implementation details.",
-  )
+  sections.push("", "The compaction summary provides orientation, but file-backed artifacts are the authoritative source for exact wording, paths, and implementation details.")
 
   return sections.join("\n")
+}
+
+/**
+ * Build a combined compaction-handoff section suitable for injecting
+ * into an agent's system prompt after a compaction cycle.
+ *
+ * Loads the real compaction-handoff reminder fragment if available,
+ * appends the role-specific reread artifact reminder, and structures
+ * the result as a single `## Compaction Handoff` section.
+ *
+ * @param agentName - Optional agent name for role-specific artifact selection.
+ *   (e.g. "zflow.review-correctness", "builtin:scout", "zflow.implement-routine")
+ * @returns A markdown-formatted compaction handoff section string.
+ */
+export async function buildCompactionHandoffSection(
+  agentName?: string,
+): Promise<string> {
+  const parts: string[] = ["## Compaction Handoff"]
+
+  // Try to load the enhanced reminder fragment from pi-zflow-agents
+  try {
+    const { loadFragment } = await import("pi-zflow-agents")
+    const fragmentContent = await loadFragment("compaction-handoff")
+    parts.push("", fragmentContent.trim())
+  } catch {
+    // Graceful fallback if pi-zflow-agents or fragment is unavailable
+    parts.push(
+      "",
+      "A compaction cycle has completed. Do not rely on cached or summarised state from before compaction.",
+    )
+  }
+
+  // Append role-specific artifact reread section
+  let role: string | undefined
+  if (agentName) {
+    if (agentName.includes("review") || agentName === "synthesizer") role = "reviewer"
+    else if (agentName.includes("orchestrat") || agentName.includes("change-implement")) role = "orchestrator"
+    else if (agentName.includes("planner")) role = "planner"
+  }
+
+  const artifacts = role ? getRereadsForRole(role) : getMandatoryRereads()
+  const reminderBody = formatRereadReminder(artifacts)
+
+  parts.push("", reminderBody)
+
+  return parts.join("\n")
 }
