@@ -4,10 +4,9 @@
  * Registers `/zflow-setup-agents`, `/zflow-update-agents`, and prompt helper commands.
  * Also injects platform documentation paths into the system prompt via `before_agent_start`.
  *
- * TODO(phase-4): Implement agent/chain setup flow.
- *   - claim("agents", ...) via getZflowRegistry()
- *   - provide("agents", agentsService) with install/update/manifest logic
- *   - Register `/zflow-setup-agents`, `/zflow-update-agents` commands
+ * Provides the "agents" capability service with install/update/manifest operations
+ * so sibling packages can check agent setup status or trigger installs via the
+ * shared capability registry (see `registry.optional("agents")`).
  *
  * @module pi-zflow-agents
  */
@@ -19,12 +18,29 @@ import {
   type PiDocPaths,
   type ZflowDocPaths,
 } from "pi-zflow-core/platform-docs"
+import { getZflowRegistry } from "pi-zflow-core/registry"
+import { PI_ZFLOW_AGENTS_VERSION } from "pi-zflow-core"
 import { fileURLToPath } from "node:url"
 import { dirname, resolve } from "node:path"
 import { createRequire } from "node:module"
 import { existsSync } from "node:fs"
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import {
+  installAgentsAndChains,
+  checkInstallStatus,
+  formatInstallSummary,
+} from "./install.js"
+import type {
+  InstallOptions,
+  InstallResult,
+} from "./install.js"
+import {
+  readManifest,
+  writeManifest,
+  diffManifest,
+} from "./manifest.js"
+import type { ManifestDiff } from "./manifest.js"
 
 // ── Path resolution helpers ──────────────────────────────────────
 
@@ -129,6 +145,28 @@ function resolvePiDocPaths(): PiDocPaths {
   }
 }
 
+// ── Agents service interface ───────────────────────────────────
+
+/**
+ * Service interface exposed through the zflow registry for sibling
+ * packages that need agent/chain installation status and operations
+ * without importing the agents module directly.
+ */
+export interface AgentsService {
+  /** Install or update agents and chains from the package to user-level directories. */
+  installAgentsAndChains: typeof installAgentsAndChains
+  /** Check whether agent installation is up to date. */
+  checkInstallStatus: typeof checkInstallStatus
+  /** Build a human-readable summary of the installation result. */
+  formatInstallSummary: typeof formatInstallSummary
+  /** Read the install manifest from disk. */
+  readManifest: typeof readManifest
+  /** Write the install manifest to disk atomically. */
+  writeManifest: typeof writeManifest
+  /** Compare the manifest against the current package state. */
+  diffManifest: typeof diffManifest
+}
+
 // ── Extension factory ────────────────────────────────────────────
 
 export default function activateZflowAgentsExtension(pi: ExtensionAPI): void {
@@ -169,9 +207,115 @@ export default function activateZflowAgentsExtension(pi: ExtensionAPI): void {
     }
   })
 
-  // ── Agent/chain setup commands — Phase 4 ─────────────────────────
-  // TODO(phase-4): Implement agent/chain setup flow.
-  //   - claim("agents", ...) via getZflowRegistry()
-  //   - provide("agents", agentsService)
-  //   - Register /zflow-setup-agents, /zflow-update-agents
+  // ── Agent/chain setup commands — Phase 4/7 ──────────────────────
+  // Claim the "agents" capability and register setup/update commands
+
+  const registry = getZflowRegistry()
+
+  const claimed = registry.claim({
+    capability: "agents",
+    version: PI_ZFLOW_AGENTS_VERSION,
+    provider: "pi-zflow-agents",
+    sourcePath: import.meta.url,
+  })
+
+  if (!claimed) return
+
+  // If the capability already has a service, another compatible
+  // instance already initialised fully. No-op to avoid duplicate
+  // command registration (coexistence rule 7).
+  if (claimed.service !== undefined) {
+    return
+  }
+
+  // ── Build and provide the agents service ──────────────────────
+  const agentsService: AgentsService = {
+    installAgentsAndChains,
+    checkInstallStatus,
+    formatInstallSummary,
+    readManifest,
+    writeManifest,
+    diffManifest,
+  }
+
+  registry.provide("agents", agentsService)
+
+  pi.registerCommand("zflow-setup-agents", {
+    description: "Install pi-zflow agent markdown files and chains into Pi-subagents discovery directories",
+    handler: async (args: string, ctx: {
+      ui: { notify: (message: string, type?: "info" | "warning" | "error") => void }
+    }): Promise<void> => {
+      const force = args.trim() === "--force"
+      const { installAgentsAndChains, formatInstallSummary } = await import("./install.js")
+
+      ctx.ui.notify(
+        force
+          ? "Setting up agents (force mode)..."
+          : "Setting up agents...",
+      )
+
+      try {
+        const result = await installAgentsAndChains({ force })
+
+        if (result.success) {
+          ctx.ui.notify("Agent setup completed successfully.", "info")
+          ctx.ui.notify(formatInstallSummary(result, false), "info")
+        } else {
+          ctx.ui.notify(
+            `Agent setup completed with ${result.errors.length} error(s).`,
+            "warning",
+          )
+          ctx.ui.notify(formatInstallSummary(result, false), "warning")
+        }
+      } catch (err: unknown) {
+        ctx.ui.notify(
+          `Agent setup failed: ${err instanceof Error ? err.message : String(err)}`,
+          "error",
+        )
+      }
+    },
+  })
+
+  pi.registerCommand("zflow-update-agents", {
+    description: "Update installed pi-zflow agents and chains to the latest package version",
+    handler: async (args: string, ctx: {
+      ui: { notify: (message: string, type?: "info" | "warning" | "error") => void }
+    }): Promise<void> => {
+      const force = args.trim() === "--force"
+      const { installAgentsAndChains, formatInstallSummary, checkInstallStatus } = await import("./install.js")
+
+      const diff = await checkInstallStatus()
+
+      if (diff && !diff.needsUpdate) {
+        ctx.ui.notify("Agents are already up to date.", "info")
+        return
+      }
+
+      ctx.ui.notify(
+        force
+          ? "Updating agents (force mode)..."
+          : "Updating agents...",
+      )
+
+      try {
+        const result = await installAgentsAndChains({ force, update: true })
+
+        if (result.success) {
+          ctx.ui.notify("Agent update completed successfully.", "info")
+          ctx.ui.notify(formatInstallSummary(result, true), "info")
+        } else {
+          ctx.ui.notify(
+            `Agent update completed with ${result.errors.length} error(s).`,
+            "warning",
+          )
+          ctx.ui.notify(formatInstallSummary(result, true), "warning")
+        }
+      } catch (err: unknown) {
+        ctx.ui.notify(
+          `Agent update failed: ${err instanceof Error ? err.message : String(err)}`,
+          "error",
+        )
+      }
+    },
+  })
 }

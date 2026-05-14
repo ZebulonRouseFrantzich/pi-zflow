@@ -23,7 +23,10 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { getZflowRegistry, PI_ZFLOW_REVIEW_VERSION } from "pi-zflow-core"
-import { parsePrUrl, validatePrUrl } from "./pr.js"
+import { parsePrUrl, validatePrUrl, checkAuthStatus, fetchPrDiff, checkSubmissionCapability } from "./pr.js"
+
+import type { ResolvedPrTarget } from "./pr.js"
+import type { CodeReviewInput, PrReviewInput } from "./orchestration.js"
 
 import {
   createManifest,
@@ -294,8 +297,62 @@ export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
     handler: async (args: string, ctx: {
       ui: { notify: (message: string, type?: "info" | "warning" | "error") => void }
     }): Promise<void> => {
-      // TODO(Phase 7): Wire to runCodeReview from orchestration.ts
-      ctx.ui.notify("Running internal code review...")
+      const cwd = process.cwd()
+
+      // Resolve repo root
+      let repoRoot: string
+      try {
+        const { execSync } = await import("node:child_process")
+        repoRoot = execSync("git rev-parse --show-toplevel", {
+          cwd,
+          encoding: "utf-8",
+          timeout: 5_000,
+        }).trim()
+      } catch {
+        ctx.ui.notify("Not a git repository — cannot determine repo root", "error")
+        return
+      }
+
+      // Determine verification status from args or default to unknown
+      // Accepted values: "passed", "failed", "skipped", "advisory", "unknown"
+      // - "passed": verification completed successfully
+      // - "failed": verification found issues
+      // - "skipped" or "advisory": final verification was explicitly skipped
+      // - "unknown" (default): verification status not yet determined
+      const statusArg = args.trim().toLowerCase()
+      const knownStatuses = ["passed", "failed", "skipped", "advisory", "unknown"] as const
+      const verificationStatus = knownStatuses.includes(statusArg as typeof knownStatuses[number])
+        ? (statusArg === "advisory" ? "skipped" : (statusArg as "passed" | "failed" | "skipped" | "unknown"))
+        : "unknown"
+
+      try {
+        const input: CodeReviewInput = {
+          source: "Manual code review via /zflow-review-code",
+          repoPath: repoRoot,
+          planningArtifacts: {
+            design: "",
+            executionGroups: "",
+            standards: "",
+            verification: "",
+          },
+          verificationStatus,
+          cwd,
+        }
+
+        const result = await reviewService.runCodeReview(input)
+        ctx.ui.notify(
+          `Code review complete.\n` +
+          `Tier: ${result.tier}\n` +
+          `Recommendation: ${result.recommendation}\n` +
+          `Findings: ${result.severity.critical} critical, ${result.severity.major} major\n` +
+          `Path: ${result.findingsPath}`,
+        )
+      } catch (err: unknown) {
+        ctx.ui.notify(
+          `Code review failed: ${err instanceof Error ? err.message : String(err)}`,
+          "error",
+        )
+      }
     },
   })
 
@@ -303,21 +360,104 @@ export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
     description: "Review an external GitHub PR or GitLab MR",
     handler: async (args: string, ctx: {
       ui: { notify: (message: string, type?: "info" | "warning" | "error") => void }
+      cwd?: string
     }): Promise<void> => {
-      // TODO(Phase 7): Wire to runPrReview from orchestration.ts
       const url = args.trim()
       if (!url) {
         ctx.ui.notify(
-          "Usage: zflow-review-pr <pr-url>\nExample: zflow-review-pr https://github.com/owner/repo/pull/42",
+          "Usage: /zflow-review-pr <pr-url>\n" +
+          "Example: /zflow-review-pr https://github.com/owner/repo/pull/42",
           "warning",
         )
         return
       }
+
+      const cwd = ctx.cwd ?? process.cwd()
+
+      // Parse URL
+      let target: ResolvedPrTarget
       try {
-        const target = parsePrUrl(url)
-        ctx.ui.notify(`Parsed ${target.platform} PR/MR: ${target.owner}/${target.repo}#${target.number}`)
+        target = parsePrUrl(url)
       } catch (err: unknown) {
-        ctx.ui.notify(`Invalid PR URL: ${err instanceof Error ? err.message : String(err)}`, "error")
+        ctx.ui.notify(
+          `Invalid PR URL: ${err instanceof Error ? err.message : String(err)}`,
+          "error",
+        )
+        return
+      }
+
+      ctx.ui.notify(`Parsed ${target.platform} PR/MR: ${target.owner}/${target.repo}#${target.number}`)
+
+      // Check auth
+      ctx.ui.notify(`Checking authentication for ${target.platform}...`)
+      const authStatus = await checkAuthStatus(target.platform)
+      if (!authStatus.authenticated) {
+        ctx.ui.notify(
+          `Auth not available for ${target.platform}: ${authStatus.error ?? "unknown error"}\n` +
+          `Install the CLI tool and authenticate first.\n` +
+          `Example: \`${target.platform === "github" ? "gh" : "glab"} auth login\``,
+          "warning",
+        )
+        return
+      }
+
+      // Check submission capability
+      const submission = await checkSubmissionCapability(target.platform)
+
+      if (submission.canSubmit) {
+        ctx.ui.notify(`Authenticated as ${authStatus.username ?? "(unknown)"} — inline comment submission available`)
+      } else {
+        ctx.ui.notify(submission.fallbackMessage ?? "Inline comment submission not available")
+      }
+
+      // Fetch PR data
+      ctx.ui.notify(`Fetching PR data from ${target.platform}...`)
+      try {
+        const fetchResult = await fetchPrDiff(target)
+
+        ctx.ui.notify(
+          `Fetched ${fetchResult.files.length} changed files: ` +
+          `"${fetchResult.metadata.title}"`,
+        )
+
+        // Run review
+        const input: PrReviewInput = {
+          target: {
+            platform: target.platform,
+            owner: target.owner,
+            repo: target.repo,
+            number: target.number,
+            url,
+          },
+          metadata: {
+            title: fetchResult.metadata.title,
+            description: fetchResult.metadata.description,
+            state: fetchResult.metadata.state,
+            headSha: fetchResult.metadata.headSha,
+            baseSha: fetchResult.metadata.baseSha,
+          },
+          files: fetchResult.files.map((f) => ({
+            path: f.path,
+            patch: f.patch,
+          })),
+          submissionAvailable: submission.canSubmit,
+          cwd,
+        }
+
+        ctx.ui.notify("Running PR review...")
+        const result = await reviewService.runPrReview(input)
+
+        ctx.ui.notify(
+          `PR review complete.\n` +
+          `Findings: ${result.findingsCount}\n` +
+          `Chunks: ${result.chunkCount}\n` +
+          `Path: ${result.findingsPath}`,
+        )
+      } catch (err: unknown) {
+        ctx.ui.notify(
+          `PR review failed: ${err instanceof Error ? err.message : String(err)}`,
+          "error",
+        )
       }
     },
   })

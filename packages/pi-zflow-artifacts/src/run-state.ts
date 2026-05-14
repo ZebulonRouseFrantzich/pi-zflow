@@ -33,6 +33,8 @@ export type RunPhase =
   | "failed"
   | "apply-back-conflicted"
   | "drift-pending"
+  | "verification-failed"
+  | "review-failed"
 
 /**
  * Apply-back status for the run.
@@ -150,6 +152,10 @@ export interface RunJson {
   createdAt: string
   /** ISO timestamp when the run was last updated. */
   updatedAt: string
+  /** Optional generic metadata bag (e.g. worktreeDirty flag, next steps). */
+  metadata?: Record<string, unknown>
+  /** Ordered list of step descriptions for what should happen next. */
+  nextSteps?: string[]
 }
 
 // ---------------------------------------------------------------------------

@@ -71,13 +71,15 @@ describe("state-index.ts", () => {
 
   test("loadStateIndex returns default for non-existent file", async () => {
     const index = await loadStateIndex()
-    assert.equal(index.version, 1)
+    assert.equal(index.version, 2)
     assert.deepEqual(index.entries, [])
+    assert.deepEqual(index.changes, {})
   })
 
   test("saveStateIndex persists and loadStateIndex retrieves", async () => {
     const index: StateIndex = {
-      version: 1,
+      version: 2,
+      changes: {},
       entries: [
         {
           type: "run",
@@ -92,7 +94,7 @@ describe("state-index.ts", () => {
     await saveStateIndex(index)
     const loaded = await loadStateIndex()
 
-    assert.equal(loaded.version, 1)
+    assert.equal(loaded.version, 2)
     assert.equal(loaded.entries.length, 1)
     assert.equal(loaded.entries[0].id, "run-1")
     assert.equal(loaded.entries[0].status, "pending")
@@ -240,13 +242,15 @@ describe("state-index.ts", () => {
     )
   })
 
-  test("loadStateIndex returns default for malformed JSON", async () => {
-    const indexPath = path.join(tmpDir, "state-index.json")
+  test("loadStateIndex throws for malformed JSON", async () => {
+    const indexPath = resolveStateIndexPath()
+    await fs.mkdir(path.dirname(indexPath), { recursive: true })
     await fs.writeFile(indexPath, "this is not json", "utf-8")
 
-    const index = await loadStateIndex()
-    assert.equal(index.version, 1)
-    assert.deepEqual(index.entries, [])
+    await assert.rejects(
+      () => loadStateIndex(),
+      SyntaxError,
+    )
   })
 
   test("multiple entries survive save/load cycle", async () => {
@@ -264,16 +268,17 @@ describe("state-index.ts", () => {
   })
 
   test("atomic write does not corrupt on partial write", async () => {
-    // First write valid data
-    await saveStateIndex({ version: 1, entries: [] })
+    // First write valid data (version 2 with changes map)
+    await saveStateIndex({ version: 2, entries: [], changes: {} }, tmpDir)
 
     // Simulate partial write by writing directly to the file (bypass atomic)
-    const indexPath = path.join(tmpDir, "state-index.json")
-    await fs.writeFile(indexPath, '{"version":1,"entri', "utf-8")
+    const indexPath = resolveStateIndexPath(tmpDir)
+    await fs.writeFile(indexPath, '{"version":2,"entri', "utf-8")
 
-    // load should recover by returning default
-    const loaded = await loadStateIndex()
-    assert.equal(loaded.version, 1)
-    assert.deepEqual(loaded.entries, [])
+    // load should throw because the JSON is corrupt (not an ENOENT error)
+    await assert.rejects(
+      () => loadStateIndex(tmpDir),
+      { name: "SyntaxError" },
+    )
   })
 })

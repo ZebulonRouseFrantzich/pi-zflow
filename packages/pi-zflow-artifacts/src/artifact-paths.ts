@@ -41,7 +41,7 @@ export function resolvePlanDir(
   version: string,
   cwd?: string,
 ): string {
-  return path.join(resolveChangeDir(changeId), `v${version}`)
+  return path.join(resolveChangeDir(changeId, cwd), `v${version}`)
 }
 
 /**
@@ -88,12 +88,34 @@ export function resolveDeviationDir(
 }
 
 /**
+ * Resolve the directory for a specific plan version, accepting "v{n}" format.
+ *
+ * This is a convenience wrapper around resolvePlanDir that accepts
+ * the version label in the canonical "v1", "v2" format used by the
+ * plan artifact system. Internally it strips the "v" prefix before
+ * delegating to resolvePlanDir.
+ *
+ * Path: `<runtime-state-dir>/plans/{changeId}/v{version}/
+ *
+ * @param changeId - Unique identifier for the change
+ * @param planVersion - Version label starting with "v" (e.g. "v1", "v2")
+ * @param cwd - Working directory (optional)
+ */
+export function resolvePlanVersionDir(
+  changeId: string,
+  planVersion: string,
+  cwd?: string,
+): string {
+  return resolvePlanDir(changeId, planVersion.replace(/^v/, ""), cwd)
+}
+
+/**
  * Resolve the path to a plan-state.json file.
  *
  * Path: `<runtime-state-dir>/plans/{changeId}/plan-state.json
  */
 export function resolvePlanStatePath(changeId: string, cwd?: string): string {
-  return path.join(resolveChangeDir(changeId), "plan-state.json")
+  return path.join(resolveChangeDir(changeId, cwd), "plan-state.json")
 }
 
 // ---------------------------------------------------------------------------

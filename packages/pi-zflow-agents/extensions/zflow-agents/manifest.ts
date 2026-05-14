@@ -1,91 +1,140 @@
 /**
  * manifest.ts — Install manifest tracking for deployed agents and chains.
  *
- * ## Overview
- *
- * The install manifest at `~/.pi/agent/zflow/install-manifest.json` records
- * what was installed and when. It is the source of truth for:
- * - Detecting whether `/zflow-setup-agents` has been run
- * - Detecting version drift between the package and deployed files
- * - Providing a clean list of installed files for `/zflow-update-agents`
- * - Supporting cleanup of stale/extra files
- *
- * ## Manifest schema
- *
- * ```typescript
- * interface InstallManifest {
- *   version: string           // Package version at install time
- *   source: string            // npm:pi-zflow-agents@<pin> or local path
- *   installedAt: string       // ISO 8601 first install timestamp
- *   updatedAt: string         // ISO 8601 last update timestamp
- *   installedAgents: string[] // e.g. ["planner-frontier.md", ...]
- *   installedChains: string[] // e.g. ["parallel-review.chain.md", ...]
- *   installedSkills: string[] // e.g. ["change-doc-workflow", ...]
- * }
- * ```
- *
- * The type is defined in `pi-zflow-core/src/schemas.ts` as `InstallManifest`.
- *
- * ## Read / Write operations
- *
- * ### `readManifest(): InstallManifest | null`
- *
- * Reads `~/.pi/agent/zflow/install-manifest.json`.
- * - If the file does not exist → return `null` (first-time install).
- * - If the file exists but is malformed JSON → throw with a clear error
- *   message that includes the file path and the parse error.
- * - Otherwise → return the parsed `InstallManifest`.
- *
- * ### `writeManifest(manifest: InstallManifest): void`
- *
- * Writes `~/.pi/agent/zflow/install-manifest.json`.
- * - Creates the parent directory (`~/.pi/agent/zflow/`) if it does not exist.
- * - Writes the manifest with 2-space indentation for readability.
- * - Uses atomic write (write to `.tmp`, then rename) to prevent corruption.
- *
- * ## Diff detection
- *
- * ### `diffManifest(manifest: InstallManifest, packageVersion: string): ManifestDiff`
- *
- * Compares the manifest against the current package state:
- *
- * ```typescript
- * interface ManifestDiff {
- *   versionChanged: boolean        // manifest.version !== packageVersion
- *   oldVersion: string | null
- *   newVersion: string
- *   missingAgents: string[]        // in package but not in manifest
- *   missingChains: string[]        // in package but not in manifest
- *   extraAgents: string[]          // in manifest but not in package (stale)
- *   extraChains: string[]          // in manifest but not in package (stale)
- *   needsUpdate: boolean           // versionChanged OR missingAgents/chains
- * }
- * ```
- *
- * This function is called by `/zflow-update-agents` to determine what needs
- * to change.
- *
- * ## Stale file cleanup
- *
- * After an update, files that were deployed by a previous version but are no
- * longer in the package are **not automatically deleted**. Instead, they are
- * listed as "extra" in the diff output. The user can:
- * - Run `/zflow-setup-agents --clean` to remove stale files.
- * - Manually delete them from the install target directory.
- *
- * A future enhancement may automatically prompt for cleanup when stale files
- * are detected.
- *
- * ## Migration between versions
- *
- * When the manifest schema changes (e.g. a new field is added in a future
- * version), the `readManifest()` function should:
- * - Accept manifests with missing optional fields (backward-compatible).
- * - Fill in defaults for any missing required fields where sensible.
- * - If the manifest is irreparably incompatible, warn and recreate.
- *
  * @module pi-zflow-agents/manifest
  */
 
-export {}
+import * as fs from "node:fs/promises"
+import * as path from "node:path"
+import { INSTALL_MANIFEST_PATH } from "pi-zflow-core/user-dirs"
+import type { InstallManifest } from "pi-zflow-core/schemas"
 
+/**
+ * Read the install manifest from disk.
+ *
+ * Reads `~/.pi/agent/zflow/install-manifest.json`.
+ * Returns `null` if the file does not exist.
+ * Throws with a clear error if the file is malformed.
+ *
+ * **Coercion:** If the manifest version exists but `installedAgents`,
+ * `installedChains`, or `installedSkills` are missing or not arrays,
+ * they are defaulted to `[]` for backward compatibility with older
+ * or partially-written manifests.
+ */
+export async function readManifest(): Promise<InstallManifest | null> {
+  try {
+    const raw = await fs.readFile(INSTALL_MANIFEST_PATH, "utf-8")
+    const parsed = JSON.parse(raw) as Partial<InstallManifest>
+
+    // Basic validation: version is required
+    if (!parsed.version) {
+      throw new Error("Install manifest is missing required field: version")
+    }
+
+    // Coerce missing or malformed array fields for backward compatibility
+    if (!Array.isArray(parsed.installedAgents)) {
+      parsed.installedAgents = []
+    }
+    if (!Array.isArray(parsed.installedChains)) {
+      parsed.installedChains = []
+    }
+    if (!Array.isArray(parsed.installedSkills)) {
+      parsed.installedSkills = []
+    }
+
+    return parsed as InstallManifest
+  } catch (err: unknown) {
+    const nodeErr = err as NodeJS.ErrnoException
+    if (nodeErr.code === "ENOENT") {
+      return null
+    }
+    if (err instanceof SyntaxError) {
+      throw new Error(
+        `Install manifest at ${INSTALL_MANIFEST_PATH} is malformed: ${err.message}`,
+      )
+    }
+    throw err
+  }
+}
+
+/**
+ * Write the install manifest to disk atomically.
+ *
+ * Creates parent directories if needed.
+ * Uses atomic write (.tmp → rename) to prevent corruption.
+ */
+export async function writeManifest(manifest: InstallManifest): Promise<void> {
+  const dir = path.dirname(INSTALL_MANIFEST_PATH)
+  await fs.mkdir(dir, { recursive: true })
+
+  const tmpPath = INSTALL_MANIFEST_PATH + ".tmp"
+  await fs.writeFile(tmpPath, JSON.stringify(manifest, null, 2), "utf-8")
+  await fs.rename(tmpPath, INSTALL_MANIFEST_PATH)
+}
+
+/**
+ * Result of comparing the manifest against the current package state.
+ */
+export interface ManifestDiff {
+  /** Whether the package version has changed */
+  versionChanged: boolean
+  /** Old version from the manifest, or null */
+  oldVersion: string | null
+  /** New package version */
+  newVersion: string
+  /** Agents in the package but not in the manifest */
+  missingAgents: string[]
+  /** Chains in the package but not in the manifest */
+  missingChains: string[]
+  /** Agents in the manifest but no longer in the package (stale) */
+  extraAgents: string[]
+  /** Chains in the manifest but no longer in the package (stale) */
+  extraChains: string[]
+  /** Whether an update is needed */
+  needsUpdate: boolean
+}
+
+/**
+ * Compare the manifest against the current package state.
+ *
+ * @param manifest - The existing install manifest.
+ * @param packageVersion - Current package version.
+ * @param knownAgentFiles - List of agent file names in the package.
+ * @param knownChainFiles - List of chain file names in the package.
+ * @returns A diff describing what has changed.
+ */
+export function diffManifest(
+  manifest: InstallManifest,
+  packageVersion: string,
+  knownAgentFiles: string[],
+  knownChainFiles: string[],
+): ManifestDiff {
+  const versionChanged = manifest.version !== packageVersion
+
+  // Find missing agents/chains
+  const missingAgents = knownAgentFiles.filter(
+    (f) => !manifest.installedAgents.includes(f),
+  )
+  const missingChains = knownChainFiles.filter(
+    (f) => !manifest.installedChains.includes(f),
+  )
+
+  // Find extra agents/chains (stale)
+  const extraAgents = manifest.installedAgents.filter(
+    (f) => !knownAgentFiles.includes(f),
+  )
+  const extraChains = manifest.installedChains.filter(
+    (f) => !knownChainFiles.includes(f),
+  )
+
+  return {
+    versionChanged,
+    oldVersion: manifest.version,
+    newVersion: packageVersion,
+    missingAgents,
+    missingChains,
+    extraAgents,
+    extraChains,
+    needsUpdate: versionChanged || missingAgents.length > 0 || missingChains.length > 0,
+  }
+}

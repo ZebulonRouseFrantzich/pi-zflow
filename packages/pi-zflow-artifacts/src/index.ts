@@ -11,6 +11,8 @@ export const PACKAGE_VERSION = "0.1.0" as const
 export {
   resolveChangeDir,
   resolvePlanDir,
+  resolvePlanVersionDir,
+  resolvePlanArtifactPath,
   resolveDeviationDir,
   resolvePlanStatePath,
   resolveRunDir,
@@ -72,9 +74,20 @@ export type {
   RetainedArtifact,
 } from "./run-state.js"
 
-// Re-export cleanup metadata helpers (Phase 7+ implementation)
+// Re-export cleanup metadata helpers
 // Also importable directly from "pi-zflow-artifacts/cleanup-metadata"
-export {} from "./cleanup-metadata.js"
+export {
+  scanForCleanup,
+  scanRuntimeStateForCleanup,
+  cleanupArtifacts,
+  formatCleanupSummary,
+} from "./cleanup-metadata.js"
+
+export type {
+  ScanOptions,
+  CleanupOptions,
+  CleanupResult,
+} from "./cleanup-metadata.js"
 
 // Re-export plan artifact write tool (Phase 2+ implementation)
 // Also importable directly from "pi-zflow-artifacts/write-plan-artifact"
