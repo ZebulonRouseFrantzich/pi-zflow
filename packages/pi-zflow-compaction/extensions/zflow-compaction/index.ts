@@ -41,8 +41,8 @@ import {
   chooseCheapCompactionModel,
   buildCompactionPrompt,
   getDefaultArtifactPaths,
-} from "../src/compaction-service.js"
-import { ensureRtkOrAlert } from "../src/rtk-check.js"
+} from "../../src/compaction-service.js"
+import { ensureRtkOrAlert } from "../../src/rtk-check.js"
 
 export default function activateZflowCompactionExtension(pi: ExtensionAPI): void {
   const registry = getZflowRegistry()
