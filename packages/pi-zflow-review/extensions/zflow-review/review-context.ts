@@ -332,6 +332,24 @@ export function buildExternalReviewPrompt(
       parts.push(file.patch)
       parts.push("```")
       parts.push("")
+
+      // ── Line map for this file (Phase 9) ──────────────────────
+      // Include the line map so reviewers can reference correct line numbers
+      const fileLineMap = file.lineMap ?? {}
+      const lineMapEntries = Object.entries(fileLineMap)
+      if (lineMapEntries.length > 0) {
+        parts.push("**Line map (diff line → new file line):**")
+        parts.push("")
+        parts.push("| Diff line | New file line |")
+        parts.push("|---:|---:|")
+        const entriesToShow = lineMapEntries.length > 12
+          ? [...lineMapEntries.slice(0, 6), ["...", "..."] as [string, string], ...lineMapEntries.slice(-6)]
+          : lineMapEntries
+        for (const [diffLine, fileLine] of entriesToShow) {
+          parts.push(`| ${diffLine} | ${fileLine} |`)
+        }
+        parts.push("")
+      }
     }
   }
 

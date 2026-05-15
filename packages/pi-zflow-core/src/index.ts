@@ -105,6 +105,18 @@ export type {
   CompatibilityMode,
 } from "./registry.js"
 
+// Re-export dispatch service types (Phase 9 — subagent dispatch contract)
+export type {
+  DispatchService,
+  AgentDispatchInput,
+  AgentDispatchResult,
+  ParallelTaskInput,
+  ParallelTaskResult,
+  ParallelDispatchInput,
+  ParallelDispatchResult,
+} from "./dispatch-service.js"
+export { DISPATCH_SERVICE_CAPABILITY } from "./dispatch-service.js"
+
 // Re-export diagnostic helpers
 // Also importable directly from "pi-zflow-core/diagnostics"
 export {

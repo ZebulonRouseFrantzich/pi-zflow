@@ -86,6 +86,101 @@ import {
 } from "./verification.js"
 import type { VerificationResult, FixLoopResult, FixLoopOptions } from "./verification.js"
 
+// ── Execution groups parsing ──────────────────────────────────
+
+/**
+ * Parse execution-groups.md content into ExecutionGroup objects.
+ *
+ * Expects the format:
+ *
+ * ```markdown
+ * ## Group {n}: {descriptive name}
+ *
+ * - **Files:** path/to/file.ts, another/file.ts
+ * - **Agent:** zflow.implement-routine
+ * - **Verification:** optional scoped verification text
+ * ```
+ */
+export function parseExecutionGroupsMd(mdContent: string): import("./ownership-validator.js").ExecutionGroup[] {
+  const groups: import("./ownership-validator.js").ExecutionGroup[] = []
+  const lines = mdContent.split("\n")
+  let currentGroup: Partial<import("./ownership-validator.js").ExecutionGroup> | null = null
+
+  for (const line of lines) {
+    const groupMatch = line.match(/^## Group\s+(\d+):\s+(.+)$/i)
+    if (groupMatch) {
+      if (currentGroup?.id) {
+        groups.push({
+          id: currentGroup.id,
+          files: currentGroup.files ?? [],
+          dependencies: currentGroup.dependencies ?? [],
+          agent: currentGroup.agent ?? "zflow.implement-routine",
+          parallelizable: currentGroup.parallelizable ?? true,
+          taskPrompt: currentGroup.taskPrompt ?? "",
+          scopedVerification: currentGroup.scopedVerification,
+        })
+      }
+      currentGroup = {
+        id: `group-${groupMatch[1]}`,
+        files: [],
+        dependencies: [],
+        agent: "zflow.implement-routine",
+        taskPrompt: groupMatch[2],
+        parallelizable: true,
+      }
+      continue
+    }
+
+    if (!currentGroup) continue
+
+    const filesMatch = line.match(/-\s+\*\*Files?:\*\*\s+(.+)/i)
+    if (filesMatch) {
+      currentGroup.files = filesMatch[1].split(",").map((f: string) => f.trim()).filter(Boolean)
+      continue
+    }
+
+    const agentMatch = line.match(/-\s+\*\*Agent:\*\*\s+(.+)/i)
+    if (agentMatch) {
+      currentGroup.agent = agentMatch[1].trim()
+      continue
+    }
+
+    const depMatch = line.match(/-\s+\*\*Dependencies:\*\*\s+(.+)/i)
+    if (depMatch) {
+      currentGroup.dependencies = depMatch[1].split(",").map((d: string) => d.trim()).filter(Boolean)
+      continue
+    }
+
+    const verifMatch = line.match(/-\s+\*\*Verification:\*\*\s+(.+)/i)
+    if (verifMatch) {
+      currentGroup.scopedVerification = verifMatch[1].trim()
+      continue
+    }
+
+    const parallelMatch = line.match(/-\s+\*\*Parallelizable:\*\*\s+(.+)/i)
+    if (parallelMatch) {
+      currentGroup.parallelizable = parallelMatch[1].trim().toLowerCase() === "yes" ||
+        parallelMatch[1].trim().toLowerCase() === "true"
+      continue
+    }
+  }
+
+  // Push the last group
+  if (currentGroup?.id) {
+    groups.push({
+      id: currentGroup.id,
+      files: currentGroup.files ?? [],
+      dependencies: currentGroup.dependencies ?? [],
+      agent: currentGroup.agent ?? "zflow.implement-routine",
+      parallelizable: currentGroup.parallelizable ?? true,
+      taskPrompt: currentGroup.taskPrompt ?? "",
+      scopedVerification: currentGroup.scopedVerification,
+    })
+  }
+
+  return groups
+}
+
 // ── Types ───────────────────────────────────────────────────────
 
 /**
@@ -3655,18 +3750,111 @@ export async function runChangePrepareWorkflow(
                 if (resolved && resolved.files) {
                   runeContextCanonical = true
                   runeContextDocsList = Object.keys(resolved.files)
+
+                  // ── Populate zflow artifacts from RuneContext canonical docs ──
+                  // When readDocs is available, read them and map to zflow artifacts.
+                  if (runeContextService.readDocs) {
+                    try {
+                      const runeDocs = await runeContextService.readDocs(resolved)
+
+                      // design.md ← canonical proposal + design docs
+                      await fs.writeFile(
+                        artifactPaths.design,
+                        [
+                          "# RuneContext Design",
+                          "",
+                          "## Proposal",
+                          "",
+                          runeDocs.proposal,
+                          "",
+                          "## Design",
+                          "",
+                          runeDocs.design,
+                        ].join("\n"),
+                        "utf-8",
+                      )
+                      console.info("[zflow] Populated design.md from RuneContext proposal/design docs")
+
+                      // standards.md ← RuneContext standards.md
+                      await fs.writeFile(artifactPaths.standards, runeDocs.standards, "utf-8")
+                      console.info("[zflow] Populated standards.md from RuneContext standards.md")
+
+                      // verification.md ← verification + references/status metadata
+                      await fs.writeFile(
+                        artifactPaths.verification,
+                        [
+                          "# RuneContext Verification",
+                          "",
+                          runeDocs.verification,
+                          runeDocs.references ? ["", "## References", "", runeDocs.references].join("\n") : "",
+                          "",
+                          "## Status",
+                          "",
+                          "```json",
+                          JSON.stringify(runeDocs.status, null, 2),
+                          "```",
+                        ].filter(Boolean).join("\n"),
+                        "utf-8",
+                      )
+                      console.info("[zflow] Populated verification.md from RuneContext verification/references/status docs")
+
+                      // execution-groups.md ← derived from tasks.md or proposal+design+verification
+                      try {
+                        const { deriveExecutionGroupsFromRuneDocs } = await import("pi-zflow-runecontext")
+                        const derived = deriveExecutionGroupsFromRuneDocs(runeDocs)
+                        const lines = [
+                          "# Execution Groups",
+                          "",
+                          `> Derived from RuneContext canonical source: ${derived.sourceDocument}.`,
+                          "> Review and replace `TBD` file lists before implementation dispatch.",
+                          "",
+                        ]
+                        for (let i = 0; i < derived.groups.length; i++) {
+                          const group = derived.groups[i]!
+                          const verification = group.tasks
+                            .map((task) => task.verification)
+                            .filter((value): value is string => Boolean(value))
+                            .join("; ")
+                          lines.push(
+                            `## Group ${i + 1}: ${group.name}`,
+                            "",
+                            `- **Files:** TBD`,
+                            `- **Agent:** zflow.implement-routine`,
+                            `- **Verification:** ${verification || "TBD — derive scoped verification from RuneContext criteria"}`,
+                            `- **Parallelizable:** true`,
+                            `- **Canonical source:** ${derived.sourceDocument}`,
+                            "",
+                            group.description,
+                            "",
+                          )
+                        }
+                        await fs.writeFile(artifactPaths.executionGroups, lines.join("\n"), "utf-8")
+                        console.info("[zflow] Populated execution-groups.md via deriveExecutionGroupsFromRuneDocs()")
+                      } catch {
+                        const basic = [
+                          `# Execution Groups`,
+                          ``,
+                          `> Derived from RuneContext canonical docs.`,
+                          `> Manual grouping is required before implementation dispatch.`,
+                          ``,
+                          `## Group 1: RuneContext implementation`,
+                          ``,
+                          `- **Files:** TBD`,
+                          `- **Agent:** zflow.implement-routine`,
+                          `- **Verification:** TBD`,
+                          `- **Canonical source:** ${runeDocs.tasks ? "tasks.md" : "proposal+design+verification"}`,
+                        ].join("\n")
+                        await fs.writeFile(artifactPaths.executionGroups, basic, "utf-8")
+                        console.info("[zflow] Wrote basic execution-groups.md from RuneContext docs")
+                      }
+                    } catch {
+                      console.warn("[zflow] Could not populate artifacts from RuneContext docs")
+                    }
+                  } else {
+                    console.info("[zflow] RuneContext readDocs not available — artifacts remain empty")
+                  }
                 }
 
-                // TODO (Phase 3 enhancement): Populate zflow artifact files
-                // from RuneContext canonical docs. When this code path is
-                // enabled, the following mapping should be used:
-                //   design.md ← proposal.md (or design.md if it exists)
-                //   execution-groups.md ← derived from tasks.md via deriveExecutionGroupsFromRuneDocs()
-                //   standards.md ← standards.md from RuneContext
-                //   verification.md ← references.md from RuneContext
-                // For now, RuneContext is flagged as canonical in plan-state.json
-                // so downstream consumers know to treat RuneContext docs as the
-                // authoritative requirements source rather than zflow artifacts.
                 console.info(`[zflow] RuneContext resolved: changeId=${resolved.changeId}, flavor=${resolved.flavor}, docs=${runeContextDocsList.join(", ") || "none"}`)
               } catch {
                 console.warn("[zflow] RuneContext resolveChange failed — proceeding without canonical doc resolution.")

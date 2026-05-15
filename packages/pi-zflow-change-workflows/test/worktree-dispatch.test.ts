@@ -7,6 +7,7 @@ import { test, describe } from "node:test"
 import {
   buildWorkerTask,
   buildWorktreeDispatchPlan,
+  parseExecutionGroupsMd,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
 import type {
@@ -217,5 +218,106 @@ describe("buildWorktreeDispatchPlan", () => {
     const config = makeConfig()
     const tasks = buildWorktreeDispatchPlan([], config)
     assert.equal(tasks.length, 0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// parseExecutionGroupsMd
+// ---------------------------------------------------------------------------
+
+describe("parseExecutionGroupsMd", () => {
+  test("parses a valid execution-groups.md content", () => {
+    const content = [
+      "# Execution Groups",
+      "",
+      "## Group 1: Implement authentication",
+      "",
+      "- **Files:** src/auth/login.ts, src/auth/logout.ts",
+      "- **Agent:** zflow.implement-routine",
+      "- **Dependencies:** group-0",
+      "- **Verification:** npm test -- src/auth/",
+      "- **Parallelizable:** true",
+      "",
+    ].join("\n")
+
+    const groups = parseExecutionGroupsMd(content)
+
+    assert.equal(groups.length, 1)
+    assert.equal(groups[0].id, "group-1")
+    assert.deepStrictEqual(groups[0].files, ["src/auth/login.ts", "src/auth/logout.ts"])
+    assert.equal(groups[0].agent, "zflow.implement-routine")
+    assert.deepStrictEqual(groups[0].dependencies, ["group-0"])
+    assert.equal(groups[0].scopedVerification, "npm test -- src/auth/")
+    assert.equal(groups[0].parallelizable, true)
+  })
+
+  test("parses multiple groups", () => {
+    const content = [
+      "# Execution Groups",
+      "",
+      "## Group 1: Auth",
+      "",
+      "- **Files:** src/auth.ts",
+      "- **Agent:** zflow.implement-routine",
+      "",
+      "## Group 2: API",
+      "",
+      "- **Files:** src/api.ts",
+      "- **Agent:** zflow.implement-hard",
+      "- **Dependencies:** group-1",
+      "- **Verification:** npm test",
+      "",
+    ].join("\n")
+
+    const groups = parseExecutionGroupsMd(content)
+
+    assert.equal(groups.length, 2)
+    assert.equal(groups[0].id, "group-1")
+    assert.equal(groups[0].agent, "zflow.implement-routine")
+    assert.equal(groups[1].id, "group-2")
+    assert.equal(groups[1].agent, "zflow.implement-hard")
+    assert.deepStrictEqual(groups[1].dependencies, ["group-1"])
+  })
+
+  test("returns empty array for empty content", () => {
+    const groups = parseExecutionGroupsMd("")
+    assert.equal(groups.length, 0)
+  })
+
+  test("returns empty array for content with no group headings", () => {
+    const groups = parseExecutionGroupsMd("# No groups here\n\nJust some text")
+    assert.equal(groups.length, 0)
+  })
+
+  test("handles optional fields gracefully", () => {
+    const content = [
+      "## Group 1: Minimal",
+      "",
+      "- **Files:** src/file.ts",
+      "- **Agent:** zflow.implement-routine",
+      "",
+    ].join("\n")
+
+    const groups = parseExecutionGroupsMd(content)
+
+    assert.equal(groups.length, 1)
+    assert.equal(groups[0].id, "group-1")
+    assert.deepStrictEqual(groups[0].dependencies, [])
+    assert.equal(groups[0].scopedVerification, undefined)
+    assert.equal(groups[0].parallelizable, true)
+  })
+
+  test("uses default agent when not specified", () => {
+    const content = [
+      "## Group 1: No agent specified",
+      "",
+      "- **Files:** src/file.ts",
+      "",
+    ].join("\n")
+
+    const groups = parseExecutionGroupsMd(content)
+
+    assert.equal(groups.length, 1)
+    assert.equal(groups[0].agent, "zflow.implement-routine")
   })
 })

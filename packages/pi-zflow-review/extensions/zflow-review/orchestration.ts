@@ -47,7 +47,7 @@ import {
   type SynthesisResult,
 } from "./synthesizer.js"
 
-import { chunkDiff, type ChunkingOptions } from "./chunking.js"
+import { chunkDiff, mergeChunkFindings, type ChunkingOptions } from "./chunking.js"
 
 import type {
   ReviewerManifest,
@@ -65,6 +65,14 @@ export interface ReviewerOutput {
     title: string
     description: string
     evidence?: string
+    /** Optional PR/MR file path for external review findings. */
+    file?: string
+    /** Optional actual new-file line number. */
+    line?: number
+    /** Optional rendered line/range string. */
+    lines?: string
+    /** Optional diff-line coordinate used for chunk line-map translation. */
+    diffLine?: number
   }>
   rawOutput: string
 }
@@ -408,7 +416,43 @@ export async function runCodeReview(
     await persistReviewerRawOutput(manifest.runId, name, rawOutput, cwd)
   }
 
-  // Step 6: Synthesise (compute severity from collected findings)
+  // Step 6: Synthesise — prefer zflow.synthesizer agent via dispatch service
+  //
+  // Phase 9: Try to find a dispatch service to invoke the zflow.synthesizer
+  // agent for consolidation. If no dispatch service is available, fall back
+  // to local severity computation.
+  const registry = getZflowRegistry()
+  const { DISPATCH_SERVICE_CAPABILITY } = await import("pi-zflow-core/dispatch-service")
+  const hasDispatchService = registry.has(DISPATCH_SERVICE_CAPABILITY)
+  let synthesizerOutput: string | null = null
+
+  if (hasDispatchService && allFindings.length > 0 && reviewerNames.length > 0) {
+    try {
+      const dispatchService = registry.get<{ name: string; runAgent: Function }>(DISPATCH_SERVICE_CAPABILITY)
+      if (dispatchService && typeof dispatchService.runAgent === "function") {
+        // Build a synthesizer prompt from the reviewer outputs
+        const synthInput = allFindings.map(f =>
+          `Reviewer: ${f.reviewerName}\nSeverity: ${f.finding.severity}\nTitle: ${f.finding.title}\nEvidence: ${f.finding.evidence || f.finding.recommendation}`
+        ).join("\n---\n")
+
+        const synthResult = await dispatchService.runAgent({
+          agent: "zflow.synthesizer",
+          task: `Synthesize the following code review findings and produce consolidated results with support/dissent/coverage:\n\n${synthInput}`,
+        })
+
+        synthesizerOutput = synthResult.rawOutput
+        coverageNotes.push(`Synthesizer dispatched via "${dispatchService.name}" (zflow.synthesizer)`)
+      }
+    } catch (err) {
+      coverageNotes.push(`Synthesizer dispatch attempted but failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  if (!synthesizerOutput) {
+    coverageNotes.push("Synthesizer: local severity computation (no zflow.synthesizer dispatch)")
+  }
+
+  // Compute severity from findings (still uses collected findings regardless of synthesizer)
   const severity = { critical: 0, major: 0, minor: 0, nit: 0 }
   for (const { finding } of allFindings) {
     severity[finding.severity]++
@@ -534,11 +578,40 @@ export async function runPrReview(
     for (const result of chunkResults) {
       if (result.status === "fulfilled") {
         const { chunkId, output } = result.value
-        for (const finding of output.findings) {
+        const chunk = chunkResult.chunks.find(c => c.chunkId === chunkId)
+        const lineMapByFile: Record<string, Record<number, number>> = {}
+        if (chunk) {
+          for (const file of chunk.files) {
+            lineMapByFile[file.path] = file.lineMap
+          }
+        }
+
+        const chunkFindings = output.findings.map((finding) => {
+          const file = finding.file ?? (chunk?.files.length === 1 ? chunk.files[0]!.path : "")
+          let diffLine = finding.diffLine
+          if (diffLine === undefined && finding.line !== undefined && file && lineMapByFile[file]) {
+            const reverse = Object.entries(lineMapByFile[file]).find(([, actual]) => actual === finding.line)
+            if (reverse) diffLine = Number(reverse[0])
+          }
+          return {
+            file,
+            diffLine: diffLine ?? 0,
+            severity: finding.severity,
+            message: finding.description,
+          }
+        })
+
+        const merged = mergeChunkFindings([{ chunkId, findings: chunkFindings, lineMapByFile }])
+
+        for (let i = 0; i < merged.length; i++) {
+          const finding = output.findings[i]!
+          const mergedFinding = merged[i]!
+          const actualLine = finding.line ?? mergedFinding.actualLine
           allFindings.push({
             severity: finding.severity,
             title: finding.title,
-            file: "",
+            file: finding.file ?? mergedFinding.file ?? "",
+            lines: finding.lines ?? (actualLine !== undefined ? String(actualLine) : undefined),
             evidence: finding.evidence || finding.description,
             recommendation: finding.description,
             submit: finding.severity === "critical" || finding.severity === "major",
