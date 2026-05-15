@@ -1,0 +1,39 @@
+{
+  "name": "pi-zflow-subagents-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "pi-zflow dispatch adaptation — registers zflow-dispatch capability for subagent/worktree execution integration",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./package.json": "./package.json"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-zflow"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "pi-subagents": "file:../../vendor/pi-subagents-zflow",
+    "pi-zflow-core": "0.1.0"
+  },
+  "bundledDependencies": [
+    "pi-subagents"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "bundleDependencies": [
+    "pi-subagents"
+  ]
+}

@@ -16,6 +16,7 @@ export const PI_ZFLOW_REVIEW_VERSION = "0.1.0" as const
 export const PI_ZFLOW_CHANGE_WORKFLOWS_VERSION = "0.1.0" as const
 export const PI_ZFLOW_RUNECONTEXT_VERSION = "0.1.0" as const
 export const PI_ZFLOW_COMPACTION_VERSION = "0.1.0" as const
+export const PI_ZFLOW_SUBAGENTS_BRIDGE_VERSION = "0.1.0" as const
 
 // Minimum supported Pi version (provisional until Phase 0 smoke testing)
 export const PI_MINIMUM_VERSION = "0.74.0" as const

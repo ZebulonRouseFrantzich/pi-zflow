@@ -17,7 +17,14 @@ pi-zflow is a monorepo of individually installable Pi packages:
 | `pi-zflow-change-workflows` | Pi extension        | Formal prepare/implement orchestration, `/zflow-change-prepare`, `/zflow-change-implement`, `/zflow-clean` |
 | `pi-zflow-runecontext`      | Pi extension        | RuneContext integration                                                                                    |
 | `pi-zflow-compaction`       | Pi extension        | Proactive compaction hooks                                                                                 |
+| `pi-zflow-subagents-bridge` | Pi extension        | Dispatch adapter capability and diagnostics for subagent/worktree execution                                |
 | `pi-zflow`                  | umbrella Pi package | Bundles the suite                                                                                          |
+
+### Dispatch backend status
+
+`pi-zflow-subagents-bridge` is the zflow-owned adapter for implementation dispatch. In local development it depends on the fork submodule at `vendor/pi-subagents-zflow` and loads `pi-subagents/zflow-bridge` for programmatic subagent/worktree execution. If that backend cannot be loaded, the bridge still registers diagnostics but returns `ok: false` instead of faking worker success.
+
+Clone with `git clone --recurse-submodules ...` or run `git submodule update --init --recursive` after checkout. Before publishing or sharing as an installable package, replace the local `file:` dependency with an exact git commit SHA for the fork.
 
 ## Version policy
 
@@ -77,6 +84,7 @@ Version pins are recorded in two places:
 | `pi-zflow-change-workflows` | `0.1.0` (workspace ref) | local development |
 | `pi-zflow-runecontext`      | `0.1.0` (workspace ref) | local development |
 | `pi-zflow-compaction`       | `0.1.0` (workspace ref) | local development |
+| `pi-zflow-subagents-bridge` | `0.1.0` (workspace ref) | local development |
 | `pi-zflow`                  | `0.1.0` (workspace ref) | local development |
 
 ### Foundation package pins
