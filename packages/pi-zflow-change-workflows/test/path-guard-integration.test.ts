@@ -376,6 +376,36 @@ describe("path-guard integration — guardBashCommand", () => {
       `Expected git init to be blocked, got: ${result.message}`)
   })
 
+  it("blocks source command", () => {
+    const result = guardBashCommand("source ./script.sh", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected source to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks dot-source command", () => {
+    const result = guardBashCommand(". ./script.sh", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected dot-source to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks export command", () => {
+    const result = guardBashCommand("export FOO=bar", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected export to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks cd command", () => {
+    const result = guardBashCommand("cd src", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected cd to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks npx command", () => {
+    const result = guardBashCommand("npx some-tool", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected npx to be blocked, got: ${result.message}`)
+  })
+
   // ── Read-only commands still allowed ───────────────────────
 
   it("allows git status", () => {

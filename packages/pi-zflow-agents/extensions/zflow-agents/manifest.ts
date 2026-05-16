@@ -26,9 +26,18 @@ export async function readManifest(): Promise<InstallManifest | null> {
     const raw = await fs.readFile(INSTALL_MANIFEST_PATH, "utf-8")
     const parsed = JSON.parse(raw) as Partial<InstallManifest>
 
-    // Basic validation: packageVersion is required
+    // Basic validation: packageVersion is required.
+    // Accept legacy `version` field as fallback for backward compatibility
+    // with manifests written before the rename to packageVersion.
     if (!parsed.packageVersion) {
-      throw new Error("Install manifest is missing required field: packageVersion")
+      if (parsed.version && typeof parsed.version === "string" && parsed.version.length > 0) {
+        parsed.packageVersion = parsed.version
+      } else {
+        throw new Error(
+          "Install manifest is missing required field: packageVersion " +
+          "(legacy version field was also absent or empty)",
+        )
+      }
     }
 
     // Coerce missing or malformed array fields for backward compatibility

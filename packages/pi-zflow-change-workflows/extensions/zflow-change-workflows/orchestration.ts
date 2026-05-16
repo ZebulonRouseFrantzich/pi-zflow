@@ -1849,6 +1849,16 @@ export async function prepareWorktreeImplementationRun(
     plannedPaths?: Set<string>
     /** Explicit repo root. Defaults to git rev-parse --show-toplevel from cwd. */
     repoRoot?: string
+    /**
+     * Explicit run ID override. When provided, skips creating a new run.json
+     * and state-index entry (the caller already created them). Useful when
+     * the calling workflow (e.g. runChangeImplementWorkflow) has already
+     * set up the run with full metadata and `runWorktreeDispatchAndFinalize`
+     * only needs preflight validation + task construction.
+     */
+    runId?: string
+    /** Proceed even with uncommitted changes in the primary worktree. */
+    force?: boolean
   },
 ): Promise<WorktreeImplementationRunPlan> {
   const cwd = options?.cwd
@@ -1881,11 +1891,16 @@ export async function prepareWorktreeImplementationRun(
   }
 
   // 3. Clean-tree preflight
-  const preflight = assertCleanPrimaryTree(repoRoot, plannedPaths)
-  if (!preflight.clean) {
-    throw new Error(
-      `Worktree implementation preflight failed.\n${preflight.summary}`,
-    )
+  let preflight: GitPreflightResult
+  if (options?.force) {
+    preflight = { clean: true, trackedChanges: [], untracked: [], overlappingUntracked: [], summary: "Skipped due to --force.", headSha: "", branch: "" }
+  } else {
+    preflight = assertCleanPrimaryTree(repoRoot, plannedPaths)
+    if (!preflight.clean) {
+      throw new Error(
+        `Worktree implementation preflight failed.\n${preflight.summary}`,
+      )
+    }
   }
 
   // 4. Validate ownership and dependencies
@@ -1896,25 +1911,40 @@ export async function prepareWorktreeImplementationRun(
     )
   }
 
-  // 5. Create run.json
-  const runId = `impl-${changeId}-${Date.now().toString(36)}`
-  const run = await createRun(runId, repoRoot, changeId, planVersion, cwd)
+  // 5. Create or reuse run.json
+  const runId = options?.runId ?? `impl-${changeId}-${Date.now().toString(36)}`
+  let run: RunJson
+  if (options?.runId) {
+    // Caller already created the run — read back existing metadata.
+    // We still need run.json to exist for finalizeWorktreeImplementationRun.
+    const existingRun = await readRun(options.runId, cwd).catch(() => null)
+    if (!existingRun) {
+      throw new Error(
+        `Caller provided runId "${options.runId}" but run.json does not exist. ` +
+        "The caller must create the run before calling prepareWorktreeImplementationRun " +
+        "when passing a specific runId.",
+      )
+    }
+    run = existingRun
+  } else {
+    run = await createRun(runId, repoRoot, changeId, planVersion, cwd)
 
-  // Recovery ref is created later by executeApplyBack, right before patches are applied.
-  // This ensures the ref points at the exact pre-apply snapshot and cannot diverge.
+    // Recovery ref is created later by executeApplyBack, right before patches are applied.
+    // This ensures the ref points at the exact pre-apply snapshot and cannot diverge.
 
-  // 6. Update state-index.json
-  await addStateIndexEntry({
-    type: "run",
-    id: runId,
-    status: "preparing",
-    metadata: {
-      changeId,
-      planVersion,
-      repoRoot,
-      groupCount: groups.length,
-    },
-  }, cwd)
+    // 6. Update state-index.json
+    await addStateIndexEntry({
+      type: "run",
+      id: runId,
+      status: "preparing",
+      metadata: {
+        changeId,
+        planVersion,
+        repoRoot,
+        groupCount: groups.length,
+      },
+    }, cwd)
+  }
 
   // 8. Determine execution batches
   const parallelBatches: ExecutionGroup[][] = []

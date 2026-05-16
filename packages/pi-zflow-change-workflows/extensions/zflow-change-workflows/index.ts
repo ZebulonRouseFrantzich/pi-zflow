@@ -651,7 +651,7 @@ async function runWorktreeDispatchAndFinalize(
   const { default: path } = await import("node:path")
   const { parseExecutionGroupsMd } = await import("./orchestration.js")
   const {
-    buildWorktreeDispatchPlan,
+    prepareWorktreeImplementationRun,
     finalizeWorktreeImplementationRun,
   } = await import("./orchestration.js")
   const { captureGroupResult } = await import("./group-result.js")
@@ -693,7 +693,8 @@ async function runWorktreeDispatchAndFinalize(
     )
   }
 
-  // Prepare the worktree implementation run
+  // Prepare the worktree implementation run — this runs clean-tree preflight,
+  // ownership/dependency validation, and builds task descriptors.
   const planArtifactPaths = {
     design: resolvePlanArtifactPath(changeId, planVersion, "design", cwd),
     executionGroups: executionGroupsArtifactPath,
@@ -701,11 +702,16 @@ async function runWorktreeDispatchAndFinalize(
     verification: resolvePlanArtifactPath(changeId, planVersion, "verification", cwd),
   }
 
-  const dispatchConfig = { runId, repoRoot, changeId, planVersion }
-  const planTasks = buildWorktreeDispatchPlan(groups, dispatchConfig, planArtifactPaths)
+  const runPlan = await prepareWorktreeImplementationRun(
+    changeId,
+    planVersion,
+    groups,
+    planArtifactPaths,
+    { cwd, repoRoot, runId, force: options?.force },
+  )
 
   // Dispatch via the dispatch service with worktree: true
-  const tasks = planTasks.map(t => ({
+  const tasks = runPlan.tasks.map(t => ({
     agent: t.agent,
     task: t.task,
     output: t.outputRelativePath,
