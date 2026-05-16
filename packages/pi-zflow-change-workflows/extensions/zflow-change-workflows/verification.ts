@@ -37,6 +37,22 @@ import { resolveFailureLogPath } from "pi-zflow-artifacts/artifact-paths"
 // ── Types ───────────────────────────────────────────────────────
 
 /**
+ * A verification command.
+ *
+ * Two forms are supported:
+ * - **Shell string** (`"npm test"`, `"just ci-fast"`): executed via `bash -c`.
+ *   Repo/profile‑configured commands are **trusted shell commands** by design;
+ *   this is not a security boundary. Shell metacharacters (`;`, `|`, `$(…)`,
+ *   etc.) are honoured.
+ * - **Argv array** (`{ command: "node", args: ["test.mjs"] }`): executed
+ *   directly via `spawnSync` without a shell. Shell metacharacters in args
+ *   are treated as literal text. Prefer this form when the command comes
+ *   from a caller‑controlled source or when you need to avoid shell
+ *   interpretation of unknown input.
+ */
+export type VerificationCommand = string | { command: string; args: string[] }
+
+/**
  * Result of running a verification command.
  */
 export interface VerificationResult {
@@ -154,25 +170,65 @@ export function resolveVerificationCommand(
 /**
  * Run a verification command and capture the result.
  *
- * Executes the given command via `bash -c` in the repo root directory.
- * Captures combined stdout and stderr, exit code, and duration.
+ * Accepts either:
+ * - A **shell string** — executed via `bash -c`. This is the expected path for
+ *   repo/profile‑configured commands and is intentionally a trusted shell
+ *   execution path, not a security boundary. Shell metacharacters and
+ *   chaining are honoured by design.
+ * - An **argv‑array object** `{ command, args }` — executed directly via
+ *   `spawnSync` without shell. All args are passed literally; shell
+ *   metacharacters are treated as plain text, not interpreted.
  *
- * @param command - The shell command to run.
+ * Captures combined stdout/stderr, exit code, and duration in all cases.
+ *
+ * @param command - The verification command (shell string or argv array).
  * @param repoRoot - Absolute path to the repository root.
  * @returns A `VerificationResult` with pass/fail, output, and timing.
  */
 export async function runVerification(
-  command: string,
+  command: VerificationCommand,
   repoRoot: string,
 ): Promise<VerificationResult> {
   const start = Date.now()
 
-  const result = spawnSync("bash", ["-c", command], {
+  if (typeof command === "string") {
+    // ── Shell string — trusted shell execution path ──────────────
+    // Repo/profile commands are intentional product behavior. This is
+    // NOT a security boundary; shell metacharacters are honoured.
+    const result = spawnSync("bash", ["-c", command], {
+      cwd: repoRoot,
+      encoding: "utf-8",
+      timeout: 15 * 60 * 1000, // 15 minutes
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 10 * 1024 * 1024, // 10 MB
+    })
+
+    const stdout: string = result.stdout ?? ""
+    const stderr: string = result.stderr ?? ""
+    const combined = stdout + (stderr ? "\n" + stderr : "")
+    const redacted = redactSecrets(combined)
+
+    const pass = result.status === 0
+
+    return {
+      pass,
+      command,
+      output: redacted,
+      duration: Date.now() - start,
+      error: pass ? undefined : result.error?.message ?? `exit code ${result.status ?? "unknown"}`,
+    }
+  }
+
+  // ── Argv‑array — no‑shell execution path ─────────────────────
+  // Shell metacharacters in args are treated literally, not interpreted.
+  const displayCommand = [command.command, ...command.args].join(" ")
+
+  const result = spawnSync(command.command, command.args, {
     cwd: repoRoot,
     encoding: "utf-8",
-    timeout: 15 * 60 * 1000, // 15 minutes
+    timeout: 15 * 60 * 1000,
     stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: 10 * 1024 * 1024, // 10 MB
+    maxBuffer: 10 * 1024 * 1024,
   })
 
   const stdout: string = result.stdout ?? ""
@@ -184,7 +240,7 @@ export async function runVerification(
 
   return {
     pass,
-    command,
+    command: displayCommand,
     output: redacted,
     duration: Date.now() - start,
     error: pass ? undefined : result.error?.message ?? `exit code ${result.status ?? "unknown"}`,

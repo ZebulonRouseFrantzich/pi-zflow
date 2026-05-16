@@ -9,7 +9,7 @@ description: |
   findings into a consolidated plan-review report.
 ---
 
-## Orchestrator notes — tier-based reviewer selection
+### Orchestrator notes — tier-based reviewer selection
 
 The orchestrator selects which reviewers to include based on the plan's
 review tier classification. Include the matching reviewers as parallel

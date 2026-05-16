@@ -457,18 +457,21 @@ export async function recoverFromApplyBack(
           resetToPreApplySnapshot(runId, repoRoot, snapshot)
           primaryTreeRestored = true
         } catch {
-          // Recovery ref may not exist; try hard reset to recorded head
+          // Recovery ref and recovery-based reset both failed.
+          // Try direct reset to the recorded snapshot.head as a final fallback.
+          // First validate the SHA to avoid applying an invalid ref.
           try {
-            execFileSync("git", ["reset", "--hard", snapshot.head], {
+            execFileSync("git", ["rev-parse", "--verify", "--end-of-options", `${snapshot.head}^{commit}`], {
               cwd: repoRoot,
               stdio: ["ignore", "pipe", "pipe"],
             })
-            execFileSync("git", ["clean", "-fd"], {
+            execFileSync("git", ["reset", "--hard", snapshot.head], {
               cwd: repoRoot,
               stdio: ["ignore", "pipe", "pipe"],
             })
             primaryTreeRestored = true
           } catch {
+            // head is invalid or reset failed — recovery cannot proceed safely
             primaryTreeRestored = false
           }
         }

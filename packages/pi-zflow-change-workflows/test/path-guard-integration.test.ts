@@ -214,6 +214,322 @@ describe("path-guard integration — guardBashCommand", () => {
     assert.ok(result.allowed,
       `Expected bash write to project file to be allowed, got: ${result.message}`)
   })
+
+  // ── Destructive command blocklist ───────────────────────────
+
+  it("blocks rm command", () => {
+    const result = guardBashCommand(
+      `rm ${path.join(PROJECT_ROOT, "src", "file.ts")}`,
+      makeOptions(),
+    )
+    assert.ok(!result.allowed,
+      `Expected rm to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks rm -rf command", () => {
+    const result = guardBashCommand("rm -rf node_modules", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected rm -rf to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks rmdir command", () => {
+    const result = guardBashCommand("rmdir dist", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected rmdir to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks git rm command", () => {
+    const result = guardBashCommand("git rm src/old-file.ts", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected git rm to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks git clean command", () => {
+    const result = guardBashCommand("git clean -fd", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected git clean to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks git reset --hard command", () => {
+    const result = guardBashCommand("git reset --hard", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected git reset --hard to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks sed -i command", () => {
+    const result = guardBashCommand('sed -i "s/foo/bar/g" file.ts', makeOptions())
+    assert.ok(!result.allowed,
+      `Expected sed -i to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks sed --in-place command", () => {
+    const result = guardBashCommand('sed --in-place "s/foo/bar/g" file.ts', makeOptions())
+    assert.ok(!result.allowed,
+      `Expected sed --in-place to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks chmod command", () => {
+    const result = guardBashCommand("chmod +x script.sh", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected chmod to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks chown command", () => {
+    const result = guardBashCommand("chown user:user file.ts", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected chown to be blocked, got: ${result.message}`)
+  })
+
+  // ── Shell chaining ─────────────────────────────────────────
+
+  it("blocks semicolon chaining", () => {
+    const result = guardBashCommand("cd src; rm file.ts", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected semicolon chaining to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks pipe chaining with destructive command", () => {
+    const result = guardBashCommand("cat file | rm file", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected pipe chaining with rm to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks && chaining with destructive command", () => {
+    const result = guardBashCommand("git status && rm file", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected && chaining to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks || chaining with destructive command", () => {
+    const result = guardBashCommand("grep foo file || rm file", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected || chaining to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks backtick command substitution", () => {
+    const result = guardBashCommand("echo `ls`", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected backtick substitution to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks dollar-paren command substitution", () => {
+    const result = guardBashCommand("cat $(which git)", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected $() substitution to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks sudo destructive command", () => {
+    const result = guardBashCommand("sudo rm /etc/config", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected sudo rm to be blocked, got: ${result.message}`)
+  })
+
+  // ── mkdir, touch, install ─────────────────────────────────
+
+  it("blocks mkdir command", () => {
+    const result = guardBashCommand("mkdir tmp", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected mkdir to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks touch command", () => {
+    const result = guardBashCommand("touch file.ts", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected touch to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks install command", () => {
+    const result = guardBashCommand("install -m 755 script.sh /usr/local/bin/", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected install to be blocked, got: ${result.message}`)
+  })
+
+  // ── Unknown commands blocked (deny-by-default) ────────────
+
+  it("blocks python script.py (unknown command)", () => {
+    const result = guardBashCommand("python script.py", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected python to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks node script.js (unknown command)", () => {
+    const result = guardBashCommand("node script.js", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected node to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks make build (unknown command)", () => {
+    const result = guardBashCommand("make build", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected make to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks git stash apply --index (not read-only)", () => {
+    const result = guardBashCommand("git stash apply --index", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected git stash apply to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks git init (not read-only)", () => {
+    const result = guardBashCommand("git init", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected git init to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks source command", () => {
+    const result = guardBashCommand("source ./script.sh", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected source to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks dot-source command", () => {
+    const result = guardBashCommand(". ./script.sh", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected dot-source to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks export command", () => {
+    const result = guardBashCommand("export FOO=bar", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected export to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks cd command", () => {
+    const result = guardBashCommand("cd src", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected cd to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks npx command", () => {
+    const result = guardBashCommand("npx some-tool", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected npx to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks env wrapper destructive command", () => {
+    const result = guardBashCommand("env rm -rf /tmp/foo", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected env rm to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks time wrapper destructive command", () => {
+    const result = guardBashCommand("time rm file", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected time rm to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks curl simple fetch (not read-only)", () => {
+    const result = guardBashCommand("curl https://example.com", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected curl to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks curl with output flag (writes to disk)", () => {
+    const result = guardBashCommand("curl -o /tmp/out https://example.com", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected curl -o to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks wget simple fetch (not read-only)", () => {
+    const result = guardBashCommand("wget https://example.com", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected wget to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks wget with output flag (writes to disk)", () => {
+    const result = guardBashCommand("wget -O /tmp/out https://example.com", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected wget -O to be blocked, got: ${result.message}`)
+  })
+
+  // ── Read-only commands still allowed ───────────────────────
+
+  it("allows git status", () => {
+    const result = guardBashCommand("git status", makeOptions())
+    assert.ok(result.allowed,
+      `Expected git status to be allowed, got: ${result.message}`)
+  })
+
+  it("allows git diff", () => {
+    const result = guardBashCommand("git diff", makeOptions())
+    assert.ok(result.allowed,
+      `Expected git diff to be allowed, got: ${result.message}`)
+  })
+
+  it("allows git log", () => {
+    const result = guardBashCommand("git log --oneline -5", makeOptions())
+    assert.ok(result.allowed,
+      `Expected git log to be allowed, got: ${result.message}`)
+  })
+
+  it("allows git show", () => {
+    const result = guardBashCommand("git show", makeOptions())
+    assert.ok(result.allowed,
+      `Expected git show to be allowed, got: ${result.message}`)
+  })
+
+  it("allows git ls-files", () => {
+    const result = guardBashCommand("git ls-files", makeOptions())
+    assert.ok(result.allowed,
+      `Expected git ls-files to be allowed, got: ${result.message}`)
+  })
+
+  it("allows git ls-tree", () => {
+    const result = guardBashCommand("git ls-tree HEAD", makeOptions())
+    assert.ok(result.allowed,
+      `Expected git ls-tree to be allowed, got: ${result.message}`)
+  })
+
+  it("allows git rev-parse", () => {
+    const result = guardBashCommand("git rev-parse HEAD", makeOptions())
+    assert.ok(result.allowed,
+      `Expected git rev-parse to be allowed, got: ${result.message}`)
+  })
+
+  it("allows ls", () => {
+    const result = guardBashCommand("ls -la src/", makeOptions())
+    assert.ok(result.allowed,
+      `Expected ls to be allowed, got: ${result.message}`)
+  })
+
+  it("allows cat", () => {
+    const result = guardBashCommand("cat package.json", makeOptions())
+    assert.ok(result.allowed,
+      `Expected cat to be allowed, got: ${result.message}`)
+  })
+
+  it("allows grep", () => {
+    const result = guardBashCommand('grep -r "TODO" src/', makeOptions())
+    assert.ok(result.allowed,
+      `Expected grep to be allowed, got: ${result.message}`)
+  })
+
+  it("allows find", () => {
+    const result = guardBashCommand("find . -name '*.ts'", makeOptions())
+    assert.ok(result.allowed,
+      `Expected find to be allowed, got: ${result.message}`)
+  })
+
+  it("allows head/tail", () => {
+    const result = guardBashCommand("tail -20 README.md", makeOptions())
+    assert.ok(result.allowed,
+      `Expected tail to be allowed, got: ${result.message}`)
+  })
+
+  it("blocks piped read-only commands (no chaining allowed)", () => {
+    const result = guardBashCommand("git diff | head -50", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected piped read-only commands to be blocked, got: ${result.message}`)
+  })
+
+  it("allows echo with redirection to allowed path", () => {
+    const result = guardBashCommand(
+      `echo "test" > ${path.join(PROJECT_ROOT, "file.ts")}`,
+      makeOptions(),
+    )
+    assert.ok(result.allowed,
+      `Expected echo with redirection to allowed path to be allowed, got: ${result.message}`)
+  })
 })
 
 describe("path-guard integration — GuardIntent", () => {

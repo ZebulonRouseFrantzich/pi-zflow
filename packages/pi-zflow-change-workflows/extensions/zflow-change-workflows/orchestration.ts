@@ -86,6 +86,101 @@ import {
 } from "./verification.js"
 import type { VerificationResult, FixLoopResult, FixLoopOptions } from "./verification.js"
 
+// ── Execution groups parsing ──────────────────────────────────
+
+/**
+ * Parse execution-groups.md content into ExecutionGroup objects.
+ *
+ * Expects the format:
+ *
+ * ```markdown
+ * ## Group {n}: {descriptive name}
+ *
+ * - **Files:** path/to/file.ts, another/file.ts
+ * - **Agent:** zflow.implement-routine
+ * - **Verification:** optional scoped verification text
+ * ```
+ */
+export function parseExecutionGroupsMd(mdContent: string): import("./ownership-validator.js").ExecutionGroup[] {
+  const groups: import("./ownership-validator.js").ExecutionGroup[] = []
+  const lines = mdContent.split("\n")
+  let currentGroup: Partial<import("./ownership-validator.js").ExecutionGroup> | null = null
+
+  for (const line of lines) {
+    const groupMatch = line.match(/^## Group\s+(\d+):\s+(.+)$/i)
+    if (groupMatch) {
+      if (currentGroup?.id) {
+        groups.push({
+          id: currentGroup.id,
+          files: currentGroup.files ?? [],
+          dependencies: currentGroup.dependencies ?? [],
+          agent: currentGroup.agent ?? "zflow.implement-routine",
+          parallelizable: currentGroup.parallelizable ?? true,
+          taskPrompt: currentGroup.taskPrompt ?? "",
+          scopedVerification: currentGroup.scopedVerification,
+        })
+      }
+      currentGroup = {
+        id: `group-${groupMatch[1]}`,
+        files: [],
+        dependencies: [],
+        agent: "zflow.implement-routine",
+        taskPrompt: groupMatch[2],
+        parallelizable: true,
+      }
+      continue
+    }
+
+    if (!currentGroup) continue
+
+    const filesMatch = line.match(/-\s+\*\*Files?:\*\*\s+(.+)/i)
+    if (filesMatch) {
+      currentGroup.files = filesMatch[1].split(",").map((f: string) => f.trim()).filter(Boolean)
+      continue
+    }
+
+    const agentMatch = line.match(/-\s+\*\*Agent:\*\*\s+(.+)/i)
+    if (agentMatch) {
+      currentGroup.agent = agentMatch[1].trim()
+      continue
+    }
+
+    const depMatch = line.match(/-\s+\*\*Dependencies:\*\*\s+(.+)/i)
+    if (depMatch) {
+      currentGroup.dependencies = depMatch[1].split(",").map((d: string) => d.trim()).filter(Boolean)
+      continue
+    }
+
+    const verifMatch = line.match(/-\s+\*\*Verification:\*\*\s+(.+)/i)
+    if (verifMatch) {
+      currentGroup.scopedVerification = verifMatch[1].trim()
+      continue
+    }
+
+    const parallelMatch = line.match(/-\s+\*\*Parallelizable:\*\*\s+(.+)/i)
+    if (parallelMatch) {
+      currentGroup.parallelizable = parallelMatch[1].trim().toLowerCase() === "yes" ||
+        parallelMatch[1].trim().toLowerCase() === "true"
+      continue
+    }
+  }
+
+  // Push the last group
+  if (currentGroup?.id) {
+    groups.push({
+      id: currentGroup.id,
+      files: currentGroup.files ?? [],
+      dependencies: currentGroup.dependencies ?? [],
+      agent: currentGroup.agent ?? "zflow.implement-routine",
+      parallelizable: currentGroup.parallelizable ?? true,
+      taskPrompt: currentGroup.taskPrompt ?? "",
+      scopedVerification: currentGroup.scopedVerification,
+    })
+  }
+
+  return groups
+}
+
 // ── Types ───────────────────────────────────────────────────────
 
 /**
@@ -1754,6 +1849,16 @@ export async function prepareWorktreeImplementationRun(
     plannedPaths?: Set<string>
     /** Explicit repo root. Defaults to git rev-parse --show-toplevel from cwd. */
     repoRoot?: string
+    /**
+     * Explicit run ID override. When provided, skips creating a new run.json
+     * and state-index entry (the caller already created them). Useful when
+     * the calling workflow (e.g. runChangeImplementWorkflow) has already
+     * set up the run with full metadata and `runWorktreeDispatchAndFinalize`
+     * only needs preflight validation + task construction.
+     */
+    runId?: string
+    /** Proceed even with uncommitted changes in the primary worktree. */
+    force?: boolean
   },
 ): Promise<WorktreeImplementationRunPlan> {
   const cwd = options?.cwd
@@ -1786,11 +1891,16 @@ export async function prepareWorktreeImplementationRun(
   }
 
   // 3. Clean-tree preflight
-  const preflight = assertCleanPrimaryTree(repoRoot, plannedPaths)
-  if (!preflight.clean) {
-    throw new Error(
-      `Worktree implementation preflight failed.\n${preflight.summary}`,
-    )
+  let preflight: GitPreflightResult
+  if (options?.force) {
+    preflight = { clean: true, trackedChanges: [], untracked: [], overlappingUntracked: [], summary: "Skipped due to --force.", headSha: "", branch: "" }
+  } else {
+    preflight = assertCleanPrimaryTree(repoRoot, plannedPaths)
+    if (!preflight.clean) {
+      throw new Error(
+        `Worktree implementation preflight failed.\n${preflight.summary}`,
+      )
+    }
   }
 
   // 4. Validate ownership and dependencies
@@ -1801,25 +1911,40 @@ export async function prepareWorktreeImplementationRun(
     )
   }
 
-  // 5. Create run.json
-  const runId = `impl-${changeId}-${Date.now().toString(36)}`
-  const run = await createRun(runId, repoRoot, changeId, planVersion, cwd)
+  // 5. Create or reuse run.json
+  const runId = options?.runId ?? `impl-${changeId}-${Date.now().toString(36)}`
+  let run: RunJson
+  if (options?.runId) {
+    // Caller already created the run — read back existing metadata.
+    // We still need run.json to exist for finalizeWorktreeImplementationRun.
+    const existingRun = await readRun(options.runId, cwd).catch(() => null)
+    if (!existingRun) {
+      throw new Error(
+        `Caller provided runId "${options.runId}" but run.json does not exist. ` +
+        "The caller must create the run before calling prepareWorktreeImplementationRun " +
+        "when passing a specific runId.",
+      )
+    }
+    run = existingRun
+  } else {
+    run = await createRun(runId, repoRoot, changeId, planVersion, cwd)
 
-  // Recovery ref is created later by executeApplyBack, right before patches are applied.
-  // This ensures the ref points at the exact pre-apply snapshot and cannot diverge.
+    // Recovery ref is created later by executeApplyBack, right before patches are applied.
+    // This ensures the ref points at the exact pre-apply snapshot and cannot diverge.
 
-  // 6. Update state-index.json
-  await addStateIndexEntry({
-    type: "run",
-    id: runId,
-    status: "preparing",
-    metadata: {
-      changeId,
-      planVersion,
-      repoRoot,
-      groupCount: groups.length,
-    },
-  }, cwd)
+    // 6. Update state-index.json
+    await addStateIndexEntry({
+      type: "run",
+      id: runId,
+      status: "preparing",
+      metadata: {
+        changeId,
+        planVersion,
+        repoRoot,
+        groupCount: groups.length,
+      },
+    }, cwd)
+  }
 
   // 8. Determine execution batches
   const parallelBatches: ExecutionGroup[][] = []
@@ -3622,22 +3747,178 @@ export async function runChangePrepareWorkflow(
   // ── Step 8: Detect RuneContext ─────────────────────────────────
   // If changePath looks like a RuneContext path (contains @ or /context/),
   // try to detect RuneContext via the pi-zflow-runecontext capability.
+  // When RuneContext is detected, canonical RuneContext docs become the
+  // requirements source and the plan-state is flagged accordingly.
   const registry = getZflowRegistry()
   const changePath = options.changePath ?? ""
+  let runeContextDetected = false
+  let runeContextCanonical = false
+  let runeContextDocsList: string[] = []
   if (changePath.includes("@") || changePath.includes("/context/")) {
     console.info(`[zflow] Change path "${changePath}" looks like a RuneContext path — attempting detection.`)
     if (registry.has("runecontext")) {
       try {
-        const runeContextService = registry.get<{ detectRuneContext?: (path: string) => Promise<unknown> }>("runecontext")
-        if (runeContextService && typeof runeContextService.detectRuneContext === "function") {
-          const detected = await runeContextService.detectRuneContext(changePath)
+        const runeContextService = registry.get<{
+          detect?: (path: string) => Promise<{ detected?: boolean; repoRoot?: string; flavor?: string; status?: string }>
+          resolveChange?: (input: { repoRoot: string; changePath?: string }) => Promise<{ changePath: string; changeId: string; flavor: string; files: Record<string, string> }>
+          readDocs?: (change: unknown) => Promise<Record<string, string>>
+        }>("runecontext")
+        if (runeContextService && typeof runeContextService.detect === "function") {
+          const detected = await runeContextService.detect(changePath)
           console.info(`[zflow] RuneContext detected: ${JSON.stringify(detected)}`)
+
+          if (detected && detected.detected) {
+            runeContextDetected = true
+
+            // Resolve the change path to discover canonical RuneContext document locations
+            if (runeContextService.resolveChange && detected.repoRoot) {
+              try {
+                const resolved = await runeContextService.resolveChange({
+                  repoRoot: detected.repoRoot,
+                  changePath,
+                })
+                if (resolved && resolved.files) {
+                  runeContextCanonical = true
+                  runeContextDocsList = Object.keys(resolved.files)
+
+                  // ── Populate zflow artifacts from RuneContext canonical docs ──
+                  // When readDocs is available, read them and map to zflow artifacts.
+                  if (runeContextService.readDocs) {
+                    try {
+                      const runeDocs = await runeContextService.readDocs(resolved)
+
+                      // design.md ← canonical proposal + design docs
+                      await fs.writeFile(
+                        artifactPaths.design,
+                        [
+                          "# RuneContext Design",
+                          "",
+                          "## Proposal",
+                          "",
+                          runeDocs.proposal,
+                          "",
+                          "## Design",
+                          "",
+                          runeDocs.design,
+                        ].join("\n"),
+                        "utf-8",
+                      )
+                      console.info("[zflow] Populated design.md from RuneContext proposal/design docs")
+
+                      // standards.md ← RuneContext standards.md
+                      await fs.writeFile(artifactPaths.standards, runeDocs.standards, "utf-8")
+                      console.info("[zflow] Populated standards.md from RuneContext standards.md")
+
+                      // verification.md ← verification + references/status metadata
+                      await fs.writeFile(
+                        artifactPaths.verification,
+                        [
+                          "# RuneContext Verification",
+                          "",
+                          runeDocs.verification,
+                          runeDocs.references ? ["", "## References", "", runeDocs.references].join("\n") : "",
+                          "",
+                          "## Status",
+                          "",
+                          "```json",
+                          JSON.stringify(runeDocs.status, null, 2),
+                          "```",
+                        ].filter(Boolean).join("\n"),
+                        "utf-8",
+                      )
+                      console.info("[zflow] Populated verification.md from RuneContext verification/references/status docs")
+
+                      // execution-groups.md ← derived from tasks.md or proposal+design+verification
+                      try {
+                        const { deriveExecutionGroupsFromRuneDocs } = await import("pi-zflow-runecontext")
+                        const derived = deriveExecutionGroupsFromRuneDocs(runeDocs)
+                        const lines = [
+                          "# Execution Groups",
+                          "",
+                          `> Derived from RuneContext canonical source: ${derived.sourceDocument}.`,
+                          "> Review and replace `TBD` file lists before implementation dispatch.",
+                          "",
+                        ]
+                        for (let i = 0; i < derived.groups.length; i++) {
+                          const group = derived.groups[i]!
+                          const verification = group.tasks
+                            .map((task) => task.verification)
+                            .filter((value): value is string => Boolean(value))
+                            .join("; ")
+                          lines.push(
+                            `## Group ${i + 1}: ${group.name}`,
+                            "",
+                            `- **Files:** TBD`,
+                            `- **Agent:** zflow.implement-routine`,
+                            `- **Verification:** ${verification || "TBD — derive scoped verification from RuneContext criteria"}`,
+                            `- **Parallelizable:** true`,
+                            `- **Canonical source:** ${derived.sourceDocument}`,
+                            "",
+                            group.description,
+                            "",
+                          )
+                        }
+                        await fs.writeFile(artifactPaths.executionGroups, lines.join("\n"), "utf-8")
+                        console.info("[zflow] Populated execution-groups.md via deriveExecutionGroupsFromRuneDocs()")
+                      } catch {
+                        const basic = [
+                          `# Execution Groups`,
+                          ``,
+                          `> Derived from RuneContext canonical docs.`,
+                          `> Manual grouping is required before implementation dispatch.`,
+                          ``,
+                          `## Group 1: RuneContext implementation`,
+                          ``,
+                          `- **Files:** TBD`,
+                          `- **Agent:** zflow.implement-routine`,
+                          `- **Verification:** TBD`,
+                          `- **Canonical source:** ${runeDocs.tasks ? "tasks.md" : "proposal+design+verification"}`,
+                        ].join("\n")
+                        await fs.writeFile(artifactPaths.executionGroups, basic, "utf-8")
+                        console.info("[zflow] Wrote basic execution-groups.md from RuneContext docs")
+                      }
+                    } catch {
+                      console.warn("[zflow] Could not populate artifacts from RuneContext docs")
+                    }
+                  } else {
+                    console.info("[zflow] RuneContext readDocs not available — artifacts remain empty")
+                  }
+                }
+
+                console.info(`[zflow] RuneContext resolved: changeId=${resolved.changeId}, flavor=${resolved.flavor}, docs=${runeContextDocsList.join(", ") || "none"}`)
+              } catch {
+                console.warn("[zflow] RuneContext resolveChange failed — proceeding without canonical doc resolution.")
+              }
+            }
+          }
         }
       } catch {
         console.warn("[zflow] RuneContext service available but detection failed.")
       }
     } else {
       console.info("[zflow] No RuneContext service found in registry. Detection is caller's responsibility.")
+    }
+  }
+
+  // Persist RuneContext canonical flag in plan-state.json so downstream
+  // consumers (review, implement, audit) know to treat RuneContext docs
+  // as the requirements source.
+  if (runeContextCanonical) {
+    try {
+      const raw = await fs.readFile(planStatePath, "utf-8")
+      const planState = JSON.parse(raw)
+      planState.runeContext = {
+        ...planState.runeContext,
+        canonical: true,
+        canonicalDocs: runeContextDocsList,
+        detectedAt: new Date().toISOString(),
+      }
+      planState.updatedAt = new Date().toISOString()
+      await fs.writeFile(planStatePath, JSON.stringify(planState, null, 2), "utf-8")
+      // Also update the in-memory object returned to the caller
+      initialPlanState.runeContext = planState.runeContext
+    } catch {
+      console.warn("[zflow] Could not persist RuneContext canonical flag in plan-state.json.")
     }
   }
 
@@ -4220,6 +4501,8 @@ export interface ImplementWorkflowOptions {
   skipVerification?: boolean
   /** If true, skip code review. */
   skipReview?: boolean
+  /** If true, proceed with a dirty primary worktree. Defaults to false (dirty tree = hard error). */
+  force?: boolean
 }
 
 /**
@@ -4274,12 +4557,29 @@ export interface ImplementWorkflowResult {
  * @param options - Workflow options.
  * @returns An ImplementWorkflowResult with the run metadata.
  */
+/**
+ * IMPLEMENTATION NOTE — Worktree dispatch gap
+ *
+ * FUTURE: This function currently creates run state but does NOT dispatch workers
+ * via pi-subagents worktree:true or execute apply-back. The
+ * prepareWorktreeImplementationRun() and finalizeWorktreeImplementationRun()
+ * helpers exist in this file but are not yet connected to the command lifecycle.
+ *
+ * Work in progress (Phase 5/7):
+ * - buildWorktreeDispatchPlan() produces task descriptors
+ * - prepareWorktreeImplementationRun() produces a full plan with preflight + groups
+ * - The command handler at /zflow-change-implement should call
+ *   prepareWorktreeImplementationRun() → dispatch via pi-subagents →
+ *   finalizeWorktreeImplementationRun() → runChangeImplementWorkflow() for
+ *   remaining post-dispatch steps.
+ */
 export async function runChangeImplementWorkflow(
   options: ImplementWorkflowOptions,
 ): Promise<ImplementWorkflowResult> {
   const cwd = options.cwd
   const { default: fs } = await import("node:fs/promises")
   const { default: pathModule } = await import("node:path")
+  const force = options.force === true
 
   // 1. Check unfinished execution runs
   const unfinished = await discoverUnfinishedWork(options.changeId, cwd)
@@ -4314,7 +4614,7 @@ export async function runChangeImplementWorkflow(
 
   const planVersion = options.planVersion ?? approvedVersion
 
-  // 3. Check worktree cleanliness
+  // 3. Check worktree cleanliness — hard error unless --force
   const { default: childProcess } = await import("node:child_process")
   const repoRoot = childProcess.execFileSync("git", ["rev-parse", "--show-toplevel"], {
     cwd: cwd ?? process.cwd(),
@@ -4331,20 +4631,24 @@ export async function runChangeImplementWorkflow(
     }).trim()
     if (status.length > 0) {
       worktreeDirty = true
-      console.warn(
-        `[zflow] Worktree is dirty for change "${options.changeId}". ` +
-        "Uncommitted changes may interfere with worktree dispatch. " +
-        "Use --force to proceed despite dirty worktree.",
-      )
+      if (force) {
+        console.warn(
+          `[zflow] Worktree is dirty for change "${options.changeId}". ` +
+          "Proceeding with dirty worktree because --force was passed.",
+        )
+      } else {
+        throw new Error(
+          `Primary worktree must be clean for change "${options.changeId}". ` +
+          "Uncommitted changes may interfere with worktree dispatch. " +
+          "Commit or stash your changes first, or re-run with --force to proceed despite dirty worktree.",
+        )
+      }
     }
-  } catch {
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("Primary worktree must be clean")) {
+      throw err
+    }
     console.warn("[zflow] Could not check worktree cleanliness — proceeding without check.")
-  }
-
-  if (worktreeDirty && !options.skipVerification) {
-    // Allow --force via skipVerification being explicitly false vs undefined
-    // The --force flag is handled at the command handler level
-    console.info("[zflow] Proceeding with dirty worktree (caller acknowledged warning).")
   }
 
   // 4. Update plan state to executing
@@ -4984,6 +5288,18 @@ export async function runImplementationPostStartSequence(
     }
   }
 
+  // ── Gap visibility: skipDispatchWait=true means dispatch is not yet wired ─
+  if (opts.skipDispatchWait) {
+    console.info(
+      "[zflow] skipDispatchWait is true: proceeding without worktree dispatch. " +
+      "Worktree dispatch via pi-subagents worktree:true is not yet integrated. " +
+      "prepareWorktreeImplementationRun() and finalizeWorktreeImplementationRun() " +
+      "helpers exist but are not connected to the command lifecycle. " +
+      "The post-start sequence will run verification/review on the primary worktree " +
+      "without any isolated worker execution or apply-back.",
+    )
+  }
+
   // 3. Dispatch artifacts present (or explicitly skipped) → proceed to verification
 
   // 3a. Skip verification entirely?
@@ -5043,11 +5359,23 @@ export async function runImplementationPostStartSequence(
 
   // 3b. Run final verification
   await transitionTo("executing")
-  await recordImplementationNextSteps(runId, [
-    "1. Final verification: run full verification suite on the primary worktree",
-    "2. Code review: run /zflow-review-code to audit the implementation",
-    "3. Fix loop: address any verification or review failures, then re-verify",
-  ], cwd)
+
+  if (opts.skipDispatchWait) {
+    // Record nextSteps that acknowledge the worktree dispatch gap
+    await recordImplementationNextSteps(runId, [
+      "⚠️ Worktree dispatch via pi-subagents worktree:true is NOT yet integrated.",
+      "   The implementation ran directly on the primary worktree without isolated worktrees or apply-back.",
+      "1. Final verification: run full verification suite on the primary worktree",
+      "2. Code review: run /zflow-review-code to audit the implementation",
+      "3. Fix loop: address any verification or review failures, then re-verify",
+    ], cwd)
+  } else {
+    await recordImplementationNextSteps(runId, [
+      "1. Final verification: run full verification suite on the primary worktree",
+      "2. Code review: run /zflow-review-code to audit the implementation",
+      "3. Fix loop: address any verification or review failures, then re-verify",
+    ], cwd)
+  }
 
   const verificationResult = await finalizeVerification(runId, cwd)
 

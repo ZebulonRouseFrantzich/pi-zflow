@@ -24,6 +24,9 @@ function makePiStub() {
       on(eventName: string) {
         events.push(eventName)
       },
+      setActiveTools(_toolNames: string[]) {
+        // no-op in stub — tool restriction is validated in integration
+      },
     },
   }
 }
@@ -50,12 +53,12 @@ describe("zflow-plan-mode extension activation", () => {
     assert.equal(commands.get("zflow-plan"), 1)
   })
 
-  it("sets up before_tool_call and before_agent_start hooks", () => {
+  it("sets up tool_call and before_agent_start hooks", () => {
     const { pi, events } = makePiStub()
 
     activateZflowPlanModeExtension(pi as any)
 
-    assert.ok(events.includes("before_tool_call"), "before_tool_call hook must be registered")
+    assert.ok(events.includes("tool_call"), "tool_call hook must be registered")
     assert.ok(events.includes("before_agent_start"), "before_agent_start hook must be registered")
   })
 
@@ -69,7 +72,7 @@ describe("zflow-plan-mode extension activation", () => {
 
     // First call registers command + hooks
     assert.equal(first.commands.get("zflow-plan"), 1)
-    assert.ok(first.events.includes("before_tool_call"))
+    assert.ok(first.events.includes("tool_call"))
     assert.ok(first.events.includes("before_agent_start"))
 
     // Second call should register nothing (capability claim prevents duplicate)

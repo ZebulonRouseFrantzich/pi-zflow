@@ -1,16 +1,12 @@
 ---
 name: plan-validator
 package: zflow
-description: |
-  Validate planning artifacts for completeness, internal consistency,
-  and adherence to artifact structure rules. Checks that execution
-  groups respect file-count and phase-count limits, dependencies are
-  consistent, and verification steps are concrete.
+description: Validate planning artifacts for completeness, internal consistency, and adherence to artifact structure rules. Checks that execution groups respect file-count and phase-count limits, dependencies are consistent, and verification steps are concrete.
 tools: read, grep, find, ls
 thinking: high
+# model is resolved via the profile system at launch time; placeholder means "must be overridden by profile"
 model: placeholder
-fallbackModels:
-  - placeholder
+fallbackModels: placeholder
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false

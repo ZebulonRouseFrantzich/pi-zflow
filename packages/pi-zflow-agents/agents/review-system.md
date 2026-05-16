@@ -1,15 +1,12 @@
 ---
 name: review-system
 package: zflow
-description: |
-  Review code changes for system-level concerns: performance,
-  scalability, observability, resilience, resource management, and
-  configuration correctness.
+description: Review code changes for system-level concerns: performance, scalability, observability, resilience, resource management, and configuration correctness.
 tools: read, grep, find, ls
 thinking: high
+# model is resolved via the profile system at launch time; placeholder means "must be overridden by profile"
 model: placeholder
-fallbackModels:
-  - placeholder
+fallbackModels: placeholder
 systemPromptMode: replace
 inheritProjectContext: false
 inheritSkills: false

@@ -108,11 +108,16 @@ export interface AllowedRoot {
    *
    * - `"any"` (default) — any write is allowed.
    * - `"planner-artifact"` — only planner artifact writes are permitted here.
+   * - `"implementation"` — only implementation writes are permitted here.
+   * - `"unknown"` — only unknown-intent writes are permitted here.
    *
    * This is how the planner-artifact runtime directory is protected from
    * implementation writes that might trample plan state.
+   *
+   * **Note**: `"system"` intent bypasses all intent restrictions and matches
+   * any root regardless of `allowIntent`.
    */
-  allowIntent?: "any" | "planner-artifact"
+  allowIntent?: "any" | "planner-artifact" | "implementation" | "unknown"
 }
 
 // ---------------------------------------------------------------------------
@@ -339,12 +344,6 @@ export const DEFAULT_BLOCKED_PATTERNS: BlockedPattern[] = [
   { pattern: "**/credentials*",     reason: "Credential files must not be modified by automation", severity: "error" },
   { pattern: "**/secrets/**",       reason: "Secrets directory must not be modified by automation", severity: "error" },
 
-  // --- User home dotfiles (protects against runaway writes) ---
-  { pattern: "~/.ssh/**",           reason: "SSH config must not be modified by automation", severity: "error" },
-  { pattern: "~/.aws/**",           reason: "AWS config must not be modified by automation", severity: "error" },
-  { pattern: "~/.config/**",        reason: "User config must not be modified by automation", severity: "warn" },
-  { pattern: "~/.pi/**",            reason: "Pi config must not be modified without explicit user intent", severity: "error" },
-
   // --- Build outputs (typically generated, not source) ---
   { pattern: "dist/**",             reason: "Build output is generated; modify source instead", severity: "warn" },
   { pattern: ".cache/**",           reason: "Cache directory should not be modified by automation", severity: "warn" },
@@ -438,8 +437,24 @@ export function realpathSafe(
       // /tmp/pi-zflow-<hash>/ for fallback, or active worktree roots).
       return real
     } catch {
-      // Path may not exist yet (e.g., about to create a file)
-      // Fall through — return the absolute unresolved path
+      // Path may not exist yet (e.g., about to create a file).
+      // Walk up the directory tree to find the first existing ancestor
+      // and resolve it through symlinks, then append remaining segments.
+      // This catches new files under symlinked directories that point
+      // outside allowed roots.
+      let parent = path.dirname(absPath)
+      while (parent !== absPath) {
+        try {
+          const realParent = fs.realpathSync(parent)
+          const relativeRemaining = path.relative(parent, absPath)
+          return path.resolve(realParent, relativeRemaining)
+        } catch {
+          const prev = parent
+          parent = path.dirname(parent)
+          if (parent === prev) break  // reached root without finding an ancestor
+        }
+      }
+      // No ancestor exists at all — fall through to unresolved path
     }
   }
 
@@ -451,31 +466,48 @@ export function realpathSafe(
 // ---------------------------------------------------------------------------
 
 /**
- * Check whether `resolvedPath` is within one of the configured allowed roots.
+ * Check whether `resolvedPath` is within one of the configured allowed roots,
+ * and optionally whether the write intent is permitted for that root.
  *
  * @param resolvedPath  An already-resolved absolute path.
  * @param allowedRoots  List of allowed roots from the policy.
  * @param projectRoot   Project root used to resolve relative allowed root paths.
- * @returns `true` if the path is within at least one allowed root.
+ * @param intent        The write intent (optional). When provided and a root
+ *                      specifies `allowIntent`, only matching intents match.
+ *                      `"system"` intent bypasses all intent restrictions.
+ * @returns `true` if the path is within at least one allowed root and the
+ *          intent is compatible (or no intent restriction applies).
  */
 export function isWithinAllowedRoots(
   resolvedPath: string,
   allowedRoots: AllowedRoot[],
   projectRoot: string,
+  intent?: WriteIntent,
 ): boolean {
   for (const root of allowedRoots) {
     const rootAbs = path.isAbsolute(root.path) ? root.path : path.resolve(projectRoot, root.path)
 
+    // Check path containment
+    let pathMatch: boolean
     if (root.glob) {
-      // Glob matching — basic support for ** and * at end of pattern.
-      // Use path-relative containment rather than raw startsWith so
-      // /tmp/root-other does not match /tmp/root.
       const pattern = rootAbs.endsWith("/**") ? rootAbs.slice(0, -3) : rootAbs
-      if (isSameOrWithin(resolvedPath, pattern)) return true
+      pathMatch = isSameOrWithin(resolvedPath, pattern)
     } else {
-      // Directory/file containment match.
-      if (isSameOrWithin(resolvedPath, rootAbs)) return true
+      pathMatch = isSameOrWithin(resolvedPath, rootAbs)
     }
+
+    if (!pathMatch) continue
+
+    // If the root specifies an intent restriction, check that the caller's
+    // intent is compatible.  "system" intent bypasses all restrictions;
+    // undefined/"any" matches everything.
+    if (root.allowIntent && root.allowIntent !== "any" && intent && intent !== "system") {
+      if (intent === root.allowIntent) return true
+      // Intent mismatch — keep checking other roots
+      continue
+    }
+
+    return true
   }
   return false
 }
@@ -528,13 +560,16 @@ export function matchesBlockedPatterns(
  *
  *  1. Resolve the real path (`realpathSafe`).
  *     - Rejects symlink escape and `..` traversal.
- *     - If the file doesn't exist yet, resolves the parent directory.
- *  2. Check the resolved path is within an allowed root.
+ *     - If the file doesn't exist yet, resolves ancestor directories
+ *       through symlinks so symlinked directories are caught even for
+ *       new files.
+ *  2. Check the resolved path is within an allowed root (respecting
+ *     intent restrictions on roots that specify `allowIntent`).
  *  3. Check the path doesn't match any blocked pattern.
- *  4. If the write intent is `"planner-artifact"`, verify the path is
- *     within an artifact directory.
- *  5. If the write intent is `"implementation"`, verify the path is NOT
- *     a planner artifact directory (prevents trampling plan state).
+ *  4. Secondary defense: if intent is `"planner-artifact"`, verify the
+ *     path is within a planner-artifact directory.
+ *  5. Secondary defense: if intent is `"implementation"`, verify the
+ *     path is NOT a planner-artifact directory.
  *
  * @param targetPath  The path the caller wants to write to.
  * @param context     Full runtime context (policy, project root, intent).
@@ -552,18 +587,28 @@ export function canWrite(
     // Path may not exist yet — try resolving the parent directory
     const parentResolved = realpathSafe(path.dirname(targetPath), projectRoot, policy.symlinkSafety)
     if (parentResolved === null) {
+      // Both the target and its parent failed — determine the specific reason.
+      // Check whether it was a traversal escape or a symlink resolution failure.
+      let reason: CanWriteResult["reason"] = "symlink-escape"
+      if (policy.symlinkSafety.preventTraversal && !path.isAbsolute(targetPath)) {
+        const absPath = path.resolve(projectRoot, targetPath)
+        const rel = path.relative(projectRoot, path.normalize(absPath))
+        if (rel.startsWith("..") || path.isAbsolute(rel)) {
+          reason = "traversal"
+        }
+      }
       return {
         allowed: false,
         message: `Path "${targetPath}" is outside the project root or escapes via symlink/traversal.`,
-        reason: resolved === null && parentResolved === null ? "symlink-escape" : "traversal",
+        reason,
       }
     }
   }
 
   const finalPath = resolved ?? realpathSafe(path.dirname(targetPath), projectRoot, policy.symlinkSafety)!
 
-  // --- Step 2: check allowed roots ---
-  if (!isWithinAllowedRoots(finalPath, policy.allowedRoots, projectRoot)) {
+  // --- Step 2: check allowed roots with intent awareness ---
+  if (!isWithinAllowedRoots(finalPath, policy.allowedRoots, projectRoot, intent)) {
     return {
       allowed: false,
       message: `Path "${targetPath}" is not within any configured allowed root.`,

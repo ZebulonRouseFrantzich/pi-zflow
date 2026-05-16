@@ -14,6 +14,9 @@
 
 import { execSync } from "node:child_process"
 
+import { getZflowRegistry } from "pi-zflow-core/registry"
+import { DISPATCH_SERVICE_CAPABILITY, type DispatchService } from "pi-zflow-core/dispatch-service"
+
 import {
   resolveDiffBaseline,
   type DiffBaselineInput,
@@ -45,7 +48,7 @@ import {
   type SynthesisResult,
 } from "./synthesizer.js"
 
-import { chunkDiff, type ChunkingOptions } from "./chunking.js"
+import { chunkDiff, mergeChunkFindings, type ChunkingOptions } from "./chunking.js"
 
 import type {
   ReviewerManifest,
@@ -63,6 +66,14 @@ export interface ReviewerOutput {
     title: string
     description: string
     evidence?: string
+    /** Optional PR/MR file path for external review findings. */
+    file?: string
+    /** Optional actual new-file line number. */
+    line?: number
+    /** Optional rendered line/range string. */
+    lines?: string
+    /** Optional diff-line coordinate used for chunk line-map translation. */
+    diffLine?: number
   }>
   rawOutput: string
 }
@@ -76,6 +87,148 @@ export type ReviewerRunner = (
   reviewerName: string,
   prompt: string,
 ) => Promise<ReviewerOutput>
+
+/**
+ * Parse a raw reviewer output string into a ReviewerOutput with findings.
+ *
+ * Tries JSON-parsing first for agents that emit structured output.
+ * Falls back to extracting markdown finding sections from freeform text.
+ */
+function parseReviewerOutput(rawOutput: string): ReviewerOutput {
+  if (!rawOutput || rawOutput.trim().length === 0) {
+    return { findings: [], rawOutput: rawOutput ?? "" }
+  }
+
+  // Try JSON first — look for a JSON block or parse the entire output
+  const trimmed = rawOutput.trim()
+  let jsonBlock = trimmed
+  const jsonMatch = trimmed.match(/```(?:json)?\s*\n([\s\S]*?)```/)
+  if (jsonMatch) {
+    jsonBlock = jsonMatch[1].trim()
+  }
+  try {
+    const parsed = JSON.parse(jsonBlock)
+    if (Array.isArray(parsed.findings)) {
+      return {
+        findings: parsed.findings.map((f: Record<string, unknown>) => ({
+          severity: (["critical", "major", "minor", "nit"] as const).includes(f.severity as string)
+            ? (f.severity as "critical" | "major" | "minor" | "nit")
+            : "minor",
+          title: String(f.title ?? "Untitled"),
+          description: String(f.description ?? f.evidence ?? ""),
+          evidence: f.evidence ? String(f.evidence) : undefined,
+          file: f.file ? String(f.file) : undefined,
+          line: typeof f.line === "number" ? f.line : undefined,
+        })),
+        rawOutput,
+      }
+    }
+  } catch {
+    // Not valid JSON — fall through to markdown extraction
+  }
+
+  // Fallback: extract markdown finding sections.
+  // Look for `## Finding:` or `### ` or `**Severity:**` patterns.
+  const findings: ReviewerOutput["findings"] = []
+  const findingBlocks = trimmed.split(/(?=^#{1,3}\s+(?:Finding|Review|Issue)\b)/m)
+  for (const block of findingBlocks) {
+    if (!block.trim()) continue
+    const severityMatch = block.match(/(?:Severity|sev)[:\s]+(\w+)/i)
+    let severity: "critical" | "major" | "minor" | "nit" = "minor"
+    if (severityMatch) {
+      const s = severityMatch[1].toLowerCase()
+      if (s === "critical" || s === "major" || s === "nit") {
+        severity = s
+      }
+    }
+    const titleMatch = block.match(/^#{1,3}\s+(?:Finding|Review|Issue)[:\s]+(.+)$/m)
+    const title = titleMatch ? titleMatch[1].trim() : (block.split("\n")[0] ?? "").replace(/^#+\s*/, "").trim()
+    if (!title) continue
+    const evidenceLines: string[] = []
+    let inEvidence = false
+    for (const line of block.split("\n")) {
+      if (/evidence|reason|why/i.test(line)) {
+        inEvidence = true
+        continue
+      }
+      if (inEvidence && (/^#{1,3}\s|^$/.test(line))) {
+        inEvidence = false
+        continue
+      }
+      if (inEvidence) evidenceLines.push(line.trim())
+    }
+    const evidence = evidenceLines.filter(Boolean).join(" ").slice(0, 500) || undefined
+    findings.push({ severity, title, description: evidence ?? title, evidence })
+  }
+
+  // Last resort: each non-empty line could be a finding if other extraction failed
+  if (findings.length === 0) {
+    const lines = trimmed.split("\n").filter(l => l.trim().length > 5).slice(0, 10)
+    for (const line of lines) {
+      findings.push({
+        severity: "minor",
+        title: line.trim().slice(0, 120),
+        description: line.trim().slice(0, 300),
+      })
+    }
+  }
+
+  return { findings, rawOutput }
+}
+
+/**
+ * Try to parse a structured synthesizer output from raw agent text.
+ *
+ * Expected JSON shape:
+ * ```json
+ * {
+ *   "severity": { "critical": 0, "major": 1, "minor": 0, "nit": 0 },
+ *   "recommendation": "CONDITIONAL-GO"
+ * }
+ * ```
+ *
+ * Looks for a JSON block first (```json ... ```), then tries full-text parse.
+ * Returns null when unparseable.
+ */
+function parseSynthesizerOutput(raw: string): {
+  severity: { critical: number; major: number; minor: number; nit: number }
+  recommendation: "GO" | "NO-GO" | "CONDITIONAL-GO"
+} | null {
+  if (!raw || raw.trim().length === 0) return null
+
+  const trimmed = raw.trim()
+  let jsonBlock = trimmed
+  const jsonMatch = trimmed.match(/```(?:json)?\s*\n([\s\S]*?)```/)
+  if (jsonMatch) {
+    jsonBlock = jsonMatch[1].trim()
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(jsonBlock)
+  } catch {
+    return null
+  }
+
+  if (!parsed || typeof parsed !== "object") return null
+  const obj = parsed as Record<string, unknown>
+  if (!obj.severity || typeof obj.severity !== "object") return null
+  if (typeof obj.recommendation !== "string") return null
+
+  const rec = obj.recommendation as string
+  if (rec !== "GO" && rec !== "NO-GO" && rec !== "CONDITIONAL-GO") return null
+
+  const sev = obj.severity as Record<string, unknown>
+  const critical = typeof sev.critical === "number" ? sev.critical : 0
+  const major = typeof sev.major === "number" ? sev.major : 0
+  const minor = typeof sev.minor === "number" ? sev.minor : 0
+  const nit = typeof sev.nit === "number" ? sev.nit : 0
+
+  return {
+    severity: { critical, major, minor, nit },
+    recommendation: rec as "GO" | "NO-GO" | "CONDITIONAL-GO",
+  }
+}
 
 // ── Interfaces ──────────────────────────────────────────────────
 
@@ -319,21 +472,96 @@ export async function runCodeReview(
       }
     }
   } else {
-    // No reviewer runner: record a diagnostic instead of silently succeeding
-    for (const name of reviewerNames) {
-      const prompt = await buildInternalReviewPrompt(name, internalCtx)
-      reviewerOutputs[name] = prompt
-      manifest = {
-        ...manifest,
-        reviewers: manifest.reviewers.map(r =>
-          r.name === name ? { ...r, status: "skipped" as const, detail: "no reviewer runner available" } : r,
-        ),
+    // Use the typed DispatchService from the capability registry.
+    const dispatchService = getZflowRegistry().optional<DispatchService>(DISPATCH_SERVICE_CAPABILITY)
+
+    if (dispatchService) {
+      const results = await Promise.allSettled(
+        reviewerNames.map(async (name) => {
+          const prompt = await buildInternalReviewPrompt(name, internalCtx)
+          let output: ReviewerOutput
+          let dispatchOk = true
+          let dispatchError: string | undefined
+          try {
+            const raw = await dispatchService.runAgent({
+              agent: name,
+              task: prompt,
+            })
+            if (raw.ok) {
+              output = parseReviewerOutput(raw.rawOutput)
+            } else {
+              dispatchOk = false
+              dispatchError = raw.error ?? "dispatch returned ok: false"
+              output = { findings: [], rawOutput: `dispatch error: ${dispatchError}` }
+            }
+          } catch (err) {
+            dispatchOk = false
+            dispatchError = err instanceof Error ? err.message : String(err)
+            output = { findings: [], rawOutput: `dispatch error: ${dispatchError}` }
+          }
+          return { name, prompt, output, ok: dispatchOk, error: dispatchError }
+        }),
+      )
+
+      for (const result of results) {
+        if (result.status === "fulfilled") {
+          const { name, output, ok, error } = result.value
+          if (!ok) {
+            reviewerOutputs[name] = output.rawOutput
+            manifest = {
+              ...manifest,
+              reviewers: manifest.reviewers.map(r =>
+                r.name === name ? { ...r, status: "failed" as const, detail: error ?? "dispatch failed" } : r,
+              ),
+            }
+            coverageNotes.push(`Reviewer "${name}" dispatch failed: ${error ?? "unknown error"}`)
+          } else {
+            reviewerOutputs[name] = output.rawOutput
+            manifest = {
+              ...manifest,
+              reviewers: manifest.reviewers.map(r =>
+                r.name === name ? { ...r, status: "executed" as const } : r,
+              ),
+            }
+            for (const f of output.findings) {
+              allFindings.push({
+                reviewerName: name,
+                finding: {
+                  severity: f.severity,
+                  title: f.title,
+                  reviewerSupport: [name],
+                  evidence: f.evidence || "See raw reviewer output.",
+                  whyItMatters: "Issue identified during code review.",
+                  recommendation: f.description,
+                  artifactPath: `runs/${manifest.runId}/review-artifacts/${name}.md`,
+                  runId: manifest.runId,
+                },
+              })
+            }
+            coverageNotes.push(`Reviewer "${name}" dispatched via "${dispatchService.name}"`)
+          }
+        } else {
+          coverageNotes.push(`Reviewer dispatch failed: ${result.reason}`)
+        }
       }
+    } else {
+      // No dispatch service found — mark all reviewers skipped
+      for (const name of reviewerNames) {
+        const prompt = await buildInternalReviewPrompt(name, internalCtx)
+        reviewerOutputs[name] = prompt
+        manifest = {
+          ...manifest,
+          reviewers: manifest.reviewers.map(r =>
+            r.name === name ? { ...r, status: "skipped" as const, detail: "no dispatch service available" } : r,
+          ),
+        }
+      }
+      coverageNotes.push(
+        "No reviewer runner or dispatch service available — review prompts were built but no " +
+        "reviewers were dispatched. All reviewers marked as skipped. " +
+        "Install and configure pi-subagents or provide a custom reviewerRunner.",
+      )
     }
-    coverageNotes.push(
-      "No reviewer runner provided — review prompts were built but no reviewers were dispatched. " +
-      "All reviewers marked as skipped. Install and configure pi-subagents or provide a custom reviewerRunner.",
-    )
   }
 
   // Step 5: Persist raw outputs
@@ -341,12 +569,64 @@ export async function runCodeReview(
     await persistReviewerRawOutput(manifest.runId, name, rawOutput, cwd)
   }
 
-  // Step 6: Synthesise (compute severity from collected findings)
-  const severity = { critical: 0, major: 0, minor: 0, nit: 0 }
-  for (const { finding } of allFindings) {
-    severity[finding.severity]++
+  // Step 6: Synthesise — prefer zflow.synthesizer agent via dispatch service
+  //
+  // Phase 9: Try to find a dispatch service to invoke the zflow.synthesizer
+  // agent for consolidation. If no dispatch service is available, fall back
+  // to local severity computation.
+  const hasDispatchService = getZflowRegistry().has(DISPATCH_SERVICE_CAPABILITY)
+  let synthesizerOutput: string | null = null
+  let synthesizerParsed: boolean = false
+
+  if (hasDispatchService && allFindings.length > 0 && reviewerNames.length > 0) {
+    try {
+      const dispatchService = getZflowRegistry().get<{ name: string; runAgent: Function }>(DISPATCH_SERVICE_CAPABILITY)
+      if (dispatchService && typeof dispatchService.runAgent === "function") {
+        // Build a synthesizer prompt from the reviewer outputs
+        const synthInput = allFindings.map(f =>
+          `Reviewer: ${f.reviewerName}\nSeverity: ${f.finding.severity}\nTitle: ${f.finding.title}\nEvidence: ${f.finding.evidence || f.finding.recommendation}`
+        ).join("\n---\n")
+
+        const synthResult = await dispatchService.runAgent({
+          agent: "zflow.synthesizer",
+          task: `Synthesize the following code review findings and produce consolidated results with support/dissent/coverage:\n\n${synthInput}`,
+        })
+
+        synthesizerOutput = synthResult.rawOutput
+        coverageNotes.push(`Synthesizer dispatched via "${dispatchService.name}" (zflow.synthesizer)`)
+      }
+    } catch (err) {
+      coverageNotes.push(`Synthesizer dispatch attempted but failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
   }
-  const recommendation = evaluateRecommendation(severity)
+
+  // Compute local severity from collected findings (used as fallback or reference)
+  const localSeverity = { critical: 0, major: 0, minor: 0, nit: 0 }
+  for (const { finding } of allFindings) {
+    localSeverity[finding.severity]++
+  }
+
+  // Try to parse synthesizer output as authoritative; fall back to local
+  let severity = localSeverity
+  let recommendation: "GO" | "NO-GO" | "CONDITIONAL-GO" = evaluateRecommendation(localSeverity)
+  if (synthesizerOutput) {
+    const parsed = parseSynthesizerOutput(synthesizerOutput)
+    if (parsed) {
+      severity = parsed.severity
+      recommendation = parsed.recommendation
+      synthesizerParsed = true
+      coverageNotes.push(
+        `Synthesizer: authoritative result used (severity overridden from synthesizer output)`,
+      )
+    } else {
+      coverageNotes.push(
+        `Synthesizer output could not be parsed as structured JSON — ` +
+        `falling back to local severity computation.`,
+      )
+    }
+  } else {
+    coverageNotes.push("Synthesizer: local severity computation (no zflow.synthesizer dispatch)")
+  }
 
   // Step 7: Persist findings
   const codeReviewFindings: CodeReviewFinding[] = allFindings.map(f => f.finding)
@@ -467,11 +747,40 @@ export async function runPrReview(
     for (const result of chunkResults) {
       if (result.status === "fulfilled") {
         const { chunkId, output } = result.value
-        for (const finding of output.findings) {
+        const chunk = chunkResult.chunks.find(c => c.chunkId === chunkId)
+        const lineMapByFile: Record<string, Record<number, number>> = {}
+        if (chunk) {
+          for (const file of chunk.files) {
+            lineMapByFile[file.path] = file.lineMap
+          }
+        }
+
+        const chunkFindings = output.findings.map((finding) => {
+          const file = finding.file ?? (chunk?.files.length === 1 ? chunk.files[0]!.path : "")
+          let diffLine = finding.diffLine
+          if (diffLine === undefined && finding.line !== undefined && file && lineMapByFile[file]) {
+            const reverse = Object.entries(lineMapByFile[file]).find(([, actual]) => actual === finding.line)
+            if (reverse) diffLine = Number(reverse[0])
+          }
+          return {
+            file,
+            diffLine: diffLine ?? 0,
+            severity: finding.severity,
+            message: finding.description,
+          }
+        })
+
+        const merged = mergeChunkFindings([{ chunkId, findings: chunkFindings, lineMapByFile }])
+
+        for (let i = 0; i < merged.length; i++) {
+          const finding = output.findings[i]!
+          const mergedFinding = merged[i]!
+          const actualLine = finding.line ?? mergedFinding.actualLine
           allFindings.push({
             severity: finding.severity,
             title: finding.title,
-            file: "",
+            file: finding.file ?? mergedFinding.file ?? "",
+            lines: finding.lines ?? (actualLine !== undefined ? String(actualLine) : undefined),
             evidence: finding.evidence || finding.description,
             recommendation: finding.description,
             submit: finding.severity === "critical" || finding.severity === "major",

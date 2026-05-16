@@ -293,7 +293,7 @@ export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
   registry.provide("review", reviewService)
 
   pi.registerCommand("zflow-review-code", {
-    description: "Review local changes against planning documents",
+    description: "Review local changes against planning documents. Usage: /zflow-review-code [change-id] or /zflow-review-code [status]",
     handler: async (args: string, ctx: {
       ui: { notify: (message: string, type?: "info" | "warning" | "error") => void }
     }): Promise<void> => {
@@ -313,27 +313,109 @@ export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
         return
       }
 
-      // Determine verification status from args or default to unknown
-      // Accepted values: "passed", "failed", "skipped", "advisory", "unknown"
-      // - "passed": verification completed successfully
-      // - "failed": verification found issues
-      // - "skipped" or "advisory": final verification was explicitly skipped
-      // - "unknown" (default): verification status not yet determined
-      const statusArg = args.trim().toLowerCase()
+      // Parse args: known status word or changeId
+      const arg = args.trim().toLowerCase()
       const knownStatuses = ["passed", "failed", "skipped", "advisory", "unknown"] as const
-      const verificationStatus = knownStatuses.includes(statusArg as typeof knownStatuses[number])
-        ? (statusArg === "advisory" ? "skipped" : (statusArg as "passed" | "failed" | "skipped" | "unknown"))
-        : "unknown"
+      let verificationStatus: "passed" | "failed" | "skipped" | "unknown"
+      let changeId: string
+
+      // Import node:path before deriving changeId from directory name
+      const { default: path } = await import("node:path")
+
+      if (knownStatuses.includes(arg as typeof knownStatuses[number])) {
+        verificationStatus = arg === "advisory" ? "skipped" : (arg as "passed" | "failed" | "skipped" | "unknown")
+        // No explicit changeId — derive from current directory name
+        changeId = path.basename(cwd)
+      } else if (arg && arg.length > 0) {
+        // Arg is neither empty nor a known status — treat as changeId
+        changeId = arg
+        verificationStatus = "unknown"
+      } else {
+        // No args at all
+        changeId = path.basename(cwd)
+        verificationStatus = "unknown"
+      }
+
+      // Resolve planning artifact paths
+      const { resolvePlanArtifactPath } = await import("pi-zflow-artifacts/artifact-paths")
+      const { existsSync } = await import("node:fs")
+
+      const planVersion = "v1"
+      const artifactKeys = ["design", "executionGroups", "standards", "verification"] as const
+      const planArtifactPaths: Record<string, string> = {
+        design: "",
+        executionGroups: "",
+        standards: "",
+        verification: "",
+      }
+
+      let hasAnyPlanArtifact = false
+      const missing: string[] = []
+
+      for (const key of artifactKeys) {
+        const resolvedPath = resolvePlanArtifactPath(changeId, planVersion, key, cwd)
+        planArtifactPaths[key] = resolvedPath
+        if (existsSync(resolvedPath)) {
+          hasAnyPlanArtifact = true
+        } else {
+          missing.push(key)
+        }
+      }
+
+      if (!hasAnyPlanArtifact) {
+        // Fallback: try without version (flat plan dir)
+        const flatKeys: Record<string, string> = {
+          design: "design.md",
+          executionGroups: "execution-groups.md",
+          standards: "standards.md",
+          verification: "verification.md",
+        }
+        const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+        const runtimeStateDir = resolveRuntimeStateDir(cwd)
+        let foundFlat = false
+        for (const [key, fileName] of Object.entries(flatKeys)) {
+          const flatPath = path.join(runtimeStateDir, "plans", changeId, fileName)
+          if (existsSync(flatPath)) {
+            planArtifactPaths[key] = flatPath
+            foundFlat = true
+          }
+        }
+        if (foundFlat) {
+          ctx.ui.notify(
+            `ℹ️ Found plan artifacts in flat layout for change "${changeId}".`,
+            "info",
+          )
+        } else {
+          ctx.ui.notify(
+            `ℹ️ No plan artifacts found for change "${changeId}". ` +
+            "Code review will run with limited planning context (diff-only). " +
+            "Pass a change-id argument to /zflow-review-code <change-id> to include planning docs.",
+            "info",
+          )
+        }
+      }
+
+      // Resolve current branch name
+      let branch = "(unknown)"
+      try {
+        const { execSync } = await import("node:child_process")
+        branch = execSync("git rev-parse --abbrev-ref HEAD", {
+          cwd,
+          encoding: "utf-8",
+          timeout: 5_000,
+        }).trim()
+      } catch { /* non-fatal */ }
 
       try {
         const input: CodeReviewInput = {
-          source: "Manual code review via /zflow-review-code",
+          source: `Manual code review via /zflow-review-code (change: ${changeId})`,
           repoPath: repoRoot,
+          branch,
           planningArtifacts: {
-            design: "",
-            executionGroups: "",
-            standards: "",
-            verification: "",
+            design: planArtifactPaths.design,
+            executionGroups: planArtifactPaths.executionGroups,
+            standards: planArtifactPaths.standards,
+            verification: planArtifactPaths.verification,
           },
           verificationStatus,
           cwd,

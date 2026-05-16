@@ -301,7 +301,7 @@ export default function activateZflowCompactionExtension(pi: ExtensionAPI): void
 
   // ── session_compact hook ────────────────────────────────────────
 
-  pi.on("session_compact", () => {
+  pi.on("session_compact", (_event, ctx) => {
     // After successful compaction, flag that the next agent start should
     // receive the compaction-handoff reminder so it rereads canonical artifacts.
     pendingCompactionHandoff = true
@@ -309,11 +309,32 @@ export default function activateZflowCompactionExtension(pi: ExtensionAPI): void
     // Reset the proactive-trigger guard so a new compaction can be
     // triggered once usage climbs back above threshold.
     compactionInProgress = false
+
+    // Persist a lightweight marker entry so the compaction fact and
+    // canonical artifact paths survive session resume/reload.
+    // On resume, before_agent_start can discover this entry via
+    // ctx.sessionManager.getEntries() and re-inject the handoff.
+    try {
+      const now = new Date().toISOString()
+      const paths = getDefaultArtifactPaths()
+      // Workflow mode is not tracked by this module directly; it is
+      // managed by pi-zflow-change-workflows.  The modes field is
+      // a placeholder for discovery by sibling extensions.
+      pi.appendEntry("zflow-compaction", {
+        compactedAt: now,
+        artifactPaths: paths,
+        modes: [] as string[],
+      })
+    } catch {
+      // Non-critical: marker entry is a best-effort persistence
+      // enhancement.  Failure does not break compaction handoff
+      // within the same session (pendingCompactionHandoff still works).
+    }
   })
 
   // ── before_agent_start hook ─────────────────────────────────────
 
-  pi.on("before_agent_start", async (event) => {
+  pi.on("before_agent_start", async (event, ctx) => {
     if (!pendingCompactionHandoff) {
       return {}
     }
@@ -325,8 +346,36 @@ export default function activateZflowCompactionExtension(pi: ExtensionAPI): void
     // role-specific artifact reread reminders.
     const handoffSection = await buildCompactionHandoffSection()
 
+    // Also check for persisted compaction entries from pi.appendEntry()
+    // that were written during previous session compact cycles.  This
+    // allows the handoff reminder to survive session resume/reload.
+    let persistedPathsSection = ""
+    try {
+      if (ctx && typeof ctx.sessionManager?.getEntries === "function") {
+        const entries = ctx.sessionManager.getEntries()
+          .filter((e: { customType?: string }) => e.customType === "zflow-compaction")
+        if (entries.length > 0) {
+          // Use the most recent entry's artifact paths
+          const last = entries[entries.length - 1] as unknown as {
+            compactedAt?: string
+            artifactPaths?: string[]
+          }
+          const paths = last.artifactPaths
+          if (paths && paths.length > 0) {
+            persistedPathsSection =
+              "\n\n### Persisted compact marker\n" +
+              "A previous compaction marker was found in session entries:\n" +
+              paths.map((p: string) => `- \`<runtime-state-dir>/${p}\``).join("\n") +
+              (last.compactedAt ? `\n\n_Compacted at: ${last.compactedAt}_` : "")
+          }
+        }
+      }
+    } catch {
+      // Non-critical: persisted entry discovery is best-effort
+    }
+
     return {
-      systemPrompt: event.systemPrompt + `\n\n${handoffSection}`,
+      systemPrompt: event.systemPrompt + `\n\n${handoffSection}${persistedPathsSection}`,
     }
   })
 }

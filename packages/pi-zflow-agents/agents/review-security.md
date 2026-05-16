@@ -1,15 +1,12 @@
 ---
 name: review-security
 package: zflow
-description: |
-  Review code changes for security concerns: injection vectors,
-  authentication/authorisation gaps, secrets exposure, input
-  validation failures, and privilege escalation paths.
+description: Review code changes for security concerns: injection vectors, authentication/authorisation gaps, secrets exposure, input validation failures, and privilege escalation paths.
 tools: read, grep, find, ls
 thinking: high
+# model is resolved via the profile system at launch time; placeholder means "must be overridden by profile"
 model: placeholder
-fallbackModels:
-  - placeholder
+fallbackModels: placeholder
 systemPromptMode: replace
 inheritProjectContext: false
 inheritSkills: false

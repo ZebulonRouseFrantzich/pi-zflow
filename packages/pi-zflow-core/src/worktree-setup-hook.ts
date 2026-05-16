@@ -171,6 +171,25 @@ export async function runWorktreeSetupHook(
   const scriptPath = path.resolve(context.repoRoot, config.script)
   const timeout = config.timeoutMs ?? DEFAULT_HOOK_TIMEOUT_MS
 
+  // --- Validate script is within repo root ---
+  const normalizedRepoRoot = path.resolve(context.repoRoot)
+  const normalizedScript = path.resolve(scriptPath)
+  const relative = path.relative(normalizedRepoRoot, normalizedScript)
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    return {
+      success: false,
+      message:
+        `worktreeSetupHook script path escapes the repository root. ` +
+        `Script "${config.script}" resolves to "${scriptPath}" ` +
+        `which is outside "${context.repoRoot}". Scripts must use repo-relative paths.`,
+      error: {
+        hint:
+          `Use a repo-relative path, e.g. ".pi/zflow/worktree-setup-hook.sh". ` +
+          `Absolute paths and ".." traversal are not permitted.`,
+      },
+    }
+  }
+
   // --- Validate script exists ---
   try {
     await fs.access(scriptPath, fs.constants.X_OK | fs.constants.R_OK)
@@ -184,19 +203,57 @@ export async function runWorktreeSetupHook(
     }
   }
 
+  // --- Resolve symlinks and re-check containment ---
+  // A repo-relative script path that is a symlink can point outside the repo
+  // even though the pre-symlink path resolved inside.  We must use realpath
+  // on both sides and verify containment again.
+  let realScriptPath: string
+  let realRepoRoot: string
+  try {
+    realScriptPath = await fs.realpath(scriptPath)
+    realRepoRoot = await fs.realpath(context.repoRoot)
+  } catch {
+    return {
+      success: false,
+      message:
+        `worktreeSetupHook script cannot be resolved: "${config.script}" ` +
+        `resolves to "${scriptPath}" but realpath resolution failed.`,
+      error: {
+        hint: "Ensure the script file has not been deleted between access check and execution.",
+      },
+    }
+  }
+
+  const realRelative = path.relative(realRepoRoot, realScriptPath)
+  if (realRelative.startsWith("..") || path.isAbsolute(realRelative)) {
+    return {
+      success: false,
+      message:
+        `worktreeSetupHook script's real path escapes the repository root. ` +
+        `Script "${config.script}" resolves to "${scriptPath}" ` +
+        `which after realpath becomes "${realScriptPath}" ` +
+        `outside "${realRepoRoot}". Symlinks to locations outside the repo are not permitted.`,
+      error: {
+        hint:
+          `Ensure the script path does not traverse outside the repo via symlinks. ` +
+          `Use a repo-relative path pointing to a real file inside the repo.`,
+      },
+    }
+  }
+
   const runtime = config.runtime ?? "shell"
 
   switch (runtime) {
     case "module": {
-      return runModuleHook(scriptPath, context, config.description)
+      return runModuleHook(realScriptPath, context, config.description)
     }
 
     case "node": {
-      return runChildProcess("node", [scriptPath, context.worktreeRoot], timeout, config.description)
+      return runChildProcess("node", [realScriptPath, context.worktreeRoot], timeout, config.description)
     }
 
     case "shell": {
-      return runChildProcess("bash", [scriptPath, context.worktreeRoot], timeout, config.description)
+      return runChildProcess("bash", [realScriptPath, context.worktreeRoot], timeout, config.description)
     }
 
     default: {

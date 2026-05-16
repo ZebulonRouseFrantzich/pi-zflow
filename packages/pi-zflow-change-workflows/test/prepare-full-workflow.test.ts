@@ -399,10 +399,20 @@ describe("runChangeImplementWorkflow", () => {
       // Create uncommitted change
       await fs.writeFile(path.join(repoRoot, "untracked.txt"), "dirty", "utf-8")
 
-      // Should not throw — dirty worktree is a warning, not an error
+      // Without --force, dirty tree must throw
+      await assert.rejects(
+        () => runChangeImplementWorkflow({
+          cwd: repoRoot,
+          changeId: "test-dirty",
+        }),
+        { message: /Primary worktree must be clean/ },
+      )
+
+      // With --force, dirty tree is allowed
       const result = await runChangeImplementWorkflow({
         cwd: repoRoot,
         changeId: "test-dirty",
+        force: true,
       })
       assert.strictEqual(result.status, "executing")
     } finally {

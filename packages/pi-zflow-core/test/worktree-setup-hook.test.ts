@@ -103,4 +103,72 @@ describe("runWorktreeSetupHook", () => {
       assert.equal(result.message, "module ready feature/test")
     })
   })
+
+  test("rejects absolute script path outside repo root", async () => {
+    await withTempDir(async (repoRoot) => {
+      const result = await runWorktreeSetupHook(
+        { script: "/tmp/outside.sh", runtime: "shell" },
+        { repoRoot, worktreeRoot: path.join(repoRoot, "wt"), ref: "HEAD" },
+      )
+
+      assert.equal(result.success, false)
+      assert.match(result.message, /escapes/i)
+      assert.match(result.message, /outside/i)
+    })
+  })
+
+  test("rejects relative script path escaping repo root with ..", async () => {
+    await withTempDir(async (repoRoot) => {
+      const result = await runWorktreeSetupHook(
+        { script: "../escaped.sh", runtime: "shell" },
+        { repoRoot, worktreeRoot: path.join(repoRoot, "wt"), ref: "HEAD" },
+      )
+
+      assert.equal(result.success, false)
+      assert.match(result.message, /escapes/i)
+    })
+  })
+
+  test("rejects script symlinked outside repo root", async () => {
+    // Create an "outside" directory with a valid hook script
+    const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-hook-outside-"))
+    try {
+      const outsideScript = path.join(outsideDir, "hook.sh")
+      await fs.writeFile(outsideScript, "#!/usr/bin/env bash\necho outside\n")
+      await fs.chmod(outsideScript, 0o755)
+
+      // Create a repo root and a symlink inside it pointing to the outside script
+      await withTempDir(async (repoRoot) => {
+        const symlinkPath = path.join(repoRoot, "hook.sh")
+        await fs.symlink(outsideScript, symlinkPath)
+
+        const result = await runWorktreeSetupHook(
+          { script: "hook.sh", runtime: "shell" },
+          { repoRoot, worktreeRoot: path.join(repoRoot, "wt"), ref: "HEAD" },
+        )
+
+        assert.equal(result.success, false)
+        assert.match(result.message, /symlink/i)
+        assert.match(result.message, /outside/i)
+        assert.match(result.message, /realpath/i)
+      })
+    } finally {
+      await fs.rm(outsideDir, { recursive: true, force: true })
+    }
+  })
+
+  test("still accepts normal relative script path", async () => {
+    await withTempDir(async (repoRoot) => {
+      const script = path.join(repoRoot, "hook.sh")
+      await fs.writeFile(script, "#!/usr/bin/env bash\necho ok\n")
+      await fs.chmod(script, 0o755)
+
+      const result = await runWorktreeSetupHook(
+        { script: "hook.sh", runtime: "shell" },
+        { repoRoot, worktreeRoot: path.join(repoRoot, "wt"), ref: "HEAD" },
+      )
+
+      assert.equal(result.success, true)
+    })
+  })
 })

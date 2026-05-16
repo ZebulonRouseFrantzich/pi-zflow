@@ -16,38 +16,39 @@ The pi-zflow foundation is built on a strict single-owner model:
 
 ## Ownership map
 
-| Concern | Owner package(s) | Details | Prohibited competitors |
-|---|---|---|---|
-| **Orchestration** (subagent delegation, worktrees, background runs) | `pi-subagents` | The only subagent runner allowed in the foundation. Worktree isolation uses `pi-subagents` native `worktree: true` support. | `pi-fork`, `pi-minimal-subagent`, `PiSwarm`, any other subagent runner |
-| **Compaction / output optimization** | `pi-rtk-optimizer` + `pi-zflow-compaction` | `pi-rtk-optimizer` owns first-pass command rewriting and output compaction. `pi-zflow-compaction` owns `session_before_compact` hooks and compaction handoff reminders. | No other package may register overlapping compaction hooks or compete with `session_before_compact` |
-| **External research / web access** | `pi-web-access` | First-pass research owner for web searches, URL fetching, GitHub content, YouTube transcripts, and code search. | None in the first-pass foundation |
-| **Human-in-the-loop** | `pi-interview` | First-pass HITL owner for interactive user prompts and decision capture. | `pi-mono-ask-user-question` (excluded) |
-| **Profile / lane / model routing** | `pi-zflow-profiles` | Profile loading, lane resolution, active-profile cache, profile health checks. Commands: `/zflow-profile`, `/zflow-profile list`, `/zflow-profile switch`, `/zflow-profile validate` | No other package may own profile/lane state or activation cache |
-| **Planning safety / read-only mode** | `pi-zflow-plan-mode` | Ad-hoc read-only planning mode, active-tool restriction, restricted bash policy, mode status. Commands: `/zflow-plan`, `/zflow-plan status`, `/zflow-plan exit` | No other package may independently toggle or own the planning safety mode |
-| **Runtime artifacts / state paths** | `pi-zflow-artifacts` | `<runtime-state-dir>` resolution, `<user-state-dir>` helpers, plan/run/review path builders, atomic artifact writes, cleanup metadata. Tool: `zflow_write_plan_artifact` | None |
-| **Review flows** | `pi-zflow-review` | Plan-review swarm invocation, internal code-review orchestration, external PR/MR diff review, findings schema/normalization. Commands: `/zflow-review-code`, `/zflow-review-pr <url>` | `pi-mono-review` (excluded from v1 foundation) |
-| **Recovery / checkpoint** | runtime artifacts; optionally `pi-rewind-hook` | If `pi-rewind-hook` is enabled, no other rewind/checkpoint package may be active by default. Recovery always uses `runtime-state-dir` files first. | No other checkpoint package when `pi-rewind-hook` is enabled |
-| **Shared library / registry** | `pi-zflow-core` | Shared TypeScript types, config schemas, registry, service interfaces, package/version helpers. No Pi extensions, commands, tools, or UI. | None (library-only package) |
-| **Agent/chain assets** | `pi-zflow-agents` | Custom agent markdown, chains, skills, prompt templates, prompt fragments, install manifest. Commands: `/zflow-setup-agents`, `/zflow-update-agents` | None |
-| **Formal change orchestration** | `pi-zflow-change-workflows` | Plan lifecycle, implementation workflow, verification/fix loops, apply-back, cleanup. Commands: `/zflow-change-prepare <change-path>`, `/zflow-change-implement <change-path>`, `/zflow-clean` | None |
-| **RuneContext integration** | `pi-zflow-runecontext` | RuneContext detection, change-doc flavor parsing, canonical doc resolution, prompt-with-preview write-back support | None |
-| **Umbrella bundling** | `pi-zflow` | Bundles all child packages, exposes their Pi resources via `bundledDependencies` and umbrella `pi` manifest | None (consumes child packages) |
+| Concern                                                             | Owner package(s)                               | Details                                                                                                                                                                                                                                                   | Prohibited competitors                                                                              |
+| ------------------------------------------------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| **Orchestration** (subagent delegation, worktrees, background runs) | `pi-subagents`                                 | The only subagent runner allowed in the foundation. Worktree isolation uses `pi-subagents` native `worktree: true` support.                                                                                                                               | `pi-fork`, `pi-minimal-subagent`, `PiSwarm`, any other subagent runner                              |
+| **Compaction / output optimization**                                | `pi-rtk-optimizer` + `pi-zflow-compaction`     | `pi-rtk-optimizer` owns first-pass command rewriting and output compaction. `pi-zflow-compaction` owns `session_before_compact` hooks and compaction handoff reminders.                                                                                   | No other package may register overlapping compaction hooks or compete with `session_before_compact` |
+| **External research / web access**                                  | `pi-web-access`                                | First-pass research owner for web searches, URL fetching, GitHub content, YouTube transcripts, and code search.                                                                                                                                           | None in the first-pass foundation                                                                   |
+| **Human-in-the-loop**                                               | `pi-interview`                                 | First-pass HITL owner for interactive user prompts and decision capture.                                                                                                                                                                                  | `pi-mono-ask-user-question` (excluded)                                                              |
+| **Profile / lane / model routing**                                  | `pi-zflow-profiles`                            | Profile loading, lane resolution, active-profile cache, profile health checks. Commands: `/zflow-profile`, `/zflow-profile list`, `/zflow-profile switch`, `/zflow-profile validate`                                                                      | No other package may own profile/lane state or activation cache                                     |
+| **Planning safety / read-only mode**                                | `pi-zflow-plan-mode`                           | Ad-hoc read-only planning mode, active-tool restriction, restricted bash policy, mode status. Commands: `/zflow-plan`, `/zflow-plan status`, `/zflow-plan exit`                                                                                           | No other package may independently toggle or own the planning safety mode                           |
+| **Runtime artifacts / state paths**                                 | `pi-zflow-artifacts`                           | `<runtime-state-dir>` resolution, `<user-state-dir>` helpers, plan/run/review path builders, atomic artifact writes, cleanup metadata. Tool: `zflow_write_plan_artifact`                                                                                  | None                                                                                                |
+| **Review flows**                                                    | `pi-zflow-review`                              | Plan-review swarm invocation, internal code-review orchestration, external PR/MR diff review, findings schema/normalization. Commands: `/zflow-review-code`, `/zflow-review-pr <url>`                                                                     | `pi-mono-review` (excluded from v1 foundation)                                                      |
+| **Recovery / checkpoint**                                           | runtime artifacts; optionally `pi-rewind-hook` | If `pi-rewind-hook` is enabled, no other rewind/checkpoint package may be active by default. Recovery always uses `runtime-state-dir` files first.                                                                                                        | No other checkpoint package when `pi-rewind-hook` is enabled                                        |
+| **Shared library / registry**                                       | `pi-zflow-core`                                | Shared TypeScript types, config schemas, registry, service interfaces, package/version helpers. No Pi extensions, commands, tools, or UI.                                                                                                                 | None (library-only package)                                                                         |
+| **Agent/chain assets**                                              | `pi-zflow-agents`                              | Custom agent markdown, chains, skills, prompt templates, prompt fragments, install manifest. Commands: `/zflow-setup-agents`, `/zflow-update-agents`                                                                                                      | None                                                                                                |
+| **Formal change orchestration**                                     | `pi-zflow-change-workflows`                    | Plan lifecycle, implementation workflow, verification/fix loops, apply-back, cleanup. Commands: `/zflow-change-prepare <change-path>`, `/zflow-change-implement <change-path>`, `/zflow-clean`                                                            | None                                                                                                |
+| **Dispatch adaptation**                                             | `pi-zflow-subagents-bridge`                    | Adapter that registers the `zflow-dispatch` capability. Owns only the bridge between zflow's typed dispatch interface and whatever runtime dispatch backend is available. Does NOT orchestrate, register commands/tools, or override built-in `subagent`. | No other package may register `zflow-dispatch`                                                      |
+| **RuneContext integration**                                         | `pi-zflow-runecontext`                         | RuneContext detection, change-doc flavor parsing, canonical doc resolution, prompt-with-preview write-back support                                                                                                                                        | None                                                                                                |
+| **Umbrella bundling**                                               | `pi-zflow`                                     | Bundles all child packages, exposes their Pi resources via `bundledDependencies` and umbrella `pi` manifest                                                                                                                                               | None (consumes child packages)                                                                      |
 
 ## Explicit exclusions from first-pass foundation
 
 The following packages and capabilities are **intentionally excluded** from the v1 foundation.
 They must not be added during Phase 0 or Phase 1 without explicit re-evaluation and approval.
 
-| Excluded entity | Reason | Alternative |
-|---|---|---|
-| `pi-mono-review` | `pi-zflow-review` owns all review flows in v1 | Use `pi-zflow-review` |
-| `pi-mono-ask-user-question` | `pi-interview` owns all HITL interactions in v1 | Use `pi-interview` |
-| `pi-fork` | Competing orchestration owner — `pi-subagents` is the only runner | Use `pi-subagents` |
-| `pi-minimal-subagent` | Competing orchestration owner — `pi-subagents` is the only runner | Use `pi-subagents` |
-| `PiSwarm` | Competing orchestration owner — `pi-subagents` is the only runner | Use `pi-subagents` |
-| `codemapper` stack | Not part of the indexed-navigation foundation; re-evaluate if needed later | None in v1 |
-| Built-in Pi tool overrides | No `pi-zflow` child package may override `read`, `bash`, `edit`, `write`, etc. by default | Use event interception or narrow custom tools |
-| Generic command aliases | `/plan`, `/profile`, `/review-pr`, `/change-prepare` are opt-in only | Use canonical `/zflow-*` commands by default |
+| Excluded entity             | Reason                                                                                    | Alternative                                   |
+| --------------------------- | ----------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `pi-mono-review`            | `pi-zflow-review` owns all review flows in v1                                             | Use `pi-zflow-review`                         |
+| `pi-mono-ask-user-question` | `pi-interview` owns all HITL interactions in v1                                           | Use `pi-interview`                            |
+| `pi-fork`                   | Competing orchestration owner — `pi-subagents` is the only runner                         | Use `pi-subagents`                            |
+| `pi-minimal-subagent`       | Competing orchestration owner — `pi-subagents` is the only runner                         | Use `pi-subagents`                            |
+| `PiSwarm`                   | Competing orchestration owner — `pi-subagents` is the only runner                         | Use `pi-subagents`                            |
+| `codemapper` stack          | Not part of the indexed-navigation foundation; re-evaluate if needed later                | None in v1                                    |
+| Built-in Pi tool overrides  | No `pi-zflow` child package may override `read`, `bash`, `edit`, `write`, etc. by default | Use event interception or narrow custom tools |
+| Generic command aliases     | `/plan`, `/profile`, `/review-pr`, `/change-prepare` are opt-in only                      | Use canonical `/zflow-*` commands by default  |
 
 ## Command and tool naming rules
 
@@ -86,6 +87,7 @@ zflow_write_plan_artifact         (custom tool, not slash-command)
 ```
 
 Rules for alias registration:
+
 1. Aliases must be disabled by default. Enable only through explicit user opt-in (config, flag, or install option).
 2. Before registering an alias, check that no other package has already claimed it.
 3. If an alias would shadow an existing command, fail with an actionable message naming the conflicting package.
@@ -121,10 +123,12 @@ lanes for `openai-codex` providers. If found, emit a recommendation advisory.
 // Pseudocode for implementation
 function maybeRecommendOpenaiVerbosity(profile: ResolvedProfile): void {
   const usesCodex = Object.values(profile.lanes).some(
-    lane => lane.provider === "openai-codex"
-  )
+    (lane) => lane.provider === "openai-codex",
+  );
   if (usesCodex) {
-    logger.info("Recommend installing @benvargas/pi-openai-verbosity for reduced verbosity")
+    logger.info(
+      "Recommend installing @benvargas/pi-openai-verbosity for reduced verbosity",
+    );
   }
 }
 ```
@@ -160,17 +164,17 @@ in the same Pi configuration. This prohibition covers:
 ```ts
 // Pseudocode for enforcement
 function installRewindHook(config: Config): void {
-  if (!config.enableRewindHook) return
+  if (!config.enableRewindHook) return;
 
-  const conflict = detectActiveCheckpointPackages()
+  const conflict = detectActiveCheckpointPackages();
   if (conflict) {
     throw new Error(
       `Cannot enable pi-rewind-hook: ${conflict.name} is already active. ` +
-      `Remove or disable ${conflict.name} before enabling rewind/checkpoint support.`
-    )
+        `Remove or disable ${conflict.name} before enabling rewind/checkpoint support.`,
+    );
   }
 
-  install("pi-rewind-hook")
+  install("pi-rewind-hook");
 }
 ```
 
@@ -188,10 +192,15 @@ suggesting package filtering or removal.
 All capability ownership and discovery flows through the shared registry provided by `pi-zflow-core`:
 
 ```ts
-registry.claim({ capability: "profiles", version: "1.0.0", provider: "pi-zflow-profiles", sourcePath: import.meta.url })
-registry.provide("profiles", profileService)
-registry.get("profiles")
-registry.optional("review")
+registry.claim({
+  capability: "profiles",
+  version: "1.0.0",
+  provider: "pi-zflow-profiles",
+  sourcePath: import.meta.url,
+});
+registry.provide("profiles", profileService);
+registry.get("profiles");
+registry.optional("review");
 ```
 
 - Same capability/version loaded twice → no-op.

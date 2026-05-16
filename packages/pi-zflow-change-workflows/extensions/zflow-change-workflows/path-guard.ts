@@ -288,9 +288,19 @@ export function guardWrite(
  * Check whether a bash command includes destructive operations that
  * should be blocked by the path guard.
  *
- * This is a best-effort heuristic check that catches common destructive
- * patterns. It is intended to supplement, not replace, the path-based
- * `guardWrite` checks.
+ * Uses a deny-by-default blocklist for obvious destructive/mutating
+ * commands (rm, git rm, sed -i, etc.) and chained/subshell shell syntax
+ * that could hide destructive operations.
+ *
+ * All multi-command shell syntax is blocked: `;`, `|`, `&&`, `||`,
+ * backticks, `$()`, and process substitution.  Simple redirection (`>`)
+ * is allowed but checked against the path guard.
+ *
+ * Known read-only commands (ls, git status/diff/log, cat, grep,
+ * head, tail, wc, etc.) pass through to the existing path-based checks.
+ *
+ * All other commands that are not read-only and have no path-checked write
+ * operation are blocked by default ("deny-by-default").
  *
  * @param command - The full bash command string.
  * @param options - Guard options.
@@ -302,12 +312,126 @@ export function guardBashCommand(
 ): GuardResult {
   const intent = options.intent ?? "bash-mutation"
   const projectRoot = options.projectRoot
+  const trimmed = command.trim()
 
-  // Extract file write targets from redirections
+  // Normalise: collapse repeated spaces and strip leading "sudo " for pattern matching
+  const normalised = trimmed.replace(/\s+/g, " ").replace(/^sudo\s+/i, "")
+
+  // ── 1. Detect shell chaining / subshell syntax ────────────────
+  // Block all top-level multi-command syntax: `;`, `|`, `&&`, `||`,
+  // backticks, `$(...)` command substitution, and `<(...)`/`>(...)`
+  // process substitution.  This is deny-by-default: no form of chaining
+  // or piping is allowed inside a single guardBashCommand call, even if
+  // every individual command looks read-only, because later segments
+  // could contain destructive operations.
+  //
+  // The only exception is redirection (`>` / `>>`) which is allowed but
+  // separately checked against path guard.
+  const hasTopLevelChaining = ((): boolean => {
+    let inSingle = false
+    let inDouble = false
+    for (let i = 0; i < trimmed.length; i++) {
+      const c = trimmed[i]
+      if (c === "'" && !inDouble) inSingle = !inSingle
+      else if (c === '"' && !inSingle) inDouble = !inDouble
+      else if (!inSingle && !inDouble) {
+        // Semicolon chaining
+        if (c === ";") return true
+        // Pipe chaining
+        if (c === "|") return true
+        // Backtick command substitution
+        if (c === "`") return true
+        // $(...) command substitution
+        if (c === "$" && trimmed[i + 1] === "(") return true
+        // Process substitution <(...) or >(...)
+        if ((c === "<" || c === ">") && trimmed[i + 1] === "(") return true
+      }
+    }
+    // Check for && and || outside quotes (character-pair scan above
+    // can't easily express two-char operators, so use a simple
+    // regex on the unquoted portions).
+    const stripped = trimmed.replace(/['"][^'"]*['"]/g, "")
+    if (/&&|\|\|/.test(stripped)) return true
+    return false
+  })()
+
+  if (hasTopLevelChaining) {
+    return {
+      allowed: false,
+      message:
+        "Bash command blocked: shell chaining or piping detected (`;`, `|`, `&&`, `||`, " +
+        "backticks, `$()`, or process substitution). " +
+        "This guard does not allow chained or multi-command shell forms. " +
+        "Run each command separately or use the edit/write tools for file changes.",
+      resolvedPath: projectRoot,
+    }
+  }
+
+  // ── 2. Block obvious destructive/mutating commands ────────────
+  const destructivePatterns: RegExp[] = [
+    // File removal
+    /\brm\s+(?:-[rfv]*\s+)?/,
+    /\brmdir\b/,
+    /\bunlink\b/,
+    // Git destructive commands
+    /\bgit\s+clean\b/,
+    /\bgit\s+rm\b/,
+    /\bgit\s+checkout\s+--\s+/,
+    /\bgit\s+reset\s+--hard\b/,
+    // In-place editors
+    /\bsed\s+(?:-[^\s]*i|--in-place)\b/,
+    /\bperl\s+-i\b/,
+    /\bruby\s+-i\b/,
+    /\bpython\s+-i\b/,
+    // Raw device / truncation
+    /\bdd\s+if=/,
+    /\btruncate\b/,
+    /\bmkfs\.\w+/,
+    /\bfdisk\b/,
+    // Permission / ownership mutation
+    /\bchmod\b/,
+    /\bchown\b/,
+    /\bchgrp\b/,
+    // Package manager updates (destructive at filesystem level)
+    /\bnpm\s+(?:install|update|uninstall|publish|add)\b/,
+    /\bpip\s+(?:install|uninstall)\b/,
+    // File / directory creation that modifies the filesystem
+    /\bmkdir\b/,
+    /\btouch\b/,
+    /^install\b/,
+  ]
+
+  // Check if the command STARTS WITH a known read-only command.
+  // If it does, skip destructive-pattern matching for the whole command
+  // (the read-only prefix check below is tighter and already safe).
+  // For commands that are NOT read-only, check destructive patterns.
+  const isReadOnly = READ_ONLY_PREFIXES.some((re) => re.test(normalised))
+  if (!isReadOnly) {
+    for (const pattern of destructivePatterns) {
+      if (pattern.test(normalised)) {
+        return {
+          allowed: false,
+          message:
+            `Bash command blocked by path guard: pattern \`${pattern.source}\` ` +
+            "matches a destructive/mutating command. " +
+            "Use the edit/write tools for file changes, or use a known read-only command " +
+            "(git status/diff/log, cat, ls, grep, find, head, tail, etc.).",
+          resolvedPath: projectRoot,
+        }
+      }
+    }
+  }
+
+  // ── 3. Track whether a write form was checked and passed ────
+  // We store this alongside redirection/tee/mv-cp checks below.
+  let hasVerifiedWriteForm = false
+
+  // ── 4. Extract file write targets from redirections ──────────
   const redirMatches = command.matchAll(/[>]{1,2}\s*(\S+)/g)
   for (const match of redirMatches) {
     const fileTarget = match[1]
     if (fileTarget) {
+      hasVerifiedWriteForm = true
       const resolvedTarget = path.isAbsolute(fileTarget)
         ? fileTarget
         : path.resolve(projectRoot, fileTarget)
@@ -316,11 +440,12 @@ export function guardBashCommand(
     }
   }
 
-  // Check for tee writes
+  // ── 5. Check for tee writes ──────────────────────────────────
   const teeMatch = command.match(/\btee\s+(-[aA]?\s+)?(\S+)/)
   if (teeMatch) {
     const fileTarget = teeMatch[2]
     if (fileTarget) {
+      hasVerifiedWriteForm = true
       const resolvedTarget = path.isAbsolute(fileTarget)
         ? fileTarget
         : path.resolve(projectRoot, fileTarget)
@@ -329,16 +454,33 @@ export function guardBashCommand(
     }
   }
 
-  // Check for mv/cp to protected locations
+  // ── 6. Check for mv/cp to protected locations ────────────────
   const mvCpMatch = command.match(/\b(mv|cp)\s+(\S+)\s+(\S+)/)
   if (mvCpMatch) {
     const destTarget = mvCpMatch[3]
     if (destTarget && !destTarget.startsWith("-")) {
+      hasVerifiedWriteForm = true
       const resolvedTarget = path.isAbsolute(destTarget)
         ? destTarget
         : path.resolve(projectRoot, destTarget)
       const result = guardWrite(resolvedTarget, { ...options, intent })
       if (!result.allowed) return result
+    }
+  }
+
+  // ── 7. Deny-by-default for unknown commands ──────────────────
+  // If the command did not start with a known read-only prefix and also
+  // did not contain any path-checked write operation (redirection, tee,
+  // mv/cp), block it as unknown/untrusted.
+  if (!isReadOnly && !hasVerifiedWriteForm) {
+    return {
+      allowed: false,
+      message:
+        "Bash command blocked: not a known read-only command and no " +
+        "path-checked write operation detected. " +
+        "Use a known read-only command (git status/diff/log, cat, ls, grep, " +
+        "head, tail, etc.) or the edit/write tools for file changes.",
+      resolvedPath: projectRoot,
     }
   }
 
@@ -348,6 +490,81 @@ export function guardBashCommand(
     resolvedPath: projectRoot,
   }
 }
+
+// ── Known read-only command prefixes ─────────────────────────────
+
+/**
+ * Commands that are known safe / read-only.  A command matching one of
+ * these prefixes skips the destructive-pattern blocklist and proceeds
+ * to normal path-based checks.
+ *
+ * This list is intentionally conservative: it covers only well-known
+ * inspection commands and clearly read-only git subcommands.  Any
+ * command not in this list and not containing a path-checked write form
+ * is blocked by default.
+ */
+const READ_ONLY_PREFIXES: RegExp[] = [
+  // Generic read-only commands
+  /^ls\b/,
+  /^pwd\b/,
+  /^cat\b/,
+  /^grep\b/,
+  /^rg\b/,
+  /^find\b/,
+  /^head\b/,
+  /^tail\b/,
+  /^wc\b/,
+  /^sort\b/,
+  /^uniq\b/,
+  /^cut\b/,
+  /^tr\b/,
+  /^od\b/,
+  /^xxd\b/,
+  /^diff\b/,
+  /^cmp\b/,
+  /^comm\b/,
+  /^tree\b/,
+  /^du\b/,
+  /^df\b/,
+  /^stat\b/,
+  /^file\b/,
+  /^which\b/,
+  /^type\b/,
+  /^printenv\b/,
+  /^dirname\b/,
+  /^basename\b/,
+  /^readlink\b/,
+  /^realpath\b/,
+  /^date\b/,
+  /^cal\b/,
+  /^nproc\b/,
+  /^uname\b/,
+  /^hostname\b/,
+  /^whoami\b/,
+  /^id\b/,
+  /^logname\b/,
+  /^echo\b/,
+  /^printf\b/,
+  /^true\b/,
+  /^false\b/,
+  /^test\b/,
+  /^\[\[?\s/,
+  /^exit\b/,
+
+  // Git read-only subcommands — only truly read-only inspection commands
+  /^git\s+(?:status|diff|log|show|grep|rev-parse|rev-list|ls-files|ls-tree|ls-remote|for-each-ref|shortlog|name-rev|check-ignore|check-attr|check-mailmap|count-objects|describe|help|merge-base|whatchanged|show-ref|show-branch|verify-commit|verify-pack|verify-tag|diff-files|diff-index|diff-tree|archive|worktree\s+list|stash\s+(?:list|show)|tag\s+(?:\-l|\-\-list)|config\s+(?:\-\-get\b|\-\-list\b|\-\-get-all\b)|branch\s+(?:\-l|\-\-list))\b/,
+
+  // Web / network — read-only
+  /^ping\s/,
+  /^nslookup\s/,
+  /^dig\s/,
+  /^host\s/,
+  /^nc\s+-[z]/,
+
+  // Data format tools — read-only
+  /^jq\b/,
+  /^yq\b/,
+]
 
 /**
  * Check whether a git write command (commit, add, checkout, push, etc.)
@@ -399,3 +616,4 @@ export function buildToolDeniedReminder(result: GuardResult): string {
     "",
   ].join("\n")
 }
+

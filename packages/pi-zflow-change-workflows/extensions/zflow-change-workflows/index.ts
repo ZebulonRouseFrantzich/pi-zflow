@@ -26,6 +26,7 @@ import {
   resolvePlanVersionDir,
   resolveChangeDir,
   resolveRunStatePath,
+  resolveRunDir,
   resolveReviewDir,
   resolveCodeReviewFindingsPath,
   resolveFailureLogPath,
@@ -353,6 +354,32 @@ export interface InterviewableContext {
     /** Non-blocking notification. */
     notify: (message: string, type?: "info" | "warning" | "error") => void
   }
+  /**
+   * The Pi runtime model registry, available when the handler runs inside
+   * a Pi extension command context. Provides model discovery and auth checks.
+   *
+   * When present, profile resolution can check lane models against
+   * real model availability. When absent, lane-health checks are skipped
+   * and all resolved lanes are assumed healthy.
+   */
+  modelRegistry?: {
+    getAll(): Array<{
+      provider: string
+      id: string
+      api?: string
+      baseUrl?: string
+      reasoning?: boolean
+      input?: string[]
+      contextWindow?: number
+      maxTokens?: number
+      [key: string]: unknown
+    }>
+    hasConfiguredAuth(model: {
+      provider: string
+      id: string
+      [key: string]: unknown
+    }): boolean
+  }
 }
 
 /**
@@ -548,6 +575,269 @@ export function resetWorkflowState(): void {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Dispatch service helpers
+// ═══════════════════════════════════════════════════════════════════
+
+import type { DispatchService } from "pi-zflow-core/dispatch-service"
+import { DISPATCH_SERVICE_CAPABILITY } from "pi-zflow-core/dispatch-service"
+
+function normalizeDispatchVerification(
+  verification: Awaited<ReturnType<DispatchService["runParallel"]>>["results"][number]["verification"],
+) {
+  if (!verification) return undefined
+  const status = verification.status === "passed"
+    ? "pass"
+    : verification.status === "failed"
+      ? "fail"
+      : verification.status
+  return {
+    status,
+    command: verification.command,
+    output: verification.output,
+  }
+}
+
+/**
+ * Try to discover and return a dispatch service from the zflow registry.
+ *
+ * Searches for a service exposing dispatch-like methods from any capability.
+ * Returns null if no service is found.
+ */
+async function tryGetDispatchServiceViaRegistry(): Promise<DispatchService | null> {
+  try {
+    const reg = getZflowRegistry()
+    // Check directly via the dedicated capability first
+    if (reg.has(DISPATCH_SERVICE_CAPABILITY)) {
+      const svc = reg.optional<DispatchService>(DISPATCH_SERVICE_CAPABILITY)
+      if (svc && typeof svc.runAgent === "function" && typeof svc.runParallel === "function") {
+        return svc
+      }
+    }
+
+    // Fallback: search all capabilities for a dispatch-like service
+    const capabilities = reg.getCapabilities()
+    for (const [, registered] of capabilities) {
+      if (registered.service === undefined) continue
+      const svc = registered.service as Record<string, unknown>
+      if (typeof svc.runAgent === "function" && typeof svc.runParallel === "function") {
+        return svc as unknown as DispatchService
+      }
+    }
+
+    return null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Run worktree dispatch using the provided dispatch service, then finalize.
+ *
+ * Reads execution-groups.md, calls prepareWorktreeImplementationRun(),
+ * dispatches via dispatchService.runParallel({ worktree: true, ... }),
+ * collects GroupResults, and calls finalizeWorktreeImplementationRun().
+ */
+async function runWorktreeDispatchAndFinalize(
+  runId: string,
+  changeId: string,
+  planVersion: string,
+  dispatchService: DispatchService,
+  options?: {
+    cwd?: string
+    force?: boolean
+  },
+): Promise<void> {
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+  const { parseExecutionGroupsMd } = await import("./orchestration.js")
+  const {
+    prepareWorktreeImplementationRun,
+    finalizeWorktreeImplementationRun,
+  } = await import("./orchestration.js")
+  const { captureGroupResult } = await import("./group-result.js")
+  const { readRun, updateRun } = await import("pi-zflow-artifacts")
+
+  const cwd = options?.cwd ?? process.cwd()
+  const repoRoot = (await import("node:child_process")).execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    cwd,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim()
+
+  // Read execution groups from the approved plan artifact
+  const executionGroupsArtifactPath = resolvePlanArtifactPath(changeId, planVersion, "execution-groups", cwd)
+  let executionGroupsMd = ""
+  try {
+    executionGroupsMd = await fs.readFile(executionGroupsArtifactPath, "utf-8")
+  } catch {
+    throw new Error(
+      `Cannot read execution-groups.md at: ${executionGroupsArtifactPath}\n` +
+      "Run /zflow-change-prepare to create plan artifacts first.",
+    )
+  }
+
+  const groups = parseExecutionGroupsMd(executionGroupsMd)
+
+  if (groups.length === 0) {
+    throw new Error(
+      `No execution groups found in ${executionGroupsArtifactPath}. ` +
+      "The approved plan must contain at least one implementation group.",
+    )
+  }
+
+  const missingScopedVerification = groups.filter((g) => !g.scopedVerification)
+  if (missingScopedVerification.length > 0) {
+    throw new Error(
+      "Cannot dispatch implementation: every execution group must define scoped verification. " +
+      `Missing: ${missingScopedVerification.map((g) => g.id).join(", ")}`,
+    )
+  }
+
+  // Prepare the worktree implementation run — this runs clean-tree preflight,
+  // ownership/dependency validation, and builds task descriptors.
+  const planArtifactPaths = {
+    design: resolvePlanArtifactPath(changeId, planVersion, "design", cwd),
+    executionGroups: executionGroupsArtifactPath,
+    standards: resolvePlanArtifactPath(changeId, planVersion, "standards", cwd),
+    verification: resolvePlanArtifactPath(changeId, planVersion, "verification", cwd),
+  }
+
+  const runPlan = await prepareWorktreeImplementationRun(
+    changeId,
+    planVersion,
+    groups,
+    planArtifactPaths,
+    { cwd, repoRoot, runId, force: options?.force },
+  )
+
+  // Dispatch via the dispatch service with worktree: true
+  const tasks = runPlan.tasks.map(t => ({
+    agent: t.agent,
+    task: t.task,
+    output: t.outputRelativePath,
+    outputMode: "file-only" as const,
+  }))
+
+  const dispatchResult = await dispatchService.runParallel({
+    tasks,
+    cwd,
+    worktree: true,
+  })
+
+  if (!dispatchResult.ok) {
+    throw new Error(
+      `Worktree dispatch failed via "${dispatchService.name}": ` +
+      dispatchResult.results
+        .filter((r) => !r.ok)
+        .map((r) => `${r.agent}: ${r.error ?? "unknown error"}`)
+        .join("; "),
+    )
+  }
+
+  // Collect group results from dispatch outputs
+  const groupResults = []
+  const runDir = resolveRunDir(runId, cwd)
+  const patchesDir = path.join(runDir, "patches")
+  await fs.mkdir(patchesDir, { recursive: true })
+
+  for (let idx = 0; idx < dispatchResult.results.length; idx++) {
+    const r = dispatchResult.results[idx]!
+    const group = groups[idx]
+    if (!group) continue
+
+    if (!r.ok) {
+      throw new Error(`Dispatch failed for ${group.id}: ${r.error ?? "unknown error"}`)
+    }
+
+    const verification = normalizeDispatchVerification(r.verification)
+
+    if (!verification || verification.status !== "pass") {
+      throw new Error(
+        `Scoped verification did not pass for ${group.id}. ` +
+        `Status: ${verification?.status ?? "missing"}`,
+      )
+    }
+
+    if (r.worktreePath) {
+      groupResults.push(await captureGroupResult({
+        groupId: group.id,
+        agent: tasks[idx]?.agent ?? group.agent ?? "unknown",
+        worktreePath: r.worktreePath,
+        runId,
+        repoRoot,
+        scopedFiles: group.files,
+        verification,
+        cwd,
+      }))
+      continue
+    }
+
+    if (r.patchPath) {
+      const destPatchPath = path.join(patchesDir, `${group.id}.patch`)
+      if (path.resolve(r.patchPath) !== path.resolve(destPatchPath)) {
+        await fs.copyFile(r.patchPath, destPatchPath)
+      }
+
+      const run = await readRun(runId, cwd)
+      const groupMeta = {
+        groupId: group.id,
+        agent: tasks[idx]?.agent ?? group.agent ?? "unknown",
+        worktreePath: r.worktreePath ?? "(provided patch)",
+        baseCommit: run.head,
+        headCommit: run.head,
+        changedFiles: r.changedFiles ?? group.files,
+        uncommittedChanges: [],
+        patchPath: destPatchPath,
+        scopedVerification: {
+          status: verification.status,
+          command: verification.command,
+          output: verification.output,
+        },
+        retained: false,
+      }
+      const existingIndex = run.groups.findIndex((g) => g.groupId === group.id)
+      if (existingIndex >= 0) run.groups[existingIndex] = groupMeta
+      else run.groups.push(groupMeta)
+      await updateRun(runId, { groups: run.groups }, cwd)
+      groupResults.push({
+        groupId: group.id,
+        agent: groupMeta.agent,
+        worktreePath: groupMeta.worktreePath,
+        baseCommit: groupMeta.baseCommit,
+        headCommit: groupMeta.headCommit,
+        changedFiles: groupMeta.changedFiles,
+        uncommittedChanges: [],
+        patchPath: destPatchPath,
+        verification,
+        retained: false,
+      })
+      continue
+    }
+
+    throw new Error(
+      `Dispatch result for ${group.id} did not include worktreePath or patchPath. ` +
+      "A zflow dispatch service must expose enough worktree metadata to capture or apply patches.",
+    )
+  }
+
+  // Finalize: apply patches back, check deviations
+  await finalizeWorktreeImplementationRun(
+    runId,
+    groupResults,
+    {
+      cwd,
+      changeId,
+      planVersion,
+      executionGroups: groups,
+    },
+  )
+
+  console.info(
+    `[zflow] Worktree dispatch completed via "${dispatchService.name}". ` +
+    `${dispatchResult.results.filter(r => r.ok).length}/${dispatchResult.results.length} groups succeeded.`,
+  )
+}
+
 // Profile preflight helper
 // ═══════════════════════════════════════════════════════════════════
 
@@ -562,12 +852,19 @@ export function resetWorkflowState(): void {
  */
 async function ensureProfileResolved(ctx: InterviewableContext): Promise<boolean> {
   const notify = ctx.ui?.notify ?? (() => {})
-  const registry = getZflowRegistry()
-  if (registry.has("profiles")) {
-    const profileService = registry.optional<{ ensureResolved?: () => Promise<unknown> }>("profiles")
+  const reg = getZflowRegistry()
+  if (reg.has("profiles")) {
+    const profileService = reg.optional<{ ensureResolved?: (...args: unknown[]) => Promise<unknown> }>("profiles")
     if (profileService && typeof profileService.ensureResolved === "function") {
       try {
-        await profileService.ensureResolved()
+        // Convert the Pi model registry if available, so lane-health preflight
+        // can check real model availability and authentication.
+        let options: Record<string, unknown> = {}
+        if (ctx.modelRegistry) {
+          const { createPiModelRegistryAdapter } = await import("pi-zflow-profiles")
+          options.registry = createPiModelRegistryAdapter(ctx.modelRegistry)
+        }
+        await profileService.ensureResolved(undefined, options)
         notify("✅ Profile resolved.", "info")
         return true
       } catch (err: unknown) {
@@ -584,7 +881,9 @@ async function ensureProfileResolved(ctx: InterviewableContext): Promise<boolean
   }
   notify(
     "ℹ️ No profile service found in registry. Proceeding without explicit profile. " +
-    "Run a profile setup command first or configure via pi-zflow-profiles. " +
+    (ctx.modelRegistry
+      ? "Run /zflow-profile default to resolve a profile with lane-health checks."
+      : "Run a profile setup command first or configure via pi-zflow-profiles. ") +
     "Verification will fall back to auto-detection.",
     "info",
   )
@@ -885,6 +1184,18 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           "info",
         )
 
+        // Check if RuneContext was detected as canonical — notify the user
+        const planStateRuneContext = (result.initialPlanState as Record<string, unknown>)?.runeContext as Record<string, unknown> | undefined
+        if (planStateRuneContext && (planStateRuneContext as Record<string, unknown>).canonical === true) {
+          const docs = (planStateRuneContext as Record<string, unknown>).canonicalDocs as string[] | undefined
+          ctx.ui.notify(
+            `📋 RuneContext detected for "${changePath}".\n` +
+            `   Canonical RuneContext docs will be used as the requirements source.\n` +
+            (docs && docs.length > 0 ? `   Available docs: ${docs.join(", ")}` : ""),
+            "info",
+          )
+        }
+
         // Step 2: Validate plan artifacts
         ctx.ui.notify(`🔍 Validating plan artifacts for "${result.changeId}" v${result.planVersion}...`, "info")
         const validation = await runPlanValidation(result.changeId, result.planVersion)
@@ -1055,9 +1366,20 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
   pi.registerCommand("zflow-change-implement", {
     description: "Execute the approved plan for a change — worktree dispatch, verification, review",
     handler: async (args: string, ctx: InterviewableContext): Promise<void> => {
-      const changeId = args.trim()
+      // Parse flags from args
+      const parts = args.trim().split(/\s+/)
+      const force = parts.includes("--force")
+      const manualDispatchComplete = parts.includes("--manual-dispatch-complete")
+      const changeId = parts.filter(p => !p.startsWith("--")).join(" ")
+
       if (!changeId) {
-        ctx.ui.notify("Usage: /zflow-change-implement <change-id>", "warning")
+        ctx.ui.notify(
+          "Usage: /zflow-change-implement <change-id> [--force] [--manual-dispatch-complete]\n\n" +
+          "  --force                       Proceed even if the primary worktree has uncommitted changes.\n" +
+          "  --manual-dispatch-complete    Skip worktree dispatch and proceed directly to verification.\n" +
+          "                                Use this when you have manually applied changes outside zflow.",
+          "warning",
+        )
         return
       }
 
@@ -1090,50 +1412,87 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       }
 
       // ── Detect and load pending handoff artifacts ──────────────
-      // If a handoff artifact exists from a previous /zflow-change-prepare approval,
-      // load it for cross-session context. This allows the implementation to proceed
-      // even when the fork API was unavailable.
       const existingHandoff = await resolvePendingHandoff(changeId)
       if (existingHandoff) {
         ctx.ui.notify(
           `📋 Loaded handoff artifact for "${changeId}" v${existingHandoff.approvedVersion}.`,
           "info",
         )
-        // Clear the artifact so it's not re-read on subsequent invocations
         await clearPendingHandoff(changeId)
+      }
+
+      // ── Check for dispatch service availability ───────────────
+      const dispatchService = await tryGetDispatchServiceViaRegistry()
+      const hasDispatch = dispatchService !== null
+
+      if (!hasDispatch && !manualDispatchComplete) {
+        ctx.ui.notify(
+          "⚠️ No dispatch service available for worktree isolation.\n\n" +
+          "To implement changes, you need one of:\n" +
+          "  1. Install and configure pi-subagents (provides the `subagent` tool).\n" +
+          "     Install: `npm install -g pi-subagents`\n" +
+          "  2. Register a pi-subagents bridge extension.\n" +
+          "  3. Run with --manual-dispatch-complete if you are applying changes manually.\n\n" +
+          "Without a dispatch service, the workflow cannot dispatch workers to isolated worktrees " +
+          "or apply patches back atomically. Aborting.",
+          "error",
+        )
+        return
+      }
+
+      if (hasDispatch) {
+        ctx.ui.notify(`🔄 Dispatch service detected: ${dispatchService!.name}`, "info")
+      }
+
+      if (manualDispatchComplete) {
+        ctx.ui.notify(
+          "⚠️ --manual-dispatch-complete: Skipping worktree dispatch. Proceeding to verification.\n" +
+          "You are responsible for ensuring changes are correctly applied to the primary worktree.",
+          "warning",
+        )
       }
 
       ctx.ui.notify(`⚙️ Implementing change "${changeId}"...`)
 
       try {
-        // Set approved-plan-loaded reminder — the approved plan is about to be loaded
         addReminder("approved-plan-loaded")
 
+        // ── Phase 2: Run the create-run workflow ──────────────────
         const result = await runChangeImplementWorkflow({
           changeId,
+          force,
         })
 
+        if (force) {
+          ctx.ui.notify(
+            "⚠️ Dirty worktree — proceeding because --force was passed.",
+            "warning",
+          )
+        }
+
         ctx.ui.notify(
-          `⚙️ Implementation for "${result.changeId}" (${result.planVersion}) ` +
-          `started with status: ${result.status}. Run ID: ${result.runId}`,
+          `⚙️ Run created for "${result.changeId}" (${result.planVersion}). Run ID: ${result.runId}`,
           "info",
         )
 
-        // Once an approved plan is loaded and execution begins, clear the
-        // approved-plan-loaded reminder.
         removeReminder("approved-plan-loaded")
 
-        // ── Run the combined post-start sequence ─────────────────
-        // This advances through verification → fix loop → code review → complete
-        // where possible, persisting every phase transition to run.json and state-index.
+        // ── Phase 3: Parse execution groups and dispatch ─────────
+        if (!manualDispatchComplete && hasDispatch) {
+          await runWorktreeDispatchAndFinalize(result.runId, result.changeId, result.planVersion, dispatchService!, {
+            cwd: undefined,
+            force,
+          })
+        }
+
+        // ── Phase 4: Post-start sequence (verification, review, complete) ──
         const postResult = await runImplementationPostStartSequence(
           result.runId,
           {
-            skipDispatchWait: true, // We just created the run; don't wait for dispatch
+            skipDispatchWait: manualDispatchComplete,
           },
         )
 
-        // Set verification-status reminder based on the sequence outcome
         if (postResult.verificationStatus === "passed" || postResult.verificationStatus === "pending") {
           addReminder("verification-status")
         } else if (postResult.verificationStatus === "failed") {
@@ -1151,7 +1510,6 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           )
         }
 
-        // Report the resulting phase/status
         ctx.ui.notify(
           `📋 Post-start sequence phase: ${postResult.phase}, status: ${postResult.status}.`,
           "info",
@@ -1161,7 +1519,6 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           ctx.ui.notify(`⚠️ ${postResult.error}`, "warning")
         }
 
-        // Print next steps from the post-start sequence (file-backed via run.json)
         const nextStepsText = postResult.nextSteps.length > 0
           ? postResult.nextSteps
               .map((s, i) => `  ${i + 1}. ${s.replace(/^\d+\.\s*/, "")}`)
@@ -1178,7 +1535,6 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           "error",
         )
       } finally {
-        // Clear mode and reminders regardless of outcome
         resetWorkflowState()
       }
     },

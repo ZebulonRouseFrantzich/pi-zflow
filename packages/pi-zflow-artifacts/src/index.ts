@@ -48,7 +48,12 @@ export type {
 
 // Re-export plan state helpers (Phase 2+ implementation)
 // Also importable directly from "pi-zflow-artifacts/plan-state"
-export {} from "./plan-state.js"
+export {
+  computeContentHash,
+  assertValidPlanVersion,
+  assertValidArtifactType,
+  recordArtifactMetadata,
+} from "./plan-state.js"
 
 // Re-export run state helpers
 // Also importable directly from "pi-zflow-artifacts/run-state"
@@ -91,4 +96,5 @@ export type {
 
 // Re-export plan artifact write tool (Phase 2+ implementation)
 // Also importable directly from "pi-zflow-artifacts/write-plan-artifact"
-export {} from "./write-plan-artifact.js"
+export { writePlanArtifact } from "./write-plan-artifact.js"
+export type { WritePlanArtifactResult } from "./write-plan-artifact.js"

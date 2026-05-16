@@ -12,14 +12,15 @@ import * as os from "node:os"
 import {
   executeApplyBack,
   PatchReplayStrategy,
+  recoverFromApplyBack,
 } from "../extensions/zflow-change-workflows/apply-back.js"
 
-import type { ApplyBackOptions } from "../extensions/zflow-change-workflows/apply-back.js"
+import type { ApplyBackOptions, RecoveryOptions } from "../extensions/zflow-change-workflows/apply-back.js"
 
-import { createRun, createRecoveryRef, readRun } from "pi-zflow-artifacts/run-state"
+import { createRun, createRecoveryRef, readRun, updateRun } from "pi-zflow-artifacts/run-state"
 import type { PreApplySnapshot } from "pi-zflow-artifacts/run-state"
 import type { ExecutionGroup } from "../extensions/zflow-change-workflows/ownership-validator.js"
-import { resolveRunDir } from "pi-zflow-artifacts/artifact-paths"
+import { resolveRunDir, resolveRunStatePath } from "pi-zflow-artifacts/artifact-paths"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -240,5 +241,103 @@ describe("executeApplyBack", () => {
     // Verify run phase
     const run = await readRun(runId, repoRoot)
     assert.equal(run.phase, "apply-back-conflicted")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// recoverFromApplyBack
+// ---------------------------------------------------------------------------
+
+describe("recoverFromApplyBack", () => {
+  let repoRoot: string
+  let runId: string
+
+  before(async () => {
+    repoRoot = await createTempRepo()
+  })
+
+  after(async () => {
+    await fs.rm(repoRoot, { recursive: true, force: true })
+  })
+
+  test("preserves unrelated untracked files when recovery ref is missing", async () => {
+    runId = "test-recovery-untracked"
+    const headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf-8" }).trim()
+
+    // Create an unrelated untracked file that should never be deleted
+    const untrackedPath = path.join(repoRoot, "important-notes.txt")
+    await fs.writeFile(untrackedPath, "This file must survive recovery\n", "utf-8")
+
+    // Create a run with a valid snapshot
+    await createRun(runId, repoRoot, "ch42", "v1", repoRoot)
+
+    // Update run to set apply-back to in-progress with our snapshot
+    const runPath = resolveRunStatePath(runId, repoRoot)
+    const run = await readRun(runId, repoRoot)
+    await fs.writeFile(
+      runPath,
+      JSON.stringify({
+        ...run,
+        applyBack: { status: "in-progress" },
+        preApplySnapshot: {
+          head: headSha,
+          indexState: "clean",
+          recoveryRef: `refs/zflow/recovery/${runId}`,
+        },
+      }, null, 2),
+      "utf-8",
+    )
+
+    // Don't create the recovery ref so resetToPreApplySnapshot must fall through
+    // to snapshot.head reset, which should succeed without deleting untracked files
+    const result = await recoverFromApplyBack(runId, repoRoot, repoRoot)
+
+    // recovery should have succeeded since headSha is valid
+    assert.ok(result.primaryTreeRestored, "primary tree should be restored")
+
+    // Check the untracked file still exists (no git clean -fd was run)
+    const content = await fs.readFile(untrackedPath, "utf-8")
+    assert.equal(content.trim(), "This file must survive recovery")
+  })
+
+  test("rejects invalid snapshot.head and does not delete untracked files", async () => {
+    runId = "test-recovery-invalid-head"
+    const headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf-8" }).trim()
+
+    // Create an unrelated untracked file
+    const untrackedPath = path.join(repoRoot, "my-data.csv")
+    await fs.writeFile(untrackedPath, "a,b,c\n1,2,3\n", "utf-8")
+
+    // Create a run with an INVALID snapshot.head
+    await createRun(runId, repoRoot, "ch42", "v1", repoRoot)
+    const runPath = resolveRunStatePath(runId, repoRoot)
+    const run = await readRun(runId, repoRoot)
+    await fs.writeFile(
+      runPath,
+      JSON.stringify({
+        ...run,
+        applyBack: { status: "in-progress" },
+        preApplySnapshot: {
+          head: "0000000000000000000000000000000000000000",
+          indexState: "clean",
+          recoveryRef: `refs/zflow/recovery/${runId}-nonexistent`,
+        },
+      }, null, 2),
+      "utf-8",
+    )
+
+    const result = await recoverFromApplyBack(runId, repoRoot, repoRoot)
+
+    // Both recovery paths should fail, but no crash and untracked files survive
+    assert.equal(result.primaryTreeRestored, false,
+      "should not restore when snapshot.head is invalid")
+    assert.ok(
+      result.recommendations.includes("abandon") || result.recommendations.includes("inspect"),
+      `should recommend safe actions, got: ${result.recommendations.join(", ")}`,
+    )
+
+    // Verify untracked file was NOT deleted
+    const content = await fs.readFile(untrackedPath, "utf-8")
+    assert.equal(content.trim(), "a,b,c\n1,2,3")
   })
 })

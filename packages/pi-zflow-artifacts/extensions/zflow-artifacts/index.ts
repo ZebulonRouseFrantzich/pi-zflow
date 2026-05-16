@@ -46,14 +46,97 @@
  * See `src/artifact-paths.ts` for `resolvePlanArtifactPath()`.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import { Type } from "typebox"
+import { getZflowRegistry } from "pi-zflow-core/registry"
+import { PI_ZFLOW_ARTIFACTS_VERSION } from "pi-zflow-core"
+import { writePlanArtifact } from "../../src/write-plan-artifact.js"
+import type { CapabilityClaim } from "pi-zflow-core/registry"
+
+/** Well-known capability name for artifact write support. */
+const ARTIFACTS_CAPABILITY = "artifacts" as const
 
 export default function activateZflowArtifactsExtension(pi: ExtensionAPI): void {
-  // Phase 2+:
-  //   1. const registry = getZflowRegistry()
-  //   2. registry.claim({ capability: "artifacts", version: "0.1.0", provider: "pi-zflow-artifacts" })
-  //   3. Register zflow_write_plan_artifact tool
-  //   4. registry.provide("artifacts", artifactService)
-  //
-  // See src/state-index.ts, src/plan-state.ts, src/run-state.ts,
-  // src/cleanup-metadata.ts, src/write-plan-artifact.ts
+  const registry = getZflowRegistry()
+
+  // ── Claim the capability ──────────────────────────────────────
+  const claim: CapabilityClaim = {
+    capability: ARTIFACTS_CAPABILITY,
+    version: PI_ZFLOW_ARTIFACTS_VERSION,
+    provider: "pi-zflow-artifacts",
+    sourcePath: import.meta.url,
+    compatibilityMode: "compatible",
+  }
+
+  const registered = registry.claim(claim)
+
+  // If claim returns null, an incompatible provider already owns this
+  // capability -- do not register anything.
+  if (!registered) {
+    return
+  }
+
+  // If the capability already has a service, another compatible
+  // instance already initialised fully. No-op to avoid duplicate registration.
+  if (registered.service !== undefined) {
+    return
+  }
+
+  // ── Provide the artifact service ──────────────────────────────
+  const artifactService = {
+    writePlanArtifact,
+  }
+
+  registry.provide(ARTIFACTS_CAPABILITY, artifactService)
+
+  // ── Register zflow_write_plan_artifact tool ───────────────────
+  pi.registerTool({
+    name: "zflow_write_plan_artifact",
+    label: "Write Plan Artifact",
+    description:
+      "Write a plan artifact (design, execution-groups, standards, or verification) " +
+      "for a given change and plan version. Validates parameters, resolves the target " +
+      "path under the runtime state directory, writes atomically via temp-file-then-rename, " +
+      "and records content hash + mtime in plan-state.json for drift detection.",
+    parameters: Type.Object({
+      changeId: Type.String({
+        description:
+          "Change identifier in kebab-case (lowercase letters, digits, and hyphens only). " +
+          "Must be a non-empty string matching [a-z0-9][a-z0-9-]*.",
+      }),
+      planVersion: Type.String({
+        description:
+          "Plan version label (e.g. 'v1', 'v2'). Must match the pattern /^v\\d+$/.",
+      }),
+      artifact: Type.String({
+        description:
+          "Artifact type to write. One of: design, execution-groups, standards, verification.",
+      }),
+      content: Type.String({
+        description:
+          "Full markdown content of the artifact. Written atomically to the resolved target path.",
+      }),
+    }),
+    promptSnippet: "zflow_write_plan_artifact(changeId, planVersion, artifact, content) — write a plan artifact file",
+    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+      const result = await writePlanArtifact(
+        {
+          changeId: params.changeId,
+          planVersion: params.planVersion,
+          artifact: params.artifact,
+          content: params.content,
+        },
+        ctx.cwd,
+      )
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+        details: result,
+      }
+    },
+  })
 }

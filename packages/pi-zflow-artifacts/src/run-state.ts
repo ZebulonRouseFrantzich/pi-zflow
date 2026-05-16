@@ -413,18 +413,36 @@ export function resetToPreApplySnapshot(
   repoRoot: string,
   snapshot: PreApplySnapshot,
 ): void {
-  // Try recovery ref first, fall back to recorded head
+  // Try recovery ref first
   try {
     execFileSync("git", ["reset", "--hard", `refs/zflow/recovery/${runId}`], {
       cwd: repoRoot,
       stdio: ["ignore", "pipe", "pipe"],
     })
+    return
   } catch {
-    execFileSync("git", ["reset", "--hard", snapshot.head], {
+    // Recovery ref unavailable — fall through to snapshot.head
+  }
+
+  // Validate the commit SHA before resetting, to avoid hard-resetting to an
+  // invalid or malicious ref that could corrupt the working tree (GC'd commit,
+  // all-zero sentinel, etc.).
+  try {
+    execFileSync("git", ["rev-parse", "--verify", "--end-of-options", `${snapshot.head}^{commit}`], {
       cwd: repoRoot,
       stdio: ["ignore", "pipe", "pipe"],
     })
+  } catch {
+    throw new Error(
+      `Cannot recover: snapshot.head (${snapshot.head}) is not a valid commit. ` +
+      "Recovery ref was also unavailable. Inspect run-state and recover manually.",
+    )
   }
+
+  execFileSync("git", ["reset", "--hard", snapshot.head], {
+    cwd: repoRoot,
+    stdio: ["ignore", "pipe", "pipe"],
+  })
   // NOTE: We intentionally do NOT run `git clean -fd` here.
   // Preflight permits non-overlapping untracked files, and a blanket clean
   // would delete unrelated user files that existed before dispatch.

@@ -2,7 +2,7 @@
  * worktree-setup.test.ts — Unit tests for Task 5.5 worktree setup hook.
  */
 import * as assert from "node:assert"
-import { test, describe, before, after } from "node:test"
+import { test, describe, before, after, mock } from "node:test"
 import * as path from "node:path"
 import * as fs from "node:fs/promises"
 import { execFileSync } from "node:child_process"
@@ -182,5 +182,26 @@ describe("getRepoWorktreeSetupConfig", () => {
     const config = await getRepoWorktreeSetupConfig(repoRoot)
     // No remaining candidates have valid config — should return null
     assert.strictEqual(config, null)
+  })
+
+  test("warns on malformed JSON when config file exists but cannot be parsed", async () => {
+    const warnCalls: string[] = []
+    mock.method(console, "warn", (msg: string) => { warnCalls.push(msg) })
+
+    const configDir = path.join(repoRoot, ".pi", "zflow")
+    await fs.mkdir(configDir, { recursive: true })
+    await fs.writeFile(path.join(configDir, "config.json"), "not valid json", "utf-8")
+
+    const config = await getRepoWorktreeSetupConfig(repoRoot)
+
+    // Restore original warn before assertions
+    mock.restoreAll()
+
+    // NULL because the JSON is unparseable and no other candidates have valid hook config
+    assert.strictEqual(config, null)
+
+    // Should have at least one warning mentioning the config path
+    const hasWarn = warnCalls.some((w) => w.includes(".pi/zflow/config.json"))
+    assert.ok(hasWarn, `expected warning mentioning config path, got: ${warnCalls.join(", ")}`)
   })
 })

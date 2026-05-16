@@ -24,7 +24,8 @@
     "pi-zflow-review": "0.1.0",
     "pi-zflow-change-workflows": "0.1.0",
     "pi-zflow-runecontext": "0.1.0",
-    "pi-zflow-compaction": "0.1.0"
+    "pi-zflow-compaction": "0.1.0",
+    "pi-zflow-subagents-bridge": "0.1.0"
   },
   "bundledDependencies": [
     "pi-zflow-core",
@@ -35,7 +36,8 @@
     "pi-zflow-review",
     "pi-zflow-change-workflows",
     "pi-zflow-runecontext",
-    "pi-zflow-compaction"
+    "pi-zflow-compaction",
+    "pi-zflow-subagents-bridge"
   ],
   "pi": {
     "extensions": [
@@ -46,7 +48,8 @@
       "node_modules/pi-zflow-review/extensions",
       "node_modules/pi-zflow-change-workflows/extensions",
       "node_modules/pi-zflow-runecontext/extensions",
-      "node_modules/pi-zflow-compaction/extensions"
+      "node_modules/pi-zflow-compaction/extensions",
+      "node_modules/pi-zflow-subagents-bridge/extensions"
     ],
     "skills": [
       "node_modules/pi-zflow-agents/skills"

@@ -17,6 +17,7 @@
     "./schemas": "./src/schemas.ts",
     "./ids": "./src/ids.ts",
     "./platform-docs": "./src/platform-docs.ts",
+    "./dispatch-service": "./src/dispatch-service.ts",
     "./package.json": "./package.json"
   },
   "keywords": [
