@@ -5,6 +5,7 @@ import * as assert from "node:assert"
 import { test, describe, before, after, afterEach } from "node:test"
 import * as path from "node:path"
 import * as fs from "node:fs/promises"
+import { accessSync } from "node:fs"
 import { execFileSync } from "node:child_process"
 import * as os from "node:os"
 
@@ -349,5 +350,39 @@ describe("Recovery ref helpers", () => {
     }).trim()
 
     assert.equal(headAfter, originalHead)
+  })
+
+  test("resetToPreApplySnapshot rejects invalid snapshot.head and preserves untracked files", () => {
+    const headBefore = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repoRoot, encoding: "utf-8",
+    }).trim()
+
+    // Create an untracked file that must survive
+    const untrackedPath = path.join(repoRoot, "surviving-notes.txt")
+    execFileSync("touch", [untrackedPath], { cwd: repoRoot, stdio: "pipe" })
+
+    const snapshot: PreApplySnapshot = {
+      head: "0000000000000000000000000000000000000000",
+      indexState: "clean",
+      recoveryRef: "refs/zflow/recovery/test-reset-invalid",
+    }
+
+    // Should throw because both recovery ref and snapshot.head are invalid
+    assert.throws(
+      () => resetToPreApplySnapshot("test-reset-invalid", repoRoot, snapshot),
+      { message: /not a valid commit/i },
+    )
+
+    // HEAD should be unchanged
+    const headAfter = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repoRoot, encoding: "utf-8",
+    }).trim()
+    assert.equal(headAfter, headBefore)
+
+    // Untracked file must survive
+    assert.doesNotThrow(
+      () => accessSync(untrackedPath),
+      "untracked file must survive after failed recovery",
+    )
   })
 })

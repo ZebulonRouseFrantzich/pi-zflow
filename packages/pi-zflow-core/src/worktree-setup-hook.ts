@@ -171,6 +171,25 @@ export async function runWorktreeSetupHook(
   const scriptPath = path.resolve(context.repoRoot, config.script)
   const timeout = config.timeoutMs ?? DEFAULT_HOOK_TIMEOUT_MS
 
+  // --- Validate script is within repo root ---
+  const normalizedRepoRoot = path.resolve(context.repoRoot)
+  const normalizedScript = path.resolve(scriptPath)
+  const relative = path.relative(normalizedRepoRoot, normalizedScript)
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    return {
+      success: false,
+      message:
+        `worktreeSetupHook script path escapes the repository root. ` +
+        `Script "${config.script}" resolves to "${scriptPath}" ` +
+        `which is outside "${context.repoRoot}". Scripts must use repo-relative paths.`,
+      error: {
+        hint:
+          `Use a repo-relative path, e.g. ".pi/zflow/worktree-setup-hook.sh". ` +
+          `Absolute paths and ".." traversal are not permitted.`,
+      },
+    }
+  }
+
   // --- Validate script exists ---
   try {
     await fs.access(scriptPath, fs.constants.X_OK | fs.constants.R_OK)

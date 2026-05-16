@@ -5,9 +5,10 @@
  * matchesBlockedPatterns, canWrite, and resolveSentinelPolicy.
  */
 import * as assert from "node:assert"
-import { test, describe, mock } from "node:test"
+import { test, describe, mock, before, after } from "node:test"
 import * as path from "node:path"
 import * as os from "node:os"
+import * as fs from "node:fs"
 
 // Import under test
 import {
@@ -338,6 +339,227 @@ describe("canWrite", () => {
       intent: "system",
     })
     assert.ok(result.allowed, "system intent should bypass warn-severity blocked patterns")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// canWrite — intent-scoped roots
+// ---------------------------------------------------------------------------
+
+describe("canWrite with intent-scoped roots", () => {
+  test("planner-artifact root denies implementation write", () => {
+    const customPolicy: SentinelPolicy = {
+      description: "intent test",
+      allowedRoots: [
+        { path: "/tmp/plans", label: "plans", allowIntent: "planner-artifact" },
+        { path: PROJECT_ROOT, label: "project", allowIntent: "implementation" },
+      ],
+      blockedPatterns: [],
+      symlinkSafety: { resolveSymlinks: true, preventTraversal: true },
+      plannerArtifactPolicy: { allowedArtifactDirs: ["/tmp/plans/**"] },
+    }
+    const resolved = resolveSentinelPolicy(customPolicy, PROJECT_ROOT, RUNTIME_STATE_DIR)
+
+    // Implementation write to the plans dir should be denied.
+    // No root permits implementation writes under /tmp/plans,
+    // so the correct reason is "outside-allowed-roots".
+    const result = canWrite("/tmp/plans/ch42/design.md", {
+      policy: resolved,
+      projectRoot: PROJECT_ROOT,
+      runtimeStateDir: RUNTIME_STATE_DIR,
+      intent: "implementation",
+    })
+    assert.ok(!result.allowed, `expected denied, got: ${result.message}`)
+    assert.equal(result.reason, "outside-allowed-roots",
+      `expected outside-allowed-roots (no root matches both path and intent), got: ${result.reason}`)
+  })
+
+  test("planner-artifact root allows planner-artifact write", () => {
+    const customPolicy: SentinelPolicy = {
+      description: "intent test",
+      allowedRoots: [
+        { path: "/tmp/plans", label: "plans", allowIntent: "planner-artifact" },
+      ],
+      blockedPatterns: [],
+      symlinkSafety: { resolveSymlinks: true, preventTraversal: true },
+      plannerArtifactPolicy: { allowedArtifactDirs: ["/tmp/plans/**"] },
+    }
+    const resolved = resolveSentinelPolicy(customPolicy, PROJECT_ROOT, RUNTIME_STATE_DIR)
+
+    const result = canWrite("/tmp/plans/ch42/design.md", {
+      policy: resolved,
+      projectRoot: PROJECT_ROOT,
+      runtimeStateDir: RUNTIME_STATE_DIR,
+      intent: "planner-artifact",
+    })
+    assert.ok(result.allowed, `expected allowed, got: ${result.message}`)
+  })
+
+  test("implementation root denies planner-artifact write", () => {
+    const customPolicy: SentinelPolicy = {
+      description: "intent test",
+      allowedRoots: [
+        { path: PROJECT_ROOT, label: "project", allowIntent: "implementation" },
+      ],
+      blockedPatterns: [],
+      symlinkSafety: { resolveSymlinks: true, preventTraversal: true },
+      plannerArtifactPolicy: { allowedArtifactDirs: [] },
+    }
+    const resolved = resolveSentinelPolicy(customPolicy, PROJECT_ROOT, RUNTIME_STATE_DIR)
+
+    const result = canWrite(`${PROJECT_ROOT}/src/app.ts`, {
+      policy: resolved,
+      projectRoot: PROJECT_ROOT,
+      runtimeStateDir: RUNTIME_STATE_DIR,
+      intent: "planner-artifact",
+    })
+
+    // Planner writes should be blocked because the only roots allow only implementation
+    assert.ok(!result.allowed, `expected denied, got: ${result.message}`)
+    assert.ok(
+      result.reason === "intent-mismatch" || result.reason === "outside-allowed-roots",
+      `reason should be intent-mismatch or outside-allowed-roots, got: ${result.reason}`,
+    )
+  })
+
+  test("undefined allowIntent matches any intent", () => {
+    const customPolicy: SentinelPolicy = {
+      description: "intent test",
+      allowedRoots: [
+        { path: PROJECT_ROOT, label: "project" },  // no allowIntent
+      ],
+      blockedPatterns: [],
+      symlinkSafety: { resolveSymlinks: true, preventTraversal: true },
+      plannerArtifactPolicy: {
+        allowedArtifactDirs: [`${PROJECT_ROOT}/plans/**`],
+      },
+    }
+    const resolved = resolveSentinelPolicy(customPolicy, PROJECT_ROOT, RUNTIME_STATE_DIR)
+
+    // Implementation write should be allowed
+    assert.ok(canWrite(`${PROJECT_ROOT}/src/app.ts`, {
+      policy: resolved,
+      projectRoot: PROJECT_ROOT,
+      runtimeStateDir: RUNTIME_STATE_DIR,
+      intent: "implementation",
+    }).allowed)
+
+    // Planner-artifact write should also be allowed (no intent restriction on root,
+    // and path is within allowed artifact dirs)
+    const result = canWrite(`${PROJECT_ROOT}/plans/ch42/design.md`, {
+      policy: resolved,
+      projectRoot: PROJECT_ROOT,
+      runtimeStateDir: RUNTIME_STATE_DIR,
+      intent: "planner-artifact",
+    })
+    assert.ok(result.allowed, `expected allowed, got: ${result.message}`)
+  })
+
+  test("system intent bypasses all intent restrictions", () => {
+    const customPolicy: SentinelPolicy = {
+      description: "intent test",
+      allowedRoots: [
+        { path: "/tmp/plans", label: "plans", allowIntent: "planner-artifact" },
+      ],
+      blockedPatterns: [],
+      symlinkSafety: { resolveSymlinks: true, preventTraversal: true },
+      plannerArtifactPolicy: { allowedArtifactDirs: [] },
+    }
+    const resolved = resolveSentinelPolicy(customPolicy, PROJECT_ROOT, RUNTIME_STATE_DIR)
+
+    // System writes should bypass the planner-artifact-only restriction
+    const result = canWrite("/tmp/plans/ch42/design.md", {
+      policy: resolved,
+      projectRoot: PROJECT_ROOT,
+      runtimeStateDir: RUNTIME_STATE_DIR,
+      intent: "system",
+    })
+    assert.ok(result.allowed, `system should bypass intent restriction, got: ${result.message}`)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// canWrite — symlink escape for new files
+// ---------------------------------------------------------------------------
+
+describe("canWrite with symlinks for non-existent files", () => {
+  let tmpDir: string
+  let projectDir: string
+  let insideSymDir: string
+  let outsideSymDir: string
+  let outsideDir: string
+
+  before(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-zflow-symlink-test-"))
+    projectDir = path.join(tmpDir, "project")
+    insideSymDir = path.join(projectDir, "link-inside")
+    outsideDir = path.join(tmpDir, "outside-target")
+    outsideSymDir = path.join(projectDir, "link-outside")
+
+    // Create project structure
+    fs.mkdirSync(path.join(projectDir, "src"), { recursive: true })
+    fs.writeFileSync(path.join(projectDir, "README.md"), "test", "utf-8")
+
+    // Create an outside target
+    fs.mkdirSync(outsideDir, { recursive: true })
+    fs.writeFileSync(path.join(outsideDir, "secrets.txt"), "secret", "utf-8")
+
+    // Create symlinks
+    fs.mkdirSync(path.join(projectDir, "sublinked"))
+    fs.writeFileSync(path.join(projectDir, "sublinked", "data.txt"), "inside data", "utf-8")
+    fs.symlinkSync(path.join(projectDir, "sublinked"), insideSymDir, "dir")
+    fs.symlinkSync(outsideDir, outsideSymDir, "dir")
+  })
+
+  after(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  test("blocks write to new file under symlinked dir pointing outside project root", () => {
+    const customPolicy: SentinelPolicy = {
+      description: "symlink test",
+      allowedRoots: [
+        { path: projectDir, label: "project", allowIntent: "implementation" },
+      ],
+      blockedPatterns: [],
+      symlinkSafety: { resolveSymlinks: true, preventTraversal: true },
+      plannerArtifactPolicy: { allowedArtifactDirs: [] },
+    }
+    const resolved = resolveSentinelPolicy(customPolicy, projectDir, RUNTIME_STATE_DIR)
+    const newFilePath = path.join(outsideSymDir, "new-malicious-file.txt")
+
+    // The symlinked dir points outside project root, so writing a new file there should be blocked
+    const result = canWrite(newFilePath, {
+      policy: resolved,
+      projectRoot: projectDir,
+      runtimeStateDir: RUNTIME_STATE_DIR,
+      intent: "implementation",
+    })
+    assert.ok(!result.allowed, `expected blocked, got: ${result.message}`)
+    assert.equal(result.reason, "outside-allowed-roots",
+      `expected outside-allowed-roots, got: ${result.reason}`)
+  })
+
+  test("allows write to new file under symlinked dir pointing inside project root", () => {
+    const customPolicy: SentinelPolicy = {
+      description: "symlink test",
+      allowedRoots: [
+        { path: projectDir, label: "project", allowIntent: "implementation" },
+      ],
+      blockedPatterns: [],
+      symlinkSafety: { resolveSymlinks: true, preventTraversal: true },
+      plannerArtifactPolicy: { allowedArtifactDirs: [] },
+    }
+    const resolved = resolveSentinelPolicy(customPolicy, projectDir, RUNTIME_STATE_DIR)
+    const newFilePath = path.join(insideSymDir, "new-allowed-file.txt")
+
+    const result = canWrite(newFilePath, {
+      policy: resolved,
+      projectRoot: projectDir,
+      runtimeStateDir: RUNTIME_STATE_DIR,
+      intent: "implementation",
+    })
+    assert.ok(result.allowed, `expected allowed, got: ${result.message}`)
   })
 })
 

@@ -76,6 +76,35 @@ describe("state-index.ts", () => {
     assert.deepEqual(index.changes, {})
   })
 
+  test("loadStateIndex returns fresh objects on ENOENT (no shared mutable state)", async () => {
+    const index1 = await loadStateIndex()
+    const index2 = await loadStateIndex()
+
+    // Mutating index1.changes must not affect index2
+    index1.changes["test"] = {
+      changeId: "test",
+      lastPhase: "draft",
+      unfinishedRuns: [],
+      retainedWorktrees: [],
+      artifactPaths: [],
+      cleanupMetadata: {},
+    }
+
+    assert.equal(Object.keys(index2.changes).length, 0,
+      "mutating first ENOENT result must not contaminate second load")
+
+    // Mutating index1.entries must not affect index2
+    index1.entries.push({
+      type: "run",
+      id: "mutated-entry",
+      status: "pending",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    })
+    assert.equal(index2.entries.length, 0,
+      "mutating first ENOENT entries must not affect second load")
+  })
+
   test("saveStateIndex persists and loadStateIndex retrieves", async () => {
     const index: StateIndex = {
       version: 2,

@@ -103,4 +103,44 @@ describe("runWorktreeSetupHook", () => {
       assert.equal(result.message, "module ready feature/test")
     })
   })
+
+  test("rejects absolute script path outside repo root", async () => {
+    await withTempDir(async (repoRoot) => {
+      const result = await runWorktreeSetupHook(
+        { script: "/tmp/outside.sh", runtime: "shell" },
+        { repoRoot, worktreeRoot: path.join(repoRoot, "wt"), ref: "HEAD" },
+      )
+
+      assert.equal(result.success, false)
+      assert.match(result.message, /escapes/i)
+      assert.match(result.message, /outside/i)
+    })
+  })
+
+  test("rejects relative script path escaping repo root with ..", async () => {
+    await withTempDir(async (repoRoot) => {
+      const result = await runWorktreeSetupHook(
+        { script: "../escaped.sh", runtime: "shell" },
+        { repoRoot, worktreeRoot: path.join(repoRoot, "wt"), ref: "HEAD" },
+      )
+
+      assert.equal(result.success, false)
+      assert.match(result.message, /escapes/i)
+    })
+  })
+
+  test("still accepts normal relative script path", async () => {
+    await withTempDir(async (repoRoot) => {
+      const script = path.join(repoRoot, "hook.sh")
+      await fs.writeFile(script, "#!/usr/bin/env bash\necho ok\n")
+      await fs.chmod(script, 0o755)
+
+      const result = await runWorktreeSetupHook(
+        { script: "hook.sh", runtime: "shell" },
+        { repoRoot, worktreeRoot: path.join(repoRoot, "wt"), ref: "HEAD" },
+      )
+
+      assert.equal(result.success, true)
+    })
+  })
 })

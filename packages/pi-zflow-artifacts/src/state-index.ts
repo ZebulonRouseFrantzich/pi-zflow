@@ -128,7 +128,9 @@ export async function loadStateIndex(cwd?: string): Promise<StateIndex> {
     // Other errors (corruption, permissions): re-throw so they are surfaced
     const nodeErr = err as NodeJS.ErrnoException
     if (nodeErr.code === "ENOENT") {
-      return { ...DEFAULT_INDEX, entries: [...DEFAULT_INDEX.entries] }
+      // Return a completely fresh object every call so callers that
+      // mutate before saving do not contaminate other in-process loads.
+      return { version: DEFAULT_INDEX.version, entries: [], changes: {} }
     }
     throw err
   }

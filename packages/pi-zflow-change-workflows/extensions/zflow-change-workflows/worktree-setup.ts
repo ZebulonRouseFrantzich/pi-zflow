@@ -109,8 +109,17 @@ export async function getRepoWorktreeSetupConfig(
         }
         return hookConfig
       }
-    } catch {
-      // File doesn't exist or isn't valid JSON — try next candidate
+    } catch (err: unknown) {
+      // ENOENT: file doesn't exist — skip silently and try next candidate
+      if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
+        continue
+      }
+      // File exists but cannot be read or parsed — warn and continue
+      if (err instanceof Error) {
+        console.warn(
+          `[zflow] Worktree setup config file exists but cannot be parsed: ${configPath} — ${err.message}`,
+        )
+      }
       continue
     }
   }
