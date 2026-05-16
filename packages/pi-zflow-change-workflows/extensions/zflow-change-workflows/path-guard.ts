@@ -530,7 +530,6 @@ const READ_ONLY_PREFIXES: RegExp[] = [
   /^file\b/,
   /^which\b/,
   /^type\b/,
-  /^env\b/,
   /^printenv\b/,
   /^dirname\b/,
   /^basename\b/,
@@ -551,14 +550,11 @@ const READ_ONLY_PREFIXES: RegExp[] = [
   /^test\b/,
   /^\[\[?\s/,
   /^exit\b/,
-  /^time\b/,
 
   // Git read-only subcommands — only truly read-only inspection commands
   /^git\s+(?:status|diff|log|show|grep|rev-parse|rev-list|ls-files|ls-tree|ls-remote|for-each-ref|shortlog|name-rev|check-ignore|check-attr|check-mailmap|count-objects|describe|help|merge-base|whatchanged|show-ref|show-branch|verify-commit|verify-pack|verify-tag|diff-files|diff-index|diff-tree|archive|worktree\s+list|stash\s+(?:list|show)|tag\s+(?:\-l|\-\-list)|config\s+(?:\-\-get\b|\-\-list\b|\-\-get-all\b)|branch\s+(?:\-l|\-\-list))\b/,
 
   // Web / network — read-only
-  /^curl\s/,
-  /^wget\s/,
   /^ping\s/,
   /^nslookup\s/,
   /^dig\s/,
@@ -620,3 +616,4 @@ export function buildToolDeniedReminder(result: GuardResult): string {
     "",
   ].join("\n")
 }
+

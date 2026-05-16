@@ -17,7 +17,12 @@
  * @module pi-zflow-subagents-bridge
  */
 
-export const PI_ZFLOW_SUBAGENTS_BRIDGE_VERSION = "0.1.0" as const
+export { PI_ZFLOW_SUBAGENTS_BRIDGE_VERSION } from "pi-zflow-core"
+
+/**
+ * Re-exported from canonical definition in pi-zflow-core.
+ * Single source of truth for bridge version constant.
+ */
 
 export type {
   DispatchService,

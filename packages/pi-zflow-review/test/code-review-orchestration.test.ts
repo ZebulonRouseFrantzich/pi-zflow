@@ -305,6 +305,93 @@ void describe("runCodeReview with DispatchService", () => {
     assert.ok(hasFallbackNote, "expected coverage note about falling back to local")
   })
 
+  it("marks reviewer as failed when dispatch returns ok: false", async () => {
+    const planningArtifacts = await writeArtifacts(tmpDir, "ch-fail-dispatch", "v1")
+
+    // Fake service that returns ok: false for all agents
+    const failingService: DispatchService & { callLog: Array<Record<string, unknown>> } = {
+      name: "test-failing-service",
+      callLog: [],
+      async runAgent(input) {
+        this.callLog.push(input)
+        return { ok: false, rawOutput: "", error: "Agent resolved but found no matching implementation" }
+      },
+      async runParallel() {
+        return { ok: false, results: [] }
+      },
+    }
+
+    const registry = getZflowRegistry()
+    registry.claim({
+      capability: DISPATCH_SERVICE_CAPABILITY,
+      version: "0.1.0",
+      provider: "test",
+      sourcePath: import.meta.url,
+      compatibilityMode: "compatible",
+    })
+    registry.provide(DISPATCH_SERVICE_CAPABILITY, failingService)
+
+    const result = await runCodeReview(makeInput(planningArtifacts))
+
+    // All reviewers should be marked as failed
+    const failedReviewers = result.manifest.reviewers.filter((r) => r.status === "failed")
+    assert.equal(
+      failedReviewers.length,
+      result.manifest.reviewers.length,
+      "all reviewers should be marked as failed",
+    )
+
+    // Each failed reviewer should carry the error detail
+    for (const r of failedReviewers) {
+      assert.ok(
+        r.detail && r.detail.length > 0,
+        `expected non-empty error detail, got: ${r.detail}`,
+      )
+    }
+
+    // Severity should be zero (no findings were parsed)
+    assert.equal(result.severity.critical, 0)
+    assert.equal(result.severity.major, 0)
+    assert.equal(result.severity.minor, 0)
+    assert.equal(result.severity.nit, 0)
+
+    // Coverage notes should mention each failure
+    const hasFailureNote = result.coverageNotes.some(n => n.includes("failed"))
+    assert.ok(hasFailureNote, "expected coverage note about failed dispatch")
+  })
+
+  it("accepts empty findings JSON as valid structured result", async () => {
+    const planningArtifacts = await writeArtifacts(tmpDir, "ch-empty-findings", "v1")
+    const emptyJson = JSON.stringify({ findings: [] })
+
+    const fakeService = makeFakeDispatchService(emptyJson)
+    const registry = getZflowRegistry()
+    registry.claim({
+      capability: DISPATCH_SERVICE_CAPABILITY,
+      version: "0.1.0",
+      provider: "test",
+      sourcePath: import.meta.url,
+      compatibilityMode: "compatible",
+    })
+    registry.provide(DISPATCH_SERVICE_CAPABILITY, fakeService)
+
+    const result = await runCodeReview(makeInput(planningArtifacts))
+
+    // All reviewers should be executed (not skipped/failed)
+    const executedReviewers = result.manifest.reviewers.filter((r) => r.status === "executed")
+    assert.equal(
+      executedReviewers.length,
+      result.manifest.reviewers.length,
+      "all reviewers should be executed",
+    )
+
+    // All severity counts must be zero — no bogus findings fabricated from the empty JSON
+    assert.equal(result.severity.critical, 0)
+    assert.equal(result.severity.major, 0)
+    assert.equal(result.severity.minor, 0)
+    assert.equal(result.severity.nit, 0)
+  })
+
   it("falls back to skipped reviewers when no dispatch service is registered", async () => {
     const planningArtifacts = await writeArtifacts(tmpDir, "ch-nodispatch", "v1")
 

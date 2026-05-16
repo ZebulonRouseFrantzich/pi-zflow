@@ -108,7 +108,7 @@ function parseReviewerOutput(rawOutput: string): ReviewerOutput {
   }
   try {
     const parsed = JSON.parse(jsonBlock)
-    if (Array.isArray(parsed.findings) && parsed.findings.length > 0) {
+    if (Array.isArray(parsed.findings)) {
       return {
         findings: parsed.findings.map((f: Record<string, unknown>) => ({
           severity: (["critical", "major", "minor", "nit"] as const).includes(f.severity as string)
@@ -480,46 +480,66 @@ export async function runCodeReview(
         reviewerNames.map(async (name) => {
           const prompt = await buildInternalReviewPrompt(name, internalCtx)
           let output: ReviewerOutput
+          let dispatchOk = true
+          let dispatchError: string | undefined
           try {
             const raw = await dispatchService.runAgent({
               agent: name,
               task: prompt,
             })
-            // Parse the raw output (text or markdown) into structured findings
-            output = parseReviewerOutput(raw.rawOutput)
+            if (raw.ok) {
+              output = parseReviewerOutput(raw.rawOutput)
+            } else {
+              dispatchOk = false
+              dispatchError = raw.error ?? "dispatch returned ok: false"
+              output = { findings: [], rawOutput: `dispatch error: ${dispatchError}` }
+            }
           } catch (err) {
-            output = { findings: [], rawOutput: `dispatch error: ${err instanceof Error ? err.message : String(err)}` }
+            dispatchOk = false
+            dispatchError = err instanceof Error ? err.message : String(err)
+            output = { findings: [], rawOutput: `dispatch error: ${dispatchError}` }
           }
-          return { name, prompt, output }
+          return { name, prompt, output, ok: dispatchOk, error: dispatchError }
         }),
       )
 
       for (const result of results) {
         if (result.status === "fulfilled") {
-          const { name, output } = result.value
-          reviewerOutputs[name] = output.rawOutput
-          manifest = {
-            ...manifest,
-            reviewers: manifest.reviewers.map(r =>
-              r.name === name ? { ...r, status: "executed" as const } : r,
-            ),
+          const { name, output, ok, error } = result.value
+          if (!ok) {
+            reviewerOutputs[name] = output.rawOutput
+            manifest = {
+              ...manifest,
+              reviewers: manifest.reviewers.map(r =>
+                r.name === name ? { ...r, status: "failed" as const, detail: error ?? "dispatch failed" } : r,
+              ),
+            }
+            coverageNotes.push(`Reviewer "${name}" dispatch failed: ${error ?? "unknown error"}`)
+          } else {
+            reviewerOutputs[name] = output.rawOutput
+            manifest = {
+              ...manifest,
+              reviewers: manifest.reviewers.map(r =>
+                r.name === name ? { ...r, status: "executed" as const } : r,
+              ),
+            }
+            for (const f of output.findings) {
+              allFindings.push({
+                reviewerName: name,
+                finding: {
+                  severity: f.severity,
+                  title: f.title,
+                  reviewerSupport: [name],
+                  evidence: f.evidence || "See raw reviewer output.",
+                  whyItMatters: "Issue identified during code review.",
+                  recommendation: f.description,
+                  artifactPath: `runs/${manifest.runId}/review-artifacts/${name}.md`,
+                  runId: manifest.runId,
+                },
+              })
+            }
+            coverageNotes.push(`Reviewer "${name}" dispatched via "${dispatchService.name}"`)
           }
-          for (const f of output.findings) {
-            allFindings.push({
-              reviewerName: name,
-              finding: {
-                severity: f.severity,
-                title: f.title,
-                reviewerSupport: [name],
-                evidence: f.evidence || "See raw reviewer output.",
-                whyItMatters: "Issue identified during code review.",
-                recommendation: f.description,
-                artifactPath: `runs/${manifest.runId}/review-artifacts/${name}.md`,
-                runId: manifest.runId,
-              },
-            })
-          }
-          coverageNotes.push(`Reviewer "${name}" dispatched via "${dispatchService.name}"`)
         } else {
           coverageNotes.push(`Reviewer dispatch failed: ${result.reason}`)
         }

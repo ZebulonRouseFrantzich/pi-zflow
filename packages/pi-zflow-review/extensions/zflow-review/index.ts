@@ -319,24 +319,26 @@ export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
       let verificationStatus: "passed" | "failed" | "skipped" | "unknown"
       let changeId: string
 
+      // Import node:path before deriving changeId from directory name
+      const { default: path } = await import("node:path")
+
       if (knownStatuses.includes(arg as typeof knownStatuses[number])) {
         verificationStatus = arg === "advisory" ? "skipped" : (arg as "passed" | "failed" | "skipped" | "unknown")
         // No explicit changeId — derive from current directory name
-        changeId = cwd.split("/").filter(Boolean).pop() ?? ""
+        changeId = path.basename(cwd)
       } else if (arg && arg.length > 0) {
         // Arg is neither empty nor a known status — treat as changeId
         changeId = arg
         verificationStatus = "unknown"
       } else {
         // No args at all
-        changeId = cwd.split("/").filter(Boolean).pop() ?? ""
+        changeId = path.basename(cwd)
         verificationStatus = "unknown"
       }
 
       // Resolve planning artifact paths
       const { resolvePlanArtifactPath } = await import("pi-zflow-artifacts/artifact-paths")
       const { existsSync } = await import("node:fs")
-      const { default: path } = await import("node:path")
 
       const planVersion = "v1"
       const artifactKeys = ["design", "executionGroups", "standards", "verification"] as const

@@ -406,6 +406,42 @@ describe("path-guard integration — guardBashCommand", () => {
       `Expected npx to be blocked, got: ${result.message}`)
   })
 
+  it("blocks env wrapper destructive command", () => {
+    const result = guardBashCommand("env rm -rf /tmp/foo", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected env rm to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks time wrapper destructive command", () => {
+    const result = guardBashCommand("time rm file", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected time rm to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks curl simple fetch (not read-only)", () => {
+    const result = guardBashCommand("curl https://example.com", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected curl to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks curl with output flag (writes to disk)", () => {
+    const result = guardBashCommand("curl -o /tmp/out https://example.com", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected curl -o to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks wget simple fetch (not read-only)", () => {
+    const result = guardBashCommand("wget https://example.com", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected wget to be blocked, got: ${result.message}`)
+  })
+
+  it("blocks wget with output flag (writes to disk)", () => {
+    const result = guardBashCommand("wget -O /tmp/out https://example.com", makeOptions())
+    assert.ok(!result.allowed,
+      `Expected wget -O to be blocked, got: ${result.message}`)
+  })
+
   // ── Read-only commands still allowed ───────────────────────
 
   it("allows git status", () => {
