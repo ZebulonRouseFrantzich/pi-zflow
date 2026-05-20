@@ -306,4 +306,7 @@ export type {
   GuardOptions,
 } from "../extensions/zflow-change-workflows/path-guard.js"
 
+// Help topic metadata for suite-level /zflow-help display
+export { ZFLOW_HELP_TOPICS, CHANGE_HELP_TOPIC } from "./help.js"
+
 

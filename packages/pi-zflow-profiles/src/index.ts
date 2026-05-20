@@ -91,3 +91,6 @@ export type {
 // Pi model registry adapter — needed by sibling packages (e.g. change-workflows)
 // to pass the Pi runtime model registry into profile resolution.
 export { createPiModelRegistryAdapter } from "../extensions/zflow-profiles/pi-registry-adapter.js"
+
+// Help topic metadata for suite-level /zflow-help display
+export { ZFLOW_HELP_TOPICS, PROFILE_HELP_TOPIC } from "./help.js"

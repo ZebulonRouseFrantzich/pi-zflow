@@ -18,6 +18,7 @@ const CHILD_PACKAGES = [
   "pi-zflow-change-workflows",
   "pi-zflow-runecontext",
   "pi-zflow-compaction",
+  "pi-zflow-subagents-bridge",
   "pi-zflow",
 ]
 const PI_HOST_PEERS = new Set([

@@ -30,3 +30,6 @@ export {
 export type {
   BashPolicyResult,
 } from "../extensions/zflow-plan-mode/bash-policy.js"
+
+// Help topic metadata for suite-level /zflow-help display
+export { ZFLOW_HELP_TOPICS, PLAN_MODE_HELP_TOPIC } from "./help.js"

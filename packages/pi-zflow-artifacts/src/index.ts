@@ -98,3 +98,6 @@ export type {
 // Also importable directly from "pi-zflow-artifacts/write-plan-artifact"
 export { writePlanArtifact } from "./write-plan-artifact.js"
 export type { WritePlanArtifactResult } from "./write-plan-artifact.js"
+
+// Help topic metadata for suite-level /zflow-help display
+export { ZFLOW_HELP_TOPICS, ARTIFACTS_HELP_TOPIC } from "./help.js"

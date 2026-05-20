@@ -176,3 +176,19 @@ export type {
   ZflowDocPaths,
   PlatformDocsOptions,
 } from "./platform-docs.js"
+
+// Re-export help catalog types and pure helpers
+// Also importable directly from "pi-zflow-core/help-catalog"
+export {
+  sortTopicsByFlow,
+  groupTopicsByPackage,
+  getTopic,
+  renderTopicMarkdown,
+  renderAllTopicsMarkdown,
+  renderHelpSummary,
+} from "./help-catalog.js"
+
+export type {
+  ZflowCommandHelp,
+  ZflowHelpTopic,
+} from "./help-catalog.js"

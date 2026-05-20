@@ -95,20 +95,25 @@ describe("extension shape", () => {
     let totalExtensions = 0
 
     for (const extPath of extPaths) {
-      // In workspace dev, node_modules/<pkg>/extensions is a virtual path.
-      // Resolve it to the actual package in the monorepo:
-      //   node_modules/pi-zflow-artifacts/extensions → packages/pi-zflow-artifacts/extensions
-      const parts = extPath.replace(/^node_modules\//, "").split("/")
-      const pkgName = parts[0]
-      const actualPkgDir = resolve(workspaceRoot, `packages/${pkgName}`)
-
       let fullExtDir: string
-      if (existsSync(actualPkgDir)) {
-        // In monorepo layout, the extensions path is relative to the package root
-        fullExtDir = resolve(actualPkgDir, ...parts.slice(1))
-      } else {
-        // Fallback: resolve relative to the umbrella package
+
+      // Path relative to umbrella package (e.g. "./extensions/zflow-help")
+      if (extPath.startsWith("./") || extPath.startsWith("../")) {
         fullExtDir = resolve(dirname(umbrellaManifest), extPath)
+      } else {
+        // node_modules/<pkg>/extensions — resolve to the actual monorepo package
+        // e.g. node_modules/pi-zflow-artifacts/extensions → packages/pi-zflow-artifacts/extensions
+        const parts = extPath.replace(/^node_modules\//, "").split("/")
+        const pkgName = parts[0]
+        const actualPkgDir = resolve(workspaceRoot, `packages/${pkgName}`)
+
+        if (existsSync(actualPkgDir)) {
+          // In monorepo layout, the extensions path is relative to the package root
+          fullExtDir = resolve(actualPkgDir, ...parts.slice(1))
+        } else {
+          // Fallback: resolve relative to the umbrella package
+          fullExtDir = resolve(dirname(umbrellaManifest), extPath)
+        }
       }
 
       const indexPaths = discoverExtensionIndexPaths(fullExtDir)

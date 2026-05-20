@@ -78,3 +78,6 @@ export {
 export type {
   ModeFragment,
 } from "./prompt-fragments.js"
+
+// Help topic metadata for suite-level /zflow-help display
+export { ZFLOW_HELP_TOPICS, AGENTS_HELP_TOPIC } from "./help.js"

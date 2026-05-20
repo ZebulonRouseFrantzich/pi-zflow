@@ -97,3 +97,6 @@ export {
   // ── Service interface ──
   createRuneContextService,
 } from "./api.js"
+
+// Help topic metadata for suite-level /zflow-help display
+export { ZFLOW_HELP_TOPICS, RUNECONTEXT_HELP_TOPIC } from "./help.js"

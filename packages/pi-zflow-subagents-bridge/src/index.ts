@@ -35,3 +35,6 @@ export type {
 } from "pi-zflow-core/dispatch-service"
 
 export { DISPATCH_SERVICE_CAPABILITY } from "pi-zflow-core/dispatch-service"
+
+// Help topic metadata for suite-level /zflow-help display
+export { ZFLOW_HELP_TOPICS, DISPATCH_HELP_TOPIC } from "./help.js"

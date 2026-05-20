@@ -18,13 +18,54 @@ pi-zflow is a monorepo of individually installable Pi packages:
 | `pi-zflow-runecontext`      | Pi extension        | RuneContext integration                                                                                    |
 | `pi-zflow-compaction`       | Pi extension        | Proactive compaction hooks                                                                                 |
 | `pi-zflow-subagents-bridge` | Pi extension        | Dispatch adapter capability and diagnostics for subagent/worktree execution                                |
-| `pi-zflow`                  | umbrella Pi package | Bundles the suite                                                                                          |
+| `pi-zflow`                  | umbrella Pi package | Bundles the suite; registers `/zflow-help` and startup hint                                                |
 
 ### Dispatch backend status
 
 `pi-zflow-subagents-bridge` is the zflow-owned adapter for implementation dispatch. In local development it depends on the fork submodule at `vendor/pi-subagents-zflow` and loads `pi-subagents/zflow-bridge` for programmatic subagent/worktree execution. If that backend cannot be loaded, the bridge still registers diagnostics but returns `ok: false` instead of faking worker success.
 
 Clone with `git clone --recurse-submodules ...` or run `git submodule update --init --recursive` after checkout. Before publishing or sharing as an installable package, replace the local `file:` dependency with an exact git commit SHA for the fork.
+
+## Help UX
+
+pi-zflow provides a suite-level help system. The architecture is:
+
+1. **Each child package owns its own help metadata** — a `src/help.ts` module that exports a `ZFLOW_HELP_TOPICS` array containing typed `ZflowHelpTopic` objects. These describe the package's commands, usage, flow guidance, and related topics.
+2. **`pi-zflow-core` provides shared types and rendering helpers** — the library-only `help-catalog.ts` module exports `ZflowHelpTopic`, `ZflowCommandHelp`, sort/group helpers, and markdown renderers (`renderTopicMarkdown`, `renderAllTopicsMarkdown`, `renderHelpSummary`). No Pi extensions are registered here.
+3. **The umbrella `pi-zflow` aggregates and renders** — the `/zflow-help` extension in `packages/pi-zflow/extensions/zflow-help/` imports `ZFLOW_HELP_TOPICS` from every child package, aggregates them, and registers the `/zflow-help` command with multiple sub-arguments. On first startup (once per extension lifetime), a short notification is shown:
+   `"pi-zflow loaded — type /zflow-help for commands and workflow guidance."`
+
+### `/zflow-help` command
+
+| Argument               | Display                                                                                       |
+| ---------------------- | --------------------------------------------------------------------------------------------- |
+| _(none)_ or `overview` | Full suite overview: package summary table, recommended workflow, per-topic details           |
+| `commands`             | Flat command table grouped by package                                                         |
+| `flow`                 | Recommended workflow and typical development cycle order only                                 |
+| `profiles`             | Profile management commands and guidance                                                      |
+| `plan` or `planning`   | Read-only planning mode commands and guidance                                                 |
+| `review`               | Code review commands and guidance                                                             |
+| `change`               | Change workflow commands and guidance                                                         |
+| `agents`               | Agent setup commands and guidance                                                             |
+| `doctor`               | Capability registry diagnostics (registered capabilities, diagnostics log, help topic counts) |
+
+Help is rendered as a persistent markdown message in the conversation via `pi.sendMessage({ customType: "zflow-help", ... })` with `triggerTurn: false` to avoid interrupting the agent.
+
+### Startup behavior
+
+The startup hint (`"pi-zflow loaded …"`) is:
+
+- Only shown on `session_start` with `reason: "startup"` (not on reload, resume, or fork)
+- Only shown when `hasUI` is true (not in print or JSON mode)
+- Only shown once per extension lifetime (deduped via a module-level flag)
+- A short one-line notification, not a full help dump
+
+### Design rules
+
+- Child packages **must not register `/zflow-help`** or any generic help command. That is the umbrella's responsibility.
+- Child packages **must export `ZFLOW_HELP_TOPICS`** from their main entrypoint for the umbrella to discover.
+- All command names in help metadata **must be namespaced** (`zflow-*` or `zflow_*`).
+- The help system does **not** scrape or infer commands from the Pi runtime — metadata is explicit and statically typed.
 
 ## Version policy
 

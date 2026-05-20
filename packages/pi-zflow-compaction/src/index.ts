@@ -26,3 +26,6 @@ export type {
   CompactionService,
   ModelRegistryLike,
 } from "./compaction-service.js"
+
+// Help topic metadata for suite-level /zflow-help display
+export { ZFLOW_HELP_TOPICS, COMPACTION_HELP_TOPIC } from "./help.js"
