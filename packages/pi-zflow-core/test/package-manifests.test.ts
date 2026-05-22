@@ -33,6 +33,15 @@ function readJson(file: string): any {
   return JSON.parse(fs.readFileSync(file, "utf8"))
 }
 
+function assertManifestPathsExist(manifestPath: string, resourcePaths: string[] | undefined, label: string): void {
+  assert.ok(resourcePaths?.length, `${label} manifest must declare ${label} paths`)
+
+  for (const resourcePath of resourcePaths) {
+    const fullPath = path.resolve(path.dirname(manifestPath), resourcePath)
+    assert.ok(fs.existsSync(fullPath), `${label} path should exist: ${resourcePath}`)
+  }
+}
+
 describe("workspace package manifests", () => {
   test("all child packages exist", () => {
     for (const pkg of CHILD_PACKAGES) {
@@ -55,6 +64,7 @@ describe("workspace package manifests", () => {
         assert.equal(typeof spec, "string", `${pkg} dependency ${name} should be a string`)
         assert.notEqual(spec, "latest", `${pkg} dependency ${name} must not use latest`)
         assert.ok(!String(spec).startsWith("^") && !String(spec).startsWith("~"), `${pkg} dependency ${name} must be exact, got ${spec}`)
+        assert.ok(!String(spec).startsWith("file:"), `${pkg} dependency ${name} must be installable from GitHub, got ${spec}`)
       }
     }
   })
@@ -78,6 +88,27 @@ describe("workspace package manifests", () => {
     for (const pkg of CHILD_PACKAGES.filter((p) => p !== "pi-zflow")) {
       assert.equal(umbrella.dependencies[pkg], "0.1.0", `umbrella dependency ${pkg} must be pinned`)
       assert.ok(bundled.has(pkg), `umbrella must bundle ${pkg}`)
+    }
+  })
+
+  test("repository root is an installable Pi package for direct GitHub installs", () => {
+    const rootManifestPath = path.join(REPO_ROOT, "package.json")
+    const root = readJson(rootManifestPath)
+
+    assert.ok(root.private, "repository root should remain a private workspace package")
+    assert.ok(root.keywords?.includes("pi-package"), "repository root should be discoverable as a Pi package")
+    assert.ok(root.keywords?.includes("pi-zflow"), "repository root should be tagged as pi-zflow")
+
+    assertManifestPathsExist(rootManifestPath, root.pi?.extensions, "extensions")
+    assertManifestPathsExist(rootManifestPath, root.pi?.skills, "skills")
+    assertManifestPathsExist(rootManifestPath, root.pi?.prompts, "prompts")
+
+    assert.ok(root.pi.extensions.includes("packages/pi-zflow/extensions"), "root manifest should expose umbrella help extension")
+    for (const pkg of CHILD_PACKAGES.filter((p) => p !== "pi-zflow-core" && p !== "pi-zflow")) {
+      const child = readJson(path.join(PACKAGE_DIR, pkg, "package.json"))
+      if (child.pi?.extensions?.length) {
+        assert.ok(root.pi.extensions.includes(`packages/${pkg}/extensions`), `root manifest should expose ${pkg} extensions`)
+      }
     }
   })
 })

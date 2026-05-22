@@ -119,15 +119,15 @@ When any child package is published to npm, update this record with the exact pu
 ### Fork dependency record
 
 The bridge (`pi-zflow-subagents-bridge`) depends on a forked `pi-subagents` for operational dispatch.
-During local development this is wired as a `file:` dependency.
+The installable GitHub package pins that fork to an exact commit SHA.
 
-| Fork package          | Local path                                                                                             | Upstream                             | Pinning strategy                       |
-| --------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------ | -------------------------------------- |
-| `pi-subagents` (fork) | `vendor/pi-subagents-zflow` submodule (package dependency uses `file:../../vendor/pi-subagents-zflow`) | `github.com/nicobailon/pi-subagents` | Pin to exact commit SHA before release |
+| Fork package          | Package dependency                                                                                                    | Upstream                             | Pinning strategy              |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------ | ----------------------------- |
+| `pi-subagents` (fork) | `https://github.com/ZebulonRouseFrantzich/pi-subagents-zflow/archive/7d8463d6c1c62d9e732246cb62fa54b8d68644be.tar.gz` | `github.com/nicobailon/pi-subagents` | Exact commit tarball required |
 
-**Submodule checkout**: use `git submodule update --init --recursive` after cloning pi-zflow.
+**Submodule checkout**: the `vendor/pi-subagents-zflow` submodule remains available for fork development. Use `git submodule update --init --recursive` after cloning pi-zflow when you need to edit the fork locally.
 
-**Upstream sync process**: inside `vendor/pi-subagents-zflow`, run `git fetch upstream && git rebase upstream/main`, test, commit/push the fork, then update the parent repo's submodule pointer. For installable releases, update `pi-zflow-subagents-bridge/package.json` from the local `file:` dependency to an exact git commit SHA.
+**Upstream sync process**: inside `vendor/pi-subagents-zflow`, run `git fetch upstream && git rebase upstream/main`, test, commit/push the fork, then update both the parent repo's submodule pointer and the exact SHA in `pi-zflow-subagents-bridge/package.json`.
 
 ---
 

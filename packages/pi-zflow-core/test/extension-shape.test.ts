@@ -132,4 +132,34 @@ describe("extension shape", () => {
 
     ok(totalExtensions >= 1, `Found ${totalExtensions} extensions via umbrella manifest`)
   })
+
+  // ── Root manifest test ──────────────────────────────────────────
+
+  it("all root Pi manifest extension paths resolve to function exports", async () => {
+    const rootManifest = resolve(workspaceRoot, "package.json")
+    const { default: rootPkg } = await import(rootManifest, { with: { type: "json" } })
+    const extPaths: string[] = rootPkg.pi?.extensions ?? []
+
+    ok(extPaths.length > 0, "Root manifest must declare extension paths for direct GitHub installs")
+
+    let totalExtensions = 0
+
+    for (const extPath of extPaths) {
+      const fullExtDir = resolve(dirname(rootManifest), extPath)
+      const indexPaths = discoverExtensionIndexPaths(fullExtDir)
+
+      ok(indexPaths.length > 0,
+        `No extension index.ts found under ${fullExtDir} (root path ${extPath})`)
+
+      totalExtensions += indexPaths.length
+
+      for (const indexPath of indexPaths) {
+        const mod = await import(indexPath)
+        ok(typeof mod.default === "function",
+          `Extension at ${indexPath} must export a function (root path ${extPath})`)
+      }
+    }
+
+    ok(totalExtensions >= 1, `Found ${totalExtensions} extensions via root manifest`)
+  })
 })

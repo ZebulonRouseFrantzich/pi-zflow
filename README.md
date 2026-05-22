@@ -20,11 +20,19 @@ pi-zflow is a monorepo of individually installable Pi packages:
 | `pi-zflow-subagents-bridge` | Pi extension        | Dispatch adapter capability and diagnostics for subagent/worktree execution                                |
 | `pi-zflow`                  | umbrella Pi package | Bundles the suite; registers `/zflow-help` and startup hint                                                |
 
+### Install from GitHub
+
+The repository root is a valid Pi package entrypoint. Install the full suite directly from GitHub with an exact ref:
+
+```bash
+pi install git:github.com/ZebulonRouseFrantzich/pi-zflow@<commit-or-tag>
+```
+
+Pi will clone the repo, run `npm install`, and load the root `pi` manifest, which exposes the workspace package extensions plus the bundled skills and prompt templates. Agent and chain assets are still installed through `/zflow-setup-agents` because Pi package manifests do not have native `agents` or `chains` keys.
+
 ### Dispatch backend status
 
-`pi-zflow-subagents-bridge` is the zflow-owned adapter for implementation dispatch. In local development it depends on the fork submodule at `vendor/pi-subagents-zflow` and loads `pi-subagents/zflow-bridge` for programmatic subagent/worktree execution. If that backend cannot be loaded, the bridge still registers diagnostics but returns `ok: false` instead of faking worker success.
-
-Clone with `git clone --recurse-submodules ...` or run `git submodule update --init --recursive` after checkout. Before publishing or sharing as an installable package, replace the local `file:` dependency with an exact git commit SHA for the fork.
+`pi-zflow-subagents-bridge` is the zflow-owned adapter for implementation dispatch. It depends on the forked `pi-subagents` package pinned to exact commit `7d8463d6c1c62d9e732246cb62fa54b8d68644be` and loads `pi-subagents/zflow-bridge` for programmatic subagent/worktree execution. If that backend cannot be loaded, the bridge still registers diagnostics but returns `ok: false` instead of faking worker success.
 
 ## Help UX
 

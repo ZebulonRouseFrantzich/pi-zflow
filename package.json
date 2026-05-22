@@ -17,5 +17,29 @@
   "engines": {
     "node": ">=22.0.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-zflow"
+  ],
+  "pi": {
+    "extensions": [
+      "packages/pi-zflow/extensions",
+      "packages/pi-zflow-artifacts/extensions",
+      "packages/pi-zflow-profiles/extensions",
+      "packages/pi-zflow-plan-mode/extensions",
+      "packages/pi-zflow-agents/extensions",
+      "packages/pi-zflow-review/extensions",
+      "packages/pi-zflow-change-workflows/extensions",
+      "packages/pi-zflow-runecontext/extensions",
+      "packages/pi-zflow-compaction/extensions",
+      "packages/pi-zflow-subagents-bridge/extensions"
+    ],
+    "skills": [
+      "packages/pi-zflow-agents/skills"
+    ],
+    "prompts": [
+      "packages/pi-zflow-agents/prompts"
+    ]
+  }
 }
