@@ -73,6 +73,7 @@ import type { ApplyBackResult } from "./apply-back.js"
 import { writeDeviationSummary, readDeviationReports } from "./deviations.js"
 import { getCurrentBranch } from "./git-preflight.js"
 import { getZflowRegistry } from "pi-zflow-core/registry"
+import { DISPATCH_SERVICE_CAPABILITY, type DispatchService } from "pi-zflow-core/dispatch-service"
 import {
   isRepoMapFresh,
   writeRepoMapCache,
@@ -2349,6 +2350,10 @@ export interface PrepareWorkflowOptions {
   changeId?: string
   /** Whether to skip the plan-review step. */
   skipReview?: boolean
+  /** Force normal ad-hoc change-doc handling; skip RuneContext detection. */
+  forceAdHoc?: boolean
+  /** Additional user notes supplied after the change path. */
+  prepareNotes?: string
 }
 
 /**
@@ -3485,11 +3490,132 @@ export async function runPrepareAgentsIfAvailable(
   changeId: string,
   planVersion: string,
   cwd?: string,
+  changePath?: string,
+  prepareNotes?: string,
 ): Promise<PrepareAgentDispatchResult> {
   const registry = getZflowRegistry()
   const { default: fs } = await import("node:fs/promises")
   const { default: pathModule } = await import("node:path")
   const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+
+  const runtimeStateDir = resolveRuntimeStateDir(cwd)
+  const versionDir = resolvePlanVersionDir(changeId, planVersion, cwd)
+  const artifactPaths = {
+    repoMap: pathModule.join(runtimeStateDir, "repo-map.md"),
+    reconnaissance: pathModule.join(runtimeStateDir, "reconnaissance.md"),
+    design: pathModule.join(versionDir, "design.md"),
+    executionGroups: pathModule.join(versionDir, "execution-groups.md"),
+    standards: pathModule.join(versionDir, "standards.md"),
+    verification: pathModule.join(versionDir, "verification.md"),
+  }
+
+  const collectOutputs = async (): Promise<string[]> => {
+    const outputs: string[] = []
+    for (const artifactPath of Object.values(artifactPaths)) {
+      try {
+        await fs.access(artifactPath)
+        outputs.push(artifactPath)
+      } catch {
+        // Not written — that's fine
+      }
+    }
+    return outputs
+  }
+
+  const recordDispatchMetadata = async (metadata: Record<string, unknown>): Promise<void> => {
+    try {
+      const planStatePath = resolvePlanStatePath(changeId, cwd)
+      const raw = await fs.readFile(planStatePath, "utf-8")
+      const planState = JSON.parse(raw)
+      planState.runtimeMetadata = {
+        ...(planState.runtimeMetadata ?? {}),
+        ...metadata,
+      }
+      planState.updatedAt = new Date().toISOString()
+      await fs.writeFile(planStatePath, JSON.stringify(planState, null, 2), "utf-8")
+    } catch {
+      // Non-critical; skip recording
+    }
+  }
+
+  const zflowDispatch = registry.optional<DispatchService>(DISPATCH_SERVICE_CAPABILITY)
+  if (zflowDispatch && typeof zflowDispatch.runAgent === "function") {
+    try {
+      const task = [
+        `Run formal zflow change preparation for changeId \`${changeId}\` and planVersion \`${planVersion}\`.`,
+        changePath ? `Change input path: ${changePath}` : "No change input path was provided.",
+        prepareNotes ? `Additional user notes: ${prepareNotes}` : "",
+        "Treat non-RuneContext idea/change documents as requirements input, then inspect the repository before planning.",
+        "Ask clarifying questions in your final output if decisions are genuinely blocked; otherwise write all four required plan artifacts.",
+        "Use ONLY zflow_write_plan_artifact for artifact writes.",
+        "Required artifact writes:",
+        `- design -> ${artifactPaths.design}`,
+        `- execution-groups -> ${artifactPaths.executionGroups}`,
+        `- standards -> ${artifactPaths.standards}`,
+        `- verification -> ${artifactPaths.verification}`,
+        `Repository map path: ${artifactPaths.repoMap}`,
+        `Reconnaissance path: ${artifactPaths.reconnaissance}`,
+      ].filter(Boolean).join("\n")
+
+      const result = await zflowDispatch.runAgent({
+        agent: "zflow.planner-frontier",
+        task,
+        cwd: cwd ?? process.cwd(),
+        output: pathModule.join(versionDir, "planner-frontier-output.md"),
+        outputMode: "file-only",
+        maxOutput: { lines: 400, bytes: 24000 },
+      })
+      const outputs = await collectOutputs()
+
+      if (!result.ok) {
+        await recordDispatchMetadata({
+          agentDispatchStatus: "failed",
+          agentDispatchService: DISPATCH_SERVICE_CAPABILITY,
+          agentDispatchMethod: "runAgent",
+          agentDispatchError: result.error ?? "Planner dispatch failed",
+        })
+        return {
+          dispatched: false,
+          agentDispatchStatus: "failed",
+          serviceName: DISPATCH_SERVICE_CAPABILITY,
+          methodUsed: "runAgent",
+          producedOutputs: outputs,
+          error: result.error ?? "Planner dispatch failed",
+        }
+      }
+
+      await recordDispatchMetadata({
+        agentDispatchStatus: "dispatched",
+        agentDispatchService: DISPATCH_SERVICE_CAPABILITY,
+        agentDispatchMethod: "runAgent",
+        agentDispatchedAt: new Date().toISOString(),
+        plannerOutputPath: result.outputPath,
+      })
+      return {
+        dispatched: true,
+        agentDispatchStatus: "dispatched",
+        serviceName: DISPATCH_SERVICE_CAPABILITY,
+        methodUsed: "runAgent",
+        producedOutputs: outputs,
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err)
+      await recordDispatchMetadata({
+        agentDispatchStatus: "failed",
+        agentDispatchService: DISPATCH_SERVICE_CAPABILITY,
+        agentDispatchMethod: "runAgent",
+        agentDispatchError: errorMessage,
+      })
+      return {
+        dispatched: false,
+        agentDispatchStatus: "failed",
+        serviceName: DISPATCH_SERVICE_CAPABILITY,
+        methodUsed: "runAgent",
+        producedOutputs: await collectOutputs(),
+        error: errorMessage,
+      }
+    }
+  }
 
   // Known dispatch method names across agent/subagent/orchestration services
   const DISPATCH_METHOD_NAMES = new Set(["runAgent", "runChain", "dispatch", "subagent"])
@@ -3534,9 +3660,6 @@ export async function runPrepareAgentsIfAvailable(
     }
   }
 
-  // A compatible dispatch service exists — call through it defensively
-  const runtimeStateDir = resolveRuntimeStateDir(cwd)
-  const versionDir = resolvePlanVersionDir(changeId, planVersion, cwd)
   const outputs: string[] = []
 
   try {
@@ -3549,14 +3672,7 @@ export async function runPrepareAgentsIfAvailable(
       changeId,
       planVersion,
       cwd: cwd ?? process.cwd(),
-      artifactPaths: {
-        repoMap: pathModule.join(runtimeStateDir, "repo-map.md"),
-        reconnaissance: pathModule.join(runtimeStateDir, "reconnaissance.md"),
-        design: pathModule.join(versionDir, "design.md"),
-        executionGroups: pathModule.join(versionDir, "execution-groups.md"),
-        standards: pathModule.join(versionDir, "standards.md"),
-        verification: pathModule.join(versionDir, "verification.md"),
-      },
+      artifactPaths,
     }
 
     await dispatchFn(dispatchContext)
@@ -3703,7 +3819,7 @@ export async function runChangePrepareWorkflow(
     approvedVersion: null,
     lifecycleState: "draft",
     runeContext: {
-      enabled: !!options.changePath,
+      enabled: false,
       changePath: options.changePath ?? null,
     },
     versions: {
@@ -3754,7 +3870,7 @@ export async function runChangePrepareWorkflow(
   let runeContextDetected = false
   let runeContextCanonical = false
   let runeContextDocsList: string[] = []
-  if (changePath.includes("@") || changePath.includes("/context/")) {
+  if (!options.forceAdHoc && (changePath.includes("@") || changePath.includes("/context/"))) {
     console.info(`[zflow] Change path "${changePath}" looks like a RuneContext path — attempting detection.`)
     if (registry.has("runecontext")) {
       try {
@@ -3769,6 +3885,7 @@ export async function runChangePrepareWorkflow(
 
           if (detected && detected.detected) {
             runeContextDetected = true
+            initialPlanState.runeContext.enabled = true
 
             // Resolve the change path to discover canonical RuneContext document locations
             if (runeContextService.resolveChange && detected.repoRoot) {
@@ -3909,6 +4026,7 @@ export async function runChangePrepareWorkflow(
       const planState = JSON.parse(raw)
       planState.runeContext = {
         ...planState.runeContext,
+        enabled: true,
         canonical: true,
         canonicalDocs: runeContextDocsList,
         detectedAt: new Date().toISOString(),
@@ -3934,7 +4052,13 @@ export async function runChangePrepareWorkflow(
   }
 
   // ── Step 10: Attempt optional agent dispatch via registry ───────
-  const agentDispatchResult = await runPrepareAgentsIfAvailable(changeId, "v1", cwd)
+  const agentDispatchResult = await runPrepareAgentsIfAvailable(
+    changeId,
+    "v1",
+    cwd,
+    options.changePath,
+    options.prepareNotes,
+  )
   if (agentDispatchResult.dispatched) {
     console.info(
       `[zflow] Agent dispatch completed via ${agentDispatchResult.serviceName}.` +

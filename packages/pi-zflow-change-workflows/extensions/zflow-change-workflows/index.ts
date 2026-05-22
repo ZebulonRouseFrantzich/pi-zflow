@@ -509,6 +509,62 @@ async function runStructuredInterview(
   return { decision: "inspect" }
 }
 
+/**
+ * Return whether ad-hoc `/zflow-plan` mode is currently active.
+ *
+ * Formal change preparation may approve a plan while plan mode is active, but
+ * it must not immediately fork or hand off to implementation from that
+ * read-only planning context.
+ */
+export function isAdHocPlanModeActive(): boolean {
+  try {
+    const service = getZflowRegistry().optional<{
+      isPlanModeActive?: () => boolean
+    }>("plan-mode")
+    return service?.isPlanModeActive?.() === true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Decide whether `/zflow-change-prepare` should create an implementation
+ * handoff/session fork after plan approval.
+ */
+export function shouldForkImplementationSessionAfterPrepare(): boolean {
+  return !isAdHocPlanModeActive()
+}
+
+/** Parsed arguments for `/zflow-change-prepare`. */
+export interface ParsedChangePrepareArgs {
+  changePath: string
+  forceAdHoc: boolean
+  notes: string
+}
+
+/**
+ * Parse `/zflow-change-prepare` arguments.
+ *
+ * The command's first token is the change document/path. Remaining text is
+ * advisory notes. `--no-runecontext` or a note like "not a RuneContext" forces
+ * normal ad-hoc change-doc handling.
+ */
+export function parseChangePrepareArgs(args: string): ParsedChangePrepareArgs {
+  const parts = args.trim().split(/\s+/).filter(Boolean)
+  const rawPath = parts[0] ?? ""
+  const rest = parts.slice(1)
+  const notes = rest.filter((part) => part !== "--no-runecontext").join(" ")
+  const forceAdHoc =
+    rest.includes("--no-runecontext") ||
+    /\bnot\s+(?:a\s+)?runecontext\b/i.test(notes) ||
+    /\bnormal\s+idea\s+file\b/i.test(notes)
+  const changePath = forceAdHoc && rawPath.startsWith("@")
+    ? rawPath.slice(1)
+    : rawPath
+
+  return { changePath, forceAdHoc, notes }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Workflow mode/reminder state management
 // ═══════════════════════════════════════════════════════════════════
@@ -1126,7 +1182,8 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
   pi.registerCommand("zflow-change-prepare", {
     description: "Run the formal change preparation workflow for a given change path or RuneContext",
     handler: async (args: string, ctx: InterviewableContext): Promise<void> => {
-      const changePath = args.trim()
+      const parsedArgs = parseChangePrepareArgs(args)
+      const changePath = parsedArgs.changePath
       if (!changePath) {
         ctx.ui.notify("Usage: /zflow-change-prepare <change-path>", "warning")
         return
@@ -1173,6 +1230,9 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         // Step 1: Run the initial prepare workflow (creates plan state, version dir, etc.)
         const result = await runChangePrepareWorkflow({
           changePath,
+          cwd: ctx.cwd,
+          forceAdHoc: parsedArgs.forceAdHoc,
+          prepareNotes: parsedArgs.notes,
         })
 
         ctx.ui.notify(
@@ -1198,23 +1258,33 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
 
         // Step 2: Validate plan artifacts
         ctx.ui.notify(`🔍 Validating plan artifacts for "${result.changeId}" v${result.planVersion}...`, "info")
-        const validation = await runPlanValidation(result.changeId, result.planVersion)
+        const validation = await runPlanValidation(result.changeId, result.planVersion, ctx.cwd)
         if (validation.pass) {
-          await advancePlanLifecycle(result.changeId, "validated")
+          await advancePlanLifecycle(result.changeId, "validated", ctx.cwd)
           ctx.ui.notify(`✅ Plan validation passed for "${result.changeId}" v${result.planVersion}.`, "info")
         } else {
           ctx.ui.notify(
             `⚠️ Plan validation found issues:\n${validation.issues.map((i) => `  - ${i}`).join("\n")}`,
             "warning",
           )
-          ctx.ui.notify("Plan artifacts need attention before proceeding to review.", "warning")
+          ctx.ui.notify(
+            `Plan artifacts need attention before review or approval.\n` +
+            `The planner must produce complete artifacts at:\n` +
+            `  - design: ${result.artifactPaths.design}\n` +
+            `  - execution-groups: ${result.artifactPaths.executionGroups}\n` +
+            `  - standards: ${result.artifactPaths.standards}\n` +
+            `  - verification: ${result.artifactPaths.verification}\n\n` +
+            `No approval prompt will be shown until validation passes.`,
+            "warning",
+          )
+          return
         }
 
         // Step 3: Run plan review
         ctx.ui.notify(`📋 Running plan review for "${result.changeId}" v${result.planVersion}...`, "info")
-        const reviewResult = await runPlanReview(result.changeId, result.planVersion)
+        const reviewResult = await runPlanReview(result.changeId, result.planVersion, ctx.cwd)
         if (reviewResult.pass) {
-          await advancePlanLifecycle(result.changeId, "reviewed")
+          await advancePlanLifecycle(result.changeId, "reviewed", ctx.cwd)
           ctx.ui.notify(`✅ Plan review passed for "${result.changeId}".`, "info")
         } else {
           ctx.ui.notify(
@@ -1254,17 +1324,33 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
 
         switch (interviewResult.decision) {
           case "approve": {
-            await approvePlanVersion(result.changeId, result.planVersion)
+            await approvePlanVersion(result.changeId, result.planVersion, ctx.cwd)
             ctx.ui.notify(
               `✅ Plan "${result.changeId}" version ${result.planVersion} approved.`,
               "info",
             )
 
+            if (!shouldForkImplementationSessionAfterPrepare()) {
+              ctx.ui.notify(
+                `📌 Plan mode is active, so no implementation session was forked.\n` +
+                `  Plan artifacts are ready for change "${result.changeId}" v${result.planVersion}:\n` +
+                `    - design: ${result.artifactPaths.design}\n` +
+                `    - execution-groups: ${result.artifactPaths.executionGroups}\n` +
+                `    - standards: ${result.artifactPaths.standards}\n` +
+                `    - verification: ${result.artifactPaths.verification}\n\n` +
+                `  When you are ready to implement, run:\n` +
+                `    /zflow-plan exit\n` +
+                `    /zflow-change-implement ${result.changeId}`,
+                "info",
+              )
+              break
+            }
+
             // Build implementation handoff and attempt session fork
             const handoff = buildImplementationHandoff(
               result.changeId,
               result.planVersion,
-              resolveRuntimeStateDir(),
+              resolveRuntimeStateDir(ctx.cwd),
               result.artifactPaths,
             )
 
@@ -1318,8 +1404,8 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             break
           }
           case "revise": {
-            await bumpPlanVersion(result.changeId)
-            await advancePlanLifecycle(result.changeId, "draft")
+            await bumpPlanVersion(result.changeId, ctx.cwd)
+            await advancePlanLifecycle(result.changeId, "draft", ctx.cwd)
             ctx.ui.notify(
               `📝 Revision requested for "${result.changeId}". ` +
               (interviewResult.revisionNotes
@@ -1332,7 +1418,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           case "cancel": {
             await updatePlanState(result.changeId, {
               lifecycleState: "cancelled",
-            })
+            }, ctx.cwd)
             ctx.ui.notify(
               `🛑 Plan "${result.changeId}" version ${result.planVersion} cancelled by user.`,
               "warning",

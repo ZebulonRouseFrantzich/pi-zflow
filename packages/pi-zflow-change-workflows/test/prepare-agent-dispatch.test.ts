@@ -25,6 +25,7 @@ import type {
 
 import { resolvePlanStatePath, resolvePlanVersionDir, resolveRepoMapPath, resolveReconnaissancePath } from "pi-zflow-artifacts/artifact-paths"
 import { getZflowRegistry, resetZflowRegistry } from "pi-zflow-core/registry"
+import { DISPATCH_SERVICE_CAPABILITY } from "pi-zflow-core/dispatch-service"
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -86,6 +87,56 @@ describe("runPrepareAgentsIfAvailable — unavailable service path", () => {
 // ---------------------------------------------------------------------------
 
 describe("runPrepareAgentsIfAvailable — fake service path", () => {
+  test("dispatches planner-frontier via zflow-dispatch runAgent with a real agent task", async () => {
+    resetZflowRegistry()
+
+    const repoRoot = await createTestRepo()
+    try {
+      const registry = getZflowRegistry()
+      let receivedInput: any = null
+      registry.claim({
+        capability: DISPATCH_SERVICE_CAPABILITY,
+        version: "0.1.0",
+        provider: "test-dispatch",
+        sourcePath: import.meta.url,
+      })
+      registry.provide(DISPATCH_SERVICE_CAPABILITY, {
+        name: "test-dispatch",
+        runAgent: async (input: any) => {
+          receivedInput = input
+          const versionDir = resolvePlanVersionDir("test-zflow-dispatch", "v1", repoRoot)
+          await fs.mkdir(versionDir, { recursive: true })
+          await fs.writeFile(path.join(versionDir, "design.md"), "# Design\n", "utf-8")
+          await fs.writeFile(path.join(versionDir, "execution-groups.md"), "# Execution Groups\n", "utf-8")
+          await fs.writeFile(path.join(versionDir, "standards.md"), "# Standards\n", "utf-8")
+          await fs.writeFile(path.join(versionDir, "verification.md"), "# Verification\n", "utf-8")
+          return { ok: true, rawOutput: "done", outputPath: path.join(versionDir, "planner-frontier-output.md") }
+        },
+        runParallel: async () => ({ ok: true, results: [] }),
+      })
+
+      await runChangePrepareWorkflow({ cwd: repoRoot, changeId: "test-zflow-dispatch" })
+      const result = await runPrepareAgentsIfAvailable(
+        "test-zflow-dispatch",
+        "v1",
+        repoRoot,
+        "docs/change.md",
+        "normal idea file",
+      )
+
+      assert.strictEqual(result.dispatched, true)
+      assert.strictEqual(result.agentDispatchStatus, "dispatched")
+      assert.strictEqual(result.serviceName, DISPATCH_SERVICE_CAPABILITY)
+      assert.strictEqual(result.methodUsed, "runAgent")
+      assert.strictEqual(receivedInput.agent, "zflow.planner-frontier")
+      assert.match(receivedInput.task, /changeId `test-zflow-dispatch`/)
+      assert.match(receivedInput.task, /Change input path: docs\/change\.md/)
+      assert.match(receivedInput.task, /Additional user notes: normal idea file/)
+    } finally {
+      await removeTestRepo(repoRoot)
+    }
+  })
+
   test("dispatches via a registry service exposing a dispatch method", async () => {
     resetZflowRegistry()
 

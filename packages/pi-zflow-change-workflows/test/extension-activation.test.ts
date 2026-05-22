@@ -8,8 +8,12 @@
 import { describe, it, afterEach } from "node:test"
 import * as assert from "node:assert/strict"
 
-import activateZflowChangeWorkflowsExtension from "../extensions/zflow-change-workflows/index.js"
+import activateZflowChangeWorkflowsExtension, {
+  parseChangePrepareArgs,
+  shouldForkImplementationSessionAfterPrepare,
+} from "../extensions/zflow-change-workflows/index.js"
 import { resetZflowRegistry } from "pi-zflow-core"
+import { getZflowRegistry } from "pi-zflow-core/registry"
 
 function makePiStub() {
   const commands: Map<string, number> = new Map()
@@ -94,5 +98,43 @@ describe("zflow-change-workflows extension activation", () => {
       activateZflowChangeWorkflowsExtension(pi as any)
       activateZflowChangeWorkflowsExtension(pi as any)
     })
+  })
+
+  it("allows prepare to fork implementation sessions when plan mode is inactive", () => {
+    assert.equal(shouldForkImplementationSessionAfterPrepare(), true)
+  })
+
+  it("does not fork implementation sessions from active /zflow-plan mode", () => {
+    const registry = getZflowRegistry()
+    registry.claim({
+      capability: "plan-mode",
+      version: "0.1.0",
+      provider: "test-plan-mode",
+      sourcePath: import.meta.url,
+      compatibilityMode: "compatible",
+    })
+    registry.provide("plan-mode", {
+      isPlanModeActive: () => true,
+    })
+
+    assert.equal(shouldForkImplementationSessionAfterPrepare(), false)
+  })
+
+  it("parses change-prepare notes and --no-runecontext opt-out", () => {
+    const parsed = parseChangePrepareArgs(
+      "@docs/change-ideas/cloudflare-target-architecture-combined-spec.md " +
+        "This document is not a RuneContext folder or file. Please treat it as a normal idea file",
+    )
+
+    assert.equal(parsed.changePath, "docs/change-ideas/cloudflare-target-architecture-combined-spec.md")
+    assert.equal(parsed.forceAdHoc, true)
+    assert.match(parsed.notes, /normal idea file/)
+  })
+
+  it("keeps explicit RuneContext-style paths when no opt-out is present", () => {
+    const parsed = parseChangePrepareArgs("@agent-os/specs/change-123")
+
+    assert.equal(parsed.changePath, "@agent-os/specs/change-123")
+    assert.equal(parsed.forceAdHoc, false)
   })
 })
