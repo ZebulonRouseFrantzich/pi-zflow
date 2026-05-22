@@ -3467,6 +3467,19 @@ export interface PrepareAgentDispatchResult {
   error?: string
 }
 
+/** Resolve an agent model override from the active zflow profile cache. */
+async function resolveProfileModelForAgent(agentName: string): Promise<string | undefined> {
+  try {
+    const profileService = getZflowRegistry().optional<{
+      getResolvedAgentBinding?: (agentName: string) => Promise<{ resolvedModel?: string | null } | null>
+    }>("profiles")
+    const binding = await profileService?.getResolvedAgentBinding?.(agentName)
+    return binding?.resolvedModel ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * Run prepare-phase agents via the registry if available.
  *
@@ -3561,6 +3574,7 @@ export async function runPrepareAgentsIfAvailable(
         agent: "zflow.planner-frontier",
         task,
         cwd: cwd ?? process.cwd(),
+        model: await resolveProfileModelForAgent("zflow.planner-frontier"),
         output: pathModule.join(versionDir, "planner-frontier-output.md"),
         outputMode: "file-only",
         maxOutput: { lines: 400, bytes: 24000 },

@@ -916,6 +916,9 @@ async function ensureProfileResolved(ctx: InterviewableContext): Promise<boolean
         // Convert the Pi model registry if available, so lane-health preflight
         // can check real model availability and authentication.
         let options: Record<string, unknown> = {}
+        if (ctx.cwd) {
+          options.repoRoot = ctx.cwd
+        }
         if (ctx.modelRegistry) {
           const { createPiModelRegistryAdapter } = await import("pi-zflow-profiles")
           options.registry = createPiModelRegistryAdapter(ctx.modelRegistry)
@@ -1257,11 +1260,11 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         }
 
         // Step 2: Validate plan artifacts
-        ctx.ui.notify(`🔍 Validating plan artifacts for "${result.changeId}" v${result.planVersion}...`, "info")
+        ctx.ui.notify(`🔍 Validating plan artifacts for "${result.changeId}" ${result.planVersion}...`, "info")
         const validation = await runPlanValidation(result.changeId, result.planVersion, ctx.cwd)
         if (validation.pass) {
           await advancePlanLifecycle(result.changeId, "validated", ctx.cwd)
-          ctx.ui.notify(`✅ Plan validation passed for "${result.changeId}" v${result.planVersion}.`, "info")
+          ctx.ui.notify(`✅ Plan validation passed for "${result.changeId}" ${result.planVersion}.`, "info")
         } else {
           ctx.ui.notify(
             `⚠️ Plan validation found issues:\n${validation.issues.map((i) => `  - ${i}`).join("\n")}`,
@@ -1281,7 +1284,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         }
 
         // Step 3: Run plan review
-        ctx.ui.notify(`📋 Running plan review for "${result.changeId}" v${result.planVersion}...`, "info")
+        ctx.ui.notify(`📋 Running plan review for "${result.changeId}" ${result.planVersion}...`, "info")
         const reviewResult = await runPlanReview(result.changeId, result.planVersion, ctx.cwd)
         if (reviewResult.pass) {
           await advancePlanLifecycle(result.changeId, "reviewed", ctx.cwd)
