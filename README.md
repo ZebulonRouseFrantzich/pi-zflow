@@ -141,7 +141,7 @@ Version pins are recorded in two places:
 | Package                 | Pinned version | Status                                       |
 | ----------------------- | -------------- | -------------------------------------------- |
 | `pi-subagents`          | `0.24.2`       | pre-install (provisional, verify in Phase 0) |
-| `pi-rtk-optimizer`      | `0.7.1`        | pre-install (provisional, verify in Phase 0) |
+| `pi-rtk-optimizer`      | `0.8.0`        | pre-install (provisional, verify in Phase 0) |
 | `pi-intercom`           | `0.6.0`        | pre-install (provisional, verify in Phase 0) |
 | `pi-web-access`         | `0.10.7`       | pre-install (provisional, verify in Phase 0) |
 | `pi-interview`          | `0.8.7`        | pre-install (provisional, verify in Phase 0) |
@@ -741,7 +741,8 @@ mutation-capable `bash`. This invariant is enforced at three levels:
 2. **Custom tool gating** — `zflow_write_plan_artifact` only writes to
    approved plan-artifact paths.
 3. **Plan-mode enforcement** — when `/zflow-plan` mode is active,
-   `pi.setActiveTools()` restricts the tool set to read-only.
+   `pi.setActiveTools()` restricts the tool set to read-only exploration plus
+   the path-guarded `zflow_write_plan_artifact` planner artifact tool.
 
 ## Skill inventory
 

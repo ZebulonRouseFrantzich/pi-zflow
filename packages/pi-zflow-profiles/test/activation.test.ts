@@ -339,29 +339,26 @@ describe("activateProfile", () => {
     const registry = makeRegistry([
       model("openai/gpt-4o-mini", { thinkingCapability: "low" }),
     ])
+    const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-test-cache-"))
+    const cachePath = path.join(cacheDir, "active-profile.json")
 
     try {
       const resolved = await activateProfile("default", {
         repoRoot,
         registry,
+        cachePath,
       })
       assert.equal(resolved.profileName, "default")
       assert.equal(resolved.resolvedLanes.scout.status, "resolved")
       assert.equal(resolved.resolvedLanes.scout.model, "openai/gpt-4o-mini")
       assert.equal(resolved.agentBindings.s.resolvedModel, "openai/gpt-4o-mini")
 
-      // Verify cache was written
-      const cachePath = path.join(
-        os.homedir(),
-        ".pi",
-        "agent",
-        "zflow",
-        "active-profile.json",
-      )
-      // In test, the cache may or may not be at the default path depending on
-      // whether the directory exists. We just verify the function completed.
+      const cache = await readActiveProfileCache(cachePath)
+      assert.notEqual(cache, null)
+      assert.equal(cache!.profileName, "default")
     } finally {
       await fs.rm(repoRoot, { recursive: true, force: true })
+      await fs.rm(cacheDir, { recursive: true, force: true })
     }
   })
 
@@ -408,17 +405,21 @@ describe("activateProfile", () => {
       model("available-model"),
       // NOTE: missing-model is intentionally absent
     ])
+    const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-test-cache-"))
+    const cachePath = path.join(cacheDir, "active-profile.json")
 
     try {
       const resolved = await activateProfile("default", {
         repoRoot,
         registry,
+        cachePath,
       })
       assert.equal(resolved.resolvedLanes.required.status, "resolved")
       assert.equal(resolved.resolvedLanes.optional.status, "disabled-optional")
       assert.equal(resolved.agentBindings.o.resolvedModel, null)
     } finally {
       await fs.rm(repoRoot, { recursive: true, force: true })
+      await fs.rm(cacheDir, { recursive: true, force: true })
     }
   })
 
@@ -821,12 +822,10 @@ describe("computeCurrentProfileHash", () => {
     }
   })
 
-  it("throws when no profile file exists", async () => {
-    await assert.rejects(
-      () => computeCurrentProfileHash("/tmp/nonexistent-repo-xyz123"),
-      (err: unknown) =>
-        err instanceof Error && err.message.includes("No profile definition file found"),
-    )
+  it("computes a hash for the fallback profile source", async () => {
+    const hash = await computeCurrentProfileHash("/tmp/nonexistent-repo-xyz123")
+    assert.equal(hash.length, 64)
+    assert.ok(/^[0-9a-f]+$/.test(hash))
   })
 })
 

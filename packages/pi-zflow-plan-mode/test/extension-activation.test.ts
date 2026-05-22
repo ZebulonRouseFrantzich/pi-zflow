@@ -9,23 +9,30 @@ import { describe, it, afterEach } from "node:test"
 import * as assert from "node:assert/strict"
 
 import activateZflowPlanModeExtension from "../extensions/zflow-plan-mode/index.js"
+import { activatePlanMode, resetPlanMode } from "../extensions/zflow-plan-mode/state.js"
 import { resetZflowRegistry } from "pi-zflow-core"
 
 function makePiStub() {
   const commands: Map<string, number> = new Map()
   const events: string[] = []
+  const handlers: Record<string, Function[]> = {}
+  const activeTools: string[][] = []
   return {
     commands,
     events,
+    handlers,
+    activeTools,
     pi: {
       registerCommand(name: string) {
         commands.set(name, (commands.get(name) ?? 0) + 1)
       },
-      on(eventName: string) {
+      on(eventName: string, handler: Function) {
         events.push(eventName)
+        handlers[eventName] = handlers[eventName] ?? []
+        handlers[eventName]!.push(handler)
       },
-      setActiveTools(_toolNames: string[]) {
-        // no-op in stub — tool restriction is validated in integration
+      setActiveTools(toolNames: string[]) {
+        activeTools.push(toolNames)
       },
     },
   }
@@ -34,6 +41,7 @@ function makePiStub() {
 describe("zflow-plan-mode extension activation", () => {
   afterEach(() => {
     resetZflowRegistry()
+    resetPlanMode()
   })
 
   it("registers the zflow-plan command", () => {
@@ -86,5 +94,21 @@ describe("zflow-plan-mode extension activation", () => {
     assert.doesNotThrow(() => {
       activateZflowPlanModeExtension(pi as any)
     })
+  })
+
+  it("keeps zflow_write_plan_artifact available while plan mode restricts tools", async () => {
+    const { pi, handlers, activeTools } = makePiStub()
+    activateZflowPlanModeExtension(pi as any)
+    activatePlanMode("test")
+
+    const beforeAgentStart = handlers.before_agent_start?.[0]
+    assert.ok(beforeAgentStart, "before_agent_start hook must be registered")
+
+    await beforeAgentStart({ systemPrompt: "base" })
+
+    assert.equal(activeTools.length, 1)
+    assert.ok(activeTools[0]!.includes("zflow_write_plan_artifact"))
+    assert.ok(!activeTools[0]!.includes("edit"))
+    assert.ok(!activeTools[0]!.includes("write"))
   })
 })

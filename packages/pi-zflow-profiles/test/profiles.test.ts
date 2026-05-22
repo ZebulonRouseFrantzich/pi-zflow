@@ -596,6 +596,7 @@ import {
   loadProfilesSync,
   resolveProjectProfilePath,
   resolveUserProfilePath,
+  resolveBuiltinProfilePath,
   fileExists,
   fileExistsSync,
   resolveProfileSource,
@@ -703,38 +704,29 @@ describe("resolveProfileSource", () => {
     }
   })
 
-  it("falls back to user path when project file does not exist", async () => {
-    // This test requires the user file to actually exist. We'll create a
-    // temporary one and monkey-patch resolveUserProfilePath for the test.
-    // Instead, test the fallback path by creating a temp repo WITHOUT a
-    // profiles file and verifying it tries to fall back.
-    //
-    // Since the user file likely doesn't exist on CI, verify the error
-    // lists both candidates.
+  it("falls back when project file does not exist", async () => {
     const tempRoot = await fs.mkdtemp(path2.join(os.tmpdir(), "zflow-profiles-test-"))
     try {
-      await assert.rejects(
-        () => resolveProfileSource(tempRoot),
-        (err: unknown) => {
-          if (!(err instanceof ProfileFileNotFoundError)) return false
-          // Should have searched both the project path and user path
-          return (
-            err.searchedPaths.length >= 2 &&
-            err.searchedPaths.some((p) => p.includes(tempRoot)) &&
-            err.searchedPaths.some((p) => p.includes(os.homedir()))
-          )
-        },
-      )
+      const source = await resolveProfileSource(tempRoot)
+      const userPath = resolveUserProfilePath()
+      if (await fileExists(userPath)) {
+        assert.equal(source, userPath)
+      } else {
+        assert.equal(source, resolveBuiltinProfilePath())
+      }
     } finally {
       await fs.rm(tempRoot, { recursive: true, force: true })
     }
   })
 
-  it("throws ProfileFileNotFoundError when neither file exists", async () => {
-    await assert.rejects(
-      () => resolveProfileSource("/tmp/nonexistent-zflow-repo-xyz789"),
-      (err: unknown) => err instanceof ProfileFileNotFoundError,
-    )
+  it("falls back to bundled profile when no project or user file is available", async () => {
+    const source = await resolveProfileSource("/tmp/nonexistent-zflow-repo-xyz789")
+    const userPath = resolveUserProfilePath()
+    if (await fileExists(userPath)) {
+      assert.equal(source, userPath)
+    } else {
+      assert.equal(source, resolveBuiltinProfilePath())
+    }
   })
 
   it("resolves from user path when repoRoot is omitted and user file exists", async () => {
@@ -745,11 +737,8 @@ describe("resolveProfileSource", () => {
       const source = await resolveProfileSource()
       assert.equal(source, userPath)
     } else {
-      // If user file doesn't exist, verify it throws searching only user path
-      await assert.rejects(
-        () => resolveProfileSource(),
-        (err: unknown) => err instanceof ProfileFileNotFoundError,
-      )
+      const source = await resolveProfileSource()
+      assert.equal(source, resolveBuiltinProfilePath())
     }
   })
 })
@@ -780,11 +769,15 @@ describe("loadProfiles", () => {
     }
   })
 
-  it("throws ProfileFileNotFoundError when no file exists", async () => {
-    await assert.rejects(
-      () => loadProfiles("/tmp/nonexistent-zflow-repo-xyz789"),
-      (err: unknown) => err instanceof ProfileFileNotFoundError,
-    )
+  it("loads the bundled fallback when no project or user file exists", async () => {
+    const result = await loadProfiles("/tmp/nonexistent-zflow-repo-xyz789")
+    const userPath = resolveUserProfilePath()
+    if (await fileExists(userPath)) {
+      assert.equal(result.source, userPath)
+    } else {
+      assert.equal(result.source, resolveBuiltinProfilePath())
+    }
+    assert.ok("default" in result.profiles)
   })
 
   it("throws ProfileValidationError for invalid file content", async () => {
@@ -885,11 +878,15 @@ describe("loadProfilesSync", () => {
     }
   })
 
-  it("throws ProfileFileNotFoundError when no file exists", () => {
-    assert.throws(
-      () => loadProfilesSync("/tmp/nonexistent-zflow-repo-xyz789"),
-      (err: unknown) => err instanceof ProfileFileNotFoundError,
-    )
+  it("loads the bundled fallback when no project or user file exists", () => {
+    const result = loadProfilesSync("/tmp/nonexistent-zflow-repo-xyz789")
+    const userPath = resolveUserProfilePath()
+    if (fileExistsSync(userPath)) {
+      assert.equal(result.source, userPath)
+    } else {
+      assert.equal(result.source, resolveBuiltinProfilePath())
+    }
+    assert.ok("default" in result.profiles)
   })
 
   it("loads valid content synchronously", async () => {

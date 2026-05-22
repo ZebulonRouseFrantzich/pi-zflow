@@ -57,6 +57,7 @@ import {
   resolveProfileSource,
   resolveProjectProfilePath,
   resolveUserProfilePath,
+  resolveBuiltinProfilePath,
   fileExists,
   fileExistsSync,
   validateProfilesFile,
@@ -93,6 +94,7 @@ export {
   resolveProfileSource,
   resolveProjectProfilePath,
   resolveUserProfilePath,
+  resolveBuiltinProfilePath,
   fileExists,
   fileExistsSync,
   validateProfilesFile,
@@ -201,6 +203,7 @@ export interface ProfileService {
   loadProfiles(repoRoot?: string): ReturnType<typeof loadProfiles>
   loadProfilesSync(repoRoot?: string): ReturnType<typeof loadProfilesSync>
   resolveProfileSource(repoRoot?: string): ReturnType<typeof resolveProfileSource>
+  resolveBuiltinProfilePath: typeof resolveBuiltinProfilePath
   resolveLane: typeof resolveLane
   resolveProfileLanes: typeof resolveProfileLanes
   resolveAgentBindings: typeof resolveAgentBindings
@@ -791,12 +794,38 @@ function formatProfileDetail(
  */
 async function handleNoArgs(ui: {
   notify: (message: string, type?: "info" | "warning" | "error") => void
-}): Promise<void> {
+}, extra?: { cwd?: string }): Promise<void> {
   const cache = await readActiveProfileCache().catch(() => null)
 
   if (!cache) {
     ui.notify(
       "No active profile found. Run `/zflow-profile default` to activate the default profile.",
+    )
+    return
+  }
+
+  const currentSource = await resolveProfileSource(getRepoRoot(extra?.cwd))
+    .catch(() => null)
+  if (
+    currentSource &&
+    path.resolve(cache.sourcePath) !== path.resolve(currentSource)
+  ) {
+    ui.notify(
+      "Active profile cache does not match the current project/profile source.\n" +
+        `Cached source: ${cache.sourcePath}\n` +
+        `Current source: ${currentSource}\n\n` +
+        "Run `/zflow-profile default` to activate the current default profile.",
+      "warning",
+    )
+    return
+  }
+
+  if (!(await fileExists(cache.sourcePath))) {
+    ui.notify(
+      "Active profile cache points to a profile file that no longer exists.\n" +
+        `Cached source: ${cache.sourcePath}\n\n` +
+        "Run `/zflow-profile default` to re-activate the default profile.",
+      "warning",
     )
     return
   }
@@ -1323,7 +1352,7 @@ async function handleProfileCommand(
   const subcommand = trimmed.split(/\s+/)[0]?.toLowerCase() ?? ""
 
   if (!subcommand) {
-    await handleNoArgs(ctx.ui)
+    await handleNoArgs(ctx.ui, { cwd: ctx.cwd })
     return
   }
 
@@ -1410,6 +1439,7 @@ export default function activateZflowProfilesExtension(pi: ExtensionAPI): void {
     loadProfiles,
     loadProfilesSync,
     resolveProfileSource,
+    resolveBuiltinProfilePath,
     resolveLane,
     resolveProfileLanes,
     resolveAgentBindings,

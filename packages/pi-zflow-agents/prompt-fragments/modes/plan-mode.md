@@ -6,11 +6,11 @@ Sticky read-only planning mode. When active:
 
 - **Source mutation is forbidden** — no edits, writes, or destructive bash commands until the mode is explicitly exited via `/zflow-plan exit`.
 - User requests to "implement", "apply", or "make changes" while in this mode are treated as planning requests, not execution commands.
-- Allowed operations: read files, search/grep, explore directory structure, run research tools (`web_search`, `fetch_content`), ask clarifying questions via `interview`, invoke subagents for analysis.
+- Allowed operations: read files, search/grep, explore directory structure, run research tools (`web_search`, `fetch_content`), ask clarifying questions via `interview`, invoke subagents for analysis, and write formal zflow plan artifacts via the path-guarded `zflow_write_plan_artifact` tool.
 
 ## Enforcement
 
-- The mode is enforced by Pi's `setActiveTools()` API, which restricts the available tool set to read-only tools while active.
+- The mode is enforced by Pi's `setActiveTools()` API, which restricts the available tool set to read-only tools plus the path-guarded `zflow_write_plan_artifact` planner artifact tool while active.
 - The associated bash policy (see `bash-policy.ts`) intercepts bash commands to block write operations (mv, cp, rm, redirects, etc.) and allows only read-only commands (cat, ls, grep, find, etc.).
 - The reminder fragment `plan-mode-active.md` is injected when this mode is active.
 

@@ -24,6 +24,12 @@ export const PACKAGE_VERSION = "0.1.0" as const
 
 // Re-export the public API for direct import by sibling packages
 export {
+  loadProfiles,
+  loadProfilesSync,
+  resolveProfileSource,
+  resolveProjectProfilePath,
+  resolveUserProfilePath,
+  resolveBuiltinProfilePath,
   getResolvedAgentBinding,
   getResolvedLane,
   ensureResolved,

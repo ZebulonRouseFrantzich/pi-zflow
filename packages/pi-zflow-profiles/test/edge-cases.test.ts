@@ -190,13 +190,16 @@ describe("Edge case: optional lane unresolved", () => {
   it("activation succeeds with optional lane disabled", async () => {
     const repoRoot = await setupFixture("optional-unresolved")
     const registry = makeRegistry([model("available-model")])
+    const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-edge-cache-"))
+    const cachePath = path.join(cacheDir, "active-profile.json")
     try {
-      const resolved = await activateProfile("default", { repoRoot, registry })
+      const resolved = await activateProfile("default", { repoRoot, registry, cachePath })
       assert.equal(resolved.resolvedLanes["scout-cheap"].status, "resolved")
       assert.equal(resolved.resolvedLanes["review-logic"].status, "disabled-optional")
       assert.equal(hasUnresolvedRequiredLanes(resolved), false)
     } finally {
       await cleanDir(repoRoot)
+      await cleanDir(cacheDir)
     }
   })
 
@@ -451,13 +454,16 @@ describe("Edge case: sync-project writes only on explicit command", () => {
       model("available-model"),
       model("available-model-hi", { thinkingCapability: "high" }),
     ])
+    const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-edge-cache-"))
+    const cachePath = path.join(cacheDir, "active-profile.json")
     try {
-      await activateProfile("default", { repoRoot, registry })
+      await activateProfile("default", { repoRoot, registry, cachePath })
       const settingsPath = path.join(repoRoot, ".pi", "settings.json")
       const exists = await fs.access(settingsPath).then(() => true).catch(() => false)
       assert.equal(exists, false, "activateProfile must not create .pi/settings.json")
     } finally {
       await cleanDir(repoRoot)
+      await cleanDir(cacheDir)
     }
   })
 
@@ -486,12 +492,14 @@ describe("Edge case: sync-project writes only on explicit command", () => {
       model("available-model"),
       model("available-model-hi", { thinkingCapability: "high" }),
     ])
+    const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-edge-cache-"))
+    const cachePath = path.join(cacheDir, "active-profile.json")
     try {
       // Activate profile to create cache
-      await activateProfile("default", { repoRoot, registry })
+      await activateProfile("default", { repoRoot, registry, cachePath })
 
       // Now explicitly sync
-      const cache = await readActiveProfileCache()
+      const cache = await readActiveProfileCache(cachePath)
       assert.notEqual(cache, null)
 
       const settingsPath = path.join(repoRoot, ".pi", "settings.json")
@@ -504,6 +512,7 @@ describe("Edge case: sync-project writes only on explicit command", () => {
       assert.equal(exists, true)
     } finally {
       await cleanDir(repoRoot)
+      await cleanDir(cacheDir)
     }
   })
 })

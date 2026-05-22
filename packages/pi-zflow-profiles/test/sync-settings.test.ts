@@ -491,9 +491,11 @@ describe("sync-to-settings: normal activation does not trigger sync", () => {
     })
 
     const registry = makeRegistry([model("m1")])
+    const cacheDir = await tempDir()
+    const cachePath = path.join(cacheDir, "active-profile.json")
 
     try {
-      await activateProfile("default", { repoRoot, registry })
+      await activateProfile("default", { repoRoot, registry, cachePath })
 
       // Verify no settings.json was created
       const settingsPath = path.join(repoRoot, ".pi", "settings.json")
@@ -501,6 +503,7 @@ describe("sync-to-settings: normal activation does not trigger sync", () => {
       assert.equal(exists, false, "activateProfile should not create .pi/settings.json")
     } finally {
       await fs.rm(repoRoot, { recursive: true, force: true })
+      await fs.rm(cacheDir, { recursive: true, force: true })
     }
   })
 

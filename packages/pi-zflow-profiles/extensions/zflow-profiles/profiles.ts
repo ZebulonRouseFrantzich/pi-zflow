@@ -820,6 +820,18 @@ import * as fs from "node:fs/promises"
 import * as fss from "node:fs"
 import * as path from "node:path"
 import * as os from "node:os"
+import { fileURLToPath } from "node:url"
+
+/**
+ * Built-in fallback profile definition bundled with the package.
+ *
+ * Project-local and user-global files still take precedence, but this keeps
+ * `/zflow-profile default` usable immediately after installing pi-zflow.
+ */
+export const BUILTIN_PROFILE_PATH = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../config/profiles.example.json",
+)
 
 /**
  * Result of a successful profile file load.
@@ -855,6 +867,13 @@ export function resolveUserProfilePath(): string {
 }
 
 /**
+ * Resolve the bundled fallback profile definition path.
+ */
+export function resolveBuiltinProfilePath(): string {
+  return BUILTIN_PROFILE_PATH
+}
+
+/**
  * Async check whether a file exists at the given path.
  */
 export async function fileExists(filePath: string): Promise<boolean> {
@@ -885,6 +904,7 @@ export function fileExistsSync(filePath: string): boolean {
  * Resolution order:
  *   1. `.pi/zflow-profiles.json` in the active repo (if `repoRoot` provided)
  *   2. `~/.pi/agent/zflow-profiles.json` as fallback
+ *   3. the bundled `config/profiles.example.json` fallback
  *
  * If `repoRoot` is omitted, only the user-global path is considered.
  *
@@ -906,10 +926,17 @@ export async function resolveProfileSource(repoRoot?: string): Promise<string> {
     return userPath
   }
 
+  // Check bundled fallback path
+  const builtinPath = resolveBuiltinProfilePath()
+  if (await fileExists(builtinPath)) {
+    return builtinPath
+  }
+
   // Neither exists — build an actionable error
   const candidates: string[] = []
   if (projectPath) candidates.push(projectPath)
   candidates.push(userPath)
+  candidates.push(builtinPath)
 
   throw new ProfileFileNotFoundError(candidates)
 }
@@ -930,7 +957,8 @@ export class ProfileFileNotFoundError extends Error {
         "\n\n" +
         'Create a ".pi/zflow-profiles.json" in your project or ' +
         '"~/.pi/agent/zflow-profiles.json" in your home directory. ' +
-        "You can copy the example from the pi-zflow-profiles package.",
+        "You can copy the example from the pi-zflow-profiles package. " +
+        "If the bundled fallback path is missing, reinstall pi-zflow.",
     )
     this.name = "ProfileFileNotFoundError"
     this.searchedPaths = searchedPaths
@@ -943,6 +971,7 @@ export class ProfileFileNotFoundError extends Error {
  * Resolution order:
  *   1. `.pi/zflow-profiles.json` in the active repo (project-local override)
  *   2. `~/.pi/agent/zflow-profiles.json` (user-global fallback)
+ *   3. bundled `config/profiles.example.json` (read-only fallback)
  *
  * The chosen source path is recorded in the return value and can be
  * surfaced in `/zflow-profile show` output.
@@ -968,6 +997,7 @@ export async function loadProfiles(repoRoot?: string): Promise<LoadedProfiles> {
  * Resolution order:
  *   1. `.pi/zflow-profiles.json` in the active repo (project-local override)
  *   2. `~/.pi/agent/zflow-profiles.json` (user-global fallback)
+ *   3. bundled `config/profiles.example.json` (read-only fallback)
  *
  * @param repoRoot - Optional repository root directory.
  * @returns The loaded, validated, and normalized profiles with source path.
@@ -978,6 +1008,7 @@ export async function loadProfiles(repoRoot?: string): Promise<LoadedProfiles> {
 export function loadProfilesSync(repoRoot?: string): LoadedProfiles {
   const projectPath = resolveProjectProfilePath(repoRoot)
   const userPath = resolveUserProfilePath()
+  const builtinPath = resolveBuiltinProfilePath()
 
   // Determine source path
   let source: string | null = null
@@ -985,12 +1016,15 @@ export function loadProfilesSync(repoRoot?: string): LoadedProfiles {
     source = projectPath
   } else if (fileExistsSync(userPath)) {
     source = userPath
+  } else if (fileExistsSync(builtinPath)) {
+    source = builtinPath
   }
 
   if (!source) {
     const candidates: string[] = []
     if (projectPath) candidates.push(projectPath)
     candidates.push(userPath)
+    candidates.push(builtinPath)
     throw new ProfileFileNotFoundError(candidates)
   }
 

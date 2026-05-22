@@ -82,12 +82,15 @@ export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
       return {}
     }
 
-    // Restrict available tools: exclude edit, write, and mutation-capable tools
+    // Restrict available tools: exclude edit, write, and mutation-capable tools.
+    // Keep zflow_write_plan_artifact available: it is the narrow, path-guarded
+    // write mechanism for formal planning artifacts and is safe in plan mode.
     const restrictedTools = [
       "read", "bash", "grep", "find", "ls",
       "web_search", "code_search", "fetch_content",
       "get_search_content", "interview", "subagent",
       "read_notebook", "contact_supervisor", "intercom",
+      "zflow_write_plan_artifact",
     ]
 
     // Apply tool restriction via Pi's API

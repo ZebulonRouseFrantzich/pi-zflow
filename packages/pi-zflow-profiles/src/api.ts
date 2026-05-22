@@ -43,6 +43,12 @@
 
 // Re-export the shared lookup functions from the extension module
 export {
+  loadProfiles,
+  loadProfilesSync,
+  resolveProfileSource,
+  resolveProjectProfilePath,
+  resolveUserProfilePath,
+  resolveBuiltinProfilePath,
   getResolvedAgentBinding,
   getResolvedLane,
   ensureResolved,

@@ -40,7 +40,7 @@ All pins must be exact — no `^`, `~`, or `latest` ranges.
 | Package            | Exact version/ref | Source | Status                                        |
 | ------------------ | ----------------- | ------ | --------------------------------------------- |
 | `pi-subagents`     | `0.24.2`          | npm    | ✅ installed — extension entry point verified |
-| `pi-rtk-optimizer` | `0.7.1`           | npm    | ✅ installed — extension entry point verified |
+| `pi-rtk-optimizer` | `0.8.0`           | npm    | ✅ updated for `@earendil-works/*` Pi packages |
 | `pi-intercom`      | `0.6.0`           | npm    | ✅ installed — extension entry point verified |
 
 ### Recommended first-pass packages
@@ -143,7 +143,7 @@ The installable GitHub package pins that fork to an exact commit SHA.
 
 | Date | Package | Old pin | New pin | Reason           |
 | ---- | ------- | ------- | ------- | ---------------- |
-| —    | —       | —       | —       | (no changes yet) |
+| 2026-05-22 | `pi-rtk-optimizer` | `0.7.1` | `0.8.0` | `0.7.1` peers on deprecated `@mariozechner/*` Pi packages and fails npm reify under current Pi `0.75.4`; `0.8.0` peers on `@earendil-works/*`. |
 
 ---
 

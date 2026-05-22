@@ -28,6 +28,7 @@ It must own formal workflow state transitions, resume/recovery flow, session han
 ## Scope and phase dependencies
 
 ### Depends on
+
 - Phase 0 foundation contracts and runtime paths
 - Phase 1 package skeletons and prompts/skills/agents from `pi-zflow-agents`
 - Phase 2 `Profile.ensureResolved()` and lane-health handling from `pi-zflow-profiles`
@@ -38,6 +39,7 @@ It must own formal workflow state transitions, resume/recovery flow, session han
 - `pi-zflow-artifacts` runtime path/state helper APIs
 
 ### Enables
+
 - The full intended user workflow of the harness
 
 ## Must-preserve decisions from the master plan
@@ -187,9 +189,11 @@ Additional rules:
 ### Task 7.1 — Integrate runtime path helpers and state-file bootstrap from `pi-zflow-artifacts`
 
 #### Objective
+
 Give the workflow extension one authoritative way to resolve all runtime-state locations via `pi-zflow-artifacts`.
 
 #### Files to create/update
+
 - `packages/pi-zflow-artifacts/src/artifact-paths.ts`
 - `packages/pi-zflow-artifacts/src/state-index.ts`
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/index.ts`
@@ -197,22 +201,24 @@ Give the workflow extension one authoritative way to resolve all runtime-state l
 #### Required helpers
 
 ```ts
-resolveRuntimeStateDir(repoRoot)
-resolveStateIndexPath(repoRoot)
-resolvePlanStatePath(repoRoot, changeId)
-resolvePlanVersionDir(repoRoot, changeId, version)
-resolveRunPath(repoRoot, runId)
-resolveReviewFindingsPath(repoRoot)
-resolveFailureLogPath(repoRoot)
+resolveRuntimeStateDir(repoRoot);
+resolveStateIndexPath(repoRoot);
+resolvePlanStatePath(repoRoot, changeId);
+resolvePlanVersionDir(repoRoot, changeId, version);
+resolveRunPath(repoRoot, runId);
+resolveReviewFindingsPath(repoRoot);
+resolveFailureLogPath(repoRoot);
 ```
 
 #### Important rules
+
 - use `<git-dir>/pi-zflow/` when in git
 - fallback to temp dir + stable cwd hash when not in git
 - create parent dirs idempotently
 - runtime artifacts must not dirty the working tree
 
 #### Acceptance criteria
+
 - Every workflow command uses the same path resolver.
 
 ---
@@ -220,33 +226,38 @@ resolveFailureLogPath(repoRoot)
 ### Task 7.2 — Implement `state-index.json` lifecycle and unfinished-run discovery
 
 #### Objective
+
 Make workflow resume and cleanup decisions state-driven.
 
 #### Files to create/update
+
 - `packages/pi-zflow-artifacts/src/state-index.ts`
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts`
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/index.ts`
 
 #### Required `state-index.json` responsibilities
+
 - unfinished runs
 - retained worktrees/artifacts
 - cleanup metadata
 - last-known phase per change
 
 #### Command-entry behavior
+
 - on startup or workflow command entry, read `state-index.json`
 - if unfinished work exists for the same change, offer resume / abandon / inspect / cleanup choices
 
 #### Example pseudocode
 
 ```ts
-const pending = stateIndex.changes[changeId]?.unfinishedRuns ?? []
+const pending = stateIndex.changes[changeId]?.unfinishedRuns ?? [];
 if (pending.length) {
-  return promptResumeChoices(pending)
+  return promptResumeChoices(pending);
 }
 ```
 
 #### Acceptance criteria
+
 - Resume/cleanup decisions do not depend on transcript memory.
 
 ---
@@ -254,25 +265,30 @@ if (pending.length) {
 ### Task 7.3 — Implement ad-hoc `/zflow-plan` mode state and command handling in `pi-zflow-plan-mode`
 
 #### Objective
+
 Add the lightweight read-only planning safety toggle in its owner package and expose state for workflow integration.
 
 #### Files to create/update
+
 - `packages/pi-zflow-plan-mode/extensions/zflow-plan-mode/index.ts`
 - `packages/pi-zflow-plan-mode/extensions/zflow-plan-mode/state.ts`
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/index.ts` (integration/status checks only)
 
 #### Commands
+
 - `/zflow-plan`
 - `/zflow-plan status`
 - `/zflow-plan exit`
 
 #### Required state behavior
+
 - persist mode state across resume/reload via extension-managed session state
 - display visible footer/widget status while active
 - inject the `plan-mode-active` runtime reminder while active
 - keep ad-hoc plan mode orthogonal to formal durable planning artifacts
 
 #### Acceptance criteria
+
 - Users can enter, inspect, and exit plan mode cleanly.
 - The active prompt/reminder state makes it clear that user requests to implement are treated as planning requests until plan mode exits.
 
@@ -281,18 +297,22 @@ Add the lightweight read-only planning safety toggle in its owner package and ex
 ### Task 7.4 — Implement `/zflow-plan` tool restriction and restricted-bash enforcement in `pi-zflow-plan-mode`
 
 #### Objective
+
 Actually prevent source mutation while ad-hoc plan mode is active.
 
 #### Files to create/update
+
 - `packages/pi-zflow-plan-mode/extensions/zflow-plan-mode/index.ts`
 - `packages/pi-zflow-plan-mode/extensions/zflow-plan-mode/bash-policy.ts`
 
 #### Required behavior
-- use `pi.setActiveTools(...)` to reduce tools to read-only exploration + structured question helpers
+
+- use `pi.setActiveTools(...)` to reduce tools to read-only exploration + structured question helpers + the path-guarded `zflow_write_plan_artifact` planner artifact tool
 - block `edit` and `write`
 - intercept tool calls to reject mutating bash even if the model attempts it
 
 #### Bash patterns to reject
+
 - redirection `>` and `>>`
 - `tee`
 - package installs
@@ -305,13 +325,17 @@ Actually prevent source mutation while ad-hoc plan mode is active.
 
 ```ts
 function isAllowedPlanModeBash(cmd) {
-  if (/[>]{1,2}|\btee\b/.test(cmd)) return false
-  if (/\b(git commit|git add|git checkout|rm|mv|npm install|pnpm add)\b/.test(cmd)) return false
-  return true
+  if (/[>]{1,2}|\btee\b/.test(cmd)) return false;
+  if (
+    /\b(git commit|git add|git checkout|rm|mv|npm install|pnpm add)\b/.test(cmd)
+  )
+    return false;
+  return true;
 }
 ```
 
 #### Acceptance criteria
+
 - Plan mode is enforced by tool policy, not just prompt instructions.
 
 ---
@@ -319,9 +343,11 @@ function isAllowedPlanModeBash(cmd) {
 ### Task 7.4A — Implement mode-fragment and runtime-reminder injection
 
 #### Objective
+
 Make workflow state visible to the model through concise prompt fragments while keeping state files and tool guards authoritative.
 
 #### Files to create/update
+
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/index.ts`
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts`
 - maybe `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/prompt-fragments.ts`
@@ -329,6 +355,7 @@ Make workflow state visible to the model through concise prompt fragments while 
 - prompt fragment source assets in `packages/pi-zflow-agents/prompt-fragments/`
 
 #### Required behavior
+
 - load prompt fragments from package assets
 - inject the root-orchestrator constitution into the main workflow/orchestrator context where supported
 - inject mode fragments for active workflow commands
@@ -338,17 +365,18 @@ Make workflow state visible to the model through concise prompt fragments while 
 
 #### Required reminders and triggers
 
-| Reminder | Trigger |
-|---|---|
-| `tool-denied` | a tool call or hook is denied/blocked |
-| `plan-mode-active` | `/zflow-plan` mode is active |
-| `approved-plan-loaded` | `/zflow-change-implement` loads an approved plan version |
-| `drift-detected` | run enters `drift-pending` |
-| `compaction-handoff` | session compaction occurs or a compacted session resumes |
-| `external-file-change` | hook/file watcher reports user/linter modification |
-| `verification-status` | final verification passes, fails, is skipped, or review is advisory |
+| Reminder               | Trigger                                                             |
+| ---------------------- | ------------------------------------------------------------------- |
+| `tool-denied`          | a tool call or hook is denied/blocked                               |
+| `plan-mode-active`     | `/zflow-plan` mode is active                                        |
+| `approved-plan-loaded` | `/zflow-change-implement` loads an approved plan version            |
+| `drift-detected`       | run enters `drift-pending`                                          |
+| `compaction-handoff`   | session compaction occurs or a compacted session resumes            |
+| `external-file-change` | hook/file watcher reports user/linter modification                  |
+| `verification-status`  | final verification passes, fails, is skipped, or review is advisory |
 
 #### Acceptance criteria
+
 - Prompt state follows workflow state and does not linger after a mode exits.
 - Runtime reminders are concise and include authoritative file/state paths when useful.
 - Reminders never replace canonical artifacts or runtime state as the source of truth.
@@ -358,13 +386,16 @@ Make workflow state visible to the model through concise prompt fragments while 
 ### Task 7.5 — Implement `/zflow-change-prepare <change-path>` orchestration
 
 #### Objective
+
 Make the formal planning workflow fully file-backed and durable.
 
 #### Files to create/update
+
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts`
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/index.ts`
 
 #### Required step sequence
+
 1. `Profile.ensureResolved()`
 2. check unfinished planning/review runs in `state-index.json`
 3. resolve the change folder or active change
@@ -383,12 +414,15 @@ Make the formal planning workflow fully file-backed and durable.
 16. use `pi-interview` to present approve / revise / cancel
 17. if approved, set `approvedVersion` and mark plan `approved`
 18. present handoff choices:
-   - fork implementation session (default)
-   - implement in current session
-   - dispatch background workers
+
+- fork implementation session (default)
+- implement in current session
+- dispatch background workers
+
 19. stop after handoff selection unless immediate implementation was explicitly requested
 
 #### Acceptance criteria
+
 - Planning no longer depends on chat transcript copying.
 
 ---
@@ -396,9 +430,11 @@ Make the formal planning workflow fully file-backed and durable.
 ### Task 7.6 — Implement plan versioning and `plan-state.json` updates
 
 #### Objective
+
 Track plan evolution explicitly and immutably.
 
 #### Files to create/update
+
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts`
 - `artifact-paths.ts`
 
@@ -423,11 +459,13 @@ Track plan evolution explicitly and immutably.
 ```
 
 #### Important rules
+
 - never edit approved versions in place once workers are dispatched
 - revisions create new version dirs
 - old versions remain for audit
 
 #### Acceptance criteria
+
 - Plan state is explicit, versioned, and resumable.
 
 ---
@@ -435,18 +473,22 @@ Track plan evolution explicitly and immutably.
 ### Task 7.7 — Implement structured approval/revision/cancel gates with `pi-interview`
 
 #### Objective
+
 Use structured human-in-the-loop interactions at critical control points.
 
 #### Files to create/update
+
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts`
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/index.ts`
 
 #### Required planning gate choices
+
 - approve this plan version
 - request revisions
 - cancel
 
 #### Required implementation/review gate choices
+
 - after review findings: select findings to fix / dismiss
 - on plan drift: approve amendment / cancel / inspect retained artifacts
 - on final verification failure: run bounded auto-fix loop vs manual review
@@ -462,6 +504,7 @@ Use structured human-in-the-loop interactions at critical control points.
 ```
 
 #### Acceptance criteria
+
 - Key workflow forks use structured HITL flows, not freeform prompt text alone.
 
 ---
@@ -469,12 +512,15 @@ Use structured human-in-the-loop interactions at critical control points.
 ### Task 7.8 — Implement default implementation-session fork handoff
 
 #### Objective
+
 Preserve planning-session auditability while giving implementation a cleaner session context.
 
 #### Files to create/update
+
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts`
 
 #### Required behavior
+
 - fork/clone the current planning leaf into a new Pi session file
 - record approved plan pointer (`changeId`, `approvedVersion`, runtime-state path)
 - keep planning session available via session tree/resume
@@ -483,16 +529,17 @@ Preserve planning-session auditability while giving implementation a cleaner ses
 #### Example pseudocode
 
 ```ts
-const implSession = await ctx.fork(currentLeafId, { position: "at" })
+const implSession = await ctx.fork(currentLeafId, { position: "at" });
 await attachSessionMetadata(implSession, {
   changeId,
   approvedVersion,
   runtimeStateDir,
   sourceSession: currentSessionId,
-})
+});
 ```
 
 #### Acceptance criteria
+
 - Forked handoff is the default and is clearly separate from git branching.
 
 ---
@@ -500,13 +547,16 @@ await attachSessionMetadata(implSession, {
 ### Task 7.9 — Implement `/zflow-change-implement <change-path>` orchestration
 
 #### Objective
+
 Drive the approved-plan execution lifecycle end to end.
 
 #### Files to create/update
+
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts`
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/index.ts`
 
 #### Required step sequence
+
 1. `Profile.ensureResolved()` and lane-health preflight
 2. check unfinished execution runs
 3. resolve change and approved plan
@@ -535,6 +585,7 @@ Drive the approved-plan execution lifecycle end to end.
 26. on success, mark plan `completed`, finalize retention/cleanup state, and check in with Zeb
 
 #### Acceptance criteria
+
 - `/zflow-change-implement` follows the master plan’s execution order exactly.
 
 ---
@@ -542,13 +593,16 @@ Drive the approved-plan execution lifecycle end to end.
 ### Task 7.10 — Implement bounded final-verification fix-loop orchestration
 
 #### Objective
+
 Provide limited automated recovery from verification failures without thrashing.
 
 #### Files to create/update
+
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/verification.ts`
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts`
 
 #### Required policy
+
 - default bound: max 3 fix iterations or about 15 minutes, whichever comes first
 - start with the cheapest suitable worker lane/model
 - stop and ask Zeb after the bound is exhausted
@@ -558,14 +612,15 @@ Provide limited automated recovery from verification failures without thrashing.
 
 ```ts
 for (let i = 0; i < 3 && elapsedMinutes < 15; i++) {
-  const result = await runVerifier()
-  if (result.pass) return result
-  await runTargetedFixIteration(result)
+  const result = await runVerifier();
+  if (result.pass) return result;
+  await runTargetedFixIteration(result);
 }
-throw new Error("Verification fix loop exhausted")
+throw new Error("Verification fix loop exhausted");
 ```
 
 #### Acceptance criteria
+
 - Fix loops are bounded and policy-driven.
 
 ---
@@ -573,12 +628,15 @@ throw new Error("Verification fix loop exhausted")
 ### Task 7.11 — Implement plan-drift handling within the orchestrated workflow
 
 #### Objective
+
 Tie Phase 5 deviation reporting into the main user-visible workflow.
 
 #### Files to create/update
+
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts`
 
 #### Required behavior
+
 - when run enters `drift-pending`, halt dependent execution
 - inject the `drift-detected` runtime reminder with deviation-report paths
 - synthesize deviation reports
@@ -587,6 +645,7 @@ Tie Phase 5 deviation reporting into the main user-visible workflow.
 - mark previous executing plan as `drifted` or `superseded` as appropriate
 
 #### Acceptance criteria
+
 - Plan drift is resolved through versioned replanning, not in-place improvisation.
 
 ---
@@ -594,13 +653,16 @@ Tie Phase 5 deviation reporting into the main user-visible workflow.
 ### Task 7.12 — Integrate `/zflow-review-code` behavior from `pi-zflow-review`
 
 #### Objective
+
 Expose internal code review as a direct command from its owner package and as a delegated post-implementation orchestration step.
 
 #### Files to create/update
+
 - `packages/pi-zflow-review/extensions/zflow-review/index.ts`
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/index.ts` (delegate/integration only)
 
 #### Required behavior
+
 - resolve repo root and review baseline
 - ensure final verification status is known or explicitly skipped/advisory
 - if final verification was skipped by explicit user choice, pass that context through so the findings file marks the review as advisory rather than release-gating
@@ -608,6 +670,7 @@ Expose internal code review as a direct command from its owner package and as a 
 - persist findings to `<runtime-state-dir>/review/code-review-findings.md`
 
 #### Acceptance criteria
+
 - Internal review can be run as an explicit command, not just as a substep of `/zflow-change-implement`.
 
 ---
@@ -615,14 +678,17 @@ Expose internal code review as a direct command from its owner package and as a 
 ### Task 7.13 — Integrate `/zflow-review-pr <url>` behavior from `pi-zflow-review`
 
 #### Objective
+
 Expose external diff-only PR/MR review from its owner package and let the main workflow delegate to it when needed.
 
 #### Files to create/update
+
 - `packages/pi-zflow-review/extensions/zflow-review/index.ts`
 - `packages/pi-zflow-review/extensions/zflow-review/pr.ts`
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/index.ts` (delegate/integration only)
 
 #### Required behavior
+
 - parse URL
 - run host/auth preflight as needed
 - invoke diff-only external review pipeline
@@ -630,6 +696,7 @@ Expose external diff-only PR/MR review from its owner package and let the main w
 - offer triage/submission when possible
 
 #### Acceptance criteria
+
 - External review command is available from the main extension UX.
 
 ---
@@ -637,9 +704,11 @@ Expose external diff-only PR/MR review from its owner package and let the main w
 ### Task 7.14 — Implement `/zflow-change-audit` and `/zflow-change-fix` command wrappers
 
 #### Objective
+
 Provide explicit user-facing hooks for reviewing a change and applying follow-up fixes.
 
 #### Files to create/update
+
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/index.ts`
 - `packages/pi-zflow-agents/prompts/zflow-draft-change-audit.md`
 - `packages/pi-zflow-agents/prompts/zflow-draft-change-fix.md`
@@ -647,18 +716,21 @@ Provide explicit user-facing hooks for reviewing a change and applying follow-up
 #### Suggested behavior
 
 ##### `/zflow-change-audit <change-path>`
+
 - resolve approved/completed change context
 - load plan + verification + latest findings
 - run or rerun review if requested
 - present summarized status and recommended next actions
 
 ##### `/zflow-change-fix <change-path>`
+
 - load selected findings or verification failures
 - build a focused fix plan
 - dispatch targeted implementation/fix flow
 - rerun verification and review as needed
 
 #### Acceptance criteria
+
 - Audit/fix commands are more than aliases; they are focused workflow wrappers.
 
 ---
@@ -666,9 +738,11 @@ Provide explicit user-facing hooks for reviewing a change and applying follow-up
 ### Task 7.15 — Implement failure-log append and read-before-similar-task behavior
 
 #### Objective
+
 Preserve lessons learned from replans, verification failures, and workflow breakdowns.
 
 #### Files to create/update
+
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts`
 - maybe `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/failure-log.ts`
 
@@ -676,6 +750,7 @@ Preserve lessons learned from replans, verification failures, and workflow break
 
 ```markdown
 ## 2026-05-11T12:00:00Z: Apply-back conflict on auth task group
+
 - **Expected**: group patch applies cleanly after Group 1
 - **Actual**: `git apply --3way` failed on src/auth/config.ts
 - **Root cause**: plan-quality
@@ -684,10 +759,12 @@ Preserve lessons learned from replans, verification failures, and workflow break
 ```
 
 #### Required behavior
+
 - append after replanning, manual intervention, or bad output events
 - read recent relevant entries before planning similar tasks if feasible
 
 #### Acceptance criteria
+
 - Failure log is maintained as a runtime artifact and influences later planning.
 
 ---
@@ -695,33 +772,40 @@ Preserve lessons learned from replans, verification failures, and workflow break
 ### Task 7.16 — Implement `/zflow-clean` and TTL-based cleanup policy
 
 #### Objective
+
 Prevent stale runtime artifacts and orphaned worktrees from growing forever.
 
 #### Files to create/update
+
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/index.ts`
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts`
 
 #### Required command options
+
 - `--dry-run`
 - `--orphans`
 - `--older-than <days>`
 
 #### Required cleanup targets
+
 - stale retained worktrees
 - expired patch artifacts
 - old run metadata beyond retention policy when safe
 - obsolete runtime temp artifacts
 
 #### Default retention policy
+
 - stale runtime/patch artifacts: 14-day TTL
 - failed/interrupted worktrees: 7-day retention by default
 - successful temp worktrees: remove immediately after verified apply-back unless an explicit keep/debug option is used
 
 #### Important rule
+
 - successful worktrees are removed immediately; `/zflow-clean` is for leftovers and TTL cleanup
 - `--dry-run` must preview what would be deleted before destructive cleanup
 
 #### Acceptance criteria
+
 - Cleanup is explicit and state-driven.
 
 ---
@@ -729,19 +813,23 @@ Prevent stale runtime artifacts and orphaned worktrees from growing forever.
 ### Task 7.17 — Implement startup/resume recovery flows
 
 #### Objective
+
 Handle interrupted planning/execution/review sessions without transcript archaeology.
 
 #### Files to create/update
+
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/index.ts`
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts`
 
 #### Required behaviors
+
 - detect unfinished runs on command entry
 - if apply-back status unknown, restore pre-apply snapshot before retry
 - surface orphan paths if cleanup previously failed
 - present resume / abandon / inspect / cleanup choices
 
 #### Acceptance criteria
+
 - Resume is based on `state-index.json`, `plan-state.json`, and `run.json`.
 
 ---
@@ -749,13 +837,16 @@ Handle interrupted planning/execution/review sessions without transcript archaeo
 ### Task 7.18 — Implement path-aware guard integration for mutation-capable workflows
 
 #### Objective
+
 Enforce safety beyond prompt instructions for planner/worker/report roles.
 
 #### Files to create/update
+
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts`
 - maybe `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/path-guard.ts`
 
 #### Required behavior
+
 - allowlist project root, active worktrees, and planner artifact paths only
 - reject writes to `.git`, `node_modules`, `.env*`, obvious secret files, home dotfiles
 - reject symlink escapes and traversal
@@ -764,6 +855,7 @@ Enforce safety beyond prompt instructions for planner/worker/report roles.
 - when the guard blocks a tool call, inject/use the `tool-denied` reminder and require the model to adjust rather than retry verbatim
 
 #### Acceptance criteria
+
 - Safety is enforced programmatically.
 
 ---
@@ -771,15 +863,18 @@ Enforce safety beyond prompt instructions for planner/worker/report roles.
 ### Task 7.19 — Integrate `/zflow-setup-agents` and update checks from `pi-zflow-agents`
 
 #### Objective
+
 Make agent and chain installation manageable from the package that owns agent/chain assets, while allowing the main workflow to check/delegate setup.
 
 #### Files to create/update
+
 - `packages/pi-zflow-agents/extensions/zflow-agents/index.ts`
 - `packages/pi-zflow-agents/extensions/zflow-agents/install.ts`
 - `packages/pi-zflow-agents/extensions/zflow-agents/manifest.ts`
 - `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/index.ts` (check/delegate only)
 
 #### Required behavior
+
 - create user-level target dirs if absent
 - copy or install packaged agent and chain assets
 - write `~/.pi/agent/zflow/install-manifest.json`
@@ -788,6 +883,7 @@ Make agent and chain installation manageable from the package that owns agent/ch
 - no-op safely if the same compatible agent installer is loaded through both umbrella and standalone packages
 
 #### Acceptance criteria
+
 - Agent installation is operational and repeatable from `pi-zflow-agents` and discoverable by the broader workflow.
 
 ---
@@ -795,13 +891,16 @@ Make agent and chain installation manageable from the package that owns agent/ch
 ### Task 7.20 — Add workflow smoke-test scenarios and documentation
 
 #### Objective
+
 Prove that the full command surface works as a coherent system.
 
 #### Files to create later
+
 - `README.md`
 - test docs or script targets
 
 #### Scenarios to cover
+
 - enter/exit `/zflow-plan`
 - run `/zflow-change-prepare` on an ad-hoc change
 - run `/zflow-change-prepare` in RuneContext mode
@@ -813,6 +912,7 @@ Prove that the full command surface works as a coherent system.
 - run `/zflow-clean --dry-run`
 
 #### Acceptance criteria
+
 - There is at least a manual end-to-end test recipe for the entire workflow surface.
 
 ## Phase exit checklist
