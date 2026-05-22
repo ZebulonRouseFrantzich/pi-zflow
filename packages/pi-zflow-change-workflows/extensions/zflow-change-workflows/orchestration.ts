@@ -2354,6 +2354,8 @@ export interface PrepareWorkflowOptions {
   forceAdHoc?: boolean
   /** Additional user notes supplied after the change path. */
   prepareNotes?: string
+  /** Optional progress callback for command UIs. */
+  onProgress?: (message: string, type?: "info" | "warning" | "error") => void
 }
 
 /**
@@ -3873,7 +3875,9 @@ export async function runChangePrepareWorkflow(
 
   // ── Step 7: Resolve profile via registry if available ─────────
   const profileResult = await resolveProfileIfAvailable(changeId, cwd)
-  console.info(`[zflow] ${profileResult.advisory}`)
+  if (!profileResult.resolved) {
+    options.onProgress?.(`⚠️ ${profileResult.advisory}`, "warning")
+  }
 
   // ── Step 8: Detect RuneContext ─────────────────────────────────
   // If changePath looks like a RuneContext path (contains @ or /context/),
@@ -4056,6 +4060,7 @@ export async function runChangePrepareWorkflow(
   }
 
   // ── Step 9: Write concrete repo-map.md and reconnaissance.md ──
+  options.onProgress?.("🗺️ Building repository map and reconnaissance context...", "info")
   const repoMapResult = await buildRepoMap(cwd)
   const reconResult = await buildReconnaissance(cwd, options.changePath)
 
@@ -4067,6 +4072,7 @@ export async function runChangePrepareWorkflow(
   }
 
   // ── Step 10: Attempt optional agent dispatch via registry ───────
+  options.onProgress?.("🤖 Dispatching zflow.planner-frontier to generate plan artifacts...", "info")
   const agentDispatchResult = await runPrepareAgentsIfAvailable(
     changeId,
     "v1",
@@ -4075,14 +4081,15 @@ export async function runChangePrepareWorkflow(
     options.prepareNotes,
   )
   if (agentDispatchResult.dispatched) {
-    console.info(
-      `[zflow] Agent dispatch completed via ${agentDispatchResult.serviceName}.` +
+    options.onProgress?.(
+      `✅ Planner dispatch completed via ${agentDispatchResult.serviceName}.` +
       `${agentDispatchResult.methodUsed} (${agentDispatchResult.producedOutputs.length} outputs).`,
+      "info",
     )
   } else if (agentDispatchResult.agentDispatchStatus === "unavailable") {
-    console.info("[zflow] No agent dispatch service available — proceeding without agent dispatch.")
+    options.onProgress?.("⚠️ No agent dispatch service available — planner did not run.", "warning")
   } else {
-    console.warn(`[zflow] Agent dispatch failed: ${agentDispatchResult.error}`)
+    options.onProgress?.(`⚠️ Agent dispatch failed: ${agentDispatchResult.error}`, "warning")
   }
 
   return {

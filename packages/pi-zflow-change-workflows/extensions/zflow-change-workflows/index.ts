@@ -1236,6 +1236,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           cwd: ctx.cwd,
           forceAdHoc: parsedArgs.forceAdHoc,
           prepareNotes: parsedArgs.notes,
+          onProgress: (message, type) => ctx.ui.notify(message, type),
         })
 
         ctx.ui.notify(
