@@ -3794,6 +3794,7 @@ export async function runChangePrepareWorkflow(
   planStatePath: string
   artifactPaths: Record<string, string>
   initialPlanState: Record<string, unknown>
+  agentDispatchResult: PrepareAgentDispatchResult
 }> {
   const cwd = options.cwd
   const { default: fs } = await import("node:fs/promises")
@@ -4091,6 +4092,7 @@ export async function runChangePrepareWorkflow(
     planStatePath,
     artifactPaths,
     initialPlanState,
+    agentDispatchResult,
   }
 }
 

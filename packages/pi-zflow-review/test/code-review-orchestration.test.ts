@@ -165,16 +165,18 @@ void describe("runCodeReview with DispatchService", () => {
 
     const result = await runCodeReview(makeInput(planningArtifacts))
 
-    // Assert runAgent was called with the typed shape and no extra keys
+    // Assert runAgent was called with the typed shape and repo cwd, not a nested context object.
     assert.ok(fakeService.callLog.length > 0, "runAgent should be called")
     for (const rawInput of fakeService.callLog) {
       const keys = Object.keys(rawInput).sort()
       assert.deepEqual(
         keys,
-        ["agent", "task"],
-        `runAgent must receive exactly { agent, task }, got keys: ${keys.join(", ")}`,
+        ["agent", "cwd", "task"],
+        `runAgent must receive exactly { agent, cwd, task }, got keys: ${keys.join(", ")}`,
       )
       assert.equal(typeof rawInput.agent, "string", "agent must be a string")
+      assert.match(String(rawInput.agent), /^zflow\.(review-|synthesizer$)/, "agent should be a packaged zflow runtime name")
+      assert.equal(rawInput.cwd, tmpDir, "cwd must be forwarded to dispatch")
       assert.equal(typeof rawInput.task, "string", "task must be a string")
     }
   })
@@ -406,10 +408,11 @@ void describe("runCodeReview with DispatchService", () => {
       result.manifest.reviewers.length,
       "all reviewers should be skipped",
     )
-    // Severity should be zero
+    // Severity should be zero, but the recommendation must fail closed because no reviewer ran.
     assert.equal(result.severity.critical, 0)
     assert.equal(result.severity.major, 0)
     assert.equal(result.severity.minor, 0)
     assert.equal(result.severity.nit, 0)
+    assert.equal(result.recommendation, "NO-GO")
   })
 })

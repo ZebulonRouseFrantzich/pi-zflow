@@ -252,6 +252,8 @@ export interface CodeReviewInput {
   modifiedFiles?: string[]
   /** Modified directories list for tier triggers. */
   modifiedDirectories?: string[]
+  /** Optional path to limit the reviewed diff to a file or directory. */
+  targetPath?: string
   /** Cross-module dependencies for tier triggers. */
   crossModuleDependencies?: string[]
   /** Whether public API changes are present. */
@@ -360,6 +362,30 @@ function getCurrentBranch(cwd?: string): string {
   }
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`
+}
+
+function toCodeReviewAgentName(reviewerName: string): string {
+  return reviewerName.startsWith("zflow.") ? reviewerName : `zflow.review-${reviewerName}`
+}
+
+function isRequiredCodeReviewer(reviewerName: string): boolean {
+  return reviewerName === "correctness" || reviewerName === "integration" || reviewerName === "security"
+}
+
+async function resolveProfileModelForAgent(agentName: string): Promise<string | undefined> {
+  try {
+    const profileService = getZflowRegistry().optional<{
+      getResolvedAgentBinding?: (agentName: string) => Promise<{ resolvedModel?: string | null } | null>
+    }>("profiles")
+    const binding = await profileService?.getResolvedAgentBinding?.(agentName)
+    return binding?.resolvedModel ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
 // ── Code review orchestration ───────────────────────────────────
 
 /**
@@ -390,9 +416,13 @@ export async function runCodeReview(
   const resolved = resolveDiffBaseline(input.baseline ?? {})
   const baseRef = resolved.baseRef
 
+  const diffCommand = input.targetPath
+    ? `${resolved.diffCommand} -- ${shellQuote(input.targetPath)}`
+    : resolved.diffCommand
+
   let diffContent: string
   try {
-    diffContent = execSync(resolved.diffCommand, {
+    diffContent = execSync(diffCommand, {
       cwd,
       encoding: "utf-8",
       timeout: 15_000,
@@ -423,6 +453,7 @@ export async function runCodeReview(
   const allFindings: Array<{ reviewerName: string; finding: CodeReviewFinding }> = []
   const reviewerOutputs: Record<string, string> = {}
   const coverageNotes: string[] = [`Tier: ${tier}`, `Base ref: ${baseRef}`]
+  if (input.targetPath) coverageNotes.push(`Target path: ${input.targetPath}`)
 
   const internalCtx: InternalReviewContext = {
     planningArtifacts: input.planningArtifacts,
@@ -483,9 +514,13 @@ export async function runCodeReview(
           let dispatchOk = true
           let dispatchError: string | undefined
           try {
+            const agentName = toCodeReviewAgentName(name)
+            const model = await resolveProfileModelForAgent(agentName)
             const raw = await dispatchService.runAgent({
-              agent: name,
+              agent: agentName,
               task: prompt,
+              cwd,
+              ...(model ? { model } : {}),
             })
             if (raw.ok) {
               output = parseReviewerOutput(raw.rawOutput)
@@ -538,7 +573,7 @@ export async function runCodeReview(
                 },
               })
             }
-            coverageNotes.push(`Reviewer "${name}" dispatched via "${dispatchService.name}"`)
+            coverageNotes.push(`Reviewer "${name}" dispatched via "${dispatchService.name}" as ${toCodeReviewAgentName(name)}`)
           }
         } else {
           coverageNotes.push(`Reviewer dispatch failed: ${result.reason}`)
@@ -587,9 +622,12 @@ export async function runCodeReview(
           `Reviewer: ${f.reviewerName}\nSeverity: ${f.finding.severity}\nTitle: ${f.finding.title}\nEvidence: ${f.finding.evidence || f.finding.recommendation}`
         ).join("\n---\n")
 
+        const synthesizerModel = await resolveProfileModelForAgent("zflow.synthesizer")
         const synthResult = await dispatchService.runAgent({
           agent: "zflow.synthesizer",
           task: `Synthesize the following code review findings and produce consolidated results with support/dissent/coverage:\n\n${synthInput}`,
+          cwd,
+          ...(synthesizerModel ? { model: synthesizerModel } : {}),
         })
 
         synthesizerOutput = synthResult.rawOutput
@@ -626,6 +664,19 @@ export async function runCodeReview(
     }
   } else {
     coverageNotes.push("Synthesizer: local severity computation (no zflow.synthesizer dispatch)")
+  }
+
+  const failedRequiredReviewers = manifest.reviewers
+    .filter((r) => r.status === "failed" && isRequiredCodeReviewer(r.name))
+    .map((r) => r.name)
+  if (failedRequiredReviewers.length > 0) {
+    recommendation = "NO-GO"
+    coverageNotes.push(
+      `Fail-closed: required reviewer(s) failed: ${failedRequiredReviewers.join(", ")}.`,
+    )
+  } else if (manifest.reviewers.length > 0 && manifest.reviewers.every((r) => r.status !== "executed")) {
+    recommendation = "NO-GO"
+    coverageNotes.push("Fail-closed: no code reviewers executed.")
   }
 
   // Step 7: Persist findings

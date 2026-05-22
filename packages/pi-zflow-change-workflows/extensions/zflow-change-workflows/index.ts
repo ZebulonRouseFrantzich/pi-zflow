@@ -1247,6 +1247,24 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           "info",
         )
 
+        if (!result.agentDispatchResult.dispatched) {
+          const status = result.agentDispatchResult.agentDispatchStatus
+          const error = result.agentDispatchResult.error
+          ctx.ui.notify(
+            `⚠️ Planner agent dispatch did not complete (${status}).\n` +
+            (error ? `Reason: ${error}\n` : "") +
+            `Plan artifacts were not generated, so validation/review/approval will not run.`,
+            "warning",
+          )
+          return
+        }
+
+        ctx.ui.notify(
+          `✅ Planner agent completed via ${result.agentDispatchResult.serviceName}.` +
+          `${result.agentDispatchResult.methodUsed}.`,
+          "info",
+        )
+
         // Check if RuneContext was detected as canonical — notify the user
         const planStateRuneContext = (result.initialPlanState as Record<string, unknown>)?.runeContext as Record<string, unknown> | undefined
         if (planStateRuneContext && (planStateRuneContext as Record<string, unknown>).canonical === true) {

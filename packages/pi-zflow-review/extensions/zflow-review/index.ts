@@ -251,6 +251,39 @@ function resolveReviewerNames(mode: ReviewerMode, tier: string): string[] {
   return getReviewerNamesForCodeTier(tier)
 }
 
+async function ensureProfileResolved(ctx: {
+  ui?: { notify?: (message: string, type?: "info" | "warning" | "error") => void }
+  cwd?: string
+  modelRegistry?: unknown
+}): Promise<void> {
+  const profileService = getZflowRegistry().optional<{
+    ensureResolved?: (...args: unknown[]) => Promise<unknown>
+  }>("profiles")
+  if (!profileService || typeof profileService.ensureResolved !== "function") {
+    ctx.ui?.notify?.(
+      "ℹ️ No zflow profile service found. Review dispatch may fail if agent models are unresolved.",
+      "warning",
+    )
+    return
+  }
+
+  try {
+    const options: Record<string, unknown> = {}
+    if (ctx.cwd) options.repoRoot = ctx.cwd
+    if (ctx.modelRegistry) {
+      const { createPiModelRegistryAdapter } = await import("pi-zflow-profiles")
+      options.registry = createPiModelRegistryAdapter(ctx.modelRegistry)
+    }
+    await profileService.ensureResolved(undefined, options)
+  } catch (err) {
+    ctx.ui?.notify?.(
+      `⚠️ Profile resolution failed: ${err instanceof Error ? err.message : String(err)}. ` +
+      "Review dispatch may fail.",
+      "warning",
+    )
+  }
+}
+
 // ── Review service interface ───────────────────────────────────
 
 export interface ReviewService {
@@ -296,8 +329,10 @@ export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
     description: "Review local changes against planning documents. Usage: /zflow-review-code [change-id] or /zflow-review-code [status]",
     handler: async (args: string, ctx: {
       ui: { notify: (message: string, type?: "info" | "warning" | "error") => void }
+      cwd?: string
+      modelRegistry?: unknown
     }): Promise<void> => {
-      const cwd = process.cwd()
+      const cwd = ctx.cwd ?? process.cwd()
 
       // Resolve repo root
       let repoRoot: string
@@ -313,22 +348,34 @@ export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
         return
       }
 
+      await ensureProfileResolved({ ...ctx, cwd: repoRoot })
+
       // Parse args: known status word or changeId
-      const arg = args.trim().toLowerCase()
+      const rawArg = args.trim()
+      const arg = rawArg.toLowerCase()
       const knownStatuses = ["passed", "failed", "skipped", "advisory", "unknown"] as const
       let verificationStatus: "passed" | "failed" | "skipped" | "unknown"
       let changeId: string
+      let targetPath: string | undefined
 
       // Import node:path before deriving changeId from directory name
       const { default: path } = await import("node:path")
+      const { existsSync, statSync } = await import("node:fs")
 
       if (knownStatuses.includes(arg as typeof knownStatuses[number])) {
         verificationStatus = arg === "advisory" ? "skipped" : (arg as "passed" | "failed" | "skipped" | "unknown")
         // No explicit changeId — derive from current directory name
         changeId = path.basename(cwd)
-      } else if (arg && arg.length > 0) {
-        // Arg is neither empty nor a known status — treat as changeId
-        changeId = arg
+      } else if (rawArg && rawArg.length > 0) {
+        const possiblePath = path.resolve(cwd, rawArg)
+        if (existsSync(possiblePath)) {
+          const stat = statSync(possiblePath)
+          targetPath = path.relative(repoRoot, possiblePath) || "."
+          changeId = stat.isDirectory() ? path.basename(possiblePath) : path.basename(possiblePath, path.extname(possiblePath))
+        } else {
+          // Arg is neither empty nor a known status/path — treat as changeId
+          changeId = rawArg.toLowerCase()
+        }
         verificationStatus = "unknown"
       } else {
         // No args at all
@@ -338,7 +385,6 @@ export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
 
       // Resolve planning artifact paths
       const { resolvePlanArtifactPath } = await import("pi-zflow-artifacts/artifact-paths")
-      const { existsSync } = await import("node:fs")
 
       const planVersion = "v1"
       const artifactKeys = ["design", "executionGroups", "standards", "verification"] as const
@@ -419,15 +465,19 @@ export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
           },
           verificationStatus,
           cwd,
+          targetPath,
         }
 
         const result = await reviewService.runCodeReview(input)
+        const notifyType = result.reviewersExecuted === 0 || result.recommendation === "NO-GO" ? "warning" : "info"
         ctx.ui.notify(
           `Code review complete.\n` +
           `Tier: ${result.tier}\n` +
           `Recommendation: ${result.recommendation}\n` +
+          `Reviewers executed: ${result.reviewersExecuted}/${result.manifest.reviewers.length}\n` +
           `Findings: ${result.severity.critical} critical, ${result.severity.major} major\n` +
           `Path: ${result.findingsPath}`,
+          notifyType,
         )
       } catch (err: unknown) {
         ctx.ui.notify(
