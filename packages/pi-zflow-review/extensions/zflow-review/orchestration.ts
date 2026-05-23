@@ -403,14 +403,14 @@ function getCurrentBranch(cwd?: string): string {
  * @returns A string array of git arguments suitable for `execFileSync("git", args, ...)`.
  */
 function parseDiffCommand(commandStr: string, targetPath?: string): string[] {
-  const args: string[] = []
+  const args: string[] = ["diff"]
   const parts = commandStr.trim().split(/\s+/)
 
   // Expect at minimum `git diff ...`
   if (parts.length < 3 || parts[0] !== "git" || parts[1] !== "diff") {
     // Unknown format — fall back to a basic diff HEAD
-    args.push("diff", "HEAD", "--")
-    if (targetPath) args.push(targetPath)
+    args.push("HEAD")
+    if (targetPath) args.push("--", targetPath)
     return args
   }
 
