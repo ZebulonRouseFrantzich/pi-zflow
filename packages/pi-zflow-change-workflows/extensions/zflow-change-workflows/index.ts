@@ -1523,6 +1523,15 @@ import type { AgentDispatchProgress, DispatchService } from "pi-zflow-core/dispa
 import { DISPATCH_SERVICE_CAPABILITY } from "pi-zflow-core/dispatch-service"
 
 const IMPLEMENT_GROUP_MAX_RETRIES = 1
+const DEFAULT_IMPLEMENT_CONCURRENCY = 2
+
+function resolveImplementConcurrency(): number {
+  const raw = process.env.ZFLOW_IMPLEMENT_CONCURRENCY
+  if (!raw) return DEFAULT_IMPLEMENT_CONCURRENCY
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed) || parsed < 1) return DEFAULT_IMPLEMENT_CONCURRENCY
+  return parsed
+}
 
 type DispatchGroupResult = Awaited<ReturnType<DispatchService["runParallel"]>>["results"][number]
 
@@ -2144,7 +2153,7 @@ async function resumeWorktreeDispatch(
     },
   }))
 
-  const WORKTREE_DISPATCH_CONCURRENCY = 6
+  const WORKTREE_DISPATCH_CONCURRENCY = resolveImplementConcurrency()
   const MAX_OUTPUT_LINES = 5000
   const MAX_OUTPUT_BYTES = 500_000
 
@@ -2554,7 +2563,7 @@ async function runWorktreeDispatchAndFinalize(
     },
   }))
 
-  const WORKTREE_DISPATCH_CONCURRENCY = 6
+  const WORKTREE_DISPATCH_CONCURRENCY = resolveImplementConcurrency()
   const MAX_OUTPUT_LINES = 5000
   const MAX_OUTPUT_BYTES = 500_000
 
