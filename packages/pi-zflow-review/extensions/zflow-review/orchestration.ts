@@ -516,8 +516,10 @@ export async function runCodeReview(
 
   if (input.diffBundle !== undefined) {
     // Caller provided an explicit diff bundle — use it directly
+    // Keep baseRef as a stable sentinel so downstream findings metadata
+    // is not confused by arbitrary labels; use diffSource for the coverage note.
     diffContent = input.diffBundle
-    baseRef = input.diffSource ?? "explicit-bundle"
+    baseRef = input.baseline?.baseRef ?? "explicit-bundle"
     diffSource = input.diffSource ?? "explicit-bundle"
   } else {
     const resolved = resolveDiffBaseline(input.baseline ?? {})
