@@ -37,6 +37,17 @@ import {
 import { validatePlanModeBash } from "./bash-policy.js"
 import { loadFragment } from "pi-zflow-agents"
 
+type PlanModeUiContext = {
+  ui?: {
+    notify?: (message: string, type?: "info" | "warning" | "error") => void
+    setStatus?: (id: string, value?: string) => void
+  }
+}
+
+function syncPlanModeFooter(ctx?: PlanModeUiContext): void {
+  ctx?.ui?.setStatus?.("zflow-plan", isPlanModeActive() ? "Plan" : undefined)
+}
+
 export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
   const registry = getZflowRegistry()
 
@@ -77,10 +88,13 @@ export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
 
   // When plan mode is active, reduce available tools to read-only exploration
   // and intercept bash commands to reject mutations.
-  pi.on("before_agent_start", async (event) => {
+  pi.on("before_agent_start", async (event, ctx?: PlanModeUiContext) => {
     if (!isPlanModeActive()) {
+      syncPlanModeFooter(ctx)
       return {}
     }
+
+    syncPlanModeFooter(ctx)
 
     // Restrict available tools: exclude edit, write, and mutation-capable tools.
     // Keep zflow_write_plan_artifact available: it is the narrow, path-guarded
@@ -147,11 +161,15 @@ export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
   pi.registerCommand("zflow-plan", {
     description: "Toggle read-only planning mode. Use 'status' to inspect, 'exit' to deactivate.",
     handler: async (args: string, ctx: {
-      ui: { notify: (message: string, type?: "info" | "warning" | "error") => void }
+      ui: {
+        notify: (message: string, type?: "info" | "warning" | "error") => void
+        setStatus?: (id: string, value?: string) => void
+      }
     }): Promise<void> => {
       const subcommand = args.trim()
 
       if (subcommand === "status") {
+        syncPlanModeFooter(ctx)
         const status = getPlanModeStatus()
         const parts = [`Plan mode: ${status.state}`]
         if (status.activatedAt) {
@@ -170,6 +188,7 @@ export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
           return
         }
         deactivatePlanMode()
+        syncPlanModeFooter(ctx)
         ctx.ui.notify("Plan mode deactivated. Normal editing is restored.")
         return
       }
@@ -177,9 +196,11 @@ export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
       // Toggle (default behavior with no subcommand)
       if (isPlanModeActive()) {
         deactivatePlanMode()
+        syncPlanModeFooter(ctx)
         ctx.ui.notify("Plan mode deactivated. Normal editing is restored.")
       } else {
         activatePlanMode("zflow-plan")
+        syncPlanModeFooter(ctx)
         ctx.ui.notify(
           "Plan mode activated.\n" +
           "• Read-only exploration is enabled.\n" +

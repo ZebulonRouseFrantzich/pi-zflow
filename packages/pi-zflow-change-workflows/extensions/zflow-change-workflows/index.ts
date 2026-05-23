@@ -353,6 +353,10 @@ export interface InterviewableContext {
     input?: (title: string, placeholder?: string, extra?: Record<string, unknown>) => Promise<string | undefined>
     /** Non-blocking notification. */
     notify: (message: string, type?: "info" | "warning" | "error") => void
+    /** Dynamic widget rendered near the editor in interactive TUI mode. */
+    setWidget?: (id: string, content?: string[], options?: { placement?: "aboveEditor" | "belowEditor" }) => void
+    /** Footer status indicator in interactive TUI mode. */
+    setStatus?: (id: string, value?: string) => void
   }
   /**
    * The Pi runtime model registry, available when the handler runs inside
@@ -379,6 +383,55 @@ export interface InterviewableContext {
       id: string
       [key: string]: unknown
     }): boolean
+  }
+}
+
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+}
+
+function createPrepareProgressIndicator(ctx: InterviewableContext): {
+  update: (message: string) => void
+  stop: (message?: string) => void
+} {
+  const ui = ctx.ui
+  const widgetId = "zflow-change-prepare-progress"
+  const statusId = "zflow-prepare"
+  const startedAt = Date.now()
+  let lastMessage = "Initializing change preparation"
+  let stopped = false
+
+  const render = () => {
+    if (stopped) return
+    const elapsed = formatElapsed(Date.now() - startedAt)
+    const line = `🤖 zflow-change-prepare running — elapsed ${elapsed} — last: ${lastMessage}`
+    ui?.setWidget?.(widgetId, [line], { placement: "belowEditor" })
+    ui?.setStatus?.(statusId, `zflow prepare ${elapsed}`)
+  }
+
+  render()
+  const interval = setInterval(render, 1000)
+
+  return {
+    update(message: string) {
+      lastMessage = message.replace(/\s+/g, " ").trim()
+      render()
+    },
+    stop(message?: string) {
+      stopped = true
+      clearInterval(interval)
+      ui?.setStatus?.(statusId, undefined)
+      if (message) {
+        const elapsed = formatElapsed(Date.now() - startedAt)
+        ui?.setWidget?.(widgetId, [`${message} — elapsed ${elapsed}`], { placement: "belowEditor" })
+        setTimeout(() => ui?.setWidget?.(widgetId, undefined), 3500)
+      } else {
+        ui?.setWidget?.(widgetId, undefined)
+      }
+    },
   }
 }
 
@@ -1228,6 +1281,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       }
 
       ctx.ui.notify(`📋 Preparing change plan for "${changePath}"...`)
+      const progress = createPrepareProgressIndicator(ctx)
 
       try {
         // Step 1: Run the initial prepare workflow (creates plan state, version dir, etc.)
@@ -1236,7 +1290,10 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           cwd: ctx.cwd,
           forceAdHoc: parsedArgs.forceAdHoc,
           prepareNotes: parsedArgs.notes,
-          onProgress: (message, type) => ctx.ui.notify(message, type),
+          onProgress: (message, type) => {
+            progress.update(message)
+            ctx.ui.notify(message, type)
+          },
         })
 
         ctx.ui.notify(
@@ -1463,6 +1520,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           "error",
         )
       } finally {
+        progress.stop("zflow-change-prepare finished")
         // Clear mode and reminders regardless of outcome
         resetWorkflowState()
       }
