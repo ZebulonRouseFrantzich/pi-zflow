@@ -214,6 +214,13 @@ export async function buildInternalReviewPrompt(
   // ── Reviewer role heading ───────────────────────────────────
   parts.push(`# Reviewer: ${reviewerName}\n`)
 
+  // ── Review-only instruction ─────────────────────────────────
+  parts.push(
+    "## Mode: review only\n\n" +
+    "REVIEW ONLY. Do not edit, write, modify, patch, or apply changes. " +
+    "Return findings only. Do not attempt to fix the code yourself.\n",
+  )
+
   // ── Plan-adherence instruction ──────────────────────────────
   parts.push(getPlanAdherenceInstruction())
   parts.push("")
