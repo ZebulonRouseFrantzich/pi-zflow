@@ -372,9 +372,9 @@ Runtime state lives outside the working tree. See `docs/foundation-versions.md` 
   and can be shared with collaborators.
 
 - **Runtime and review artifacts** — transient state, raw planner output,
-  review findings, and metadata remain under `.git/pi-zflow/` and are
-  not committed. Review findings are accessible at
-  `.git/pi-zflow/review/plan-review-<change-id>-<version>.md`.
+  scoped verification results, review findings, and metadata remain under
+  `.zflow/` and are not committed. Review findings are accessible at
+  `.zflow/review/plan-review-<change-id>-<version>.md`.
 
 This split keeps reviewable change docs in the worktree while avoiding
 worktree pollution with agent-internal state.

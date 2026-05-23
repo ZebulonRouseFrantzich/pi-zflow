@@ -47,7 +47,7 @@ environment, or hard-coded defaults):
 | Input                                       | Type               | Description                                                                                                                                                                                                                                                                       |
 | ------------------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `allowedRoots`                              | `AllowedRoot[]`    | Directories where mutations are permitted. Each has a path, optional glob flag, and optional intent restriction.                                                                                                                                                                  |
-| `blockedPatterns`                           | `BlockedPattern[]` | Glob patterns for paths that must never be mutated, even inside allowed roots. Each has a pattern, reason, severity, and optional `exclude[]` patterns for intentional carve-outs (e.g., `.git/**` excludes `<runtime-state-dir>/**` because runtime state lives inside `.git/`). |
+| `blockedPatterns`                           | `BlockedPattern[]` | Glob patterns for paths that must never be mutated, even inside allowed roots. Each has a pattern, reason, severity, and optional `exclude[]` patterns for intentional carve-outs (e.g., `.git/**` blocks Git internals; runtime state now lives under `.zflow/`). |
 | `symlinkSafety.resolveSymlinks`             | `boolean`          | Whether to follow symlinks and check the real path against the allowlist.                                                                                                                                                                                                         |
 | `symlinkSafety.preventTraversal`            | `boolean`          | Whether to reject `..` traversal that escapes the project root.                                                                                                                                                                                                                   |
 | `plannerArtifactPolicy.allowedArtifactDirs` | `string[]`         | Glob patterns for directories where planner artifact writes are permitted.                                                                                                                                                                                                        |
@@ -109,16 +109,16 @@ packages/pi-zflow-core/config/sentinel-policy.default.json
 
 ### Default blocked patterns (severity: error)
 
-| Pattern                                       | Reason                   | Notes                                                                   |
-| --------------------------------------------- | ------------------------ | ----------------------------------------------------------------------- |
-| `.git/**`                                     | Git internals            | Excludes `<runtime-state-dir>/**` (runtime state lives under `.zflow/`) |
-| `.gitignore`, `.gitattributes`, `.gitmodules` | Git config files         |                                                                         |
-| `node_modules/**`                             | Package-manager managed  |                                                                         |
-| `.env*`                                       | Environment/secret files |                                                                         |
-| `**/*.pem`, `**/*.key`                        | Private key files        |                                                                         |
-| `**/credentials*`, `**/secrets/**`            | Credential files         |                                                                         |
-| `~/.ssh/**`, `~/.aws/**`, `~/.pi/**`          | User-sensitive config    |                                                                         |
-| `~/.config/**`                                | User config (warn)       |                                                                         |
+| Pattern                                       | Reason                   | Notes                                                                                               |
+| --------------------------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------- |
+| `.git/**`                                     | Git internals            | Runtime state no longer lives under `.git/` — it is under `.zflow/` (see allowed path table above). |
+| `.gitignore`, `.gitattributes`, `.gitmodules` | Git config files         |                                                                                                     |
+| `node_modules/**`                             | Package-manager managed  |                                                                                                     |
+| `.env*`                                       | Environment/secret files |                                                                                                     |
+| `**/*.pem`, `**/*.key`                        | Private key files        |                                                                                                     |
+| `**/credentials*`, `**/secrets/**`            | Credential files         |                                                                                                     |
+| `~/.ssh/**`, `~/.aws/**`, `~/.pi/**`          | User-sensitive config    |                                                                                                     |
+| `~/.config/**`                                | User config (warn)       |                                                                                                     |
 
 ### Default blocked patterns (severity: warn)
 
