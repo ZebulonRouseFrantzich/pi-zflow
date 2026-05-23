@@ -610,7 +610,7 @@ function createWorkflowProgressIndicator(
   options?: { command?: string; model?: string; thinking?: string; initialMessage?: string; statusId?: string; widgetId?: string },
 ): {
   update: (message: string) => void
-  updateSubagent: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) => void
+  updateSubagent: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id">>) => void
   stop: (message?: string, status?: "completed" | "failed") => void
 } {
   const ui = ctx.ui
@@ -740,7 +740,7 @@ function createWorkflowProgressIndicator(
       render()
       sendSnapshotMessage()
     },
-    updateSubagent(subagentId: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) {
+    updateSubagent(subagentId: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id">>) {
       const current = workflowProgressSnapshots.get(id)
       let shouldSendMessage = false
       if (current) {
@@ -748,6 +748,7 @@ function createWorkflowProgressIndicator(
         const nextStatus = update.status ?? existing?.status ?? "running"
         const statusChanged = update.status !== undefined && update.status !== existing?.status
         const lastCommandChanged = update.lastCommand !== undefined && update.lastCommand !== existing?.lastCommand
+        const startedAtChanged = update.startedAt !== undefined && update.startedAt !== existing?.startedAt
         const nextSubagent: WorkflowSubagentSnapshot = {
           id: subagentId,
           agent: update.agent ?? existing?.agent ?? subagentId,
@@ -755,7 +756,7 @@ function createWorkflowProgressIndicator(
           model: update.model ?? existing?.model,
           thinking: update.thinking ?? existing?.thinking,
           status: nextStatus,
-          startedAt: existing?.startedAt ?? Date.now(),
+          startedAt: update.startedAt ?? existing?.startedAt ?? Date.now(),
           finishedAt: update.finishedAt ?? existing?.finishedAt ?? (isFinishedSubagentStatus(nextStatus) ? Date.now() : undefined),
           lastCommand: update.lastCommand ?? existing?.lastCommand,
           lastActivityAt: Date.now(),
@@ -771,7 +772,7 @@ function createWorkflowProgressIndicator(
           ...current,
           subagents: updatedSubagents,
         })
-        shouldSendMessage = statusChanged || lastCommandChanged
+        shouldSendMessage = statusChanged || lastCommandChanged || startedAtChanged
       }
       render()
       if (shouldSendMessage) {
@@ -1337,7 +1338,9 @@ async function runWorktreeDispatchAndFinalize(
     output: path.join(worktreeResultsDir, `${t.groupId}-result.md`),
     outputMode: "file-only" as const,
     onUpdate: (progress: AgentDispatchProgress) => {
-      const recentTool = progress.recentTools?.at(-1)
+      const recentTools = Array.isArray(progress.recentTools) ? progress.recentTools : []
+      const recentTool = recentTools[recentTools.length - 1]
+      const recentOutput = Array.isArray(progress.recentOutput) ? progress.recentOutput : []
       options?.onSubagentUpdate?.(t.groupId, {
         agent: t.agent,
         title: runPlan.groups[taskIdx]?.taskPrompt ?? undefined,
@@ -1348,7 +1351,7 @@ async function runWorktreeDispatchAndFinalize(
           ? `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}`
           : recentTool?.tool
             ? `${recentTool.tool}${recentTool.args ? ` ${recentTool.args}` : ""}`
-            : progress.recentOutput?.at(-1) ?? "running",
+            : recentOutput[recentOutput.length - 1] ?? "running",
       })
     },
   }))
@@ -1360,8 +1363,8 @@ async function runWorktreeDispatchAndFinalize(
       title: runPlan.groups[taskIdx]?.taskPrompt ?? undefined,
       model: implementModel.model ?? "unavailable",
       thinking: implementModel.thinking ?? "unavailable",
-      status: "queued",
-      lastCommand: "queued",
+      status: "running",
+      lastCommand: "dispatching to worktree...",
     })
   }
 
@@ -1378,7 +1381,8 @@ async function runWorktreeDispatchAndFinalize(
   })
 
   // Classify results: successful groups go into collected; failures are classified
-  // as retryable or blocker. Retryable groups get one bounded re-run via runAgent.
+  // as retryable or blocker. Retryable groups get one bounded re-run via runParallel
+  // (not sequential runAgent) so multiple retries run concurrently.
   const decisions: FailedGroupDecision[] = []
   const allResults: Array<DispatchGroupResult> = [...dispatchResult.results]
 
@@ -1402,6 +1406,9 @@ async function runWorktreeDispatchAndFinalize(
   }
 
   if (failedIndices.length > 0) {
+    // ── Phase 1: classify every failed group immediately so UI shows honest state
+    const retryIndices: number[] = []
+    const retryDecisionIndices: number[] = []
     for (const idx of failedIndices) {
       const result = allResults[idx]!
       const group = runPlan.groups[idx]
@@ -1409,6 +1416,8 @@ async function runWorktreeDispatchAndFinalize(
       decisions.push(decision)
 
       if (decision.decision === "retry") {
+        retryIndices.push(idx)
+        retryDecisionIndices.push(decisions.length - 1)
         const task = runPlan.tasks[idx]!
         options?.onSubagentUpdate?.(task.groupId, {
           agent: result.agent,
@@ -1416,63 +1425,8 @@ async function runWorktreeDispatchAndFinalize(
           status: "retry",
           finishedAt: undefined,
           startedAt: Date.now(),
-          lastCommand: "retrying...",
+          lastCommand: "scheduling retry...",
         })
-
-        try {
-          const retryResult = await dispatchService.runAgent({
-            agent: task.agent,
-            task: task.task,
-            cwd,
-            model: implementModel.model,
-            output: path.join(worktreeResultsDir, `${task.groupId}-result.md`),
-            outputMode: "file-only",
-          })
-          // Replace the failed result with retry result
-          const retryDispatchResult: DispatchGroupResult = {
-            agent: retryResult.agent ?? task.agent,
-            rawOutput: retryResult.rawOutput,
-            outputPath: retryResult.outputPath,
-            ok: retryResult.ok,
-            error: retryResult.error,
-          }
-          allResults[idx] = retryDispatchResult
-
-          if (retryResult.ok) {
-            decisions[decisions.length - 1] = { ...decision, decision: "retry", reason: "Retry succeeded." }
-            options?.onSubagentUpdate?.(task.groupId, {
-              agent: retryResult.agent ?? task.agent,
-              title: group?.taskPrompt ?? undefined,
-              status: "completed",
-              finishedAt: Date.now(),
-            })
-          } else {
-            decisions[decisions.length - 1] = classifyFailedGroup(group?.id ?? `group-${idx}`, retryDispatchResult, 1, IMPLEMENT_GROUP_MAX_RETRIES)
-            options?.onSubagentUpdate?.(task.groupId, {
-              agent: retryResult.agent ?? task.agent,
-              title: group?.taskPrompt ?? undefined,
-              status: "failed",
-              finishedAt: Date.now(),
-              lastCommand: retryResult.error ?? "retry failed",
-            })
-          }
-        } catch (retryErr: unknown) {
-          decisions[decisions.length - 1] = {
-            groupId: group?.id ?? `group-${idx}`,
-            agent: result.agent,
-            attempt: 1,
-            decision: "blocker",
-            reason: `Retry threw: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`,
-            error: result.error,
-          }
-          options?.onSubagentUpdate?.(task.groupId, {
-            agent: result.agent,
-            title: group?.taskPrompt ?? undefined,
-            status: "failed",
-            finishedAt: Date.now(),
-            lastCommand: "retry crashed",
-          })
-        }
       } else {
         options?.onSubagentUpdate?.(runPlan.tasks[idx]?.groupId ?? `group-${idx}`, {
           agent: result.agent,
@@ -1481,6 +1435,109 @@ async function runWorktreeDispatchAndFinalize(
           finishedAt: Date.now(),
           lastCommand: decision.reason,
         })
+      }
+    }
+
+    // ── Phase 2: dispatch all retries in parallel (not one-at-a-time)
+    if (retryIndices.length > 0) {
+      const retryTasks = retryIndices.map((idx) => {
+        const task = runPlan.tasks[idx]!
+        const group = runPlan.groups[idx]
+        return {
+          agent: task.agent,
+          task: task.task,
+          model: implementModel.model,
+          output: path.join(worktreeResultsDir, `${task.groupId}-result.md`),
+          outputMode: "file-only" as const,
+          onUpdate: (progress: AgentDispatchProgress) => {
+            const recentTools = Array.isArray(progress.recentTools) ? progress.recentTools : []
+            const recentTool = recentTools[recentTools.length - 1]
+            const recentOutput = Array.isArray(progress.recentOutput) ? progress.recentOutput : []
+            options?.onSubagentUpdate?.(task.groupId, {
+              agent: task.agent,
+              title: group?.taskPrompt ?? undefined,
+              model: implementModel.model ?? "unavailable",
+              thinking: implementModel.thinking ?? "unavailable",
+              status: progress.status ?? "running",
+              lastCommand: progress.currentTool
+                ? `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}`
+                : recentTool?.tool
+                  ? `${recentTool.tool}${recentTool.args ? ` ${recentTool.args}` : ""}`
+                  : recentOutput[recentOutput.length - 1] ?? "retrying...",
+            })
+          },
+        }
+      })
+
+      let retryDispatchResult: Awaited<ReturnType<DispatchService["runParallel"]>>
+      try {
+        retryDispatchResult = await dispatchService.runParallel({
+          tasks: retryTasks,
+          cwd,
+          concurrency: WORKTREE_DISPATCH_CONCURRENCY,
+          worktree: true,
+          maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
+        })
+      } catch (retryDispatchErr: unknown) {
+        // If the parallel retry dispatch itself throws, treat every retry as a blocker
+        const errMsg = retryDispatchErr instanceof Error ? retryDispatchErr.message : String(retryDispatchErr)
+        for (let rIdx = 0; rIdx < retryIndices.length; rIdx++) {
+          const originalIdx = retryIndices[rIdx]!
+          const decisionIdx = retryDecisionIndices[rIdx]!
+          const group = runPlan.groups[originalIdx]
+          const task = runPlan.tasks[originalIdx]!
+          decisions[decisionIdx] = {
+            ...decisions[decisionIdx]!,
+            decision: "blocker",
+            reason: `Retry dispatch threw: ${errMsg}`,
+          }
+          options?.onSubagentUpdate?.(task.groupId, {
+            agent: task.agent,
+            title: group?.taskPrompt ?? undefined,
+            status: "failed",
+            finishedAt: Date.now(),
+            lastCommand: `retry dispatch threw: ${errMsg}`,
+          })
+        }
+        // Fall through to blocker check below
+        retryDispatchResult = { ok: false, results: [] }
+      }
+
+      // ── Phase 3: map retry results back to original indices
+      for (let rIdx = 0; rIdx < retryDispatchResult.results.length; rIdx++) {
+        const originalIdx = retryIndices[rIdx]!
+        const decisionIdx = retryDecisionIndices[rIdx]!
+        const group = runPlan.groups[originalIdx]
+        const task = runPlan.tasks[originalIdx]!
+        const rResult = retryDispatchResult.results[rIdx]!
+        const mappedResult: DispatchGroupResult = {
+          agent: rResult.agent ?? task.agent,
+          rawOutput: rResult.rawOutput,
+          outputPath: rResult.outputPath,
+          ok: rResult.ok,
+          error: rResult.error,
+        }
+        allResults[originalIdx] = mappedResult
+
+        if (rResult.ok) {
+          decisions[decisionIdx] = { ...decisions[decisionIdx]!, decision: "retry", reason: "Retry succeeded." }
+          options?.onSubagentUpdate?.(task.groupId, {
+            agent: rResult.agent ?? task.agent,
+            title: group?.taskPrompt ?? undefined,
+            status: "completed",
+            finishedAt: Date.now(),
+            lastCommand: "retry dispatch complete",
+          })
+        } else {
+          decisions[decisionIdx] = classifyFailedGroup(group?.id ?? `group-${originalIdx}`, mappedResult, 1, IMPLEMENT_GROUP_MAX_RETRIES)
+          options?.onSubagentUpdate?.(task.groupId, {
+            agent: rResult.agent ?? task.agent,
+            title: group?.taskPrompt ?? undefined,
+            status: "failed",
+            finishedAt: Date.now(),
+            lastCommand: rResult.error ?? "retry failed",
+          })
+        }
       }
     }
   }
