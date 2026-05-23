@@ -5361,31 +5361,54 @@ export async function finalizeVerification(
   cwd?: string,
 ): Promise<{
   pass: boolean
+  status: "passed" | "failed" | "skipped"
   command: string
   output: string
   duration: number
   error?: string
 }> {
+  const { default: fs } = await import("node:fs/promises")
+  const { parseVerificationMdCommand, resolveVerificationCommand, runVerification } = await import("./verification.js")
+  const { resolvePlanArtifactPath } = await import("pi-zflow-artifacts/artifact-paths")
+
   const run = await readRun(runId, cwd)
   const repoRoot = run.repoRoot
 
-  // Resolve verification command
-  const command = resolveVerificationCommand(repoRoot)
+  // Try to extract a verification command from the approved plan's verification.md
+  let planCommand: string | null = null
+  try {
+    const verifMdPath = resolvePlanArtifactPath(run.changeId, run.planVersion, "verification", cwd)
+    const verifMdContent = await fs.readFile(verifMdPath, "utf-8")
+    planCommand = parseVerificationMdCommand(verifMdContent)
+  } catch {
+    // verification.md may not exist yet — non-fatal, fall through to other sources
+  }
+
+  // Resolve verification command (precedence: profile, repo config, plan, auto-detect)
+  const command = resolveVerificationCommand(repoRoot, undefined, planCommand ?? undefined)
   if (!command) {
     console.warn("[zflow] No verification command resolved — marking verification as skipped.")
     await updateRun(runId, {
       verification: { status: "skipped" },
     } as any, cwd)
-    return { pass: true, command: "(none)", output: "Verification skipped — no command resolved.", duration: 0 }
+    return { pass: true, status: "skipped", command: "(none)", output: "Verification skipped — no command resolved.", duration: 0 }
   }
 
   // Run verification
   const result = await runVerification(command, repoRoot)
 
+  const vStatus = result.pass ? "passed" : "failed"
+  // Truncate output for run.json to avoid bloating the state file
+  const truncatedOutput = result.output.length > 2000
+    ? result.output.slice(0, 2000) + "\n...(truncated)"
+    : result.output
+
   // Log to run.json
   await updateRun(runId, {
     verification: {
-      status: result.pass ? "passed" : "failed",
+      status: vStatus,
+      command: result.command,
+      output: truncatedOutput,
       completedAt: new Date().toISOString(),
       failureCount: result.pass ? 0 : 1,
     },
@@ -5402,6 +5425,7 @@ export async function finalizeVerification(
 
   return {
     pass: result.pass,
+    status: vStatus,
     command: result.command,
     output: result.output,
     duration: result.duration,
@@ -5802,7 +5826,13 @@ export async function runImplementationPostStartSequence(
 
   reportProgress("Running final verification on the primary worktree")
   const verificationResult = await finalizeVerification(runId, cwd)
-  reportProgress(verificationResult.pass ? "Final verification passed; starting code review" : "Final verification failed; evaluating fix loop")
+  if (verificationResult.status === "skipped") {
+    reportProgress("Final verification was skipped (no command resolved); proceeding to code review")
+  } else if (verificationResult.pass) {
+    reportProgress("Final verification passed; starting code review")
+  } else {
+    reportProgress("Final verification failed; evaluating fix loop")
+  }
 
   if (!verificationResult.pass) {
     // 3c. Verification failed — attempt fix loop if autoFix is enabled

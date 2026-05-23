@@ -31,6 +31,7 @@ import {
   resolveRunStatePath,
   resolveStateIndexPath,
   resolvePlanStatePath,
+  resolvePlanArtifactPath,
 } from "pi-zflow-artifacts/artifact-paths"
 
 import {
@@ -247,6 +248,30 @@ describe("runImplementationPostStartSequence", () => {
       // the sequence should complete
       assert.strictEqual(result.status, "completed", "should complete workflow")
       assert.strictEqual(result.verificationStatus, "passed", "verification should pass")
+    })
+
+    test("uses verification.md command when no repo verification command exists", async () => {
+      const repoRoot = await createTestRepo()
+      const { runId, changeId } = await setupImplementRun(repoRoot, "test-plan-verification")
+      await fs.writeFile(
+        resolvePlanArtifactPath(changeId, "v1", "verification", repoRoot),
+        "# Verification\n\n```bash\ntest -f README.md\n```\n",
+        "utf-8",
+      )
+
+      await simulateDispatchArtifacts(runId, repoRoot)
+      await setRunPhase(runId, "applying", repoRoot)
+
+      const result = await runImplementationPostStartSequence(runId, undefined, repoRoot)
+
+      assert.strictEqual(result.status, "completed", "workflow should complete")
+      assert.strictEqual(result.verificationStatus, "passed", "verification.md command should pass")
+
+      const runJson = JSON.parse(
+        await fs.readFile(resolveRunStatePath(runId, repoRoot), "utf-8"),
+      )
+      assert.strictEqual(runJson.verification.status, "passed")
+      assert.strictEqual(runJson.verification.command, "test -f README.md")
     })
 
     test("verification pass leads to review then complete", async () => {
