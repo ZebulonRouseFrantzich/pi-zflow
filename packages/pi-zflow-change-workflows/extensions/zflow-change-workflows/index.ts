@@ -171,6 +171,7 @@ import {
   buildDriftDetectedReminder,
   buildCodeReviewInputFromContext,
   publishPlanArtifacts,
+  deriveSemanticChangeId,
   type PublishPlanArtifactsResult,
 } from "./orchestration.js"
 
