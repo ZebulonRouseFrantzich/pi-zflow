@@ -57,7 +57,7 @@ import {
   recordSkipped as recordSkippedFn,
   getCoverageSummary,
 } from "pi-zflow-review"
-import { readRun, updateRun, setRunPhase, addRetainedArtifact, createRun, createRecoveryRef, removeRecoveryRef } from "pi-zflow-artifacts"
+import { readRun, updateRun, setRunPhase, addRetainedArtifact, createRun, createRecoveryRef, removeRecoveryRef, assertValidPlanVersion } from "pi-zflow-artifacts"
 import type { RunPhase, RetainedArtifact, RunJson } from "pi-zflow-artifacts"
 import { resolveRunDir, resolveRunStatePath, resolvePlanVersionDir, resolvePlanStatePath, resolvePlanArtifactPath, resolveCodeReviewFindingsPath } from "pi-zflow-artifacts/artifact-paths"
 import { addStateIndexEntry, loadStateIndex, listStateIndexEntries, updateStateIndexEntry } from "pi-zflow-artifacts/state-index"
@@ -73,6 +73,7 @@ import type { ApplyBackResult } from "./apply-back.js"
 import { writeDeviationSummary, readDeviationReports } from "./deviations.js"
 import { getCurrentBranch } from "./git-preflight.js"
 import { getZflowRegistry } from "pi-zflow-core/registry"
+import { assertSafeChangeId } from "pi-zflow-core/ids"
 import { DISPATCH_SERVICE_CAPABILITY, type DispatchService, type AgentDispatchProgress } from "pi-zflow-core/dispatch-service"
 import {
   isRepoMapFresh,
@@ -6151,8 +6152,28 @@ export async function publishPlanArtifacts(
     repoRoot = cwd
   }
 
+  // Validate changeId and planVersion to prevent path traversal
+  assertSafeChangeId(changeId)
+  assertValidPlanVersion(planVersion)
+
+  // Validate repoRelativeDir is not absolute (would escape repo root)
+  if (path.isAbsolute(repoRelativeDir)) {
+    throw new Error(
+      `repoRelativeDir must be a relative path, got absolute: "${repoRelativeDir}"`,
+    )
+  }
+
   // Build durable target path
   const durableDir = path.resolve(repoRoot, repoRelativeDir, changeId, planVersion)
+
+  // Double-check that durableDir stays within the repo root
+  const relative = path.relative(repoRoot, durableDir)
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(
+      `Durable publish path "${durableDir}" escapes repository root "${repoRoot}". ` +
+      `Change ID "${changeId}" or planVersion "${planVersion}" may contain path traversal.`,
+    )
+  }
 
   // Published artifact paths
   const publishedArtifacts: Record<string, string> = {}

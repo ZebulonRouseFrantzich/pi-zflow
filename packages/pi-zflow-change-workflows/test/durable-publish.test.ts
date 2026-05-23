@@ -246,4 +246,79 @@ describe("publishPlanArtifacts", () => {
       await fs.rm(repoRoot, { recursive: true, force: true })
     }
   })
+
+  test("rejects changeId with path traversal", async () => {
+    const repoRoot = await createTestRepo()
+    try {
+      const runtimeStateDir = path.join(repoRoot, ".zflow")
+      const planVersion = "v1"
+      await writeRuntimePlanArtifacts(runtimeStateDir, "safe-change", planVersion)
+
+      await assert.rejects(
+        () => publishPlanArtifacts("../escape", planVersion, {
+          cwd: repoRoot, runtimeStateDir,
+        }),
+        { message: /Unsafe changeId/ },
+      )
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  test("rejects invalid planVersion", async () => {
+    const repoRoot = await createTestRepo()
+    try {
+      const runtimeStateDir = path.join(repoRoot, ".zflow")
+      await writeRuntimePlanArtifacts(runtimeStateDir, "test-change", "v1")
+
+      await assert.rejects(
+        () => publishPlanArtifacts("test-change", "not-a-version", {
+          cwd: repoRoot, runtimeStateDir,
+        }),
+        { message: /Invalid planVersion/ },
+      )
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  test("rejects absolute repoRelativeDir", async () => {
+    const repoRoot = await createTestRepo()
+    try {
+      const runtimeStateDir = path.join(repoRoot, ".zflow")
+      const changeId = "test-abs-path"
+      const planVersion = "v1"
+      await writeRuntimePlanArtifacts(runtimeStateDir, changeId, planVersion)
+
+      await assert.rejects(
+        () => publishPlanArtifacts(changeId, planVersion, {
+          cwd: repoRoot, runtimeStateDir,
+          repoRelativeDir: "/absolute/path",
+        }),
+        { message: /repoRelativeDir must be a relative/ },
+      )
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  test("rejects escaping repoRelativeDir", async () => {
+    const repoRoot = await createTestRepo()
+    try {
+      const runtimeStateDir = path.join(repoRoot, ".zflow")
+      const changeId = "test-escape"
+      const planVersion = "v1"
+      await writeRuntimePlanArtifacts(runtimeStateDir, changeId, planVersion)
+
+      await assert.rejects(
+        () => publishPlanArtifacts(changeId, planVersion, {
+          cwd: repoRoot, runtimeStateDir,
+          repoRelativeDir: "safe/../../etc",
+        }),
+        { message: /escapes repository root/ },
+      )
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
+  })
 })
