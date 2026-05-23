@@ -12,7 +12,7 @@
  * @module pi-zflow-review/orchestration
  */
 
-import { execSync } from "node:child_process"
+import { execSync, execFileSync } from "node:child_process"
 
 import { getZflowRegistry } from "pi-zflow-core/registry"
 import { DISPATCH_SERVICE_CAPABILITY, type DispatchService } from "pi-zflow-core/dispatch-service"
@@ -388,8 +388,42 @@ function getCurrentBranch(cwd?: string): string {
   }
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'"'"'`)}'`
+/**
+ * Parse a known `git diff` command string into a git args array.
+ *
+ * Handles the limited set of command strings emitted by `resolveDiffBaseline()`:
+ *   - `git diff HEAD`
+ *   - `git diff <ref>...HEAD`
+ *   - `git diff <ref>..HEAD`
+ *
+ * `targetPath`, if provided, is appended as a positional path argument (no shell quoting).
+ *
+ * @param commandStr - A git diff command string from `resolveDiffBaseline()`.
+ * @param targetPath - Optional file/directory path to restrict the diff.
+ * @returns A string array of git arguments suitable for `execFileSync("git", args, ...)`.
+ */
+function parseDiffCommand(commandStr: string, targetPath?: string): string[] {
+  const args: string[] = []
+  const parts = commandStr.trim().split(/\s+/)
+
+  // Expect at minimum `git diff ...`
+  if (parts.length < 3 || parts[0] !== "git" || parts[1] !== "diff") {
+    // Unknown format — fall back to a basic diff HEAD
+    args.push("diff", "HEAD", "--")
+    if (targetPath) args.push(targetPath)
+    return args
+  }
+
+  // Strip "git diff" prefix, keep remaining args (e.g. "HEAD" or "main...HEAD")
+  for (let i = 2; i < parts.length; i++) {
+    args.push(parts[i])
+  }
+
+  if (targetPath) {
+    args.push("--", targetPath)
+  }
+
+  return args
 }
 
 function toCodeReviewAgentName(reviewerName: string): string {
@@ -490,12 +524,9 @@ export async function runCodeReview(
     baseRef = resolved.baseRef
     diffSource = resolved.resolution
 
-    const diffCommand = input.targetPath
-      ? `${resolved.diffCommand} -- ${shellQuote(input.targetPath)}`
-      : resolved.diffCommand
-
     try {
-      diffContent = execSync(diffCommand, {
+      const diffArgs = parseDiffCommand(resolved.diffCommand, input.targetPath)
+      diffContent = execFileSync("git", diffArgs, {
         cwd,
         encoding: "utf-8",
         timeout: 15_000,
@@ -533,7 +564,8 @@ export async function runCodeReview(
   if (diffContent.length === 0) {
     coverageNotes.push(`Diff bundle is empty — no changes to review (source: ${diffSource}).`)
   } else {
-    coverageNotes.push(`Diff bundle: ${diffContent.length} bytes (source: ${diffSource}).`)
+    const byteCount = Buffer.byteLength(diffContent, "utf8")
+    coverageNotes.push(`Diff bundle: ${byteCount} bytes (source: ${diffSource}).`)
   }
 
   const internalCtx: InternalReviewContext = {
