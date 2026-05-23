@@ -418,6 +418,18 @@ interface WorkflowProgressSnapshot {
   lastMessage: string
   updateCount: number
   recentMessages: string[]
+  subagents: WorkflowSubagentSnapshot[]
+}
+
+interface WorkflowSubagentSnapshot {
+  id: string
+  agent: string
+  model?: string
+  thinking?: string
+  status: string
+  startedAt: number
+  finishedAt?: number
+  lastCommand?: string
 }
 
 interface WorkflowProgressMessageDetails {
@@ -469,6 +481,17 @@ function makeWorkflowProgressComponent(details: WorkflowProgressMessageDetails, 
       for (const message of snapshot.recentMessages.slice(-3)) {
         lines.push(truncateText(`  ${theme.fg("dim", "•")} ${message}`, available))
       }
+      if (snapshot.subagents.length > 0) {
+        lines.push(truncateText(`  ${theme.fg("dim", "subagents:")}`, available))
+        for (const subagent of snapshot.subagents) {
+          const subElapsed = formatElapsed((subagent.finishedAt ?? Date.now()) - subagent.startedAt)
+          const model = subagent.model ?? "unavailable"
+          const thinking = subagent.thinking ? `, thinking ${subagent.thinking}` : ""
+          lines.push(truncateText(`    ${subagent.id}: ${subagent.status} ${subElapsed}`, available))
+          lines.push(truncateText(`      ${subagent.agent} · model ${model}${thinking}`, available))
+          lines.push(truncateText(`      last: ${subagent.lastCommand ?? "starting"}`, available))
+        }
+      }
       return lines
     },
   }
@@ -493,6 +516,7 @@ function createWorkflowProgressIndicator(
   options?: { command?: string; model?: string; thinking?: string; initialMessage?: string; statusId?: string; widgetId?: string },
 ): {
   update: (message: string) => void
+  updateSubagent: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) => void
   stop: (message?: string, status?: "completed" | "failed") => void
 } {
   const ui = ctx.ui
@@ -515,6 +539,7 @@ function createWorkflowProgressIndicator(
     lastMessage: options?.initialMessage ?? "Initializing workflow",
     updateCount: 0,
     recentMessages: [options?.initialMessage ?? "Initializing workflow"],
+    subagents: [],
   }
   workflowProgressSnapshots.set(id, initialSnapshot)
 
@@ -547,6 +572,30 @@ function createWorkflowProgressIndicator(
           lastMessage: normalizedMessage,
           updateCount: current.updateCount + 1,
           recentMessages: [...current.recentMessages, normalizedMessage].slice(-5),
+        })
+      }
+      render()
+    },
+    updateSubagent(subagentId: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) {
+      const current = workflowProgressSnapshots.get(id)
+      if (current) {
+        const existing = current.subagents.find((subagent) => subagent.id === subagentId)
+        const nextSubagent: WorkflowSubagentSnapshot = {
+          id: subagentId,
+          agent: update.agent ?? existing?.agent ?? subagentId,
+          model: update.model ?? existing?.model,
+          thinking: update.thinking ?? existing?.thinking,
+          status: update.status ?? existing?.status ?? "running",
+          startedAt: existing?.startedAt ?? Date.now(),
+          finishedAt: update.finishedAt ?? existing?.finishedAt,
+          lastCommand: update.lastCommand ?? existing?.lastCommand,
+        }
+        workflowProgressSnapshots.set(id, {
+          ...current,
+          subagents: [
+            ...current.subagents.filter((subagent) => subagent.id !== subagentId),
+            nextSubagent,
+          ],
         })
       }
       render()
@@ -876,7 +925,7 @@ export function resetWorkflowState(): void {
 // Dispatch service helpers
 // ═══════════════════════════════════════════════════════════════════
 
-import type { DispatchService } from "pi-zflow-core/dispatch-service"
+import type { AgentDispatchProgress, DispatchService } from "pi-zflow-core/dispatch-service"
 import { DISPATCH_SERVICE_CAPABILITY } from "pi-zflow-core/dispatch-service"
 
 function normalizeDispatchVerification(
@@ -943,6 +992,7 @@ async function runWorktreeDispatchAndFinalize(
   options?: {
     cwd?: string
     force?: boolean
+    onSubagentUpdate?: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) => void
   },
 ): Promise<void> {
   const { default: fs } = await import("node:fs/promises")
@@ -1016,7 +1066,31 @@ async function runWorktreeDispatchAndFinalize(
     model: implementModel.model,
     output: t.outputRelativePath,
     outputMode: "file-only" as const,
+    onUpdate: (progress: AgentDispatchProgress) => {
+      const recentTool = progress.recentTools?.at(-1)
+      options?.onSubagentUpdate?.(t.groupId, {
+        agent: t.agent,
+        model: implementModel.model ?? "unavailable",
+        thinking: implementModel.thinking ?? "unavailable",
+        status: progress.status ?? "running",
+        lastCommand: progress.currentTool
+          ? `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}`
+          : recentTool?.tool
+            ? `${recentTool.tool}${recentTool.args ? ` ${recentTool.args}` : ""}`
+            : progress.recentOutput?.at(-1) ?? "running",
+      })
+    },
   }))
+
+  for (const task of runPlan.tasks) {
+    options?.onSubagentUpdate?.(task.groupId, {
+      agent: task.agent,
+      model: implementModel.model ?? "unavailable",
+      thinking: implementModel.thinking ?? "unavailable",
+      status: "queued",
+      lastCommand: "queued",
+    })
+  }
 
   const dispatchResult = await dispatchService.runParallel({
     tasks,
@@ -1025,6 +1099,18 @@ async function runWorktreeDispatchAndFinalize(
   })
 
   if (!dispatchResult.ok) {
+    for (let idx = 0; idx < dispatchResult.results.length; idx++) {
+      const result = dispatchResult.results[idx]
+      const task = runPlan.tasks[idx]
+      if (task && result) {
+        options?.onSubagentUpdate?.(task.groupId, {
+          agent: result.agent,
+          status: result.ok ? "completed" : "failed",
+          finishedAt: Date.now(),
+          lastCommand: result.error ?? "dispatch complete",
+        })
+      }
+    }
     throw new Error(
       `Worktree dispatch failed via "${dispatchService.name}": ` +
       dispatchResult.results
@@ -1032,6 +1118,19 @@ async function runWorktreeDispatchAndFinalize(
         .map((r) => `${r.agent}: ${r.error ?? "unknown error"}`)
         .join("; "),
     )
+  }
+
+  for (let idx = 0; idx < dispatchResult.results.length; idx++) {
+    const result = dispatchResult.results[idx]
+    const task = runPlan.tasks[idx]
+    if (task && result) {
+      options?.onSubagentUpdate?.(task.groupId, {
+        agent: result.agent,
+        status: result.ok ? "completed" : "failed",
+        finishedAt: Date.now(),
+        lastCommand: result.ok ? "dispatch complete" : result.error ?? "dispatch failed",
+      })
+    }
   }
 
   // Collect group results from dispatch outputs
@@ -1966,6 +2065,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           await runWorktreeDispatchAndFinalize(result.runId, result.changeId, result.planVersion, dispatchService!, {
             cwd: undefined,
             force,
+            onSubagentUpdate: (id, update) => implProgress.updateSubagent(id, update),
           })
         }
 

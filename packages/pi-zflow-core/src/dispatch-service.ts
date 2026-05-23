@@ -100,6 +100,8 @@ export interface ParallelTaskInput {
   output?: string | false
   /** Output mode. */
   outputMode?: "inline" | "file-only"
+  /** Optional live progress callback from the dispatch backend. */
+  onUpdate?: (progress: AgentDispatchProgress) => void
 }
 
 /**
