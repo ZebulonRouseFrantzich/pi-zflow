@@ -565,13 +565,6 @@ function colorizeThinking(thinking: string | undefined, theme: any): string {
   return theme.fg("dim", thinking)
 }
 
-function cardBorderColor(status: ZflowCardViewModel["status"], theme: any, text: string): string {
-  if (status === "failed") return theme.fg("error", text)
-  if (status === "running") return theme.fg("borderAccent", text)
-  if (status === "queued") return theme.fg("borderMuted", text)
-  return theme.fg("border", text)
-}
-
 function statusTextColor(status: ZflowCardViewModel["status"], theme: any, text: string): string {
   if (status === "completed") return theme.fg("success", text)
   if (status === "failed") return theme.fg("error", text)
@@ -579,10 +572,15 @@ function statusTextColor(status: ZflowCardViewModel["status"], theme: any, text:
   return theme.fg("accent", text)
 }
 
-function cardContentLine(rawValue: string, width: number, colorize: (text: string) => string): string {
-  const innerWidth = Math.max(1, width - 4)
-  const raw = visualPadEnd(visualTruncate(rawValue, innerWidth), innerWidth)
-  return `│ ${colorize(raw)} │`
+/**
+ * Choose a Pi TUI background function for a card based on its status.
+ * Returns a function that wraps text in the appropriate theme background color.
+ */
+function cardBgFn(status: ZflowCardViewModel["status"], theme: any): (s: string) => string {
+  if (status === "completed") return (s) => theme.bg("toolSuccessBg", s)
+  if (status === "failed") return (s) => theme.bg("toolErrorBg", s)
+  if (status === "running") return (s) => theme.bg("toolPendingBg", s)
+  return (s) => theme.bg("customMessageBg", s)
 }
 
 function colorizeMetaLine(rawMeta: string, theme: any): string {
@@ -601,32 +599,50 @@ function colorizeMetaLine(rawMeta: string, theme: any): string {
 }
 
 /**
- * Render a single zflow card into themed ANSI lines.
+ * Render a single zflow card as a filled-background panel.
  *
- * This is the unified card renderer. Every zflow card (subagent/phase/reviewer)
- * is modelled the same way via ZflowCardViewModel and rendered here. It follows
- * the Pi TUI Component contract through ZflowCard.render(width): raw content is
- * width-normalized before native theme colors are applied, so ANSI styles do not
- * corrupt layout calculations.
+ * Uses Pi TUI theme background colors (toolPendingBg/customMessageBg/toolSuccessBg/toolErrorBg
+ * based on status) instead of ASCII box-drawing borders. Each line is a full-width
+ * background-filled rectangle matching Pi's native card style. Different statuses
+ * get different background colors so cards are visually distinguishable.
+ *
+ * The first and last lines are empty-padding lines giving the card vertical breathing
+ * room, making it appear as a standalone rectangular panel.
  */
 function buildCardLines(model: ZflowCardViewModel, theme: any, width: number): string[] {
   const safeWidth = Math.max(8, width)
-  const borderTop = `┌${"─".repeat(Math.max(1, safeWidth - 2))}┐`
-  const borderBot = `└${"─".repeat(Math.max(1, safeWidth - 2))}┘`
+  const bgFn = cardBgFn(model.status, theme)
 
-  const lines = [cardBorderColor(model.status, theme, borderTop)]
-  lines.push(cardContentLine(model.title, safeWidth, (text) => statusTextColor(model.status, theme, text)))
-  lines.push(cardContentLine(model.statusLine, safeWidth, (text) => statusTextColor(model.status, theme, text)))
+  function cardLine(plain: string, colorize: (s: string) => string): string {
+    const indented = "  " + plain
+    const fitted = visualPadEnd(visualTruncate(indented, safeWidth), safeWidth)
+    return bgFn(colorize(fitted))
+  }
 
+  const lines: string[] = []
+
+  // Top padding line — empty background-filled line for vertical breathing room
+  lines.push(bgFn(" ".repeat(safeWidth)))
+
+  // Title line — colored by status (success/accent/error/warning)
+  lines.push(cardLine(model.title, (s) => statusTextColor(model.status, theme, s)))
+
+  // Status + elapsed line — dimmed metadata
+  lines.push(cardLine(model.statusLine, (s) => theme.fg("dim", s)))
+
+  // Meta lines — each dimmed, with thinking level highlighted via colorizeThinking
   for (const meta of model.metaLines) {
-    lines.push(cardContentLine(meta, safeWidth, (text) => colorizeMetaLine(text, theme)))
+    lines.push(cardLine(meta, (s) => colorizeMetaLine(s, theme)))
   }
 
+  // Body lines — dimmed bullet items
   for (const body of model.bodyLines) {
-    lines.push(cardContentLine(body, safeWidth, (text) => theme.fg("dim", text)))
+    lines.push(cardLine(body, (s) => theme.fg("dim", s)))
   }
 
-  lines.push(cardBorderColor(model.status, theme, borderBot))
+  // Bottom padding line
+  lines.push(bgFn(" ".repeat(safeWidth)))
+
   return lines
 }
 
