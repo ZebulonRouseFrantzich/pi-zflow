@@ -411,6 +411,7 @@ interface WorkflowProgressSnapshot {
   command: string
   changePath: string
   model?: string
+  thinking?: string
   status: "running" | "completed" | "failed"
   startedAt: number
   finishedAt?: number
@@ -457,6 +458,9 @@ function makeWorkflowProgressComponent(details: WorkflowProgressMessageDetails, 
       if (snapshot.model) {
         lines.push(truncateText(`  ${theme.fg("dim", "model:")} ${snapshot.model}`, available))
       }
+      if (snapshot.thinking) {
+        lines.push(truncateText(`  ${theme.fg("dim", "thinking:")} ${snapshot.thinking}`, available))
+      }
       lines.push(
         truncateText(`  ${theme.fg("dim", "elapsed:")} ${elapsed}`, available),
         truncateText(`  ${theme.fg("dim", "updates:")} ${snapshot.updateCount}`, available),
@@ -486,7 +490,7 @@ function createWorkflowProgressIndicator(
   pi: ExtensionAPI,
   ctx: InterviewableContext,
   changePath: string,
-  options?: { command?: string; model?: string; initialMessage?: string; statusId?: string; widgetId?: string },
+  options?: { command?: string; model?: string; thinking?: string; initialMessage?: string; statusId?: string; widgetId?: string },
 ): {
   update: (message: string) => void
   stop: (message?: string, status?: "completed" | "failed") => void
@@ -505,6 +509,7 @@ function createWorkflowProgressIndicator(
     command,
     changePath,
     model: options?.model,
+    thinking: options?.thinking,
     status: "running",
     startedAt,
     lastMessage: options?.initialMessage ?? "Initializing workflow",
@@ -1008,7 +1013,7 @@ async function runWorktreeDispatchAndFinalize(
   const tasks = runPlan.tasks.map(t => ({
     agent: t.agent,
     task: t.task,
-    model: implementModel,
+    model: implementModel.model,
     output: t.outputRelativePath,
     outputMode: "file-only" as const,
   }))
@@ -1188,13 +1193,17 @@ async function ensureProfileResolved(ctx: InterviewableContext): Promise<boolean
   return false
 }
 
-async function resolveWorkflowModel(agentName: string): Promise<string | undefined> {
+async function resolveWorkflowModel(agentName: string): Promise<{ model?: string; thinking?: string }> {
   try {
-    const { getResolvedAgentBinding } = await import("pi-zflow-profiles")
+    const { getResolvedAgentBinding, getResolvedLane } = await import("pi-zflow-profiles")
     const binding = await getResolvedAgentBinding(agentName)
-    return binding?.resolvedModel ?? undefined
+    const lane = binding?.lane ? await getResolvedLane(binding.lane) : null
+    return {
+      model: binding?.resolvedModel ?? undefined,
+      thinking: lane?.thinking ?? undefined,
+    }
   } catch {
-    return undefined
+    return {}
   }
 }
 
@@ -1497,7 +1506,8 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       ctx.ui.notify(`📋 Preparing change plan for "${changePath}"...`)
       const progress = createWorkflowProgressIndicator(pi, ctx, changePath, {
         command: "zflow-change-prepare",
-        model: workflowModel ?? "unavailable",
+        model: workflowModel.model ?? "unavailable",
+        thinking: workflowModel.thinking ?? "unavailable",
         initialMessage: "Initializing change preparation",
         statusId: "zflow-prepare",
       })
@@ -1926,7 +1936,8 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       const implementModel = await resolveWorkflowModel("zflow.implement-routine")
       const implProgress = createWorkflowProgressIndicator(pi, ctx, changeInput, {
         command: "zflow-change-implement",
-        model: implementModel ?? "unavailable",
+        model: implementModel.model ?? "unavailable",
+        thinking: implementModel.thinking ?? "unavailable",
         initialMessage: "Starting implementation workflow",
         statusId: "zflow-implement",
         widgetId: "zflow-implement-progress",
@@ -2092,7 +2103,8 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       const fixModel = await resolveWorkflowModel("zflow.implement-routine")
       const fixProgress = createWorkflowProgressIndicator(pi, ctx, changeId, {
         command: "zflow-change-fix",
-        model: fixModel ?? "unavailable",
+        model: fixModel.model ?? "unavailable",
+        thinking: fixModel.thinking ?? "unavailable",
         initialMessage: "Running fix workflow",
         statusId: "zflow-fix",
         widgetId: "zflow-fix-progress",
