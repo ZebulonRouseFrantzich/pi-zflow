@@ -170,6 +170,8 @@ import {
   createPlanAmendment,
   buildDriftDetectedReminder,
   buildCodeReviewInputFromContext,
+  publishPlanArtifacts,
+  type PublishPlanArtifactsResult,
 } from "./orchestration.js"
 
 import {
@@ -300,9 +302,11 @@ export {
   buildImplementationGateQuestions,
   parseInterviewResponse,
   runStructuredInterview,
+  publishPlanArtifacts,
 }
 
 export type {
+  PublishPlanArtifactsResult,
   StateIndexEntry,
   ReminderId,
   ModeFragment,
@@ -586,6 +590,11 @@ function selectToDecision(
       // Other labels map to a "continue" decision
       return { decision: "continue" }
     }
+  } catch {
+    // fall through
+  }
+  return { decision: "continue" }
+}
 
 function formatPlanInspectionPaths(input: {
   changeId: string
@@ -593,22 +602,49 @@ function formatPlanInspectionPaths(input: {
   planStatePath: string
   artifactPaths: Record<string, string>
   reviewFindingsPath?: string
+  durableDir?: string
+  publishedArtifacts?: Record<string, string>
+  publishErrors?: string[]
 }): string {
-  return [
-    `📌 Generated plan artifacts for "${input.changeId}" ${input.planVersion}:`,
-    `  - plan state: ${input.planStatePath}`,
-    `  - design: ${input.artifactPaths.design}`,
-    `  - execution groups: ${input.artifactPaths.executionGroups}`,
-    `  - standards: ${input.artifactPaths.standards}`,
-    `  - verification: ${input.artifactPaths.verification}`,
-    input.reviewFindingsPath ? `  - review findings: ${input.reviewFindingsPath}` : undefined,
-    `\nReview these files before approving. If you need time, choose "Inspect Artifacts" or "Cancel"; the plan remains on disk and can be revisited later.`,
-  ].filter((line): line is string => Boolean(line)).join("\n")
-}
-  } catch {
-    // fall through
+  const durable = input.durableDir && input.publishedArtifacts
+    ? Object.entries(input.publishedArtifacts).length > 0
+    : false
+
+  const sections: string[] = []
+
+  if (durable && input.publishedArtifacts) {
+    sections.push(
+      `📂 Repo-visible change documents for "${input.changeId}" ${input.planVersion}:`,
+      `  - directory: ${input.durableDir}`,
+    )
+    for (const [key, filePath] of Object.entries(input.publishedArtifacts)) {
+      sections.push(`  - ${key}: ${filePath}`)
+    }
+    sections.push("")
   }
-  return { decision: "continue" }
+
+  sections.push(`📌 Runtime plan artifacts for "${input.changeId}" ${input.planVersion}:`)
+  if (input.planStatePath) sections.push(`  - plan state: ${input.planStatePath}`)
+  for (const key of ["design", "executionGroups", "standards", "verification"] as const) {
+    if (input.artifactPaths[key]) sections.push(`  - ${key}: ${input.artifactPaths[key]}`)
+  }
+  if (input.reviewFindingsPath) sections.push(`  - review findings: ${input.reviewFindingsPath}`)
+
+  if (input.publishErrors && input.publishErrors.length > 0) {
+    sections.push("")
+    sections.push("⚠️  Publishing warnings:")
+    for (const err of input.publishErrors) {
+      sections.push(`  - ${err}`)
+    }
+  }
+
+  sections.push(
+    "",
+    `Review the changes in the repo-visible directory before approving.`,
+    `If you need time, choose "Inspect Artifacts" or "Cancel"; the plan remains on disk and can be revisited later.`,
+  )
+
+  return sections.join("\n")
 }
 
 /**
@@ -1488,20 +1524,64 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           )
         }
 
+        // Step 4: Publish durable plan artifacts to repo-visible path
+        ctx.ui.notify(`📤 Publishing durable plan artifacts for "${result.changeId}"...`, "info")
+        const publishResult = await publishPlanArtifacts(
+          result.changeId,
+          result.planVersion,
+          {
+            cwd: ctx.cwd,
+            reviewFindingsPath: reviewResult.reviewFindingsPath,
+          },
+        )
+
+        if (publishResult.artifactCount < 4) {
+          const missing = Object.keys(publishResult.publishedArtifacts).length
+          ctx.ui.notify(
+            `⚠️  Durable publish completed with errors: ${missing}/4 artifacts published.\n` +
+            publishResult.errors.map((e) => `  - ${e}`).join("\n"),
+            "warning",
+          )
+          ctx.ui.notify(
+            `Cannot proceed to approval — not all four required plan artifacts were published.\n` +
+            `Check planner output and runtime artifact paths:\n` +
+            `  - design: ${result.artifactPaths.design}\n` +
+            `  - execution-groups: ${result.artifactPaths.executionGroups}\n` +
+            `  - standards: ${result.artifactPaths.standards}\n` +
+            `  - verification: ${result.artifactPaths.verification}`,
+            "warning",
+          )
+          if (publishResult.errors.length > 0) {
+            ctx.ui.notify(
+              `Publishing errors:\n${publishResult.errors.join("\n")}`,
+              "error",
+            )
+          }
+          return
+        }
+
+        ctx.ui.notify(
+          `✅ Durable plan artifacts published to: ${publishResult.durableDir}`,
+          "info",
+        )
+
         const inspectionSummary = formatPlanInspectionPaths({
           changeId: result.changeId,
           planVersion: result.planVersion,
           planStatePath: result.planStatePath,
           artifactPaths: result.artifactPaths,
           reviewFindingsPath: reviewResult.reviewFindingsPath,
+          durableDir: publishResult.durableDir,
+          publishedArtifacts: publishResult.publishedArtifacts,
+          publishErrors: publishResult.errors.length > 0 ? publishResult.errors : undefined,
         })
         ctx.ui.notify(inspectionSummary, "info")
 
-        // Step 4: Run structured interview for plan approval
+        // Step 5: Run structured interview for plan approval
         const approvalQuestions = buildPlanApprovalQuestions(
           result.changeId,
           result.planVersion,
-          `Change path: ${changePath}\nReview status: ${reviewResult.pass ? "passed" : "needs attention"}\nValidation: ${validation.pass ? "passed" : "has issues"}\n\n${inspectionSummary}`,
+          `Change path: ${changePath}\nReview status: ${reviewResult.pass ? "passed" : "needs attention"}\nValidation: ${validation.pass ? "passed" : "has issues"}\n\nDurable plan docs published to: ${publishResult.durableDir}\n\n${inspectionSummary}`,
         )
 
         let interviewResult: { decision: string; revisionNotes?: string } | null = null
@@ -1510,19 +1590,21 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             ctx,
             approvalQuestions,
             `Plan "${result.changeId}" version ${result.planVersion} is ready. ` +
-            `Use the interactive UI to inspect, approve, request revisions, or cancel.`,
+            `Review the durable docs at ${publishResult.durableDir} then use the interactive UI to inspect, approve, request revisions, or cancel.`,
           )
 
           if (!interviewResult) {
             // No usable UI at all — log paths for manual inspection
             ctx.ui.notify(
               `📌 Plan "${result.changeId}" version ${result.planVersion} is ready for review.\n` +
-              `Plan artifacts:\n` +
+              `Repo-visible change documents:\n` +
+              Object.entries(publishResult.publishedArtifacts).map(([k, v]) => `  - ${k}: ${v}`).join("\n") +
+              `\n\nRuntime artifacts:\n` +
               `  - design: ${result.artifactPaths.design}\n` +
               `  - execution-groups: ${result.artifactPaths.executionGroups}\n` +
               `  - standards: ${result.artifactPaths.standards}\n` +
               `  - verification: ${result.artifactPaths.verification}\n\n` +
-              `Run /zflow-change-audit ${result.changeId} to inspect.`,
+              `Use /zflow-change-audit ${result.changeId} to inspect.`,
               "info",
             )
             return
