@@ -2095,7 +2095,8 @@ export async function prepareWorktreeImplementationRun(
     agent: "zflow.implement-routine",
     files: g.files,
     dependencies: g.dependencies,
-    taskPrompt: "",
+    taskPrompt: g.taskPrompt,
+    scopedVerification: g.scopedVerification,
   }))
   const tasks = buildWorktreeDispatchPlan(dispatchGroups, dispatchConfig, planArtifactPaths)
 
@@ -5580,6 +5581,8 @@ export interface PostStartSequenceOptions {
   skipVerification?: boolean
   /** If true, skip code review. */
   skipReview?: boolean
+  /** Receives user-visible phase updates for long post-dispatch work. */
+  onProgress?: (message: string) => void
   /** If false, do not attempt auto-fix loop on verification failure (default: true). */
   autoFix?: boolean
   /**
@@ -5649,6 +5652,9 @@ export async function runImplementationPostStartSequence(
   const { default: fs } = await import("node:fs/promises")
   const opts = options ?? {}
   const autoFix = opts.autoFix !== false // default true
+  const reportProgress = (message: string): void => {
+    try { opts.onProgress?.(message) } catch { /* progress callbacks are best-effort */ }
+  }
 
   // 1. Read the current run state
   const run = await readRun(runId, cwd)
@@ -5681,6 +5687,7 @@ export async function runImplementationPostStartSequence(
   const hasDispatchArtifacts = hasGroupResults || hasApplyBackArtifacts
 
   if (!hasDispatchArtifacts && !opts.skipDispatchWait) {
+    reportProgress("Waiting for dispatch artifacts before final verification")
     // No dispatch results yet — return waiting-for-dispatch
     const nextSteps: string[] = [
       "1. Worktree dispatch: dispatch execution groups to isolated worktrees with per-group agents",
@@ -5773,6 +5780,7 @@ export async function runImplementationPostStartSequence(
   }
 
   // 3b. Run final verification
+  reportProgress("Preparing final verification on the primary worktree")
   await transitionTo("executing")
 
   if (opts.skipDispatchWait) {
@@ -5792,15 +5800,19 @@ export async function runImplementationPostStartSequence(
     ], cwd)
   }
 
+  reportProgress("Running final verification on the primary worktree")
   const verificationResult = await finalizeVerification(runId, cwd)
+  reportProgress(verificationResult.pass ? "Final verification passed; starting code review" : "Final verification failed; evaluating fix loop")
 
   if (!verificationResult.pass) {
     // 3c. Verification failed — attempt fix loop if autoFix is enabled
     if (autoFix) {
+      reportProgress("Running bounded fix loop after verification failure")
       const fixHandler = opts.fixHandler ?? (async () => false)
       const fixLoopResult = await runBoundedFixLoop(runId, fixHandler, cwd)
 
       if (!fixLoopResult.success) {
+        reportProgress("Fix loop exhausted; marking verification failed")
         await transitionTo("verification-failed")
         return {
           phase: "verification-failed",
@@ -5818,9 +5830,11 @@ export async function runImplementationPostStartSequence(
         }
       }
 
+      reportProgress("Fix loop succeeded; continuing to code review")
       // Fix loop succeeded — verification passes now
     } else {
       // autoFix disabled — mark as failed
+      reportProgress("Final verification failed; auto-fix is disabled")
       await transitionTo("verification-failed")
       return {
         phase: "verification-failed",
@@ -5840,7 +5854,9 @@ export async function runImplementationPostStartSequence(
 
   // 4. Verification passed (or fix loop resolved it) → code review
   if (!opts.skipReview) {
+    reportProgress("Running code review on the applied implementation")
     const reviewResult = await finalizeCodeReview(runId, cwd)
+    reportProgress(reviewResult.pass ? "Code review passed; completing workflow" : "Code review found issues; marking review failed")
 
     if (!reviewResult.pass) {
       await transitionTo("review-failed")
@@ -5862,6 +5878,7 @@ export async function runImplementationPostStartSequence(
     }
 
     await transitionTo("completed")
+    reportProgress("Persisting completed workflow state")
     await completeWorkflow(changeId, runId, cwd)
 
     return {
@@ -5877,6 +5894,7 @@ export async function runImplementationPostStartSequence(
   }
 
   // 5. Verification passed, review skipped
+  reportProgress("Review skipped; completing workflow")
   await transitionTo("completed")
   await completeWorkflow(changeId, runId, cwd)
 

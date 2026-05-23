@@ -620,7 +620,6 @@ function createWorkflowProgressIndicator(
   const widgetId = options?.widgetId ?? `${command}-progress`
   const startedAt = Date.now()
   let stopped = false
-  let lastMessageAt = 0
   // Clear the older below-editor widget if it exists from a hot-reloaded session.
   ui?.setWidget?.(widgetId, undefined)
   const initialSnapshot: WorkflowProgressSnapshot = {
@@ -647,62 +646,23 @@ function createWorkflowProgressIndicator(
     })
   }
 
-  const renderWidgetLines = (snapshot: WorkflowProgressSnapshot): string[] => {
-    const elapsed = formatElapsed(Date.now() - snapshot.startedAt)
-    const lines: string[] = [
-      `${snapshot.command} · ${snapshot.status} · ${elapsed}`,
-      `change: ${snapshot.changePath}`,
-    ]
-    if (snapshot.model) {
-      lines.push(`model: ${snapshot.model}`)
-    }
-    if (snapshot.thinking) {
-      lines.push(`thinking: ${snapshot.thinking}`)
-    }
-    lines.push(`last: ${snapshot.lastMessage}`)
-    if (snapshot.subagents.length > 0) {
-      const finished = snapshot.subagents.filter((s) => isFinishedSubagentStatus(s.status)).length
-      lines.push(`subagents: ${finished}/${snapshot.subagents.length} finished`)
-      for (const subagent of snapshot.subagents) {
-        const subElapsed = formatElapsed((subagent.finishedAt ?? Date.now()) - subagent.startedAt)
-        lines.push(`  ${subagentStatusIcon(subagent.status)} ${subagent.id} · ${subagent.status} · ${subElapsed} · last: ${subagent.lastCommand ?? "starting"}`)
-      }
-    }
-    return lines
-  }
-
-  const sendSnapshotMessage = (force = false): void => {
-    if (stopped) return
-    const now = Date.now()
-    if (!force && now - lastMessageAt < 1000) return
-    lastMessageAt = now
-    const current = workflowProgressSnapshots.get(id)
-    if (current && typeof pi.sendMessage === "function") {
-      pi.sendMessage(
-        {
-          customType: WORKFLOW_PROGRESS_MESSAGE_TYPE,
-          content: `${command} ${changePath}`,
-          display: true,
-          details: { id, snapshot: current },
-        },
-        { deliverAs: "nextTurn" },
-      )
-    }
+  const refreshProgressMessage = (): void => {
+    // The custom message renderer reads the latest snapshot from
+    // workflowProgressSnapshots, so one persistent chat component is enough.
+    // Re-sending visible messages for every tick/update creates duplicated
+    // historical progress blocks in chat.
+    ui?.requestRender?.()
   }
 
   const render = (): void => {
     if (stopped) return
     const elapsed = formatElapsed(Date.now() - startedAt)
     ui?.setStatus?.(statusId, `${command} ${elapsed}`)
-    const snapshot = workflowProgressSnapshots.get(id)
-    if (snapshot && ui?.setWidget) {
-      ui.setWidget(widgetId, renderWidgetLines(snapshot))
-    }
     ui?.requestRender?.()
   }
 
   render()
-  sendSnapshotMessage(true)
+  refreshProgressMessage()
 
   const interval = setInterval(() => {
     const current = workflowProgressSnapshots.get(id)
@@ -722,7 +682,7 @@ function createWorkflowProgressIndicator(
       }
     }
     render()
-    sendSnapshotMessage()
+    refreshProgressMessage()
   }, 1000)
 
   return {
@@ -738,7 +698,7 @@ function createWorkflowProgressIndicator(
         })
       }
       render()
-      sendSnapshotMessage()
+      refreshProgressMessage()
     },
     updateSubagent(subagentId: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id">>) {
       const current = workflowProgressSnapshots.get(id)
@@ -776,7 +736,7 @@ function createWorkflowProgressIndicator(
       }
       render()
       if (shouldSendMessage) {
-        sendSnapshotMessage(true)
+        refreshProgressMessage()
       }
     },
     stop(message?: string, status: "completed" | "failed" = "completed") {
@@ -794,7 +754,7 @@ function createWorkflowProgressIndicator(
           lastMessage: message ?? current.lastMessage,
         })
       }
-      sendSnapshotMessage(true)
+      refreshProgressMessage()
       ui?.requestRender?.()
     },
   }
@@ -1259,6 +1219,7 @@ async function runWorktreeDispatchAndFinalize(
   options?: {
     cwd?: string
     force?: boolean
+    onWorkflowUpdate?: (message: string) => void
     onSubagentUpdate?: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) => void
   },
 ): Promise<void> {
@@ -1356,21 +1317,22 @@ async function runWorktreeDispatchAndFinalize(
     },
   }))
 
+  const WORKTREE_DISPATCH_CONCURRENCY = 6
+  const MAX_OUTPUT_LINES = 5000
+  const MAX_OUTPUT_BYTES = 500_000
+
   for (let taskIdx = 0; taskIdx < runPlan.tasks.length; taskIdx++) {
     const task = runPlan.tasks[taskIdx]!
+    const initiallyScheduled = taskIdx < WORKTREE_DISPATCH_CONCURRENCY
     options?.onSubagentUpdate?.(task.groupId, {
       agent: task.agent,
       title: runPlan.groups[taskIdx]?.taskPrompt ?? undefined,
       model: implementModel.model ?? "unavailable",
       thinking: implementModel.thinking ?? "unavailable",
-      status: "running",
-      lastCommand: "dispatching to worktree...",
+      status: initiallyScheduled ? "running" : "queued",
+      lastCommand: initiallyScheduled ? "starting worktree dispatch..." : "queued waiting for dispatch slot",
     })
   }
-
-  const WORKTREE_DISPATCH_CONCURRENCY = 6
-  const MAX_OUTPUT_LINES = 5000
-  const MAX_OUTPUT_BYTES = 500_000
 
   const dispatchResult = await dispatchService.runParallel({
     tasks,
@@ -1585,8 +1547,11 @@ async function runWorktreeDispatchAndFinalize(
     )
   }
 
+  options?.onWorkflowUpdate?.("All subagents finished; validating scoped verification and collecting worktree results")
+
   // Collect group results from dispatch outputs
   const groupResults = []
+  const postDispatchFailures: string[] = []
   const patchesDir = path.join(runDir, "patches")
   await fs.mkdir(patchesDir, { recursive: true })
 
@@ -1603,10 +1568,12 @@ async function runWorktreeDispatchAndFinalize(
 
     if (!verification || verification.status !== "pass") {
       const vStatus = verification?.status ?? "missing"
+      const failure = `${group.id}: scoped verification ${vStatus}`
+      postDispatchFailures.push(failure)
       options?.onSubagentUpdate?.(group.id, {
         status: "failed",
         finishedAt: Date.now(),
-        lastCommand: `scoped verification ${vStatus}`,
+        lastCommand: failure,
       })
       continue
     }
@@ -1707,6 +1674,26 @@ async function runWorktreeDispatchAndFinalize(
     })
   }
 
+  if (postDispatchFailures.length > 0) {
+    const reportPath = path.join(worktreeResultsDir, "post-dispatch-failure-report.json")
+    await fs.writeFile(reportPath, JSON.stringify({ failures: postDispatchFailures }, null, 2), "utf-8")
+    await recordDispatchFailurePolicy(runId, cwd, postDispatchFailures.map((failure) => ({
+      groupId: failure.split(":", 1)[0] ?? "unknown",
+      agent: "zflow.implement-routine",
+      attempt: 0,
+      decision: "blocker" as const,
+      reason: failure,
+      error: failure,
+    })), reportPath)
+    throw new Error(
+      `${postDispatchFailures.length} group(s) failed post-dispatch validation: ` +
+      postDispatchFailures.join("; ") +
+      `\nFailure report: ${reportPath}`,
+    )
+  }
+
+  options?.onWorkflowUpdate?.("Applying completed group patches back to the primary worktree")
+
   // Finalize: apply patches back, check deviations
   await finalizeWorktreeImplementationRun(
     runId,
@@ -1718,6 +1705,8 @@ async function runWorktreeDispatchAndFinalize(
       executionGroups: groups,
     },
   )
+
+  options?.onWorkflowUpdate?.("Apply-back complete; dispatch artifacts are ready for final verification")
 
   console.info(
     `[zflow] Worktree dispatch completed via "${dispatchService.name}". ` +
@@ -2553,16 +2542,18 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           await runWorktreeDispatchAndFinalize(result.runId, result.changeId, result.planVersion, dispatchService!, {
             cwd: undefined,
             force,
+            onWorkflowUpdate: (message) => implProgress.update(message),
             onSubagentUpdate: (id, update) => implProgress.updateSubagent(id, update),
           })
         }
 
         // ── Phase 4: Post-start sequence (verification, review, complete) ──
-        implProgress.update("Running post-start sequence (verification, review)")
+        implProgress.update("Starting post-start sequence: final verification, review, and completion")
         const postResult = await runImplementationPostStartSequence(
           result.runId,
           {
             skipDispatchWait: manualDispatchComplete,
+            onProgress: (message) => implProgress.update(message),
           },
         )
 
