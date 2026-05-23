@@ -5675,7 +5675,7 @@ export async function runImplementationPostStartSequence(
  */
 const PUBLISH_ARTIFACT_FILES: Record<string, string> = {
   design: "design.md",
-  "execution-groups": "execution-groups.md",
+  executionGroups: "execution-groups.md",
   standards: "standards.md",
   verification: "verification.md",
 }
@@ -5803,7 +5803,7 @@ export async function publishPlanArtifacts(
     ),
     publishedArtifacts,
     note: "Review findings, logs, and transient runtime state remain under .git/pi-zflow/. This directory contains durable plan documents intended for review and commit.",
-    reviewFindingsRef: options?.reviewFindingsPath ?? path.join(srcVersionDir, "plan-review-findings.md"),
+    reviewFindingsRef: options?.reviewFindingsPath ?? path.join(runtimeStateDir, "review", `plan-review-${changeId}-${planVersion}.md`),
   }
 
   await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf-8")
