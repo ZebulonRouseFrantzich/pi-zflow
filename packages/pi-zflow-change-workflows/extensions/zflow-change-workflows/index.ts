@@ -650,6 +650,17 @@ function createWorkflowProgressIndicator(
 
   render()
   const interval = setInterval(render, 1000)
+  const heartbeatInterval = setInterval(() => {
+    const current = workflowProgressSnapshots.get(id)
+    if (current && typeof pi.sendMessage === "function") {
+      pi.sendMessage({
+        customType: WORKFLOW_PROGRESS_MESSAGE_TYPE,
+        content: `${command} ${changePath}`,
+        display: true,
+        details: { id, snapshot: current },
+      })
+    }
+  }, 15000)
 
   return {
     update(message: string) {
@@ -699,6 +710,7 @@ function createWorkflowProgressIndicator(
       if (stopped) return
       stopped = true
       clearInterval(interval)
+      clearInterval(heartbeatInterval)
       ui?.setStatus?.(statusId, undefined)
       const current = workflowProgressSnapshots.get(id)
       if (current) {
@@ -1280,9 +1292,11 @@ async function runWorktreeDispatchAndFinalize(
     })
   }
 
+  const WORKTREE_DISPATCH_CONCURRENCY = 6
   const dispatchResult = await dispatchService.runParallel({
     tasks,
     cwd,
+    concurrency: WORKTREE_DISPATCH_CONCURRENCY,
     worktree: true,
   })
 
