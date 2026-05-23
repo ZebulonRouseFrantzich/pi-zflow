@@ -106,7 +106,7 @@ describe("runChangePrepareWorkflow", () => {
       })
 
       // Verify state-index.json was created with the plan entry
-      const stateIndexPath = path.join(repoRoot, ".git", "pi-zflow", "state-index.json")
+      const stateIndexPath = path.join(repoRoot, ".zflow", "state-index.json")
       const stateIndexContent = await fs.readFile(stateIndexPath, "utf-8")
       const stateIndex = JSON.parse(stateIndexContent)
       const planEntry = stateIndex.entries.find(

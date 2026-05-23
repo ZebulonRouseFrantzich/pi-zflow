@@ -1731,7 +1731,7 @@ export function buildWorktreeDispatchPlan(
     task: buildWorkerTask(group, config, planArtifactPaths),
     claimedFiles: group.files,
     scopedVerification: group.scopedVerification,
-    outputRelativePath: `.git/pi-zflow/runs/<runId>/worktree-results/${group.id}-result.md`,
+    outputRelativePath: `.zflow/runs/<runId>/worktree-results/${group.id}-result.md`,
   }))
 }
 
@@ -2632,7 +2632,7 @@ export function deriveSemanticChangeId(changePath?: string): string | null {
 }
 
 export interface ChangeImplementTarget {
-  /** Runtime change ID used for `.git/pi-zflow/plans/<changeId>`. */
+  /** Runtime change ID used for `.zflow/plans/<changeId>`. */
   changeId: string
   /** Original command argument. */
   input: string
@@ -2690,7 +2690,7 @@ async function findDurableManifestPath(inputPath: string, cwd?: string): Promise
  *
  * Users commonly pass the durable docs path (`docs/zflow-changes/<name>/` or a
  * version directory) after reviewing the committed plan documents. The runtime
- * implementation state still lives under `.git/pi-zflow/plans/<changeId>/`, so
+ * implementation state still lives under `.zflow/plans/<changegeId>/`, so
  * this helper reads the durable `manifest.json` and follows
  * `previousRuntimeChangeId` when present.
  */
@@ -6045,7 +6045,7 @@ export async function publishPlanArtifacts(
       Object.entries(PUBLISH_ARTIFACT_FILES).map(([key, fn]) => [key, path.join(srcVersionDir, fn)]),
     ),
     publishedArtifacts,
-    note: "Review findings, logs, and transient runtime state remain under .git/pi-zflow/. This directory contains durable plan documents intended for review and commit.",
+    note: "Review findings, logs, and transient runtime state remain under .zflow/. This directory contains durable plan documents intended for review and commit.",
     reviewFindingsRef: options?.reviewFindingsPath ?? path.join(runtimeStateDir, "review", `plan-review-${changeId}-${planVersion}.md`),
   }
 

@@ -54,7 +54,7 @@ async function writeArtifacts(
   changeId: string,
   version: string,
 ): Promise<CodeReviewInput["planningArtifacts"]> {
-  const versionDir = path.join(dir, ".git", "pi-zflow", "plans", changeId, version)
+  const versionDir = path.join(dir, ".zflow", "plans", changeId, version)
   await fs.mkdir(versionDir, { recursive: true })
 
   const artifacts: Record<string, string> = {

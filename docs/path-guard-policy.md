@@ -109,16 +109,16 @@ packages/pi-zflow-core/config/sentinel-policy.default.json
 
 ### Default blocked patterns (severity: error)
 
-| Pattern                                       | Reason                   | Notes                                                                  |
-| --------------------------------------------- | ------------------------ | ---------------------------------------------------------------------- |
-| `.git/**`                                     | Git internals            | Excludes `<runtime-state-dir>/**` (runtime state lives inside `.git/`) |
-| `.gitignore`, `.gitattributes`, `.gitmodules` | Git config files         |                                                                        |
-| `node_modules/**`                             | Package-manager managed  |                                                                        |
-| `.env*`                                       | Environment/secret files |                                                                        |
-| `**/*.pem`, `**/*.key`                        | Private key files        |                                                                        |
-| `**/credentials*`, `**/secrets/**`            | Credential files         |                                                                        |
-| `~/.ssh/**`, `~/.aws/**`, `~/.pi/**`          | User-sensitive config    |                                                                        |
-| `~/.config/**`                                | User config (warn)       |                                                                        |
+| Pattern                                       | Reason                   | Notes                                                                   |
+| --------------------------------------------- | ------------------------ | ----------------------------------------------------------------------- |
+| `.git/**`                                     | Git internals            | Excludes `<runtime-state-dir>/**` (runtime state lives under `.zflow/`) |
+| `.gitignore`, `.gitattributes`, `.gitmodules` | Git config files         |                                                                         |
+| `node_modules/**`                             | Package-manager managed  |                                                                         |
+| `.env*`                                       | Environment/secret files |                                                                         |
+| `**/*.pem`, `**/*.key`                        | Private key files        |                                                                         |
+| `**/credentials*`, `**/secrets/**`            | Credential files         |                                                                         |
+| `~/.ssh/**`, `~/.aws/**`, `~/.pi/**`          | User-sensitive config    |                                                                         |
+| `~/.config/**`                                | User config (warn)       |                                                                         |
 
 ### Default blocked patterns (severity: warn)
 

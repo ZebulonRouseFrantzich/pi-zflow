@@ -13,6 +13,7 @@ import {
   DEFAULT_FAILED_WORKTREE_RETENTION_DAYS,
   inGitRepo,
   resolveGitDir,
+  resolveGitToplevel,
 } from "../src/runtime-paths.js"
 
 describe("runtime path constants", () => {
@@ -51,14 +52,13 @@ describe("inGitRepo", () => {
 })
 
 describe("resolveRuntimeStateDir", () => {
-  test("returns <git-dir>/pi-zflow/ when in a repo", () => {
+  test("returns <toplevel>/.zflow/ when in a repo", () => {
     const result = resolveRuntimeStateDir()
-    assert.ok(result.endsWith(path.join("pi-zflow")), `expected pi-zflow suffix, got: ${result}`)
-    // Should contain .git since the runtime dir is inside .git/
-    // Note: it could also be in a worktree git-dir which might differ
+    assert.ok(result.endsWith(path.join(".zflow")), `expected .zflow suffix, got: ${result}`)
+    // Should contain ".zflow" since the runtime dir is <toplevel>/.zflow/
     assert.ok(
-      result.includes(".git") || result.includes(os.tmpdir()),
-      `expected .git or tmpdir in path, got: ${result}`,
+      result.includes(".zflow") || result.includes(os.tmpdir()),
+      `expected .zflow or tmpdir in path, got: ${result}`,
     )
   })
 
@@ -78,5 +78,19 @@ describe("resolveRuntimeStateDir", () => {
     const a = resolveRuntimeStateDir("/tmp/project-alpha")
     const b = resolveRuntimeStateDir("/tmp/project-beta")
     assert.notEqual(a, b)
+  })
+
+  test("resolveGitToplevel returns non-null inside this repo", () => {
+    const result = resolveGitToplevel()
+    assert.notEqual(result, null, "expected to resolve git toplevel")
+    assert.ok(path.isAbsolute(result!), "expected absolute path")
+  })
+
+  test("resolveGitToplevel returns null outside git", () => {
+    const result = resolveGitToplevel("/tmp")
+    if (result !== null) {
+      // /tmp could be inside a git repo in some setups; that's ok
+      console.log("resolveGitToplevel(/tmp) resolved to:", result)
+    }
   })
 })

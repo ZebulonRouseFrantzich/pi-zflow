@@ -23,7 +23,7 @@ export const CHANGE_HELP_TOPIC: ZflowHelpTopic = {
     "plans, apply fixes, and clean up temporary artifacts. " +
     "Durable plan documents are published to the repo under " +
     "docs/zflow-changes/ for review and commit; runtime/review " +
-    "logs remain under .git/pi-zflow/.",
+    "logs remain under .zflow/.",
   flowOrder: 30,
   flowGuidance:
     "Core workflow: prepare a change plan, review it, implement it " +
@@ -40,7 +40,7 @@ export const CHANGE_HELP_TOPIC: ZflowHelpTopic = {
         "standards, verification), validates them, runs plan review, " +
         "and publishes durable copies to docs/zflow-changes/<id>/<version>/ " +
         "for review and commit. Runtime state and review logs remain " +
-        "under .git/pi-zflow/.",
+        "under .zflow/.",
     },
     {
       name: "zflow-change-implement",

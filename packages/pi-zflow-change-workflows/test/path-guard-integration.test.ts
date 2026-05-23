@@ -2,7 +2,7 @@
  * Integration tests for the change-workflows path guard.
  *
  * Validates:
- * - Path guard allows writes to `.git/pi-zflow/plans/` (runtime state dir)
+ * - Path guard allows writes to `.zflow/plans/` (runtime state dir)
  * - Path guard blocks `.git/config`, `.git/HEAD`, etc.
  * - Path guard allows `.pi/` in repo root but blocks `~/.pi/`
  * - `before_tool_call` hook blocks edit/write to blocked paths
@@ -27,7 +27,7 @@ import type { GuardResult, GuardOptions } from "../extensions/zflow-change-workf
 
 const PROJECT_ROOT = "/tmp/pi-zflow-test-path-guard"
 const GIT_DIR = path.join(PROJECT_ROOT, ".git")
-const RUNTIME_STATE_DIR = path.join(GIT_DIR, "pi-zflow")
+const RUNTIME_STATE_DIR = path.join(PROJECT_ROOT, ".zflow")
 
 function makeOptions(overrides?: Partial<GuardOptions>): GuardOptions {
   return {
@@ -39,23 +39,23 @@ function makeOptions(overrides?: Partial<GuardOptions>): GuardOptions {
 
 // ── Tests ────────────────────────────────────────────────────────
 
-describe("path-guard integration — .git/pi-zflow/ runtime state dir", () => {
-  it("allows writes to .git/pi-zflow/plans/ (runtime state dir)", () => {
+describe("path-guard integration — .zflow/ runtime state dir", () => {
+  it("allows writes to .zflow/plans/ (runtime state dir)", () => {
     const result = guardWrite(
       path.join(RUNTIME_STATE_DIR, "plans", "ch42", "v1", "design.md"),
       makeOptions(),
     )
     assert.ok(result.allowed,
-      `Expected write to .git/pi-zflow/plans/ to be allowed, got: ${result.message}`)
+      `Expected write to .zflow/plans/ to be allowed, got: ${result.message}`)
   })
 
-  it("allows writes to any path under .git/pi-zflow/", () => {
+  it("allows writes to any path under .zflow/", () => {
     const result = guardWrite(
       path.join(RUNTIME_STATE_DIR, "state-index.json"),
       makeOptions(),
     )
     assert.ok(result.allowed,
-      `Expected write to .git/pi-zflow/state-index.json to be allowed, got: ${result.message}`)
+      `Expected write to .zflow/state-index.json to be allowed, got: ${result.message}`)
   })
 
   it("allows writes to the exact runtime state directory path", () => {
@@ -76,7 +76,7 @@ describe("path-guard integration — .git/pi-zflow/ runtime state dir", () => {
       `Expected runtime-state prefix trick to be blocked, got: ${result.message}`)
   })
 
-  it("allows writes to .git/pi-zflow even when runtimeStateDir is not explicitly set", () => {
+  it("allows writes to .zflow even when runtimeStateDir is not explicitly set", () => {
     // Without runtimeStateDir in options, the guard should resolve it
     // via resolveRuntimeStateDir (which calls git rev-parse).
     // For this test, we set it explicitly to match.
@@ -85,7 +85,7 @@ describe("path-guard integration — .git/pi-zflow/ runtime state dir", () => {
       makeOptions(),
     )
     assert.ok(result.allowed,
-      `Expected write to .git/pi-zflow/ to be allowed, got: ${result.message}`)
+      `Expected write to .zflow/ to be allowed, got: ${result.message}`)
   })
 
   it("blocks writes to .git/config", () => {

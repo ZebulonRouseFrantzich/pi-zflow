@@ -28,7 +28,9 @@ export {
   DEFAULT_FAILED_WORKTREE_RETENTION_DAYS,
   resolveGitDir,
   inGitRepo,
+  resolveGitToplevel,
   resolveRuntimeStateDir,
+  ensureRuntimeStateDir,
   resolveUserStateDir,
 } from "./runtime-paths.js"
 

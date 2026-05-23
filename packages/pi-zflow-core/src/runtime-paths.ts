@@ -9,6 +9,7 @@
 
 import * as path from "node:path"
 import * as os from "node:os"
+import * as fs from "node:fs"
 import { createHash } from "node:crypto"
 import { execSync } from "node:child_process"
 
@@ -78,11 +79,69 @@ export function inGitRepo(cwd: string = process.cwd()): boolean {
 // ---------------------------------------------------------------------------
 
 /**
+ * Resolve the git working tree top-level directory.
+ *
+ * Uses `git rev-parse --show-toplevel`.
+ *
+ * Returns `null` if `cwd` is not inside a git repository.
+ */
+export function resolveGitToplevel(cwd: string = process.cwd()): string | null {
+  try {
+    const topLevel = execSync("git rev-parse --show-toplevel", {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5_000,
+    }).trim()
+    return topLevel || null
+  } catch {
+    // not a git repo
+    return null
+  }
+}
+
+/**
+ * Ensure the runtime state directory exists and contains a `.gitignore`
+ * that prevents the runtime artifacts from being tracked by git.
+ *
+ * Called by artifact path resolvers before the first write to a runtime
+ * state path.  No-op on subsequent calls within the same process via an
+ * internal cache.
+ *
+ * @param cwd - Working directory to resolve from (default: `process.cwd()`)
+ */
+const ensuredRuntimeDirs = new Set<string>()
+
+export function ensureRuntimeStateDir(cwd: string = process.cwd()): string {
+  const dir = resolveRuntimeStateDir(cwd)
+  if (ensuredRuntimeDirs.has(dir)) return dir
+  ensuredRuntimeDirs.add(dir)
+
+  try {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true })
+    }
+    // Write a .gitignore that ignores everything inside .zflow/ except
+    // the .gitignore itself, so runtime artifacts are visible on disk
+    // but don't pollute `git status`.
+    const gitignorePath = path.join(dir, ".gitignore")
+    if (!fs.existsSync(gitignorePath)) {
+      fs.writeFileSync(gitignorePath, "*\n!.gitignore\n", "utf-8")
+    }
+  } catch {
+    // Non-fatal — the .gitignore is best-effort
+  }
+
+  return dir
+}
+
+/**
  * Resolve the runtime state root directory for a project.
  *
  * **Primary** (inside a git repo):
- *   `<git-dir>/pi-zflow/`
- *   This places state outside the working tree.
+ *   `<repo-toplevel>/.zflow/`
+ *   This places state in a repo-visible directory outside the working tree
+ *   pattern, while keeping it out of `.git/` internals.
  *
  * **Fallback** (outside git):
  *   `<os.tmpdir()>/pi-zflow-<stable-cwd-hash>/`
@@ -91,9 +150,9 @@ export function inGitRepo(cwd: string = process.cwd()): boolean {
  * @param cwd - Working directory to resolve from (default: `process.cwd()`)
  */
 export function resolveRuntimeStateDir(cwd: string = process.cwd()): string {
-  const gitDir = resolveGitDir(cwd)
-  if (gitDir) {
-    return path.join(gitDir, "pi-zflow")
+  const gitToplevel = resolveGitToplevel(cwd)
+  if (gitToplevel) {
+    return path.join(gitToplevel, ".zflow")
   }
   return path.join(os.tmpdir(), `pi-zflow-${stableHash(cwd)}`)
 }

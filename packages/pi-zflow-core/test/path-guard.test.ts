@@ -30,7 +30,7 @@ import type {
 } from "../src/path-guard.js"
 
 const PROJECT_ROOT = "/home/user/project"
-const RUNTIME_STATE_DIR = path.join(PROJECT_ROOT, ".git", "pi-zflow")
+const RUNTIME_STATE_DIR = path.join(PROJECT_ROOT, ".zflow")
 const TEMP_FALLBACK = path.join(os.tmpdir(), "pi-zflow-test-hash")
 
 // ---------------------------------------------------------------------------

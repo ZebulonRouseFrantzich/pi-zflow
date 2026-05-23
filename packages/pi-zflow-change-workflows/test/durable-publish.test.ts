@@ -74,7 +74,7 @@ describe("publishPlanArtifacts", () => {
     const repoRoot = await createTestRepo()
     try {
       // Simulate runtime state directory structure
-      const runtimeStateDir = path.join(repoRoot, ".git", "pi-zflow")
+      const runtimeStateDir = path.join(repoRoot, ".zflow")
       const changeId = "test-feature"
       const planVersion = "v1"
 
@@ -119,7 +119,7 @@ describe("publishPlanArtifacts", () => {
   test("publishes to custom repo relative path", async () => {
     const repoRoot = await createTestRepo()
     try {
-      const runtimeStateDir = path.join(repoRoot, ".git", "pi-zflow")
+      const runtimeStateDir = path.join(repoRoot, ".zflow")
       const changeId = "test-custom"
       const planVersion = "v2"
 
@@ -143,7 +143,7 @@ describe("publishPlanArtifacts", () => {
   test("reports missing artifacts as errors", async () => {
     const repoRoot = await createTestRepo()
     try {
-      const runtimeStateDir = path.join(repoRoot, ".git", "pi-zflow")
+      const runtimeStateDir = path.join(repoRoot, ".zflow")
       const changeId = "test-missing"
       const planVersion = "v1"
 
@@ -174,7 +174,7 @@ describe("publishPlanArtifacts", () => {
   test("manifest references correct source and review paths", async () => {
     const repoRoot = await createTestRepo()
     try {
-      const runtimeStateDir = path.join(repoRoot, ".git", "pi-zflow")
+      const runtimeStateDir = path.join(repoRoot, ".zflow")
       const changeId = "test-manifest-refs"
       const planVersion = "v1"
 
@@ -197,9 +197,9 @@ describe("publishPlanArtifacts", () => {
       for (const sourcePath of Object.values(manifest.sourceArtifacts)) {
         assert.ok(typeof sourcePath === "string", "source artifact path must be a string")
       }
-      // Note should mention .git/pi-zflow
+      // Note should mention .zflow
       assert.ok(
-        manifest.note.includes(".git/pi-zflow"),
+        manifest.note.includes(".zflow/"),
         "manifest note should reference runtime state dir",
       )
     } finally {
@@ -210,7 +210,7 @@ describe("publishPlanArtifacts", () => {
   test("resolveChangeImplementTarget maps durable docs path to previous runtime change id", async () => {
     const repoRoot = await createTestRepo()
     try {
-      const runtimeStateDir = path.join(repoRoot, ".git", "pi-zflow")
+      const runtimeStateDir = path.join(repoRoot, ".zflow")
       const runtimeChangeId = "docs-change-ideas-cl-mphn61g6"
       const durableChangeId = "cloudflare-target-architecture"
       const planVersion = "v1"
