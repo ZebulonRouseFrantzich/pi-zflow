@@ -512,6 +512,55 @@ function visualPadEnd(value: string, targetVisualWidth: number): string {
   return value + " ".repeat(targetVisualWidth - currentWidth)
 }
 
+/**
+ * Word-wrap plain text at word boundaries, preserving visual character widths.
+ * Input MUST NOT contain ANSI escape codes.
+ * Returns lines each with visual width ≤ maxWidth.
+ */
+function wordWrap(text: string, maxWidth: number): string[] {
+  if (!text) return [""]
+  if (maxWidth <= 0) return [""]
+  if (visualWidth(text) <= maxWidth) return [text]
+
+  const result: string[] = []
+  let line = ""
+
+  for (const word of text.split(" ")) {
+    if (!word) {
+      if (line) line += " " // preserve inter-word spacing
+      continue
+    }
+
+    const candidate = line ? line + " " + word : word
+    if (visualWidth(candidate) <= maxWidth) {
+      line = candidate
+    } else {
+      if (line) result.push(line)
+
+      // Word itself may exceed maxWidth — hard-break it
+      if (visualWidth(word) > maxWidth) {
+        let remaining = word
+        let chunk = ""
+        for (const ch of remaining) {
+          const test = chunk + ch
+          if (visualWidth(test) > maxWidth && chunk) {
+            result.push(chunk)
+            chunk = ch
+          } else {
+            chunk = test
+          }
+        }
+        line = chunk
+      } else {
+        line = word
+      }
+    }
+  }
+
+  if (line) result.push(line)
+  return result
+}
+
 function isFinishedSubagentStatus(status: string): boolean {
   const normalized = status.toLowerCase()
   return normalized === "completed" || normalized === "failed"
@@ -599,48 +648,57 @@ function colorizeMetaLine(rawMeta: string, theme: any): string {
 }
 
 /**
- * Render a single zflow card as a filled-background panel.
+ * Render a single zflow card as a filled-background panel with text wrapping.
  *
- * Uses Pi TUI theme background colors (toolPendingBg/customMessageBg/toolSuccessBg/toolErrorBg
- * based on status) instead of ASCII box-drawing borders. Each line is a full-width
- * background-filled rectangle matching Pi's native card style. Different statuses
- * get different background colors so cards are visually distinguishable.
- *
- * The first and last lines are empty-padding lines giving the card vertical breathing
- * room, making it appear as a standalone rectangular panel.
+ * Uses Pi TUI theme background colors based on status. Each content line is
+ * word-wrapped to fit the available width, and the card grows vertically to
+ * accommodate wrapped content. No truncation — text that would overflow wraps
+ * to one or more additional lines.
  */
 function buildCardLines(model: ZflowCardViewModel, theme: any, width: number): string[] {
   const safeWidth = Math.max(8, width)
   const bgFn = cardBgFn(model.status, theme)
 
-  function cardLine(plain: string, colorize: (s: string) => string): string {
-    const indented = "  " + plain
-    const fitted = visualPadEnd(visualTruncate(indented, safeWidth), safeWidth)
-    return bgFn(colorize(fitted))
+  function cardLineWrapped(text: string, colorize: (s: string) => string): string[] {
+    const contentWidth = Math.max(1, safeWidth - 2)
+    const wrapped = wordWrap(text, contentWidth)
+    return wrapped.map((fragment) => {
+      const indented = "  " + fragment
+      const padded = visualPadEnd(indented, safeWidth)
+      return bgFn(colorize(padded))
+    })
   }
 
   const lines: string[] = []
 
-  // Top padding line — empty background-filled line for vertical breathing room
+  // Top padding — empty background-filled line for vertical breathing room
   lines.push(bgFn(" ".repeat(safeWidth)))
 
-  // Title line — colored by status (success/accent/error/warning)
-  lines.push(cardLine(model.title, (s) => statusTextColor(model.status, theme, s)))
+  // Title — word-wrapped, colored by status
+  for (const l of cardLineWrapped(model.title, (s) => statusTextColor(model.status, theme, s))) {
+    lines.push(l)
+  }
 
   // Status + elapsed line — dimmed metadata
-  lines.push(cardLine(model.statusLine, (s) => theme.fg("dim", s)))
+  for (const l of cardLineWrapped(model.statusLine, (s) => theme.fg("dim", s))) {
+    lines.push(l)
+  }
 
-  // Meta lines — each dimmed, with thinking level highlighted via colorizeThinking
+  // Meta lines — dimmed, with thinking level highlighted
   for (const meta of model.metaLines) {
-    lines.push(cardLine(meta, (s) => colorizeMetaLine(s, theme)))
+    for (const l of cardLineWrapped(meta, (s) => colorizeMetaLine(s, theme))) {
+      lines.push(l)
+    }
   }
 
   // Body lines — dimmed bullet items
   for (const body of model.bodyLines) {
-    lines.push(cardLine(body, (s) => theme.fg("dim", s)))
+    for (const l of cardLineWrapped(body, (s) => theme.fg("dim", s))) {
+      lines.push(l)
+    }
   }
 
-  // Bottom padding line
+  // Bottom padding
   lines.push(bgFn(" ".repeat(safeWidth)))
 
   return lines
@@ -758,10 +816,21 @@ function renderReviewerCards(reviewers: WorkflowReviewerSnapshot[], width: numbe
   const rendered: string[] = []
 
   for (let index = 0; index < ordered.length; index += columns) {
-    const rowCards = ordered.slice(index, index + columns).map((r) => new ZflowCard(toReviewerCardModel(r), theme).render(cardWidth))
-    const rowHeight = Math.max(...rowCards.map((card) => card.length))
+    const rowSlice = ordered.slice(index, index + columns)
+    const rowCardData = rowSlice.map((r) => {
+      const model = toReviewerCardModel(r)
+      return {
+        lines: new ZflowCard(model, theme).render(cardWidth),
+        bg: cardBgFn(model.status, theme),
+      }
+    })
+    const rowHeight = Math.max(...rowCardData.map((d) => d.lines.length))
     for (let line = 0; line < rowHeight; line++) {
-      rendered.push(rowCards.map((card) => card[line] ?? " ".repeat(cardWidth)).join(" ".repeat(gap)))
+      rendered.push(
+        rowCardData
+          .map((d) => d.lines[line] ?? d.bg(" ".repeat(cardWidth)))
+          .join(" ".repeat(gap)),
+      )
     }
   }
 
@@ -812,10 +881,21 @@ function renderSubagentCards(subagents: WorkflowSubagentSnapshot[], width: numbe
   const rendered: string[] = []
 
   for (let index = 0; index < ordered.length; index += columns) {
-    const rowCards = ordered.slice(index, index + columns).map((sa) => new ZflowCard(toSubagentCardModel(sa), theme).render(cardWidth))
-    const rowHeight = Math.max(...rowCards.map((card) => card.length))
+    const rowSlice = ordered.slice(index, index + columns)
+    const rowCardData = rowSlice.map((sa) => {
+      const model = toSubagentCardModel(sa)
+      return {
+        lines: new ZflowCard(model, theme).render(cardWidth),
+        bg: cardBgFn(model.status, theme),
+      }
+    })
+    const rowHeight = Math.max(...rowCardData.map((d) => d.lines.length))
     for (let line = 0; line < rowHeight; line++) {
-      rendered.push(rowCards.map((card) => card[line] ?? " ".repeat(cardWidth)).join(" ".repeat(gap)))
+      rendered.push(
+        rowCardData
+          .map((d) => d.lines[line] ?? d.bg(" ".repeat(cardWidth)))
+          .join(" ".repeat(gap)),
+      )
     }
   }
 
