@@ -1390,6 +1390,11 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             `${options.dryRun ? "Would abandon" : "Abandoned"} ${result.abandonedRuns.length} unfinished run(s): ${result.abandonedRuns.join(", ")}`,
             "info",
           )
+        } else if (options.changeId && options.abandonUnfinished) {
+          ctx.ui.notify(
+            `No unfinished runs found for change "${options.changeId}".`,
+            "info",
+          )
         }
 
         if (options.dryRun) {
