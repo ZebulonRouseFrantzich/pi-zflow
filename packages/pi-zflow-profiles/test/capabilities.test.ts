@@ -92,6 +92,27 @@ describe("checkThinkingCompatibility", () => {
     assert.ok(result.reason.includes("clamp"))
   })
 
+  it("supports off as an explicit disabled thinking level", () => {
+    const result = checkThinkingCompatibility("low", "off", false, "m1")
+    assert.equal(result.compatible, true)
+    assert.equal(result.effectiveLevel, "off")
+    assert.ok(result.reason.includes("explicitly disabled"))
+  })
+
+  it("supports xhigh as the highest thinking level", () => {
+    const result = checkThinkingCompatibility("xhigh", "xhigh", true, "m1")
+    assert.equal(result.compatible, true)
+    assert.equal(result.effectiveLevel, "xhigh")
+    assert.equal(result.reason, "")
+  })
+
+  it("rejects high model for xhigh conservative request", () => {
+    const result = checkThinkingCompatibility("high", "xhigh", true, "m1")
+    assert.equal(result.compatible, false)
+    assert.equal(result.effectiveLevel, "xhigh")
+    assert.ok(result.reason.toLowerCase().includes("conservative"))
+  })
+
   it("produces no reason for exact match", () => {
     const result = checkThinkingCompatibility("medium", "medium", false, "m1")
     assert.equal(result.compatible, true)

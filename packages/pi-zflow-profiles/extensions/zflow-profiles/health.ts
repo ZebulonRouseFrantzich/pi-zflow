@@ -39,6 +39,7 @@ import type {
   ResolvedLane,
   ModelRegistry,
   NormalizedProfileDefinition,
+  ThinkingLevel,
 } from "./profiles.js"
 
 import { CONSERVATIVE_LANES } from "./capabilities.js"
@@ -375,20 +376,25 @@ export function reresolveLane(
     if (validation.valid) {
       // Determine effective thinking level
       const modelThinking = model?.thinkingCapability ?? "medium"
-      const requestedScore =
-        laneDef.thinking === "high" ? 3
-        : laneDef.thinking === "medium" ? 2
-        : laneDef.thinking === "low" ? 1
-        : 0
-      const modelScore =
-        modelThinking === "high" ? 3
-        : modelThinking === "medium" ? 2
-        : 1
+      const thinkingScore: Record<ThinkingLevel, number> = {
+        off: 0,
+        low: 1,
+        medium: 2,
+        high: 3,
+        xhigh: 4,
+      }
+      const requestedScore = laneDef.thinking ? thinkingScore[laneDef.thinking] : 0
+      const modelScore = thinkingScore[modelThinking]
 
       let effectiveLevel = laneDef.thinking ?? "medium"
       let reason: string | undefined
 
-      if (modelScore >= requestedScore || !requestedScore) {
+      if (laneDef.thinking === "off") {
+        effectiveLevel = "off"
+        reason = modelThinking !== "off"
+          ? `Thinking explicitly disabled; model "${modelId}" capability "${modelThinking}" will not be requested.`
+          : undefined
+      } else if (modelScore >= requestedScore || !requestedScore) {
         // Model meets or exceeds requested thinking — no clamping issue
         effectiveLevel = modelThinking
         reason = undefined

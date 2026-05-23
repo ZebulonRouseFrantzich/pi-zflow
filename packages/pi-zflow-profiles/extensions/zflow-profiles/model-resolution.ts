@@ -39,6 +39,7 @@ import type {
   ResolvedAgentBinding,
   ResolvedProfile,
   CapabilityRequirements,
+  ThinkingLevel,
 } from "./profiles.js"
 
 import type { ThinkingCompatibilityResult } from "./capabilities.js"
@@ -59,7 +60,7 @@ export type { ThinkingCompatibilityResult } from "./capabilities.js"
  */
 export function isModelThinkingCompatible(
   model: ModelInfo,
-  requestedLevel?: "low" | "medium" | "high",
+  requestedLevel?: ThinkingLevel,
   isConservative: boolean = false,
 ): ThinkingCompatibilityResult {
   return checkThinkingCompatibility(

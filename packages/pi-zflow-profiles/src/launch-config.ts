@@ -34,7 +34,7 @@
  * @module pi-zflow-profiles/launch-config
  */
 
-import type { ResolvedProfile } from "../extensions/zflow-profiles/profiles.js"
+import type { ResolvedProfile, ThinkingLevel } from "../extensions/zflow-profiles/profiles.js"
 import { validateWebAccessScope } from "./builtin-overrides.js"
 
 // ── Launch config type ──────────────────────────────────────────
@@ -58,7 +58,7 @@ export interface LaunchAgentConfig {
   /** Maximum depth of subagent nesting. */
   maxSubagentDepth?: number
   /** Thinking/reasoning effort level. */
-  thinking?: "low" | "medium" | "high"
+  thinking?: ThinkingLevel
 }
 
 // ── Launch config builders ──────────────────────────────────────

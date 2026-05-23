@@ -23,6 +23,9 @@
 
 // ── Public types (raw input form) ───────────────────────────────
 
+/** Supported thinking/reasoning effort levels, ordered from disabled to deepest. */
+export type ThinkingLevel = "off" | "low" | "medium" | "high" | "xhigh"
+
 /**
  * A single logical lane definition.
  *
@@ -45,11 +48,13 @@ export interface LaneDefinition {
 
   /**
    * Desired thinking/reasoning effort level for models in this lane.
-   * - "low":  cheap/quick reasoning (suitable for scout, repo-mapper)
+   * - "off": disable additional reasoning effort when supported
+   * - "low": cheap/quick reasoning (suitable for scout, repo-mapper)
    * - "medium": balanced reasoning (routine implementation, verification)
    * - "high": deep reasoning (planning, security review, hard implementation)
+   * - "xhigh": extra-deep reasoning for highest-risk planning/review/implementation
    */
-  thinking?: "low" | "medium" | "high"
+  thinking?: ThinkingLevel
 
   /**
    * Ordered list of preferred model identifiers (e.g. "openai/gpt-5.4").
@@ -144,7 +149,7 @@ export interface ProfilesFile {
 export interface NormalizedLaneDefinition {
   required: boolean
   optional: boolean
-  thinking?: "low" | "medium" | "high"
+  thinking?: ThinkingLevel
   preferredModels: string[]
 }
 
@@ -194,7 +199,7 @@ export interface ResolvedLane {
   /** Whether this lane is optional (nice-to-have). */
   optional: boolean
   /** Effective thinking level after resolution (may be clamped). */
-  thinking?: "low" | "medium" | "high"
+  thinking?: ThinkingLevel
   /** Resolution status. */
   status: LaneStatus
   /** Human-readable explanation for failures, skips, or changes. */
@@ -261,7 +266,7 @@ export interface ModelInfo {
   /** Whether this model supports text input/output. */
   supportsText: boolean
   /** The model's maximum available thinking/reasoning capability. */
-  thinkingCapability: "low" | "medium" | "high"
+  thinkingCapability: ThinkingLevel
   /** Whether the user is authenticated and the model is available for use. */
   authenticated: boolean
   /**
@@ -291,7 +296,7 @@ export interface ModelCapabilityProfile {
   /** Whether the model supports text input/output. */
   supportsText: boolean
   /** The model's maximum thinking/reasoning capability. */
-  thinkingCapability: "low" | "medium" | "high"
+  thinkingCapability: ThinkingLevel
   /** Maximum context window in tokens (undefined = unconstrained). */
   contextWindow?: number
   /** Maximum output in tokens (undefined = unconstrained). */
@@ -312,7 +317,7 @@ export interface CapabilityRequirements {
   /** Whether the model must support text input/output. */
   requiresText: boolean
   /** Minimum required thinking level (optional). */
-  requiredThinking?: "low" | "medium" | "high"
+  requiredThinking?: ThinkingLevel
   /** Whether this is a conservative lane that rejects thinking downgrades. */
   isConservativeLane: boolean
   /** Minimum context window size in tokens (optional). */
@@ -404,7 +409,7 @@ export class ProfileValidationError extends Error {
 // ── Constants ───────────────────────────────────────────────────
 
 /** Valid thinking levels. */
-export const THINKING_LEVELS = ["low", "medium", "high"] as const
+export const THINKING_LEVELS = ["off", "low", "medium", "high", "xhigh"] as const
 
 /** Default thinking level when not specified. */
 export const DEFAULT_THINKING = "medium" as const
@@ -421,7 +426,7 @@ function isNonEmptyString(v: unknown): v is string {
 /**
  * Check if a value is a valid thinking level.
  */
-function isValidThinking(v: unknown): v is "low" | "medium" | "high" {
+function isValidThinking(v: unknown): v is ThinkingLevel {
   return THINKING_LEVELS.includes(v as any)
 }
 
@@ -1045,7 +1050,7 @@ export interface CachedResolvedLane {
   /** Resolved model identifier, or null if unresolved. */
   model: string | null
   /** Effective thinking level after resolution. */
-  thinking?: "low" | "medium" | "high"
+  thinking?: ThinkingLevel
   /** Whether this lane was required. */
   required: boolean
   /** Whether this lane was optional. */
