@@ -146,6 +146,15 @@ export type {
   CodeReviewInputContext,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
+// Durable plan artifact publishing (Phase 7 — publish docs to repo-visible path)
+export {
+  publishPlanArtifacts,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
+export type {
+  PublishPlanArtifactsResult,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
 // Verification and failure log (Phase 7 — verification command resolution)
 export {
   resolveVerificationCommand,
