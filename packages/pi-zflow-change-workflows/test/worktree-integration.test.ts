@@ -152,6 +152,8 @@ describe("Phase 5 — Worktree orchestration integration", () => {
         files: ["src/main.ts"],
         dependencies: [],
         parallelizable: true,
+        taskPrompt: "Update main entrypoint",
+        scopedVerification: "npm test -- src/main.test.ts",
       },
       {
         id: "group-2",
@@ -173,6 +175,8 @@ describe("Phase 5 — Worktree orchestration integration", () => {
     assert.equal(plan.tasks.length, 2, "Should have 2 tasks")
     assert.ok(plan.preflight.clean, "Preflight should pass")
     assert.ok(plan.ownershipValidation.valid, "Ownership validation should pass")
+    assert.match(plan.tasks[0]!.task, /## Scoped verification/, "worker prompt should include scoped verification")
+    assert.match(plan.tasks[0]!.task, /npm test -- src\/main\.test\.ts/, "worker prompt should preserve scoped verification command")
     // parallelBatches depends on whether dependencies/conflicts exist
     // With clean non-conflicting groups, all should be in parallelBatches
     assert.equal(plan.run.phase, "pending", "Run should be in pending phase")

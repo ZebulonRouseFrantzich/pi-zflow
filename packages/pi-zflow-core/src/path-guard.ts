@@ -253,7 +253,7 @@ export interface PathGuardContext {
   projectRoot: string
 
   /**
-   * The runtime state directory (`<git-dir>/pi-zflow/` or temp fallback).
+   * The runtime state directory (`<repo-root>/.zflow/` or temp fallback).
    * Planner artifact patterns are resolved relative to this.
    */
   runtimeStateDir: string
@@ -323,7 +323,7 @@ export const DEFAULT_ALLOWED_ROOTS: AllowedRoot[] = [
  * These must be matched **case-insensitively** on case-insensitive filesystems.
  *
  * NOTE: The `.git/**` pattern excludes `<runtime-state-dir>/**` because
- * runtime state intentionally lives inside `.git/` per Task 0.6 design.
+ * runtime state intentionally lives under `<repo-root>/.zflow/`.
  * The `<runtime-state-dir>` placeholder is resolved at policy-load time.
  */
 export const DEFAULT_BLOCKED_PATTERNS: BlockedPattern[] = [
@@ -433,7 +433,7 @@ export function realpathSafe(
       // Return the resolved real path. The caller (canWrite) will check
       // it against allowed roots — there is no separate project-root
       // check here because legitimate paths routinely sit outside the
-      // working tree (e.g. <git-dir>/pi-zflow/ for runtime state,
+      // working tree (e.g. <repo-root>/.zflow/ for runtime state,
       // /tmp/pi-zflow-<hash>/ for fallback, or active worktree roots).
       return real
     } catch {

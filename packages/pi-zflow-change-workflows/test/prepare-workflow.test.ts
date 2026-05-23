@@ -106,7 +106,7 @@ describe("runChangePrepareWorkflow", () => {
       })
 
       // Verify state-index.json was created with the plan entry
-      const stateIndexPath = path.join(repoRoot, ".git", "pi-zflow", "state-index.json")
+      const stateIndexPath = path.join(repoRoot, ".zflow", "state-index.json")
       const stateIndexContent = await fs.readFile(stateIndexPath, "utf-8")
       const stateIndex = JSON.parse(stateIndexContent)
       const planEntry = stateIndex.entries.find(
@@ -130,7 +130,21 @@ describe("runChangePrepareWorkflow", () => {
       })
 
       assert.ok(result.changeId, "changeId should be generated")
-      assert.ok(result.changeId.startsWith("my-feature-change-"), "changeId should derive from changePath")
+      assert.strictEqual(result.changeId, "my-feature")
+    } finally {
+      await removeTestRepo(repoRoot)
+    }
+  })
+
+  test("generates semantic change ID from change document basename", async () => {
+    const repoRoot = await createTestRepo()
+    try {
+      const result = await runChangePrepareWorkflow({
+        cwd: repoRoot,
+        changePath: "@docs/change-ideas/cloudflare-target-architecture-combined-spec.md",
+      })
+
+      assert.strictEqual(result.changeId, "cloudflare-target-architecture")
     } finally {
       await removeTestRepo(repoRoot)
     }

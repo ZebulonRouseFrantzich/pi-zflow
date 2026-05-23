@@ -31,6 +31,7 @@ export type RunPhase =
   | "applying"
   | "completed"
   | "failed"
+  | "partial"
   | "apply-back-conflicted"
   | "drift-pending"
   | "verification-failed"
@@ -62,6 +63,10 @@ export interface VerificationStatus {
   completedAt?: string
   /** Number of verification failures. */
   failureCount?: number
+  /** The verification command that was run (if any). */
+  command?: string
+  /** Truncated output from the verification command. */
+  output?: string
 }
 
 /**

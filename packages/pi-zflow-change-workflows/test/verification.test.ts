@@ -10,7 +10,11 @@ import { mkdtempSync, rmSync } from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 
-import { runVerification } from "../extensions/zflow-change-workflows/verification.js"
+import {
+  runVerification,
+  parseVerificationMdCommand,
+  resolveVerificationCommand,
+} from "../extensions/zflow-change-workflows/verification.js"
 
 function withTempRepo(): { repoRoot: string; cleanup: () => void } {
   const repoRoot = mkdtempSync(path.join(os.tmpdir(), "zflow-verification-test-"))
@@ -117,6 +121,87 @@ void describe("runVerification", () => {
       )
 
       assert.match(result.command, /^node -e true$/)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+void describe("parseVerificationMdCommand", () => {
+  void it("extracts bash-fenced block", () => {
+    const md = `# Verification\n\nRun this:\n\`\`\`bash\nnpm run verify:readme && test -f src/lib.ts\n\`\`\``
+    const result = parseVerificationMdCommand(md)
+    assert.equal(result, "npm run verify:readme && test -f src/lib.ts")
+  })
+
+  void it("extracts sh-fenced block", () => {
+    const md = "`\`\`sh\nmake check\n\`\`\`"
+    const result = parseVerificationMdCommand(md)
+    assert.equal(result, "make check")
+  })
+
+  void it("extracts shell-fenced block", () => {
+    const md = "`\`\`shell\necho hello\n\`\`\`"
+    const result = parseVerificationMdCommand(md)
+    assert.equal(result, "echo hello")
+  })
+
+  void it("returns null for markdown with no fenced code block", () => {
+    const result = parseVerificationMdCommand("# Verification\n\nNo commands here.")
+    assert.equal(result, null)
+  })
+
+  void it("returns null for empty bash block", () => {
+    const md = "`\`\`bash\n\n\`\`\`"
+    const result = parseVerificationMdCommand(md)
+    assert.equal(result, null)
+  })
+
+  void it("extracts first fenced block when multiple exist", () => {
+    const md = "`\`\`bash\nfirst command\n\`\`\`\n\n`\`\`bash\nsecond command\n\`\`\`"
+    const result = parseVerificationMdCommand(md)
+    assert.equal(result, "first command")
+  })
+
+  void it("extracts from CRLF file", () => {
+    const md = "# Verification\r\n\r\nRun this:\r\n`\`\`bash\r\nnpm run verify:readme\r\n`\`\`\r\n"
+    const result = parseVerificationMdCommand(md)
+    assert.equal(result, "npm run verify:readme")
+  })
+
+  void it("extracts from CRLF file with shell fence", () => {
+    const md = "`\`\`shell\r\necho hello\r\n`\`\`\r\n"
+    const result = parseVerificationMdCommand(md)
+    assert.equal(result, "echo hello")
+  })
+})
+
+void describe("resolveVerificationCommand with planCommand", () => {
+  void it("returns planCommand when no profile or repo config", () => {
+    const { repoRoot, cleanup } = withTempRepo()
+    try {
+      const result = resolveVerificationCommand(repoRoot, undefined, "npm test")
+      assert.equal(result, "npm test")
+    } finally {
+      cleanup()
+    }
+  })
+
+  void it("prefers profileCommand over planCommand", () => {
+    const { repoRoot, cleanup } = withTempRepo()
+    try {
+      const result = resolveVerificationCommand(repoRoot, "profile-cmd", "plan-cmd")
+      assert.equal(result, "profile-cmd")
+    } finally {
+      cleanup()
+    }
+  })
+
+  void it("returns null when no source provides a command", () => {
+    const { repoRoot, cleanup } = withTempRepo()
+    try {
+      const result = resolveVerificationCommand(repoRoot)
+      assert.equal(result, null)
     } finally {
       cleanup()
     }

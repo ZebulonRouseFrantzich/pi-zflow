@@ -12,7 +12,7 @@
  * @module pi-zflow-review/orchestration
  */
 
-import { execSync } from "node:child_process"
+import { execSync, execFileSync } from "node:child_process"
 
 import { getZflowRegistry } from "pi-zflow-core/registry"
 import { DISPATCH_SERVICE_CAPABILITY, type DispatchService } from "pi-zflow-core/dispatch-service"
@@ -233,6 +233,26 @@ function parseSynthesizerOutput(raw: string): {
 // ── Interfaces ──────────────────────────────────────────────────
 
 /**
+ * Per-reviewer progress update emitted during code review.
+ */
+export interface ReviewerUpdate {
+  /** Short reviewer name (e.g. "correctness", "integration"). */
+  reviewerName: string
+  /** Full agent name (e.g. "zflow.review-correctness"). */
+  agentName: string
+  /** Reviewer status. */
+  status: "queued" | "running" | "completed" | "failed"
+  /** Resolved model identifier, if available. */
+  model?: string
+  /** Effective thinking level, if available. */
+  thinking?: string
+  /** Active tool name, if a tool is running. */
+  currentTool?: string
+  /** Last command or activity line. */
+  lastCommand?: string
+}
+
+/**
  * Input to the internal code review flow.
  */
 export interface CodeReviewInput {
@@ -244,6 +264,10 @@ export interface CodeReviewInput {
   branch: string
   /** Baseline override options. */
   baseline?: DiffBaselineInput
+  /** Explicit diff bundle content (overrides git diff execution when provided). */
+  diffBundle?: string
+  /** Optional label for the diff source (e.g. "run-patches", "git-diff"). */
+  diffSource?: string
   /** Execution groups with review tags for tier selection. */
   executionGroups?: Array<{ reviewTags?: string | string[] }>
   /** Verification document content for tier triggers. */
@@ -252,6 +276,8 @@ export interface CodeReviewInput {
   modifiedFiles?: string[]
   /** Modified directories list for tier triggers. */
   modifiedDirectories?: string[]
+  /** Optional path to limit the reviewed diff to a file or directory. */
+  targetPath?: string
   /** Cross-module dependencies for tier triggers. */
   crossModuleDependencies?: string[]
   /** Whether public API changes are present. */
@@ -271,6 +297,8 @@ export interface CodeReviewInput {
   verificationStatus: "passed" | "failed" | "skipped" | "unknown"
   /** Optional reviewer runner to dispatch real reviewer agents. */
   reviewerRunner?: ReviewerRunner
+  /** Optional progress callback for per-reviewer status updates. */
+  onReviewUpdate?: (update: ReviewerUpdate) => void
   /** Working directory for runtime-state resolution. */
   cwd?: string
 }
@@ -360,6 +388,101 @@ function getCurrentBranch(cwd?: string): string {
   }
 }
 
+/**
+ * Parse a known `git diff` command string into a git args array.
+ *
+ * Handles the limited set of command strings emitted by `resolveDiffBaseline()`:
+ *   - `git diff HEAD`
+ *   - `git diff <ref>...HEAD`
+ *   - `git diff <ref>..HEAD`
+ *
+ * `targetPath`, if provided, is appended as a positional path argument (no shell quoting).
+ *
+ * @param commandStr - A git diff command string from `resolveDiffBaseline()`.
+ * @param targetPath - Optional file/directory path to restrict the diff.
+ * @returns A string array of git arguments suitable for `execFileSync("git", args, ...)`.
+ */
+function parseDiffCommand(commandStr: string, targetPath?: string): string[] {
+  const args: string[] = ["diff"]
+  const parts = commandStr.trim().split(/\s+/)
+
+  // Expect at minimum `git diff ...`
+  if (parts.length < 3 || parts[0] !== "git" || parts[1] !== "diff") {
+    // Unknown format — fall back to a basic diff HEAD
+    args.push("HEAD")
+    if (targetPath) args.push("--", targetPath)
+    return args
+  }
+
+  // Strip "git diff" prefix, keep remaining args (e.g. "HEAD" or "main...HEAD")
+  for (let i = 2; i < parts.length; i++) {
+    args.push(parts[i])
+  }
+
+  if (targetPath) {
+    args.push("--", targetPath)
+  }
+
+  return args
+}
+
+function toCodeReviewAgentName(reviewerName: string): string {
+  return reviewerName.startsWith("zflow.") ? reviewerName : `zflow.review-${reviewerName}`
+}
+
+function isRequiredCodeReviewer(reviewerName: string): boolean {
+  return reviewerName === "correctness" || reviewerName === "integration" || reviewerName === "security"
+}
+
+interface AgentModelInfo {
+  model?: string
+  thinking?: string
+}
+
+async function resolveProfileModelForAgent(agentName: string): Promise<string | undefined> {
+  const info = await resolveAgentModelInfo(agentName)
+  return info.model
+}
+
+async function resolveAgentModelInfo(agentName: string): Promise<AgentModelInfo> {
+  try {
+    const profileService = getZflowRegistry().optional<{
+      getResolvedAgentBinding?: (agentName: string) => Promise<{ resolvedModel?: string | null; lane?: string } | null>
+      getResolvedLane?: (laneName: string) => Promise<{ thinking?: string } | null>
+    }>("profiles")
+    if (!profileService) return {}
+    const binding = await profileService.getResolvedAgentBinding?.(agentName)
+    if (!binding) return {}
+    let thinking: string | undefined
+    if (binding.lane && profileService.getResolvedLane) {
+      const lane = await profileService.getResolvedLane(binding.lane)
+      if (lane) thinking = lane.thinking
+    }
+    return {
+      model: binding.resolvedModel ?? undefined,
+      thinking,
+    }
+  } catch {
+    return {}
+  }
+}
+
+function emitReviewerUpdate(
+  callback: CodeReviewInput["onReviewUpdate"] | undefined,
+  name: string,
+  agentName: string,
+  status: ReviewerUpdate["status"],
+  extra?: { model?: string; thinking?: string; currentTool?: string; lastCommand?: string },
+): void {
+  if (!callback) return
+  callback({
+    reviewerName: name,
+    agentName,
+    status,
+    ...extra,
+  })
+}
+
 // ── Code review orchestration ───────────────────────────────────
 
 /**
@@ -387,19 +510,33 @@ export async function runCodeReview(
   const branch = input.branch || getCurrentBranch(cwd)
 
   // Step 1: Resolve diff baseline and produce diff bundle
-  const resolved = resolveDiffBaseline(input.baseline ?? {})
-  const baseRef = resolved.baseRef
-
   let diffContent: string
-  try {
-    diffContent = execSync(resolved.diffCommand, {
-      cwd,
-      encoding: "utf-8",
-      timeout: 15_000,
-      maxBuffer: 10 * 1024 * 1024,
-    })
-  } catch {
-    diffContent = "(diff unavailable)"
+  let baseRef: string
+  let diffSource: string
+
+  if (input.diffBundle !== undefined) {
+    // Caller provided an explicit diff bundle — use it directly
+    // Keep baseRef as a stable sentinel so downstream findings metadata
+    // is not confused by arbitrary labels; use diffSource for the coverage note.
+    diffContent = input.diffBundle
+    baseRef = input.baseline?.baseRef ?? "explicit-bundle"
+    diffSource = input.diffSource ?? "explicit-bundle"
+  } else {
+    const resolved = resolveDiffBaseline(input.baseline ?? {})
+    baseRef = resolved.baseRef
+    diffSource = resolved.resolution
+
+    try {
+      const diffArgs = parseDiffCommand(resolved.diffCommand, input.targetPath)
+      diffContent = execFileSync("git", diffArgs, {
+        cwd,
+        encoding: "utf-8",
+        timeout: 15_000,
+        maxBuffer: 10 * 1024 * 1024,
+      })
+    } catch {
+      diffContent = "(diff unavailable)"
+    }
   }
 
   // Step 2: Determine code-review tier
@@ -423,6 +560,15 @@ export async function runCodeReview(
   const allFindings: Array<{ reviewerName: string; finding: CodeReviewFinding }> = []
   const reviewerOutputs: Record<string, string> = {}
   const coverageNotes: string[] = [`Tier: ${tier}`, `Base ref: ${baseRef}`]
+  if (input.targetPath) coverageNotes.push(`Target path: ${input.targetPath}`)
+
+  // Diff coverage note
+  if (diffContent.length === 0) {
+    coverageNotes.push(`Diff bundle is empty — no changes to review (source: ${diffSource}).`)
+  } else {
+    const byteCount = Buffer.byteLength(diffContent, "utf8")
+    coverageNotes.push(`Diff bundle: ${byteCount} bytes (source: ${diffSource}).`)
+  }
 
   const internalCtx: InternalReviewContext = {
     planningArtifacts: input.planningArtifacts,
@@ -434,16 +580,25 @@ export async function runCodeReview(
   if (input.reviewerRunner) {
     // Run reviewers in parallel via the injected runner
     const runner = input.reviewerRunner
+    // Emit queued for all reviewers
+    for (const name of reviewerNames) {
+      const agentName = toCodeReviewAgentName(name)
+      emitReviewerUpdate(input.onReviewUpdate, name, agentName, "queued")
+    }
     const results = await Promise.allSettled(
       reviewerNames.map(async (name) => {
+        const agentName = toCodeReviewAgentName(name)
+        emitReviewerUpdate(input.onReviewUpdate, name, agentName, "running")
         const prompt = await buildInternalReviewPrompt(name, internalCtx)
-        return { name, prompt, output: await runner(name, prompt) }
+        const output = await runner(name, prompt)
+        return { name, prompt, output }
       }),
     )
 
     for (const result of results) {
       if (result.status === "fulfilled") {
         const { name, prompt, output } = result.value
+        const agentName = toCodeReviewAgentName(name)
         reviewerOutputs[name] = output.rawOutput
         manifest = {
           ...manifest,
@@ -451,6 +606,7 @@ export async function runCodeReview(
             r.name === name ? { ...r, status: "executed" as const } : r,
           ),
         }
+        emitReviewerUpdate(input.onReviewUpdate, name, agentName, "completed")
         for (const f of output.findings) {
           allFindings.push({
             reviewerName: name,
@@ -476,16 +632,51 @@ export async function runCodeReview(
     const dispatchService = getZflowRegistry().optional<DispatchService>(DISPATCH_SERVICE_CAPABILITY)
 
     if (dispatchService) {
+      // Pre-resolve model/thinking for all reviewers
+      const reviewerAgentInfo = new Map<string, AgentModelInfo>()
+      for (const name of reviewerNames) {
+        const agentName = toCodeReviewAgentName(name)
+        const info = await resolveAgentModelInfo(agentName)
+        reviewerAgentInfo.set(name, info)
+        emitReviewerUpdate(input.onReviewUpdate, name, agentName, "queued", {
+          model: info.model,
+          thinking: info.thinking,
+        })
+      }
+
       const results = await Promise.allSettled(
         reviewerNames.map(async (name) => {
+          const agentName = toCodeReviewAgentName(name)
+          const agentInfo = reviewerAgentInfo.get(name) ?? {}
+          emitReviewerUpdate(input.onReviewUpdate, name, agentName, "running", {
+            model: agentInfo.model,
+            thinking: agentInfo.thinking,
+          })
           const prompt = await buildInternalReviewPrompt(name, internalCtx)
           let output: ReviewerOutput
           let dispatchOk = true
           let dispatchError: string | undefined
           try {
             const raw = await dispatchService.runAgent({
-              agent: name,
+              agent: agentName,
               task: prompt,
+              cwd,
+              ...(agentInfo.model ? { model: agentInfo.model } : {}),
+              onUpdate: (progress) => {
+                if (!input.onReviewUpdate) return
+                const currentTool = progress.currentTool
+                const args = progress.currentToolArgs
+                const lastCommand = currentTool ? `${currentTool}${args ? " " + args : ""}` : undefined
+                input.onReviewUpdate({
+                  reviewerName: name,
+                  agentName,
+                  status: "running",
+                  model: agentInfo.model,
+                  thinking: agentInfo.thinking,
+                  currentTool: currentTool ?? undefined,
+                  lastCommand: lastCommand ?? progress.recentOutput?.[progress.recentOutput.length - 1],
+                })
+              },
             })
             if (raw.ok) {
               output = parseReviewerOutput(raw.rawOutput)
@@ -499,13 +690,13 @@ export async function runCodeReview(
             dispatchError = err instanceof Error ? err.message : String(err)
             output = { findings: [], rawOutput: `dispatch error: ${dispatchError}` }
           }
-          return { name, prompt, output, ok: dispatchOk, error: dispatchError }
+          return { name, agentName, agentInfo, prompt, output, ok: dispatchOk, error: dispatchError }
         }),
       )
 
       for (const result of results) {
         if (result.status === "fulfilled") {
-          const { name, output, ok, error } = result.value
+          const { name, agentName, agentInfo, output, ok, error } = result.value
           if (!ok) {
             reviewerOutputs[name] = output.rawOutput
             manifest = {
@@ -514,6 +705,11 @@ export async function runCodeReview(
                 r.name === name ? { ...r, status: "failed" as const, detail: error ?? "dispatch failed" } : r,
               ),
             }
+            emitReviewerUpdate(input.onReviewUpdate, name, agentName, "failed", {
+              model: agentInfo.model,
+              thinking: agentInfo.thinking,
+              lastCommand: error ?? "dispatch failed",
+            })
             coverageNotes.push(`Reviewer "${name}" dispatch failed: ${error ?? "unknown error"}`)
           } else {
             reviewerOutputs[name] = output.rawOutput
@@ -523,6 +719,10 @@ export async function runCodeReview(
                 r.name === name ? { ...r, status: "executed" as const } : r,
               ),
             }
+            emitReviewerUpdate(input.onReviewUpdate, name, agentName, "completed", {
+              model: agentInfo.model,
+              thinking: agentInfo.thinking,
+            })
             for (const f of output.findings) {
               allFindings.push({
                 reviewerName: name,
@@ -538,7 +738,7 @@ export async function runCodeReview(
                 },
               })
             }
-            coverageNotes.push(`Reviewer "${name}" dispatched via "${dispatchService.name}"`)
+            coverageNotes.push(`Reviewer "${name}" dispatched via "${dispatchService.name}" as ${toCodeReviewAgentName(name)}`)
           }
         } else {
           coverageNotes.push(`Reviewer dispatch failed: ${result.reason}`)
@@ -587,9 +787,12 @@ export async function runCodeReview(
           `Reviewer: ${f.reviewerName}\nSeverity: ${f.finding.severity}\nTitle: ${f.finding.title}\nEvidence: ${f.finding.evidence || f.finding.recommendation}`
         ).join("\n---\n")
 
+        const synthesizerModel = await resolveProfileModelForAgent("zflow.synthesizer")
         const synthResult = await dispatchService.runAgent({
           agent: "zflow.synthesizer",
           task: `Synthesize the following code review findings and produce consolidated results with support/dissent/coverage:\n\n${synthInput}`,
+          cwd,
+          ...(synthesizerModel ? { model: synthesizerModel } : {}),
         })
 
         synthesizerOutput = synthResult.rawOutput
@@ -626,6 +829,19 @@ export async function runCodeReview(
     }
   } else {
     coverageNotes.push("Synthesizer: local severity computation (no zflow.synthesizer dispatch)")
+  }
+
+  const failedRequiredReviewers = manifest.reviewers
+    .filter((r) => r.status === "failed" && isRequiredCodeReviewer(r.name))
+    .map((r) => r.name)
+  if (failedRequiredReviewers.length > 0) {
+    recommendation = "NO-GO"
+    coverageNotes.push(
+      `Fail-closed: required reviewer(s) failed: ${failedRequiredReviewers.join(", ")}.`,
+    )
+  } else if (manifest.reviewers.length > 0 && manifest.reviewers.every((r) => r.status !== "executed")) {
+    recommendation = "NO-GO"
+    coverageNotes.push("Fail-closed: no code reviewers executed.")
   }
 
   // Step 7: Persist findings

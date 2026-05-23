@@ -95,6 +95,7 @@ interface BackendDispatchService {
     output?: string | false
     outputMode?: "inline" | "file-only"
     maxOutput?: { lines?: number; bytes?: number }
+    onUpdate?: (progress: unknown) => void
   }): Promise<{
     ok: boolean
     exitCode: number
@@ -112,6 +113,7 @@ interface BackendDispatchService {
       output?: string | false
       outputMode?: "inline" | "file-only"
       maxOutput?: { lines?: number; bytes?: number }
+      onUpdate?: (progress: unknown) => void
     }>
     cwd?: string
     concurrency?: number
@@ -160,6 +162,7 @@ class SubagentsDispatchService implements DispatchService {
         output: input.output,
         outputMode: input.outputMode,
         maxOutput: input.maxOutput,
+        onUpdate: input.onUpdate,
       })
       return {
         ok: result.ok,
@@ -187,6 +190,7 @@ class SubagentsDispatchService implements DispatchService {
           output: t.output,
           outputMode: t.outputMode,
           maxOutput: input.maxOutput,
+          onUpdate: t.onUpdate,
         })),
         cwd: input.cwd,
         concurrency: input.concurrency,

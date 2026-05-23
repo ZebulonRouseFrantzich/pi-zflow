@@ -14,17 +14,20 @@ import { resetZflowRegistry } from "pi-zflow-core"
 
 function makePiStub() {
   const commands: Map<string, number> = new Map()
+  const commandHandlers: Map<string, Function> = new Map()
   const events: string[] = []
   const handlers: Record<string, Function[]> = {}
   const activeTools: string[][] = []
   return {
     commands,
+    commandHandlers,
     events,
     handlers,
     activeTools,
     pi: {
-      registerCommand(name: string) {
+      registerCommand(name: string, command?: { handler?: Function }) {
         commands.set(name, (commands.get(name) ?? 0) + 1)
+        if (command?.handler) commandHandlers.set(name, command.handler)
       },
       on(eventName: string, handler: Function) {
         events.push(eventName)
@@ -110,5 +113,28 @@ describe("zflow-plan-mode extension activation", () => {
     assert.ok(activeTools[0]!.includes("zflow_write_plan_artifact"))
     assert.ok(!activeTools[0]!.includes("edit"))
     assert.ok(!activeTools[0]!.includes("write"))
+  })
+
+  it("shows a footer Plan indicator while plan mode is active", async () => {
+    const { pi, commandHandlers } = makePiStub()
+    const statuses: Array<{ id: string; value?: string }> = []
+    const ctx = {
+      ui: {
+        notify() {},
+        setStatus(id: string, value?: string) {
+          statuses.push({ id, value })
+        },
+      },
+    }
+
+    activateZflowPlanModeExtension(pi as any)
+    const handler = commandHandlers.get("zflow-plan")
+    assert.ok(handler, "zflow-plan handler must be registered")
+
+    await handler("", ctx)
+    assert.deepEqual(statuses.at(-1), { id: "zflow-plan", value: "Plan" })
+
+    await handler("exit", ctx)
+    assert.deepEqual(statuses.at(-1), { id: "zflow-plan", value: undefined })
   })
 })

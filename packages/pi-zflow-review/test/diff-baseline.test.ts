@@ -23,16 +23,16 @@ import type {
 // ── resolveDiffBaseline ────────────────────────────────────────
 
 void describe("resolveDiffBaseline", () => {
-  it("should return 'main' with 'default' resolution when no options given", () => {
+  it("should return 'HEAD' with 'default' resolution when no options given", () => {
     const result = resolveDiffBaseline({})
-    assert.equal(result.baseRef, "main")
+    assert.equal(result.baseRef, "HEAD")
     assert.equal(result.resolution, "default")
-    assert.equal(result.diffCommand, "git diff main...HEAD")
+    assert.equal(result.diffCommand, "git diff HEAD")
   })
 
-  it("should return 'main' with 'default' resolution when called with empty input", () => {
+  it("should return 'HEAD' with 'default' resolution when called with empty input", () => {
     const result = resolveDiffBaseline()
-    assert.equal(result.baseRef, "main")
+    assert.equal(result.baseRef, "HEAD")
     assert.equal(result.resolution, "default")
   })
 

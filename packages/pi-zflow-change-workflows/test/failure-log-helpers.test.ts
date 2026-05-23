@@ -23,7 +23,7 @@ import type {
 
 /**
  * Create a temporary directory with a git repo for test isolation.
- * The git repo ensures resolveRuntimeStateDir uses .git/pi-zflow/.
+ * The git repo ensures resolveRuntimeStateDir uses .zflow/.
  */
 async function makeTempDir(): Promise<string> {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-test-failure-log-"))
@@ -38,14 +38,14 @@ async function makeTempDir(): Promise<string> {
 
 /**
  * Create a minimal fake failure log file.
- * resolveRuntimeStateDir(cwd) resolves to `<git-dir>/pi-zflow/`,
- * so we write the log at `.git/pi-zflow/failure-log.md`.
+ * resolveRuntimeStateDir(cwd) resolves to `<repo-root>/.zflow/`,
+ * so we write the log at `.zflow/failure-log.md`.
  */
 async function writeFakeFailureLog(
   repoRoot: string,
   entries: FailureLogEntry[],
 ): Promise<void> {
-  const runtimeStateDir = path.join(repoRoot, ".git", "pi-zflow")
+  const runtimeStateDir = path.join(repoRoot, ".zflow")
   await fs.mkdir(runtimeStateDir, { recursive: true })
   const logPath = path.join(runtimeStateDir, "failure-log.md")
   const lines: string[] = []

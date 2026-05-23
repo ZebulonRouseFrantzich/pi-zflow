@@ -360,6 +360,25 @@ Runtime state lives outside the working tree. See `docs/foundation-versions.md` 
 - `resolveInstallManifestPath()` — install manifest
 - Plus all other derived paths matching the `docs/foundation-versions.md` layout.
 
+### Durable vs runtime artifact distinction
+
+`/zflow-change-prepare` produces two categories of output:
+
+- **Durable change documents** — the four canonical plan artifacts
+  (`design.md`, `execution-groups.md`, `standards.md`, `verification.md`)
+  are copied into the working tree after validation and review, under
+  `docs/zflow-changes/<change-id>/<version>/`. These files are intended
+  for review, commit, and PR discussion — they survive session restarts
+  and can be shared with collaborators.
+
+- **Runtime and review artifacts** — transient state, raw planner output,
+  scoped verification results, review findings, and metadata remain under
+  `.zflow/` and are not committed. Review findings are accessible at
+  `.zflow/review/plan-review-<change-id>-<version>.md`.
+
+This split keeps reviewable change docs in the worktree while avoiding
+worktree pollution with agent-internal state.
+
 ### User-level directories (`packages/pi-zflow-core/src/user-dirs.ts`)
 
 | Directory / File                          | Purpose                                       | Constant                |

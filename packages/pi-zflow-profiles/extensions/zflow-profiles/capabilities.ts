@@ -31,15 +31,18 @@ import type {
   ModelInfo,
   ModelCapabilityProfile,
   CapabilityRequirements,
+  ThinkingLevel,
 } from "./profiles.js"
 
 // ── Constants ───────────────────────────────────────────────────
 
 /** Thinking capability levels mapped to numeric values for comparison. */
-const THINKING_SCORE: Record<string, number> = {
+const THINKING_SCORE: Record<ThinkingLevel, number> = {
+  off: 0,
   low: 1,
   medium: 2,
   high: 3,
+  xhigh: 4,
 }
 
 /**
@@ -67,7 +70,7 @@ export interface ThinkingCompatibilityResult {
    * - If model's capability < requested and acceptable → model's capability
    * - If incompatible → the originally requested level (not used)
    */
-  effectiveLevel: "low" | "medium" | "high"
+  effectiveLevel: ThinkingLevel
   /** Human-readable reason if clamped or incompatible. */
   reason: string
 }
@@ -99,8 +102,8 @@ function scoreThinking(level: string): number {
  * @returns The compatibility check result.
  */
 export function checkThinkingCompatibility(
-  modelThinking: "low" | "medium" | "high",
-  requestedLevel?: "low" | "medium" | "high",
+  modelThinking: ThinkingLevel,
+  requestedLevel?: ThinkingLevel,
   isConservative: boolean = false,
   modelId: string = "<unknown>",
 ): ThinkingCompatibilityResult {
@@ -110,6 +113,16 @@ export function checkThinkingCompatibility(
       compatible: true,
       effectiveLevel: modelThinking,
       reason: "",
+    }
+  }
+
+  if (requestedLevel === "off") {
+    return {
+      compatible: true,
+      effectiveLevel: "off",
+      reason: modelThinking !== "off"
+        ? `Thinking explicitly disabled; model "${modelId}" capability "${modelThinking}" will not be requested.`
+        : "",
     }
   }
 
@@ -259,7 +272,7 @@ export interface CapabilityCheckResult {
   /** Whether the model satisfies all requirements. */
   compatible: boolean
   /** Effective thinking level after clamping. */
-  effectiveThinking: "low" | "medium" | "high"
+  effectiveThinking: ThinkingLevel
   /** Human-readable reasons for any failures. */
   reasons: string[]
 }
@@ -287,7 +300,7 @@ export function checkCapabilityRequirements(
   requirements: CapabilityRequirements,
 ): CapabilityCheckResult {
   const reasons: string[] = []
-  let effectiveThinking: "low" | "medium" | "high" = model.thinkingCapability
+  let effectiveThinking: ThinkingLevel = model.thinkingCapability
 
   // 1. Tool use support
   if (requirements.requiresTools && !model.supportsTools) {

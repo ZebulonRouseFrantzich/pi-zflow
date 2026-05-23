@@ -57,7 +57,7 @@ import {
   recordSkipped as recordSkippedFn,
   getCoverageSummary,
 } from "pi-zflow-review"
-import { readRun, updateRun, setRunPhase, addRetainedArtifact, createRun, createRecoveryRef, removeRecoveryRef } from "pi-zflow-artifacts"
+import { readRun, updateRun, setRunPhase, addRetainedArtifact, createRun, createRecoveryRef, removeRecoveryRef, assertValidPlanVersion } from "pi-zflow-artifacts"
 import type { RunPhase, RetainedArtifact, RunJson } from "pi-zflow-artifacts"
 import { resolveRunDir, resolveRunStatePath, resolvePlanVersionDir, resolvePlanStatePath, resolvePlanArtifactPath, resolveCodeReviewFindingsPath } from "pi-zflow-artifacts/artifact-paths"
 import { addStateIndexEntry, loadStateIndex, listStateIndexEntries, updateStateIndexEntry } from "pi-zflow-artifacts/state-index"
@@ -73,7 +73,8 @@ import type { ApplyBackResult } from "./apply-back.js"
 import { writeDeviationSummary, readDeviationReports } from "./deviations.js"
 import { getCurrentBranch } from "./git-preflight.js"
 import { getZflowRegistry } from "pi-zflow-core/registry"
-import { DISPATCH_SERVICE_CAPABILITY, type DispatchService } from "pi-zflow-core/dispatch-service"
+import { assertSafeChangeId } from "pi-zflow-core/ids"
+import { DISPATCH_SERVICE_CAPABILITY, type DispatchService, type AgentDispatchProgress } from "pi-zflow-core/dispatch-service"
 import {
   isRepoMapFresh,
   writeRepoMapCache,
@@ -106,21 +107,35 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
   const groups: import("./ownership-validator.js").ExecutionGroup[] = []
   const lines = mdContent.split("\n")
   let currentGroup: Partial<import("./ownership-validator.js").ExecutionGroup> | null = null
+  let collectingFiles = false
+  let collectingVerification = false
+
+  const normalizeDependency = (dependency: string): string => {
+    const trimmed = dependency.trim().replace(/^`|`$/g, "").replace(/^\[|\]$/g, "").trim()
+    if (!trimmed) return ""
+    const gMatch = trimmed.match(/^G(\d+)$/i)
+    if (gMatch) return `group-${gMatch[1]}`
+    return trimmed
+  }
+
+  const pushCurrentGroup = (): void => {
+    if (!currentGroup?.id) return
+    groups.push({
+      id: currentGroup.id,
+      files: currentGroup.files ?? [],
+      dependencies: currentGroup.dependencies ?? [],
+      agent: currentGroup.agent ?? "zflow.implement-routine",
+      parallelizable: currentGroup.parallelizable ?? true,
+      taskPrompt: currentGroup.taskPrompt ?? "",
+      scopedVerification: currentGroup.scopedVerification,
+    })
+  }
 
   for (const line of lines) {
-    const groupMatch = line.match(/^## Group\s+(\d+):\s+(.+)$/i)
+    const groupMatch = line.match(/^## Group\s+(\d+):\s+(.+)$/i) ??
+      line.match(/^#{2,3}\s+G(\d+)\s+[—-]\s+(.+)$/i)
     if (groupMatch) {
-      if (currentGroup?.id) {
-        groups.push({
-          id: currentGroup.id,
-          files: currentGroup.files ?? [],
-          dependencies: currentGroup.dependencies ?? [],
-          agent: currentGroup.agent ?? "zflow.implement-routine",
-          parallelizable: currentGroup.parallelizable ?? true,
-          taskPrompt: currentGroup.taskPrompt ?? "",
-          scopedVerification: currentGroup.scopedVerification,
-        })
-      }
+      pushCurrentGroup()
       currentGroup = {
         id: `group-${groupMatch[1]}`,
         files: [],
@@ -129,15 +144,39 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
         taskPrompt: groupMatch[2],
         parallelizable: true,
       }
+      collectingFiles = false
+      collectingVerification = false
       continue
     }
 
     if (!currentGroup) continue
 
-    const filesMatch = line.match(/-\s+\*\*Files?:\*\*\s+(.+)/i)
+    if (/^#{1,6}\s+/.test(line)) {
+      collectingFiles = false
+      collectingVerification = false
+    }
+
+    const filesHeaderMatch = line.match(/-\s+\*\*Files?(?:\/paths)?:\*\*\s*$/i)
+    if (filesHeaderMatch) {
+      collectingFiles = true
+      collectingVerification = false
+      continue
+    }
+
+    const filesMatch = line.match(/-\s+\*\*Files?(?:\/paths)?:\*\*\s+(.+)/i)
     if (filesMatch) {
       currentGroup.files = filesMatch[1].split(",").map((f: string) => f.trim()).filter(Boolean)
+      collectingFiles = false
       continue
+    }
+
+    if (collectingFiles) {
+      const fileItemMatch = line.match(/^\s+-\s+`?([^`\n]+?)`?\s*$/)
+      if (fileItemMatch && !fileItemMatch[1].startsWith("**")) {
+        currentGroup.files = [...(currentGroup.files ?? []), fileItemMatch[1].trim()]
+        continue
+      }
+      if (line.trim().startsWith("- **")) collectingFiles = false
     }
 
     const agentMatch = line.match(/-\s+\*\*Agent:\*\*\s+(.+)/i)
@@ -146,16 +185,50 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
       continue
     }
 
-    const depMatch = line.match(/-\s+\*\*Dependencies:\*\*\s+(.+)/i)
-    if (depMatch) {
-      currentGroup.dependencies = depMatch[1].split(",").map((d: string) => d.trim()).filter(Boolean)
+    const ownerMatch = line.match(/-\s+\*\*Owner:\*\*\s+`?([^`\n]+)`?/i)
+    if (ownerMatch) {
+      currentGroup.agent = ownerMatch[1].trim()
       continue
     }
 
-    const verifMatch = line.match(/-\s+\*\*Verification:\*\*\s+(.+)/i)
+    const taskMatch = line.match(/-\s+\*\*Task:\*\*\s+(.+)/i)
+    if (taskMatch) {
+      currentGroup.taskPrompt = taskMatch[1].trim()
+      continue
+    }
+
+    const depMatch = line.match(/-\s+\*\*Dependencies:\*\*\s+(.+)/i)
+    if (depMatch) {
+      currentGroup.dependencies = depMatch[1]
+        .replace(/^`|`$/g, "")
+        .replace(/^\[|\]$/g, "")
+        .split(",")
+        .map(normalizeDependency)
+        .filter(Boolean)
+      continue
+    }
+
+    const verifHeaderMatch = line.match(/-\s+\*\*Scoped verification:\*\*\s*$/i)
+    if (verifHeaderMatch) {
+      collectingVerification = true
+      collectingFiles = false
+      continue
+    }
+
+    const verifMatch = line.match(/-\s+\*\*(?:Verification|Scoped verification):\*\*\s+(.+)/i)
     if (verifMatch) {
       currentGroup.scopedVerification = verifMatch[1].trim()
+      collectingVerification = false
       continue
+    }
+
+    if (collectingVerification) {
+      const verificationItemMatch = line.match(/^\s+-\s+(.+)$/)
+      if (verificationItemMatch && !verificationItemMatch[1].startsWith("**")) {
+        currentGroup.scopedVerification = [currentGroup.scopedVerification, verificationItemMatch[1].trim()].filter(Boolean).join("; ")
+        continue
+      }
+      if (line.trim().startsWith("- **")) collectingVerification = false
     }
 
     const parallelMatch = line.match(/-\s+\*\*Parallelizable:\*\*\s+(.+)/i)
@@ -167,17 +240,7 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
   }
 
   // Push the last group
-  if (currentGroup?.id) {
-    groups.push({
-      id: currentGroup.id,
-      files: currentGroup.files ?? [],
-      dependencies: currentGroup.dependencies ?? [],
-      agent: currentGroup.agent ?? "zflow.implement-routine",
-      parallelizable: currentGroup.parallelizable ?? true,
-      taskPrompt: currentGroup.taskPrompt ?? "",
-      scopedVerification: currentGroup.scopedVerification,
-    })
-  }
+  pushCurrentGroup()
 
   return groups
 }
@@ -1082,7 +1145,7 @@ export async function abandonWorkflow(
   runId: string,
   cwd?: string,
 ): Promise<{ success: boolean; message: string }> {
-  const { updateStateIndexEntry } = await import("pi-zflow-artifacts/state-index")
+  const { updateStateIndexEntry, getChangeLifecycle, upsertChangeLifecycle } = await import("pi-zflow-artifacts/state-index")
 
   try {
     // Mark run as abandoned in state index
@@ -1090,6 +1153,16 @@ export async function abandonWorkflow(
       status: "abandoned",
       metadata: { reason: "user-abandoned" },
     }, cwd)
+
+    const lifecycle = await getChangeLifecycle(changeId, cwd)
+    if (lifecycle) {
+      const unfinishedRuns = lifecycle.unfinishedRuns.filter((id) => id !== runId)
+      await upsertChangeLifecycle({
+        ...lifecycle,
+        unfinishedRuns,
+        lastPhase: unfinishedRuns.length === 0 ? "cancelled" : lifecycle.lastPhase,
+      }, cwd)
+    }
 
     return {
       success: true,
@@ -1138,6 +1211,10 @@ export function buildResumePrompt(context: ResumeContext): string {
 export interface CleanWorkflowOptions {
   /** Working directory for runtime state dir resolution. */
   cwd?: string
+  /** Optional change ID whose unfinished runs should be cleaned/abandoned. */
+  changeId?: string
+  /** If true, mark unfinished runs for changeId as abandoned. */
+  abandonUnfinished?: boolean
   /** If true, only preview what would be deleted; do not actually remove. */
   dryRun?: boolean
   /** If true, also clean orphaned artifacts not tied to known state-index entries. */
@@ -1154,6 +1231,8 @@ export interface CleanWorkflowResult {
   dryRun: boolean
   /** Cleanup candidates that were found (or processed). */
   candidates: Array<{ path: string; description: string }>
+  /** Unfinished run IDs marked as abandoned. */
+  abandonedRuns: string[]
   /** Number of artifacts cleaned. */
   cleaned: number
   /** Number of artifacts kept (skipped or errors). */
@@ -1189,6 +1268,19 @@ export async function runCleanWorkflow(
 
   const runtimeDir = resolveRuntimeStateDir(options.cwd)
   const dryRun = options.dryRun ?? false
+  const abandonedRuns: string[] = []
+
+  if (options.changeId && options.abandonUnfinished) {
+    const unfinished = await discoverUnfinishedWork(options.changeId, options.cwd)
+    if (!dryRun) {
+      for (const runId of unfinished.unfinishedRuns) {
+        const result = await abandonWorkflow(options.changeId, runId, options.cwd)
+        if (result.success) abandonedRuns.push(runId)
+      }
+    } else {
+      abandonedRuns.push(...unfinished.unfinishedRuns)
+    }
+  }
 
   // Scan for cleanup candidates
   const rawCandidates = await scanForCleanup(runtimeDir, {
@@ -1211,6 +1303,7 @@ export async function runCleanWorkflow(
       path: c.path,
       description: c.description,
     })),
+    abandonedRuns,
     cleaned: result.cleaned,
     kept: result.kept,
     errors: result.errors,
@@ -1305,6 +1398,7 @@ export async function runChangeAuditWorkflow(
   const { default: fs } = await import("node:fs/promises")
 
   // Read plan state
+  await migrateLegacyChangeArtifactsIfPresent(changeId, cwd)
   const planStatePath = resolvePlanStatePath(changeId, cwd)
   let planState: Record<string, unknown>
   try {
@@ -1443,6 +1537,7 @@ export async function runChangeFixWorkflow(
   const { default: path } = await import("node:path")
 
   // Read plan state
+  await migrateLegacyChangeArtifactsIfPresent(changeId, cwd)
   const planStatePath = resolvePlanStatePath(changeId, cwd)
   let planState: Record<string, unknown>
   try {
@@ -1864,7 +1959,9 @@ export async function prepareWorktreeImplementationRun(
 ): Promise<WorktreeImplementationRunPlan> {
   const cwd = options?.cwd
   const { default: path } = await import("node:path")
-  const { execFileSync } = await import("node:child_process")
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const execFileAsync = promisify(execFile)
 
   // 1. Resolve repo root
   let repoRoot: string
@@ -1872,10 +1969,8 @@ export async function prepareWorktreeImplementationRun(
     repoRoot = options.repoRoot
   } else {
     try {
-      repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim()
+      const { stdout } = await execFileAsync("git", ["rev-parse", "--show-toplevel"])
+      repoRoot = stdout.trim()
     } catch {
       throw new Error("Not a git repository — cannot run worktree implementation.")
     }
@@ -2003,7 +2098,8 @@ export async function prepareWorktreeImplementationRun(
     agent: "zflow.implement-routine",
     files: g.files,
     dependencies: g.dependencies,
-    taskPrompt: "",
+    taskPrompt: g.taskPrompt,
+    scopedVerification: g.scopedVerification,
   }))
   const tasks = buildWorktreeDispatchPlan(dispatchGroups, dispatchConfig, planArtifactPaths)
 
@@ -2354,6 +2450,8 @@ export interface PrepareWorkflowOptions {
   forceAdHoc?: boolean
   /** Additional user notes supplied after the change path. */
   prepareNotes?: string
+  /** Optional progress callback for command UIs. */
+  onProgress?: (message: string, type?: "info" | "warning" | "error") => void
 }
 
 /**
@@ -2489,27 +2587,182 @@ export async function markPlanVersionState(
   await fs.writeFile(planStatePath, JSON.stringify(planState, null, 2), "utf-8")
 }
 
+const CHANGE_ID_NOISE_TOKENS = new Set([
+  "change",
+  "changes",
+  "idea",
+  "ideas",
+  "doc",
+  "docs",
+  "plan",
+  "draft",
+  "spec",
+  "specification",
+  "combined",
+])
+
 /**
- * Generate a deterministic but unique change identifier.
+ * Derive a stable, semantic change identifier from a path or title.
  *
- * If a `changePath` is provided, derives a slug from it and appends a
- * timestamp suffix for uniqueness. Otherwise creates a timestamp-only ID.
+ * The durable change-doc directory is intended to be reviewed and committed,
+ * so it should describe the change rather than the source file location or a
+ * timestamp. For file paths, this uses the basename/stem and removes common
+ * planning-document noise words such as `combined` and `spec`.
  *
- * @param changePath - Optional path to derive the slug from.
+ * @param changePath - Path or title supplied to `/zflow-change-prepare`.
+ * @returns A kebab-case semantic identifier, or null when no useful slug exists.
+ */
+export function deriveSemanticChangeId(changePath?: string): string | null {
+  if (!changePath) return null
+  const cleaned = changePath.trim().replace(/^@+/, "")
+  if (!cleaned) return null
+
+  const segment = cleaned.split(/[\\/]/).filter(Boolean).at(-1) ?? cleaned
+  const stem = segment.replace(/\.[^.]+$/, "")
+  const tokens = stem
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .toLowerCase()
+    .split("-")
+    .filter(Boolean)
+
+  const semanticTokens = tokens.filter((token) => !CHANGE_ID_NOISE_TOKENS.has(token))
+  const chosenTokens = semanticTokens.length >= 2 ? semanticTokens : tokens
+  const slug = chosenTokens.join("-").slice(0, 72).replace(/-+$/g, "")
+  return slug || null
+}
+
+export interface ChangeImplementTarget {
+  /** Runtime change ID used for `.zflow/plans/<changeId>`. */
+  changeId: string
+  /** Original command argument. */
+  input: string
+  /** Durable docs change ID, when input pointed at `docs/zflow-changes/<id>/...`. */
+  durableChangeId?: string
+  /** Manifest path used to resolve the runtime change ID, when applicable. */
+  manifestPath?: string
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  const { default: fs } = await import("node:fs/promises")
+  try {
+    await fs.access(filePath)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function migrateLegacyChangeArtifactsIfPresent(changeId: string, cwd?: string): Promise<boolean> {
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+  const { resolveGitDir, ensureRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+
+  const runtimeDir = ensureRuntimeStateDir(cwd)
+  const newChangeDir = path.join(runtimeDir, "plans", changeId)
+  if (await fileExists(path.join(newChangeDir, "plan-state.json"))) return false
+
+  const gitDir = resolveGitDir(cwd ?? process.cwd())
+  if (!gitDir) return false
+
+  const legacyChangeDir = path.join(gitDir, "pi-zflow", "plans", changeId)
+  if (!(await fileExists(path.join(legacyChangeDir, "plan-state.json")))) return false
+
+  await fs.mkdir(path.dirname(newChangeDir), { recursive: true })
+  await fs.cp(legacyChangeDir, newChangeDir, { recursive: true, force: false, errorOnExist: false })
+  console.info(`[zflow] Migrated legacy plan artifacts for change "${changeId}" from .git/pi-zflow to .zflow.`)
+  return true
+}
+
+async function findDurableManifestPath(inputPath: string, cwd?: string): Promise<string | null> {
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+  const repoRoot = cwd ?? process.cwd()
+  const cleaned = inputPath.trim().replace(/^@+/, "").replace(/[\\/]$/, "")
+  if (!cleaned) return null
+  const absolutePath = path.isAbsolute(cleaned) ? cleaned : path.join(repoRoot, cleaned)
+
+  const directManifest = path.join(absolutePath, "manifest.json")
+  if (await fileExists(directManifest)) return directManifest
+
+  const parts = absolutePath.split(path.sep)
+  const zflowIndex = parts.lastIndexOf("zflow-changes")
+  if (zflowIndex === -1 || !parts[zflowIndex + 1]) return null
+
+  const changeDir = parts.slice(0, zflowIndex + 2).join(path.sep) || path.sep
+  try {
+    const entries = await fs.readdir(changeDir, { withFileTypes: true })
+    const versionDirs = entries
+      .filter((entry) => entry.isDirectory() && /^v\d+$/.test(entry.name))
+      .map((entry) => entry.name)
+      .sort((a, b) => Number.parseInt(b.slice(1), 10) - Number.parseInt(a.slice(1), 10))
+    for (const version of versionDirs) {
+      const candidate = path.join(changeDir, version, "manifest.json")
+      if (await fileExists(candidate)) return candidate
+    }
+  } catch {
+    return null
+  }
+
+  return null
+}
+
+/**
+ * Resolve a `/zflow-change-implement` argument to the runtime plan change ID.
+ *
+ * Users commonly pass the durable docs path (`docs/zflow-changes/<name>/` or a
+ * version directory) after reviewing the committed plan documents. The runtime
+ * implementation state still lives under `.zflow/plans/<changeId>/`, so
+ * this helper reads the durable `manifest.json` and follows
+ * `previousRuntimeChangeId` when present.
+ */
+export async function resolveChangeImplementTarget(
+  input: string,
+  cwd?: string,
+): Promise<ChangeImplementTarget> {
+  const { default: fs } = await import("node:fs/promises")
+  const cleaned = input.trim().replace(/^@+/, "").replace(/[\\/]$/, "")
+
+  if (cleaned && await fileExists(resolvePlanStatePath(cleaned, cwd))) {
+    return { changeId: cleaned, input }
+  }
+
+  const manifestPath = await findDurableManifestPath(input, cwd)
+  if (manifestPath) {
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf-8")) as {
+      changeId?: string
+      previousRuntimeChangeId?: string
+      sourceRuntimePath?: string
+    }
+    const candidates = [manifest.previousRuntimeChangeId, manifest.changeId].filter((value): value is string => Boolean(value))
+    for (const candidate of candidates) {
+      if (await fileExists(resolvePlanStatePath(candidate, cwd))) {
+        return {
+          changeId: candidate,
+          input,
+          durableChangeId: manifest.changeId,
+          manifestPath,
+        }
+      }
+    }
+  }
+
+  return { changeId: cleaned || input, input }
+}
+
+/**
+ * Generate a change identifier.
+ *
+ * If a `changePath` is provided, derives a stable semantic slug from its
+ * basename/title. Otherwise creates a timestamp-only fallback ID.
+ *
+ * @param changePath - Optional path/title to derive the slug from.
  * @returns A kebab-case change ID string.
  */
 function generateChangeId(changePath?: string): string {
-  const timestamp = Date.now().toString(36)
-  if (changePath) {
-    const slug = changePath
-      .replace(/[^a-zA-Z0-9]/g, "-")
-      .replace(/-+/g, "-")
-      .replace(/^-|-$/g, "")
-      .toLowerCase()
-      .slice(0, 20)
-    return `${slug}-${timestamp}`
-  }
-  return `change-${timestamp}`
+  return deriveSemanticChangeId(changePath) ?? `change-${Date.now().toString(36)}`
 }
 
 /**
@@ -3467,6 +3720,42 @@ export interface PrepareAgentDispatchResult {
   error?: string
 }
 
+/** Resolve an agent model override from the active zflow profile cache. */
+async function resolveProfileModelForAgent(agentName: string): Promise<string | undefined> {
+  try {
+    const profileService = getZflowRegistry().optional<{
+      getResolvedAgentBinding?: (agentName: string) => Promise<{ resolvedModel?: string | null } | null>
+    }>("profiles")
+    const binding = await profileService?.getResolvedAgentBinding?.(agentName)
+    return binding?.resolvedModel ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+function formatDispatchElapsed(ms: number | undefined): string {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) return "00:00"
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+}
+
+function formatPrepareAgentProgress(progress: AgentDispatchProgress): string {
+  const elapsed = formatDispatchElapsed(progress.durationMs)
+  const toolCount = progress.toolCount ?? 0
+  if (progress.currentTool) {
+    const args = progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""
+    return `zflow.planner-frontier running — child elapsed ${elapsed} — ${toolCount} tools — current: ${progress.currentTool}${args}`
+  }
+  const recent = progress.recentTools?.at(-1)
+  if (recent?.tool) {
+    const args = recent.args ? ` ${recent.args}` : ""
+    return `zflow.planner-frontier running — child elapsed ${elapsed} — ${toolCount} tools — last: ${recent.tool}${args}`
+  }
+  return `zflow.planner-frontier running — child elapsed ${elapsed} — ${toolCount} tools observed`
+}
+
 /**
  * Run prepare-phase agents via the registry if available.
  *
@@ -3492,6 +3781,7 @@ export async function runPrepareAgentsIfAvailable(
   cwd?: string,
   changePath?: string,
   prepareNotes?: string,
+  onAgentProgress?: (message: string) => void,
 ): Promise<PrepareAgentDispatchResult> {
   const registry = getZflowRegistry()
   const { default: fs } = await import("node:fs/promises")
@@ -3557,14 +3847,30 @@ export async function runPrepareAgentsIfAvailable(
         `Reconnaissance path: ${artifactPaths.reconnaissance}`,
       ].filter(Boolean).join("\n")
 
+      let sawChildProgress = false
+      const launchStartedAt = Date.now()
+      onAgentProgress?.("zflow.planner-frontier launch requested — waiting for first child event")
+      const heartbeat = setInterval(() => {
+        if (sawChildProgress) return
+        onAgentProgress?.(
+          `zflow.planner-frontier launch pending — no child tool events yet after ${formatDispatchElapsed(Date.now() - launchStartedAt)}`,
+        )
+      }, 15_000)
+      heartbeat.unref?.()
+
       const result = await zflowDispatch.runAgent({
         agent: "zflow.planner-frontier",
         task,
         cwd: cwd ?? process.cwd(),
+        model: await resolveProfileModelForAgent("zflow.planner-frontier"),
+        onUpdate: (progress) => {
+          sawChildProgress = true
+          onAgentProgress?.(formatPrepareAgentProgress(progress))
+        },
         output: pathModule.join(versionDir, "planner-frontier-output.md"),
         outputMode: "file-only",
         maxOutput: { lines: 400, bytes: 24000 },
-      })
+      }).finally(() => clearInterval(heartbeat))
       const outputs = await collectOutputs()
 
       if (!result.ok) {
@@ -3780,6 +4086,7 @@ export async function runChangePrepareWorkflow(
   planStatePath: string
   artifactPaths: Record<string, string>
   initialPlanState: Record<string, unknown>
+  agentDispatchResult: PrepareAgentDispatchResult
 }> {
   const cwd = options.cwd
   const { default: fs } = await import("node:fs/promises")
@@ -3858,7 +4165,9 @@ export async function runChangePrepareWorkflow(
 
   // ── Step 7: Resolve profile via registry if available ─────────
   const profileResult = await resolveProfileIfAvailable(changeId, cwd)
-  console.info(`[zflow] ${profileResult.advisory}`)
+  if (!profileResult.resolved) {
+    options.onProgress?.(`⚠️ ${profileResult.advisory}`, "warning")
+  }
 
   // ── Step 8: Detect RuneContext ─────────────────────────────────
   // If changePath looks like a RuneContext path (contains @ or /context/),
@@ -4041,6 +4350,7 @@ export async function runChangePrepareWorkflow(
   }
 
   // ── Step 9: Write concrete repo-map.md and reconnaissance.md ──
+  options.onProgress?.("🗺️ Building repository map and reconnaissance context...", "info")
   const repoMapResult = await buildRepoMap(cwd)
   const reconResult = await buildReconnaissance(cwd, options.changePath)
 
@@ -4052,22 +4362,25 @@ export async function runChangePrepareWorkflow(
   }
 
   // ── Step 10: Attempt optional agent dispatch via registry ───────
+  options.onProgress?.("🤖 Dispatching zflow.planner-frontier to generate plan artifacts...", "info")
   const agentDispatchResult = await runPrepareAgentsIfAvailable(
     changeId,
     "v1",
     cwd,
     options.changePath,
     options.prepareNotes,
+    (message) => options.onProgress?.(message, "info"),
   )
   if (agentDispatchResult.dispatched) {
-    console.info(
-      `[zflow] Agent dispatch completed via ${agentDispatchResult.serviceName}.` +
+    options.onProgress?.(
+      `✅ Planner dispatch completed via ${agentDispatchResult.serviceName}.` +
       `${agentDispatchResult.methodUsed} (${agentDispatchResult.producedOutputs.length} outputs).`,
+      "info",
     )
   } else if (agentDispatchResult.agentDispatchStatus === "unavailable") {
-    console.info("[zflow] No agent dispatch service available — proceeding without agent dispatch.")
+    options.onProgress?.("⚠️ No agent dispatch service available — planner did not run.", "warning")
   } else {
-    console.warn(`[zflow] Agent dispatch failed: ${agentDispatchResult.error}`)
+    options.onProgress?.(`⚠️ Agent dispatch failed: ${agentDispatchResult.error}`, "warning")
   }
 
   return {
@@ -4077,6 +4390,7 @@ export async function runChangePrepareWorkflow(
     planStatePath,
     artifactPaths,
     initialPlanState,
+    agentDispatchResult,
   }
 }
 
@@ -4111,6 +4425,10 @@ export function buildPlanApprovalQuestions(
         question: "How would you like to proceed with this plan?",
         options: [
           {
+            label: "Inspect Artifacts",
+            content: "Pause here. Review the generated plan and review findings paths before deciding.",
+          },
+          {
             label: "Approve",
             content: "Plan looks good. Approve and proceed to implementation.",
           },
@@ -4123,7 +4441,7 @@ export function buildPlanApprovalQuestions(
             content: "Cancel this planning session. No changes will be made.",
           },
         ],
-        recommended: "Approve",
+        recommended: "Inspect Artifacts",
       },
       {
         id: "revisionNotes",
@@ -4715,6 +5033,7 @@ export async function runChangeImplementWorkflow(
   }
 
   // 2. Resolve change and approved plan
+  await migrateLegacyChangeArtifactsIfPresent(options.changeId, cwd)
   const planStatePath = resolvePlanStatePath(options.changeId, cwd)
   let planState: Record<string, unknown>
 
@@ -4739,20 +5058,18 @@ export async function runChangeImplementWorkflow(
   const planVersion = options.planVersion ?? approvedVersion
 
   // 3. Check worktree cleanliness — hard error unless --force
-  const { default: childProcess } = await import("node:child_process")
-  const repoRoot = childProcess.execFileSync("git", ["rev-parse", "--show-toplevel"], {
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const execFileAsync = promisify(execFile)
+  const { stdout: repoRootRaw } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
     cwd: cwd ?? process.cwd(),
-    encoding: "utf-8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim()
+  })
+  const repoRoot = repoRootRaw.trim()
 
   let worktreeDirty = false
   try {
-    const status = childProcess.execFileSync("git", ["status", "--porcelain"], {
-      cwd: repoRoot,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim()
+    const { stdout: statusRaw } = await execFileAsync("git", ["status", "--porcelain"], { cwd: repoRoot })
+    const status = statusRaw.trim()
     if (status.length > 0) {
       worktreeDirty = true
       if (force) {
@@ -5069,31 +5386,54 @@ export async function finalizeVerification(
   cwd?: string,
 ): Promise<{
   pass: boolean
+  status: "passed" | "failed" | "skipped"
   command: string
   output: string
   duration: number
   error?: string
 }> {
+  const { default: fs } = await import("node:fs/promises")
+  const { parseVerificationMdCommand, resolveVerificationCommand, runVerification } = await import("./verification.js")
+  const { resolvePlanArtifactPath } = await import("pi-zflow-artifacts/artifact-paths")
+
   const run = await readRun(runId, cwd)
   const repoRoot = run.repoRoot
 
-  // Resolve verification command
-  const command = resolveVerificationCommand(repoRoot)
+  // Try to extract a verification command from the approved plan's verification.md
+  let planCommand: string | null = null
+  try {
+    const verifMdPath = resolvePlanArtifactPath(run.changeId, run.planVersion, "verification", cwd)
+    const verifMdContent = await fs.readFile(verifMdPath, "utf-8")
+    planCommand = parseVerificationMdCommand(verifMdContent)
+  } catch {
+    // verification.md may not exist yet — non-fatal, fall through to other sources
+  }
+
+  // Resolve verification command (precedence: profile, repo config, plan, auto-detect)
+  const command = resolveVerificationCommand(repoRoot, undefined, planCommand ?? undefined)
   if (!command) {
     console.warn("[zflow] No verification command resolved — marking verification as skipped.")
     await updateRun(runId, {
       verification: { status: "skipped" },
     } as any, cwd)
-    return { pass: true, command: "(none)", output: "Verification skipped — no command resolved.", duration: 0 }
+    return { pass: true, status: "skipped", command: "(none)", output: "Verification skipped — no command resolved.", duration: 0 }
   }
 
   // Run verification
   const result = await runVerification(command, repoRoot)
 
+  const vStatus = result.pass ? "passed" : "failed"
+  // Truncate output for run.json to avoid bloating the state file
+  const truncatedOutput = result.output.length > 2000
+    ? result.output.slice(0, 2000) + "\n...(truncated)"
+    : result.output
+
   // Log to run.json
   await updateRun(runId, {
     verification: {
-      status: result.pass ? "passed" : "failed",
+      status: vStatus,
+      command: result.command,
+      output: truncatedOutput,
       completedAt: new Date().toISOString(),
       failureCount: result.pass ? 0 : 1,
     },
@@ -5110,6 +5450,7 @@ export async function finalizeVerification(
 
   return {
     pass: result.pass,
+    status: vStatus,
     command: result.command,
     output: result.output,
     duration: result.duration,
@@ -5170,9 +5511,25 @@ export async function runBoundedFixLoop(
  * @param cwd - Working directory (optional).
  * @returns Code review result.
  */
+/**
+ * Per-reviewer progress callback used by implement workflow progress cards.
+ */
+export interface ReviewerProgressCallback {
+  (update: {
+    reviewerName: string
+    agentName: string
+    status: "queued" | "running" | "completed" | "failed"
+    model?: string
+    thinking?: string
+    currentTool?: string
+    lastCommand?: string
+  }): void
+}
+
 export async function finalizeCodeReview(
   runId: string,
   cwd?: string,
+  onReviewerUpdate?: ReviewerProgressCallback,
 ): Promise<{
   pass: boolean
   findingsPath?: string
@@ -5184,6 +5541,9 @@ export async function finalizeCodeReview(
 
   if (reviewService && typeof reviewService.runCodeReview === "function") {
     try {
+      const { default: path } = await import("node:path")
+      const { default: fs } = await import("node:fs/promises")
+
       const planningArtifacts = {
         design: resolvePlanArtifactPath(run.changeId, run.planVersion, "design", cwd),
         executionGroups: resolvePlanArtifactPath(run.changeId, run.planVersion, "execution-groups", cwd),
@@ -5191,12 +5551,74 @@ export async function finalizeCodeReview(
         verification: resolvePlanArtifactPath(run.changeId, run.planVersion, "verification", cwd),
       }
 
+      // Build a unified diff bundle from all applied group patch files
+      let diffBundle = ""
+      const groupPatchPaths: string[] = []
+      for (const group of run.groups) {
+        if (group.patchPath) groupPatchPaths.push(group.patchPath)
+      }
+
+      if (groupPatchPaths.length > 0) {
+        const parts: string[] = []
+        for (const patchPath of groupPatchPaths) {
+          try {
+            const content = await fs.readFile(patchPath, "utf-8")
+            parts.push(content.trimEnd())
+          } catch {
+            parts.push(`# Patch not found: ${patchPath}`)
+          }
+        }
+        diffBundle = parts.length > 0 ? parts.join("\n") : ""
+      }
+
+      const modifiedFiles: string[] = []
+      for (const group of run.groups) {
+        if (Array.isArray(group.changedFiles)) {
+          for (const f of group.changedFiles) {
+            if (!modifiedFiles.includes(f)) modifiedFiles.push(f)
+          }
+        }
+      }
+
+      // Resolve execution groups from the plan artifact for tier triggers
+      let executionGroups: Array<{ reviewTags?: string | string[] }> | undefined
+      try {
+        const execPath = resolvePlanArtifactPath(run.changeId, run.planVersion, "execution-groups", cwd)
+        const execMd = await fs.readFile(execPath, "utf-8")
+        const parsed = parseExecutionGroupsMd(execMd)
+        executionGroups = parsed.map((g) => ({
+          reviewTags: g.reviewTags ?? undefined,
+        }))
+      } catch {
+        // execution-groups.md may not exist — non-fatal
+      }
+
+      // Map to runCodeReview's callback shape
+      const onReviewUpdate = onReviewerUpdate
+        ? (update: { reviewerName: string; agentName: string; status: string; model?: string; thinking?: string; currentTool?: string; lastCommand?: string }): void => {
+            onReviewerUpdate({
+              reviewerName: update.reviewerName,
+              agentName: update.agentName,
+              status: update.status as "queued" | "running" | "completed" | "failed",
+              model: update.model,
+              thinking: update.thinking,
+              currentTool: update.currentTool,
+              lastCommand: update.lastCommand,
+            })
+          }
+        : undefined
+
       const result = await (reviewService.runCodeReview as Function)({
         source: `Implementation of ${run.changeId}`,
         repoPath: run.repoRoot || cwd || process.cwd(),
         branch: run.branch || "(unknown)",
         planningArtifacts,
         verificationStatus: (run.verification as any)?.status || "unknown",
+        diffBundle: diffBundle || undefined,
+        diffSource: diffBundle ? "run-patches" : undefined,
+        modifiedFiles: modifiedFiles.length > 0 ? modifiedFiles : undefined,
+        executionGroups,
+        onReviewUpdate,
         cwd,
       })
 
@@ -5289,6 +5711,10 @@ export interface PostStartSequenceOptions {
   skipVerification?: boolean
   /** If true, skip code review. */
   skipReview?: boolean
+  /** Receives user-visible phase updates for long post-dispatch work. */
+  onProgress?: (message: string) => void
+  /** Per-reviewer progress callback for code review cards. */
+  onReviewerUpdate?: ReviewerProgressCallback
   /** If false, do not attempt auto-fix loop on verification failure (default: true). */
   autoFix?: boolean
   /**
@@ -5358,6 +5784,9 @@ export async function runImplementationPostStartSequence(
   const { default: fs } = await import("node:fs/promises")
   const opts = options ?? {}
   const autoFix = opts.autoFix !== false // default true
+  const reportProgress = (message: string): void => {
+    try { opts.onProgress?.(message) } catch { /* progress callbacks are best-effort */ }
+  }
 
   // 1. Read the current run state
   const run = await readRun(runId, cwd)
@@ -5390,6 +5819,7 @@ export async function runImplementationPostStartSequence(
   const hasDispatchArtifacts = hasGroupResults || hasApplyBackArtifacts
 
   if (!hasDispatchArtifacts && !opts.skipDispatchWait) {
+    reportProgress("Waiting for dispatch artifacts before final verification")
     // No dispatch results yet — return waiting-for-dispatch
     const nextSteps: string[] = [
       "1. Worktree dispatch: dispatch execution groups to isolated worktrees with per-group agents",
@@ -5436,7 +5866,7 @@ export async function runImplementationPostStartSequence(
 
     // Go directly to code review (advisory)
     if (!opts.skipReview) {
-      const reviewResult = await finalizeCodeReview(runId, cwd)
+      const reviewResult = await finalizeCodeReview(runId, cwd, opts.onReviewerUpdate)
       await transitionTo(reviewResult.pass ? "executing" : "review-failed")
 
       if (reviewResult.pass) {
@@ -5482,6 +5912,7 @@ export async function runImplementationPostStartSequence(
   }
 
   // 3b. Run final verification
+  reportProgress("Preparing final verification on the primary worktree")
   await transitionTo("executing")
 
   if (opts.skipDispatchWait) {
@@ -5501,15 +5932,25 @@ export async function runImplementationPostStartSequence(
     ], cwd)
   }
 
+  reportProgress("Running final verification on the primary worktree")
   const verificationResult = await finalizeVerification(runId, cwd)
+  if (verificationResult.status === "skipped") {
+    reportProgress("Final verification was skipped (no command resolved); proceeding to code review")
+  } else if (verificationResult.pass) {
+    reportProgress("Final verification passed; starting code review")
+  } else {
+    reportProgress("Final verification failed; evaluating fix loop")
+  }
 
   if (!verificationResult.pass) {
     // 3c. Verification failed — attempt fix loop if autoFix is enabled
     if (autoFix) {
+      reportProgress("Running bounded fix loop after verification failure")
       const fixHandler = opts.fixHandler ?? (async () => false)
       const fixLoopResult = await runBoundedFixLoop(runId, fixHandler, cwd)
 
       if (!fixLoopResult.success) {
+        reportProgress("Fix loop exhausted; marking verification failed")
         await transitionTo("verification-failed")
         return {
           phase: "verification-failed",
@@ -5527,9 +5968,11 @@ export async function runImplementationPostStartSequence(
         }
       }
 
+      reportProgress("Fix loop succeeded; continuing to code review")
       // Fix loop succeeded — verification passes now
     } else {
       // autoFix disabled — mark as failed
+      reportProgress("Final verification failed; auto-fix is disabled")
       await transitionTo("verification-failed")
       return {
         phase: "verification-failed",
@@ -5549,7 +5992,9 @@ export async function runImplementationPostStartSequence(
 
   // 4. Verification passed (or fix loop resolved it) → code review
   if (!opts.skipReview) {
-    const reviewResult = await finalizeCodeReview(runId, cwd)
+    reportProgress("Running code review on the applied implementation")
+    const reviewResult = await finalizeCodeReview(runId, cwd, opts.onReviewerUpdate)
+    reportProgress(reviewResult.pass ? "Code review passed; completing workflow" : "Code review found issues; marking review failed")
 
     if (!reviewResult.pass) {
       await transitionTo("review-failed")
@@ -5571,7 +6016,9 @@ export async function runImplementationPostStartSequence(
     }
 
     await transitionTo("completed")
+    reportProgress("Persisting completed workflow state")
     await completeWorkflow(changeId, runId, cwd)
+    reportProgress("Workflow completion persisted")
 
     return {
       phase: "completed",
@@ -5586,6 +6033,7 @@ export async function runImplementationPostStartSequence(
   }
 
   // 5. Verification passed, review skipped
+  reportProgress("Review skipped; completing workflow")
   await transitionTo("completed")
   await completeWorkflow(changeId, runId, cwd)
 
@@ -5596,5 +6044,184 @@ export async function runImplementationPostStartSequence(
     runId,
     changeId,
     nextSteps: [],
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Durable plan artifact publishing
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Mapping of artifact names to their canonical file names.
+ */
+const PUBLISH_ARTIFACT_FILES: Record<string, string> = {
+  design: "design.md",
+  executionGroups: "execution-groups.md",
+  standards: "standards.md",
+  verification: "verification.md",
+}
+
+/**
+ * Result of publishing plan artifacts to the durable repo path.
+ */
+export interface PublishPlanArtifactsResult {
+  /** The change identifier. */
+  changeId: string
+  /** The plan version that was published. */
+  planVersion: string
+  /** Absolute path to the durable directory under the repo. */
+  durableDir: string
+  /** Per-artifact mapping: durable file path for each published artifact. */
+  publishedArtifacts: Record<string, string>
+  /** Absolute path to the generated manifest file. */
+  manifestPath: string
+  /** Number of artifacts successfully published. */
+  artifactCount: number
+  /** Any errors encountered (non-fatal). */
+  errors: string[]
+}
+
+/**
+ * Default relative path under the repo root for durable change documents.
+ */
+const DEFAULT_PUBLISH_REPO_PATH = "docs/zflow-changes"
+
+/**
+ * Publish plan artifacts from the runtime state directory into a durable
+ * repo-visible path so they can be reviewed, committed, and shared.
+ *
+ * The artifacts are copied from:
+ *   `<runtime-state-dir>/plans/{changeId}/{planVersion}/`
+ * into:
+ *   `<repoRoot>/{repoRelativeDir}/{changeId}/{planVersion}/`
+ *
+ * A manifest file (`manifest.json`) is also written in the target directory
+ * with metadata about the change, version, source paths, and pointers to
+ * runtime-only artifacts.
+ *
+ * @param changeId - Unique change identifier.
+ * @param planVersion - Plan version label (e.g. "v1").
+ * @param options
+ * @param options.cwd - Working directory (defaults to `process.cwd()`).
+ * @param options.repoRelativeDir - Relative path under repo root for durable docs
+ *   (default: `"docs/zflow-changes"`).
+ * @param options.versionDir - Explicit version directory override (auto-resolved
+ *   when omitted).
+ * @param options.runtimeStateDir - Explicit runtime state dir override.
+ * @returns A structured publish result with durable paths.
+ */
+export async function publishPlanArtifacts(
+  changeId: string,
+  planVersion: string,
+  options?: {
+    cwd?: string
+    repoRelativeDir?: string
+    versionDir?: string
+    runtimeStateDir?: string
+    reviewFindingsPath?: string
+  },
+): Promise<PublishPlanArtifactsResult> {
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+  const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+  const { resolvePlanVersionDir } = await import("pi-zflow-artifacts/artifact-paths")
+
+  const cwd = options?.cwd ?? process.cwd()
+  const repoRelativeDir = options?.repoRelativeDir ?? DEFAULT_PUBLISH_REPO_PATH
+
+  // Resolve runtime source directory
+  const runtimeStateDir = options?.runtimeStateDir ?? resolveRuntimeStateDir(cwd)
+  const srcVersionDir = options?.versionDir ?? (
+    // When runtimeStateDir is overridden, derive the version dir directly
+    // instead of falling back to resolvePlanVersionDir (which ignores the override).
+    options?.runtimeStateDir
+      ? path.join(runtimeStateDir, "plans", changeId, planVersion)
+      : resolvePlanVersionDir(changeId, planVersion, cwd)
+  )
+
+  // Resolve repo root
+  let repoRoot: string
+  try {
+    const { execSync } = await import("node:child_process")
+    repoRoot = execSync("git rev-parse --show-toplevel", {
+      cwd,
+      encoding: "utf-8",
+      timeout: 5_000,
+    }).trim()
+  } catch {
+    repoRoot = cwd
+  }
+
+  // Validate changeId and planVersion to prevent path traversal
+  assertSafeChangeId(changeId)
+  assertValidPlanVersion(planVersion)
+
+  // Validate repoRelativeDir is not absolute (would escape repo root)
+  if (path.isAbsolute(repoRelativeDir)) {
+    throw new Error(
+      `repoRelativeDir must be a relative path, got absolute: "${repoRelativeDir}"`,
+    )
+  }
+
+  // Build durable target path
+  const durableDir = path.resolve(repoRoot, repoRelativeDir, changeId, planVersion)
+
+  // Double-check that durableDir stays within the repo root
+  const relative = path.relative(repoRoot, durableDir)
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(
+      `Durable publish path "${durableDir}" escapes repository root "${repoRoot}". ` +
+      `Change ID "${changeId}" or planVersion "${planVersion}" may contain path traversal.`,
+    )
+  }
+
+  // Published artifact paths
+  const publishedArtifacts: Record<string, string> = {}
+  const errors: string[] = []
+
+  // Create target directory
+  await fs.mkdir(durableDir, { recursive: true })
+
+  // Copy each artifact
+  for (const [artifactKey, fileName] of Object.entries(PUBLISH_ARTIFACT_FILES)) {
+    const srcPath = path.join(srcVersionDir, fileName)
+    const destPath = path.join(durableDir, fileName)
+
+    try {
+      await fs.access(srcPath)
+      await fs.copyFile(srcPath, destPath)
+      publishedArtifacts[artifactKey] = destPath
+    } catch {
+      errors.push(`Artifact "${artifactKey}" not found at source: ${srcPath}`)
+    }
+  }
+
+  // Write manifest.json
+  const runtimePlansDir = path.join(runtimeStateDir, "plans")
+  const manifestPath = path.join(durableDir, "manifest.json")
+
+  const manifest = {
+    changeId,
+    planVersion,
+    generatedAt: new Date().toISOString(),
+    sourceRuntimePath: path.join(runtimePlansDir, changeId),
+    sourceArtifacts: Object.fromEntries(
+      Object.entries(PUBLISH_ARTIFACT_FILES).map(([key, fn]) => [key, path.join(srcVersionDir, fn)]),
+    ),
+    publishedArtifacts,
+    note: "Review findings, logs, and transient runtime state remain under .zflow/. This directory contains durable plan documents intended for review and commit.",
+    reviewFindingsRef: options?.reviewFindingsPath ?? path.join(runtimeStateDir, "review", `plan-review-${changeId}-${planVersion}.md`),
+  }
+
+  await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf-8")
+
+  return {
+    changeId,
+    planVersion,
+    durableDir,
+    publishedArtifacts,
+    manifestPath,
+    artifactCount: Object.keys(publishedArtifacts).length,
+    errors,
   }
 }

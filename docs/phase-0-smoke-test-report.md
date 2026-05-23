@@ -120,7 +120,7 @@ import {
   resolveSentinelPolicy,
 } from 'pi-zflow-core';
 
-resolveRuntimeStateDir() → /repo/.git/pi-zflow/   ✅
+resolveRuntimeStateDir() → /repo/.zflow/   ✅
 resolveUserStateDir() → ~/.pi/agent/zflow/        ✅
 DEFAULT_STALE_ARTIFACT_TTL_DAYS = 14              ✅
 canWrite() → enforces allowlist model             ✅

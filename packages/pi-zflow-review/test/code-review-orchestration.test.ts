@@ -54,7 +54,7 @@ async function writeArtifacts(
   changeId: string,
   version: string,
 ): Promise<CodeReviewInput["planningArtifacts"]> {
-  const versionDir = path.join(dir, ".git", "pi-zflow", "plans", changeId, version)
+  const versionDir = path.join(dir, ".zflow", "plans", changeId, version)
   await fs.mkdir(versionDir, { recursive: true })
 
   const artifacts: Record<string, string> = {
@@ -165,16 +165,17 @@ void describe("runCodeReview with DispatchService", () => {
 
     const result = await runCodeReview(makeInput(planningArtifacts))
 
-    // Assert runAgent was called with the typed shape and no extra keys
+    // Assert runAgent was called with the typed shape and repo cwd, not a nested context object.
     assert.ok(fakeService.callLog.length > 0, "runAgent should be called")
     for (const rawInput of fakeService.callLog) {
       const keys = Object.keys(rawInput).sort()
-      assert.deepEqual(
-        keys,
-        ["agent", "task"],
-        `runAgent must receive exactly { agent, task }, got keys: ${keys.join(", ")}`,
-      )
+      assert.ok(keys.includes("agent"), `runAgent input should include agent, got keys: ${keys.join(", ")}`)
+      assert.ok(keys.includes("cwd"), `runAgent input should include cwd, got keys: ${keys.join(", ")}`)
+      assert.ok(keys.includes("task"), `runAgent input should include task, got keys: ${keys.join(", ")}`)
+      assert.ok(!keys.includes("context"), `runAgent input must not include nested context, got keys: ${keys.join(", ")}`)
       assert.equal(typeof rawInput.agent, "string", "agent must be a string")
+      assert.match(String(rawInput.agent), /^zflow\.(review-|synthesizer$)/, "agent should be a packaged zflow runtime name")
+      assert.equal(rawInput.cwd, tmpDir, "cwd must be forwarded to dispatch")
       assert.equal(typeof rawInput.task, "string", "task must be a string")
     }
   })
@@ -406,10 +407,71 @@ void describe("runCodeReview with DispatchService", () => {
       result.manifest.reviewers.length,
       "all reviewers should be skipped",
     )
-    // Severity should be zero
+    // Severity should be zero, but the recommendation must fail closed because no reviewer ran.
     assert.equal(result.severity.critical, 0)
     assert.equal(result.severity.major, 0)
     assert.equal(result.severity.minor, 0)
     assert.equal(result.severity.nit, 0)
+    assert.equal(result.recommendation, "NO-GO")
+  })
+})
+
+// ── diffBundle support ──────────────────────────────────────────
+
+void describe("runCodeReview with explicit diffBundle", () => {
+  it("uses diffBundle content when provided instead of running git diff", async () => {
+    const planningArtifacts = await writeArtifacts(tmpDir, "ch-bundle", "v1")
+    const jsonOutput = JSON.stringify({ findings: [] })
+
+    const fakeService = makeFakeDispatchService(jsonOutput)
+    const registry = getZflowRegistry()
+    registry.claim({
+      capability: DISPATCH_SERVICE_CAPABILITY,
+      version: "0.1.0",
+      provider: "test",
+      sourcePath: import.meta.url,
+      compatibilityMode: "compatible",
+    })
+    registry.provide(DISPATCH_SERVICE_CAPABILITY, fakeService)
+
+    const bundleContent = `diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..e69de29`
+
+    const result = await runCodeReview(makeInput(planningArtifacts, {
+      diffBundle: bundleContent,
+      diffSource: "test-bundle",
+    }))
+
+    // Coverage notes should mention the bundle source
+    const hasSourceNote = result.coverageNotes.some(n => n.includes("test-bundle"))
+    assert.ok(hasSourceNote, "coverage notes should contain diff source label")
+    // Coverage notes should mention bytes
+    const hasBytesNote = result.coverageNotes.some(n => n.includes("bytes"))
+    assert.ok(hasBytesNote, "coverage notes should mention diff bundle size")
+  })
+
+  it("emits empty-diff coverage note when explicit diffBundle is empty", async () => {
+    const planningArtifacts = await writeArtifacts(tmpDir, "ch-emptybundle", "v1")
+    const jsonOutput = JSON.stringify({ findings: [] })
+
+    const fakeService = makeFakeDispatchService(jsonOutput)
+    const registry = getZflowRegistry()
+    registry.claim({
+      capability: DISPATCH_SERVICE_CAPABILITY,
+      version: "0.1.0",
+      provider: "test",
+      sourcePath: import.meta.url,
+      compatibilityMode: "compatible",
+    })
+    registry.provide(DISPATCH_SERVICE_CAPABILITY, fakeService)
+
+    const result = await runCodeReview(makeInput(planningArtifacts, {
+      diffBundle: "",
+      diffSource: "empty-test",
+    }))
+
+    const hasEmptyNote = result.coverageNotes.some(n => n.includes("no changes"))
+    assert.ok(hasEmptyNote, "coverage notes should mention empty diff when bundle is empty")
   })
 })

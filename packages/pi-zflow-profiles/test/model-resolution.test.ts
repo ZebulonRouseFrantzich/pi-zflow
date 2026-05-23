@@ -227,6 +227,28 @@ describe("resolveLane — thinking compatibility", () => {
     assert.equal(result.thinking, "high")
   })
 
+  it("resolves xhigh thinking when model supports xhigh", () => {
+    const reg = makeRegistry([model("m1", { thinkingCapability: "xhigh" })])
+    const result = resolveLane(
+      "planning-frontier",
+      lane(["m1"], { thinking: "xhigh" }),
+      reg,
+    )
+    assert.equal(result.status, "resolved")
+    assert.equal(result.thinking, "xhigh")
+  })
+
+  it("accepts off thinking request", () => {
+    const reg = makeRegistry([model("m1", { thinkingCapability: "high" })])
+    const result = resolveLane(
+      "scout-cheap",
+      lane(["m1"], { thinking: "off" }),
+      reg,
+    )
+    assert.equal(result.status, "resolved")
+    assert.equal(result.thinking, "off")
+  })
+
   it("no requested thinking always compatible", () => {
     const reg = makeRegistry([model("m1", { thinkingCapability: "low" })])
     const result = resolveLane("scout-cheap", lane(["m1"]), reg)

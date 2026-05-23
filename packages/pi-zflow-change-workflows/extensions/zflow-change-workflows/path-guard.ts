@@ -77,8 +77,8 @@ export interface GuardOptions {
  * These protect critical infrastructure, secrets, and package manager state.
  */
 const BLOCKED_PATH_PATTERNS: RegExp[] = [
-  // Git internals — allow .git/pi-zflow/ (runtime state dir)
-  /(?:^|[/\\])\.git[\\/](?!pi-zflow[\\/])/,
+  // Git internals — always blocked (runtime state now lives under .zflow/)
+  /(?:^|[/\\])\.git[\\/]/,
   // Node modules
   /\bnode_modules\b/,
   // Environment files
@@ -212,7 +212,7 @@ export function guardWrite(
   }
 
   // Runtime state dir override: if the resolved path is under the known
-  // runtime state directory (e.g. <git-dir>/pi-zflow/), allow it regardless
+  // runtime state directory (e.g. <repo-root>/.zflow/), allow it regardless
   // of blocked patterns.  This ensures runtime artifacts can always be written.
   const runtimeStateDir = options.runtimeStateDir ?? resolveRuntimeStateDir(options.projectRoot)
 
@@ -239,6 +239,16 @@ export function guardWrite(
     return {
       allowed: true,
       message: `Write allowed to runtime state directory "${resolvedPath}".`,
+      resolvedPath,
+    }
+  }
+
+  const relativeToProject = path.relative(projectRoot, resolvedPath)
+  const firstSegment = relativeToProject.split(path.sep)[0]
+  if (firstSegment && firstSegment !== ".zflow" && firstSegment.startsWith(".zflow")) {
+    return {
+      allowed: false,
+      message: `Blocked runtime state prefix trick: writes to "${resolvedPath}" are denied by policy.`,
       resolvedPath,
     }
   }

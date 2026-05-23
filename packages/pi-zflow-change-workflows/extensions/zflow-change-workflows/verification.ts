@@ -68,6 +68,30 @@ export interface VerificationResult {
   error?: string
 }
 
+// ── Verification.md command extraction ──────────────────────────
+
+/**
+ * Parse a fenced bash/sh/shell command from verification.md content.
+ *
+ * Searches the entire document for the first non-empty fenced code block
+ * tagged with bash, sh, shell, or no language annotation. The block is
+ * identified by triple backtick fences.
+ *
+ * @param content - The full text of verification.md.
+ * @returns The extracted command string, or `null` if none found.
+ */
+export function parseVerificationMdCommand(content: string): string | null {
+  // Try to find a fenced bash/sh/shell code block
+  const fences = content.matchAll(/```(?:bash|sh|shell)?\s*\r?\n([\s\S]*?)```/gi)
+  for (const match of fences) {
+    const command = match[1]?.trim()
+    if (command && command.length > 0) {
+      return command
+    }
+  }
+  return null
+}
+
 // ── Verification command resolution ───────────────────────────
 
 /**
@@ -76,18 +100,21 @@ export interface VerificationResult {
  * Precedence:
  * 1. `verificationCommand` from the active profile (caller passes this)
  * 2. repo config `.pi/settings.json` under a `zflow` key
- * 3. auto-detection in documented order
+ * 3. approved plan `verification.md` command (caller passes parsed result)
+ * 4. auto-detection in documented order
  *
  * When auto-detecting, this function logs which command was found via
  * console.info so the caller can inform the user.
  *
  * @param repoRoot - Absolute path to the repository root.
  * @param profileCommand - Optional verification command from the active profile.
+ * @param planCommand - Optional verification command from the approved plan verification.md.
  * @returns The resolved command string, or `null` if nothing was found.
  */
 export function resolveVerificationCommand(
   repoRoot: string,
   profileCommand?: string,
+  planCommand?: string,
 ): string | null {
   // 1. Profile-level command takes highest precedence
   if (profileCommand) {
@@ -108,7 +135,13 @@ export function resolveVerificationCommand(
     }
   }
 
-  // 3. Auto-detection in documented order
+  // 3. Approved plan verification.md command
+  if (planCommand && planCommand.trim()) {
+    console.info(`[zflow] Using verification command from plan verification.md: ${planCommand}`)
+    return planCommand.trim()
+  }
+
+  // 4. Auto-detection in documented order
   // 3a. `just ci-fast` when justfile exists and has the recipe
   const justfile = path.join(repoRoot, "justfile")
   if (existsSync(justfile)) {

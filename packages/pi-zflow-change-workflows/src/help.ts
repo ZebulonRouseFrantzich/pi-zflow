@@ -20,7 +20,10 @@ export const CHANGE_HELP_TOPIC: ZflowHelpTopic = {
   summary:
     "Formal artifact-first change orchestration: prepare plans, " +
     "implement changes in isolated worktrees, audit results against " +
-    "plans, apply fixes, and clean up temporary artifacts.",
+    "plans, apply fixes, and clean up temporary artifacts. " +
+    "Durable plan documents are published to the repo under " +
+    "docs/zflow-changes/ for review and commit; runtime/review " +
+    "logs remain under .zflow/.",
   flowOrder: 30,
   flowGuidance:
     "Core workflow: prepare a change plan, review it, implement it " +
@@ -32,7 +35,12 @@ export const CHANGE_HELP_TOPIC: ZflowHelpTopic = {
       name: "zflow-change-prepare",
       usage: "/zflow-change-prepare <change-path>",
       description:
-        "Prepare a formal change plan from a change request document.",
+        "Prepare a formal change plan from a change request document. " +
+        "Generates four plan artifacts (design, execution-groups, " +
+        "standards, verification), validates them, runs plan review, " +
+        "and publishes durable copies to docs/zflow-changes/<id>/<version>/ " +
+        "for review and commit. Runtime state and review logs remain " +
+        "under .zflow/.",
     },
     {
       name: "zflow-change-implement",

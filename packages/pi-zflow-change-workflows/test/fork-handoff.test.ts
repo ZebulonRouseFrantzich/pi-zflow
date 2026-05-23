@@ -246,7 +246,7 @@ describe("forkImplementationSessionIfAvailable", () => {
     try {
       const ctx = makeFakeCtxMinimal()
       const handoff = makeHandoff({
-        runtimeStateDir: path.join(repoRoot, ".git", "pi-zflow"),
+        runtimeStateDir: path.join(repoRoot, ".zflow"),
       })
 
       const branchesBefore = countGitBranches(repoRoot)
@@ -286,7 +286,7 @@ describe("forkImplementationSessionIfAvailable", () => {
       const handoff = makeHandoff({
         changeId: "pending-read-test",
         approvedVersion: "v3",
-        runtimeStateDir: path.join(repoRoot, ".git", "pi-zflow"),
+        runtimeStateDir: path.join(repoRoot, ".zflow"),
       })
 
       await forkImplementationSessionIfAvailable(ctx, handoff)
@@ -339,7 +339,7 @@ describe("fork handoff — integration", () => {
     try {
       process.chdir(repoRoot)
 
-      const runtimeStateDir = path.join(repoRoot, ".git", "pi-zflow")
+      const runtimeStateDir = path.join(repoRoot, ".zflow")
       const handoff = makeHandoff({
         changeId: "integration-test",
         approvedVersion: "v4",

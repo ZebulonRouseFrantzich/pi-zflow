@@ -213,6 +213,23 @@ describe("validateProfilesFile", () => {
     )
   })
 
+  it("accepts off and xhigh thinking levels", () => {
+    const data = validProfilesFile()
+    data.default.lanes["no-thinking"] = {
+      thinking: "off",
+      preferredModels: ["openai/gpt-4o-mini"],
+    }
+    data.default.lanes["deep-thinking"] = {
+      thinking: "xhigh",
+      preferredModels: ["openai/gpt-5.4-codex"],
+    }
+    data.default.agentBindings["zflow.repo-mapper"] = { lane: "no-thinking" }
+    data.default.agentBindings["zflow.review-system"] = { lane: "deep-thinking" }
+
+    const result = validateProfilesFile(data)
+    assert.equal(result.valid, true)
+  })
+
   it("rejects invalid thinking level", () => {
     const data = {
       default: {

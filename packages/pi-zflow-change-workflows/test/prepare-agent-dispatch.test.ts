@@ -114,6 +114,18 @@ describe("runPrepareAgentsIfAvailable — fake service path", () => {
         },
         runParallel: async () => ({ ok: true, results: [] }),
       })
+      registry.claim({
+        capability: "profiles",
+        version: "0.1.0",
+        provider: "test-profiles",
+        sourcePath: import.meta.url,
+      })
+      registry.provide("profiles", {
+        getResolvedAgentBinding: async (agentName: string) => ({
+          agent: agentName,
+          resolvedModel: "openai-codex/gpt-5.4",
+        }),
+      })
 
       await runChangePrepareWorkflow({ cwd: repoRoot, changeId: "test-zflow-dispatch" })
       const result = await runPrepareAgentsIfAvailable(
@@ -129,6 +141,7 @@ describe("runPrepareAgentsIfAvailable — fake service path", () => {
       assert.strictEqual(result.serviceName, DISPATCH_SERVICE_CAPABILITY)
       assert.strictEqual(result.methodUsed, "runAgent")
       assert.strictEqual(receivedInput.agent, "zflow.planner-frontier")
+      assert.strictEqual(receivedInput.model, "openai-codex/gpt-5.4")
       assert.match(receivedInput.task, /changeId `test-zflow-dispatch`/)
       assert.match(receivedInput.task, /Change input path: docs\/change\.md/)
       assert.match(receivedInput.task, /Additional user notes: normal idea file/)
