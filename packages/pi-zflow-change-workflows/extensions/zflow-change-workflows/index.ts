@@ -2230,7 +2230,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
 
       // Check for unfinished work via checkUnfinishedOnEntry if we can derive changeId
       if (pathSlug) {
-        const unfinishedCheck = await checkUnfinishedOnEntry(pathSlug)
+        const unfinishedCheck = await checkUnfinishedOnEntry(pathSlug, ctx.cwd)
         if (unfinishedCheck.hasUnfinishedWork) {
           const choices = unfinishedCheck.choices.map(
             (c) => `  - ${c.action}: ${c.description}`,
@@ -2587,13 +2587,15 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       const parts = args.trim().split(/\s+/)
       const force = parts.includes("--force")
       const manualDispatchComplete = parts.includes("--manual-dispatch-complete")
+      const abandonUnfinished = parts.includes("--abandon") || parts.includes("--abandon-unfinished")
       const changeInput = parts.filter(p => !p.startsWith("--")).join(" ")
 
       if (!changeInput) {
         ctx.ui.notify(
-          "Usage: /zflow-change-implement <change-id-or-docs-path> [--force] [--manual-dispatch-complete]\n\n" +
+          "Usage: /zflow-change-implement <change-id-or-docs-path> [--force] [--abandon] [--manual-dispatch-complete]\n\n" +
           "  <change-id-or-docs-path>       Runtime change ID, or docs/zflow-changes/<id>/[version/] path.\n" +
           "  --force                       Proceed even if the primary worktree has uncommitted changes.\n" +
+          "  --abandon                     Mark unfinished runs for this change abandoned, then start fresh.\n" +
           "  --manual-dispatch-complete    Skip worktree dispatch and proceed directly to verification.\n" +
           "                                Use this when you have manually applied changes outside zflow.",
           "warning",
@@ -2618,24 +2620,38 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       const cleanupMode = (): void => { resetWorkflowState() }
 
       // Check for unfinished work on this change
-      const unfinishedCheck = await checkUnfinishedOnEntry(changeId)
+      const unfinishedCheck = await checkUnfinishedOnEntry(changeId, ctx.cwd)
       if (unfinishedCheck.hasUnfinishedWork) {
-        const choices = unfinishedCheck.choices.map(
-          (c) => `  - ${c.action}: ${c.description}`,
-        ).join("\n")
-        ctx.ui.notify(
-          `⚠️ Unfinished work detected for change "${changeId}".\n\n` +
-          `Last phase: ${unfinishedCheck.lastPhase}\n` +
-          `Unfinished runs: ${unfinishedCheck.unfinishedRunIds.join(", ")}\n` +
-          (unfinishedCheck.retainedWorktrees.length > 0
-            ? `Retained worktrees: ${unfinishedCheck.retainedWorktrees.join(", ")}\n`
-            : "") +
-          `\nAvailable options:\n${choices}\n\n` +
-          "Use /zflow-clean or /zflow-change-audit to inspect and clean up before retrying.",
-          "warning",
-        )
-        cleanupMode()
-        return
+        if (abandonUnfinished) {
+          const cleanResult = await runCleanWorkflow({
+            cwd: ctx.cwd,
+            changeId,
+            abandonUnfinished: true,
+          })
+          ctx.ui.notify(
+            `🧹 Abandoned ${cleanResult.abandonedRuns.length} unfinished run(s) for "${changeId}": ` +
+            `${cleanResult.abandonedRuns.join(", ") || "none"}. Starting fresh...`,
+            "info",
+          )
+        } else {
+          const choices = unfinishedCheck.choices.map(
+            (c) => `  - ${c.action}: ${c.description}`,
+          ).join("\n")
+          ctx.ui.notify(
+            `⚠️ Unfinished work detected for change "${changeId}".\n\n` +
+            `Last phase: ${unfinishedCheck.lastPhase}\n` +
+            `Unfinished runs: ${unfinishedCheck.unfinishedRunIds.join(", ")}\n` +
+            (unfinishedCheck.retainedWorktrees.length > 0
+              ? `Retained worktrees: ${unfinishedCheck.retainedWorktrees.join(", ")}\n`
+              : "") +
+            `\nAvailable options:\n${choices}\n\n` +
+            `To start fresh now, run:\n  /zflow-change-implement ${changeInput} --abandon\n\n` +
+            `Or clean separately with:\n  /zflow-clean ${changeInput}`,
+            "warning",
+          )
+          cleanupMode()
+          return
+        }
       }
 
       // ── Detect and load pending handoff artifacts ──────────────
