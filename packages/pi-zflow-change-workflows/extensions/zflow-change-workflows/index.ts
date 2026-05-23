@@ -641,15 +641,19 @@ function makeWorkflowProgressComponent(details: WorkflowProgressMessageDetails, 
         truncateText(`  ${theme.fg("dim", "updates:")} ${snapshot.updateCount}`, available),
         truncateText(`  ${theme.fg("dim", "last:")} ${snapshot.lastMessage}`, available),
       )
-      for (const message of snapshot.recentMessages.slice(-3)) {
-        lines.push(truncateText(`  ${theme.fg("dim", "•")} ${message}`, available))
+      const phaseCards = snapshot.phaseCards ?? []
+      // Suppress top-level recent-message bullets when phase cards are present,
+      // because the cards provide the same information in a more readable layout.
+      if (phaseCards.length === 0) {
+        for (const message of snapshot.recentMessages.slice(-3)) {
+          lines.push(truncateText(`  ${theme.fg("dim", "•")} ${message}`, available))
+        }
       }
       if (snapshot.subagents.length > 0) {
         const finished = snapshot.subagents.filter((subagent) => isFinishedSubagentStatus(subagent.status)).length
         lines.push(truncateText(`  ${theme.fg("dim", "subagents:")} ${finished}/${snapshot.subagents.length} finished`, available))
         lines.push(...renderSubagentCards(snapshot.subagents, available))
       }
-      const phaseCards = snapshot.phaseCards ?? []
       if (phaseCards.length > 0) {
         lines.push(truncateText(`  ${theme.fg("dim", "workflow cards:")}`, available))
         lines.push(...renderWorkflowCards(phaseCards, available))
@@ -2761,27 +2765,21 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           },
         )
 
-        if (postResult.verificationStatus === "failed") {
-          implProgress.update(`Verification ${postResult.verificationStatus}`)
-        } else if (postResult.verificationStatus === "skipped") {
-          implProgress.update("Verification was skipped")
-        }
+        // Avoid duplicating verification status messages already shown via phase cards.
+        // Top-level recent-message bullets are suppressed when phase cards are present
+        // (see render), so we only set a concise stop message.
 
-        if (postResult.error) {
-          implProgress.update(`⚠️ ${postResult.error}`)
-        }
-
-        const nextStepsText = postResult.nextSteps.length > 0
-          ? postResult.nextSteps
-              .map((s, i) => `  ${i + 1}. ${s.replace(/^\d+\.\s*/, "")}`)
-              .join("\n")
-          : "  No further steps — workflow is complete."
         const finalCardStatus = postResult.status === "completed"
           ? "completed"
           : postResult.status === "failed"
             ? "failed"
             : "running"
         const finalCardTitle = postResult.status === "completed" ? "Workflow Complete" : "Workflow Needs Attention"
+        const nextStepsLine = postResult.nextSteps.length > 0
+          ? `Next steps: ${postResult.nextSteps.map((s) => s.replace(/^\d+\.\s*/, "")).join("; ")}`
+          : "No further steps — workflow is complete."
+
+        // Update the Workflow Complete / Workflow Needs Attention card with both lines
         implProgress.updatePhaseCard(
           "workflow-complete",
           finalCardTitle,
@@ -2791,14 +2789,11 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         implProgress.updatePhaseCard(
           "workflow-complete",
           finalCardTitle,
-          postResult.nextSteps.length > 0
-            ? `Next steps: ${postResult.nextSteps.map((s) => s.replace(/^\d+\.\s*/, "")).join("; ")}`
-            : "No further steps — workflow is complete.",
+          nextStepsLine,
           finalCardStatus,
         )
-        implProgress.stop(
-          `Phase: ${postResult.phase}, status: ${postResult.status}.\n${nextStepsText}`,
-        )
+
+        implProgress.stop(finalCardTitle)
       } catch (err: unknown) {
         implProgress.stop(
           `Implementation failed: ${err instanceof Error ? err.message : String(err)}`,
