@@ -1733,7 +1733,7 @@ export function buildWorktreeDispatchPlan(
     task: buildWorkerTask(group, config, planArtifactPaths),
     claimedFiles: group.files,
     scopedVerification: group.scopedVerification,
-    outputRelativePath: `.zflow/runs/<runId>/worktree-results/${group.id}-result.md`,
+    outputRelativePath: `worktree-results/${group.id}-result.md`,
   }))
 }
 
