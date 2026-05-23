@@ -404,24 +404,28 @@ function formatElapsed(ms: number): string {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
 }
 
-const PREPARE_PROGRESS_MESSAGE_TYPE = "zflow-change-prepare-progress" as const
+const WORKFLOW_PROGRESS_MESSAGE_TYPE = "zflow-workflow-progress" as const
 
-interface PrepareProgressSnapshot {
+interface WorkflowProgressSnapshot {
   id: string
+  command: string
   changePath: string
+  model?: string
   status: "running" | "completed" | "failed"
   startedAt: number
   finishedAt?: number
   lastMessage: string
+  updateCount: number
+  recentMessages: string[]
 }
 
-interface PrepareProgressMessageDetails {
+interface WorkflowProgressMessageDetails {
   id: string
-  snapshot: PrepareProgressSnapshot
+  snapshot: WorkflowProgressSnapshot
 }
 
-const prepareProgressSnapshots = new Map<string, PrepareProgressSnapshot>()
-let prepareProgressCounter = 0
+const workflowProgressSnapshots = new Map<string, WorkflowProgressSnapshot>()
+let workflowProgressCounter = 0
 
 function truncateText(value: string, width: number): string {
   if (width <= 0) return ""
@@ -429,14 +433,14 @@ function truncateText(value: string, width: number): string {
   return `${value.slice(0, Math.max(0, width - 1))}…`
 }
 
-function makePrepareProgressComponent(details: PrepareProgressMessageDetails, theme: any): {
+function makeWorkflowProgressComponent(details: WorkflowProgressMessageDetails, theme: any): {
   invalidate: () => void
   render: (width: number) => string[]
 } {
   return {
     invalidate() {},
     render(width: number): string[] {
-      const snapshot = prepareProgressSnapshots.get(details.id) ?? details.snapshot
+      const snapshot = workflowProgressSnapshots.get(details.id) ?? details.snapshot
       const finishedAt = snapshot.finishedAt ?? Date.now()
       const elapsed = formatElapsed(finishedAt - snapshot.startedAt)
       const statusLabel = snapshot.status === "running"
@@ -446,52 +450,73 @@ function makePrepareProgressComponent(details: PrepareProgressMessageDetails, th
           : theme.fg("error", "failed")
       const icon = snapshot.status === "running" ? "🤖" : snapshot.status === "completed" ? "✅" : "⚠️"
       const available = Math.max(24, width - 2)
-      return [
-        truncateText(`${icon} ${theme.bold("zflow-change-prepare")} ${statusLabel}`, available),
+      const lines = [
+        truncateText(`${icon} ${theme.bold(snapshot.command)} ${statusLabel}`, available),
         truncateText(`  ${theme.fg("dim", "change:")} ${snapshot.changePath}`, available),
-        truncateText(`  ${theme.fg("dim", "elapsed:")} ${elapsed}`, available),
-        truncateText(`  ${theme.fg("dim", "last:")} ${snapshot.lastMessage}`, available),
       ]
+      if (snapshot.model) {
+        lines.push(truncateText(`  ${theme.fg("dim", "model:")} ${snapshot.model}`, available))
+      }
+      lines.push(
+        truncateText(`  ${theme.fg("dim", "elapsed:")} ${elapsed}`, available),
+        truncateText(`  ${theme.fg("dim", "updates:")} ${snapshot.updateCount}`, available),
+        truncateText(`  ${theme.fg("dim", "last:")} ${snapshot.lastMessage}`, available),
+      )
+      for (const message of snapshot.recentMessages.slice(-3)) {
+        lines.push(truncateText(`  ${theme.fg("dim", "•")} ${message}`, available))
+      }
+      return lines
     },
   }
 }
 
-function registerPrepareProgressRenderer(pi: ExtensionAPI): void {
+function registerWorkflowProgressRenderer(pi: ExtensionAPI): void {
   if (typeof pi.registerMessageRenderer !== "function") return
-  pi.registerMessageRenderer<PrepareProgressMessageDetails>(
-    PREPARE_PROGRESS_MESSAGE_TYPE,
+  pi.registerMessageRenderer<WorkflowProgressMessageDetails>(
+    WORKFLOW_PROGRESS_MESSAGE_TYPE,
     (message, _options, theme) => {
-      const details = message.details as PrepareProgressMessageDetails | undefined
+      const details = message.details as WorkflowProgressMessageDetails | undefined
       if (!details?.id || !details.snapshot) return undefined
-      return makePrepareProgressComponent(details, theme)
+      return makeWorkflowProgressComponent(details, theme)
     },
   )
 }
 
-function createPrepareProgressIndicator(pi: ExtensionAPI, ctx: InterviewableContext, changePath: string): {
+function createWorkflowProgressIndicator(
+  pi: ExtensionAPI,
+  ctx: InterviewableContext,
+  changePath: string,
+  options?: { command?: string; model?: string; initialMessage?: string; statusId?: string; widgetId?: string },
+): {
   update: (message: string) => void
   stop: (message?: string, status?: "completed" | "failed") => void
 } {
   const ui = ctx.ui
-  const id = `prepare-${Date.now().toString(36)}-${++prepareProgressCounter}`
-  const statusId = "zflow-prepare"
+  const id = `wf-${Date.now().toString(36)}-${++workflowProgressCounter}`
+  const command = options?.command ?? "zflow-workflow"
+  const statusId = options?.statusId ?? `zflow-${command.replace(/^zflow-/, "").replace(/-/g, "")}`
+  const widgetId = options?.widgetId ?? `${command}-progress`
   const startedAt = Date.now()
   let stopped = false
   // Clear the older below-editor widget if it exists from a hot-reloaded session.
-  ui?.setWidget?.("zflow-change-prepare-progress", undefined)
-  const initialSnapshot: PrepareProgressSnapshot = {
+  ui?.setWidget?.(widgetId, undefined)
+  const initialSnapshot: WorkflowProgressSnapshot = {
     id,
+    command,
     changePath,
+    model: options?.model,
     status: "running",
     startedAt,
-    lastMessage: "Initializing change preparation",
+    lastMessage: options?.initialMessage ?? "Initializing workflow",
+    updateCount: 0,
+    recentMessages: [options?.initialMessage ?? "Initializing workflow"],
   }
-  prepareProgressSnapshots.set(id, initialSnapshot)
+  workflowProgressSnapshots.set(id, initialSnapshot)
 
   if (typeof pi.sendMessage === "function") {
     pi.sendMessage({
-      customType: PREPARE_PROGRESS_MESSAGE_TYPE,
-      content: `zflow-change-prepare ${changePath}`,
+      customType: WORKFLOW_PROGRESS_MESSAGE_TYPE,
+      content: `${command} ${changePath}`,
       display: true,
       details: { id, snapshot: initialSnapshot },
     })
@@ -500,7 +525,7 @@ function createPrepareProgressIndicator(pi: ExtensionAPI, ctx: InterviewableCont
   const render = () => {
     if (stopped) return
     const elapsed = formatElapsed(Date.now() - startedAt)
-    ui?.setStatus?.(statusId, `zflow prepare ${elapsed}`)
+    ui?.setStatus?.(statusId, `${command} ${elapsed}`)
     ui?.requestRender?.()
   }
 
@@ -509,11 +534,14 @@ function createPrepareProgressIndicator(pi: ExtensionAPI, ctx: InterviewableCont
 
   return {
     update(message: string) {
-      const current = prepareProgressSnapshots.get(id)
+      const current = workflowProgressSnapshots.get(id)
+      const normalizedMessage = message.replace(/\s+/g, " ").trim()
       if (current) {
-        prepareProgressSnapshots.set(id, {
+        workflowProgressSnapshots.set(id, {
           ...current,
-          lastMessage: message.replace(/\s+/g, " ").trim(),
+          lastMessage: normalizedMessage,
+          updateCount: current.updateCount + 1,
+          recentMessages: [...current.recentMessages, normalizedMessage].slice(-5),
         })
       }
       render()
@@ -523,9 +551,9 @@ function createPrepareProgressIndicator(pi: ExtensionAPI, ctx: InterviewableCont
       stopped = true
       clearInterval(interval)
       ui?.setStatus?.(statusId, undefined)
-      const current = prepareProgressSnapshots.get(id)
+      const current = workflowProgressSnapshots.get(id)
       if (current) {
-        prepareProgressSnapshots.set(id, {
+        workflowProgressSnapshots.set(id, {
           ...current,
           status,
           finishedAt: Date.now(),
@@ -976,9 +1004,11 @@ async function runWorktreeDispatchAndFinalize(
   )
 
   // Dispatch via the dispatch service with worktree: true
+  const implementModel = await resolveWorkflowModel("zflow.implement-routine")
   const tasks = runPlan.tasks.map(t => ({
     agent: t.agent,
     task: t.task,
+    model: implementModel,
     output: t.outputRelativePath,
     outputMode: "file-only" as const,
   }))
@@ -1158,6 +1188,16 @@ async function ensureProfileResolved(ctx: InterviewableContext): Promise<boolean
   return false
 }
 
+async function resolveWorkflowModel(agentName: string): Promise<string | undefined> {
+  try {
+    const { getResolvedAgentBinding } = await import("pi-zflow-profiles")
+    const binding = await getResolvedAgentBinding(agentName)
+    return binding?.resolvedModel ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
 // ── Extension activation ────────────────────────────────────────
 
 const CHANGE_WORKFLOWS_CAPABILITY = "change-workflows" as const
@@ -1191,7 +1231,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
 
   // Provide a minimal service marker so duplicate loads see service !== undefined
   registry.provide(CHANGE_WORKFLOWS_CAPABILITY, { activated: true })
-  registerPrepareProgressRenderer(pi)
+  registerWorkflowProgressRenderer(pi)
 
   // ── Agent setup check ─────────────────────────────────────────
   // Check if the zflow-agents capability is available via registry.
@@ -1375,48 +1415,37 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         }
       }
 
-      ctx.ui.notify(
-        options.dryRun
-          ? "🧹 Dry-run cleanup — previewing stale artifacts..."
-          : "🧹 Running cleanup...",
-      )
+      const cleanProgress = createWorkflowProgressIndicator(pi, ctx, targetInput || "all", {
+        command: "zflow-clean",
+        model: undefined,
+        initialMessage: options.dryRun ? "Dry-run cleanup preview" : "Running cleanup",
+        statusId: "zflow-clean",
+        widgetId: "zflow-clean-progress",
+      })
 
       try {
         const result = await runCleanWorkflow(options)
 
-        ctx.ui.notify(result.summary, "info")
+        cleanProgress.update(result.summary)
         if (result.abandonedRuns.length > 0) {
-          ctx.ui.notify(
+          cleanProgress.update(
             `${options.dryRun ? "Would abandon" : "Abandoned"} ${result.abandonedRuns.length} unfinished run(s): ${result.abandonedRuns.join(", ")}`,
-            "info",
           )
         } else if (options.changeId && options.abandonUnfinished) {
-          ctx.ui.notify(
-            `No unfinished runs found for change "${options.changeId}".`,
-            "info",
-          )
+          cleanProgress.update(`No unfinished runs found for change "${options.changeId}".`)
         }
 
-        if (options.dryRun) {
-          ctx.ui.notify(
-            `Preview: ${result.cleaned} artifact(s) would be cleaned, ${result.kept} kept.`,
-            "info",
-          )
-          ctx.ui.notify("Run without --dry-run to actually clean.", "info")
-        } else {
-          if (result.errors.length > 0) {
-            ctx.ui.notify(
-              `Cleaned ${result.cleaned} artifact(s). ${result.errors.length} error(s) occurred.`,
-              result.errors.length > 0 ? "warning" : "info",
-            )
-          } else {
-            ctx.ui.notify(`Cleaned ${result.cleaned} artifact(s).`, "info")
-          }
-        }
+        cleanProgress.stop(
+          options.dryRun
+            ? `Preview: ${result.cleaned} artifact(s) would be cleaned, ${result.kept} kept.`
+            : result.errors.length > 0
+              ? `Cleaned ${result.cleaned} artifact(s). ${result.errors.length} error(s) occurred.`
+              : `Cleaned ${result.cleaned} artifact(s).`,
+        )
       } catch (err: unknown) {
-        ctx.ui.notify(
+        cleanProgress.stop(
           `Cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
-          "error",
+          "failed",
         )
       }
     },
@@ -1464,8 +1493,14 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         }
       }
 
+      const workflowModel = await resolveWorkflowModel("zflow.planner-frontier")
       ctx.ui.notify(`📋 Preparing change plan for "${changePath}"...`)
-      const progress = createPrepareProgressIndicator(pi, ctx, changePath)
+      const progress = createWorkflowProgressIndicator(pi, ctx, changePath, {
+        command: "zflow-change-prepare",
+        model: workflowModel ?? "unavailable",
+        initialMessage: "Initializing change preparation",
+        statusId: "zflow-prepare",
+      })
 
       try {
         // Step 1: Run the initial prepare workflow (creates plan state, version dir, etc.)
@@ -1888,10 +1923,18 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         )
       }
 
-      ctx.ui.notify(`⚙️ Implementing change "${changeId}"...`)
+      const implementModel = await resolveWorkflowModel("zflow.implement-routine")
+      const implProgress = createWorkflowProgressIndicator(pi, ctx, changeInput, {
+        command: "zflow-change-implement",
+        model: implementModel ?? "unavailable",
+        initialMessage: "Starting implementation workflow",
+        statusId: "zflow-implement",
+        widgetId: "zflow-implement-progress",
+      })
 
       try {
         addReminder("approved-plan-loaded")
+        implProgress.update("Creating run state and parsing execution plan")
 
         // ── Phase 2: Run the create-run workflow ──────────────────
         const result = await runChangeImplementWorkflow({
@@ -1900,21 +1943,15 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         })
 
         if (force) {
-          ctx.ui.notify(
-            "⚠️ Dirty worktree — proceeding because --force was passed.",
-            "warning",
-          )
+          implProgress.update("Forcing dirty worktree — changes may conflict")
         }
 
-        ctx.ui.notify(
-          `⚙️ Run created for "${result.changeId}" (${result.planVersion}). Run ID: ${result.runId}`,
-          "info",
-        )
-
+        implProgress.update(`Run created: ${result.runId}, version ${result.planVersion}`)
         removeReminder("approved-plan-loaded")
 
         // ── Phase 3: Parse execution groups and dispatch ─────────
         if (!manualDispatchComplete && hasDispatch) {
+          implProgress.update(`Dispatching ${result.changeId} via ${dispatchService!.name}`)
           await runWorktreeDispatchAndFinalize(result.runId, result.changeId, result.planVersion, dispatchService!, {
             cwd: undefined,
             force,
@@ -1922,6 +1959,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         }
 
         // ── Phase 4: Post-start sequence (verification, review, complete) ──
+        implProgress.update("Running post-start sequence (verification, review)")
         const postResult = await runImplementationPostStartSequence(
           result.runId,
           {
@@ -1929,30 +1967,14 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           },
         )
 
-        if (postResult.verificationStatus === "passed" || postResult.verificationStatus === "pending") {
-          addReminder("verification-status")
-        } else if (postResult.verificationStatus === "failed") {
-          addReminder("verification-status")
-          ctx.ui.notify(
-            `⚠️ Final verification ${postResult.verificationStatus}. ` +
-            `Check run.json for details. Phase: ${postResult.phase}`,
-            "warning",
-          )
+        if (postResult.verificationStatus === "failed") {
+          implProgress.update(`Verification ${postResult.verificationStatus}`)
         } else if (postResult.verificationStatus === "skipped") {
-          addReminder("verification-status")
-          ctx.ui.notify(
-            `ℹ️ Final verification was skipped. Review will be advisory.`,
-            "info",
-          )
+          implProgress.update("Verification was skipped")
         }
 
-        ctx.ui.notify(
-          `📋 Post-start sequence phase: ${postResult.phase}, status: ${postResult.status}.`,
-          "info",
-        )
-
         if (postResult.error) {
-          ctx.ui.notify(`⚠️ ${postResult.error}`, "warning")
+          implProgress.update(`⚠️ ${postResult.error}`)
         }
 
         const nextStepsText = postResult.nextSteps.length > 0
@@ -1960,15 +1982,13 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
               .map((s, i) => `  ${i + 1}. ${s.replace(/^\d+\.\s*/, "")}`)
               .join("\n")
           : "  No further steps — workflow is complete."
-        ctx.ui.notify(
-          `📋 Next steps (persisted in run.json):\n${nextStepsText}\n\n` +
-          `Use /zflow-change-audit ${changeId} to check workflow status at any time.`,
-          "info",
+        implProgress.stop(
+          `Phase: ${postResult.phase}, status: ${postResult.status}.\n${nextStepsText}`,
         )
       } catch (err: unknown) {
-        ctx.ui.notify(
+        implProgress.stop(
           `Implementation failed: ${err instanceof Error ? err.message : String(err)}`,
-          "error",
+          "failed",
         )
       } finally {
         resetWorkflowState()
@@ -1987,28 +2007,32 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         return
       }
 
-      ctx.ui.notify(`🔍 Auditing change "${changeId}"...`)
+      const auditProgress = createWorkflowProgressIndicator(pi, ctx, changeId, {
+        command: "zflow-change-audit",
+        model: undefined,
+        initialMessage: "Auditing change status",
+        statusId: "zflow-audit",
+        widgetId: "zflow-audit-progress",
+      })
 
       try {
+        auditProgress.update("Reading plan state and run metadata")
         const result = await runChangeAuditWorkflow({
           changeId,
         })
 
-        // Present full summary
-        ctx.ui.notify(result.summary, "info")
+        auditProgress.update(result.summary)
 
-        // Emit recommended actions as additional notifications
+        // Emit recommended actions
         for (const action of result.recommendedActions) {
-          ctx.ui.notify(`→ ${action}`, "info")
+          auditProgress.update(`→ ${action}`)
         }
 
-        // Suggest re-run commands based on status
         const status = result.status
         if (status === "approved" || status === "executing") {
-          ctx.ui.notify(
+          auditProgress.update(
             `Tip: Run /zflow-review-code ${changeId} to (re-)run code review, ` +
             `or /zflow-change-implement ${changeId} if not yet executed.`,
-            "info",
           )
         }
 
@@ -2029,36 +2053,26 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           if (gateResult) {
             switch (gateResult.decision) {
               case "continue": {
-                // "Auto-fix Loop" was selected — redirect to fix workflow
-                ctx.ui.notify(
-                  `→ Run /zflow-change-fix ${changeId} to start the auto-fix loop.`,
-                  "info",
-                )
+                auditProgress.update("→ Run /zflow-change-fix to start the auto-fix loop.")
                 break
               }
               case "approve": {
-                // "Skip Verification" or equivalent — mark as advisory
-                ctx.ui.notify(
-                  `→ Verification skipped for "${changeId}". Review will be advisory.`,
-                  "info",
-                )
+                auditProgress.update("→ Verification skipped. Review will be advisory.")
                 break
               }
               default: {
-                // "Manual Review" or "cancel" — just show the notification
-                ctx.ui.notify(
-                  `→ Manual review chosen for "${changeId}". Use /zflow-change-fix ${changeId} when ready.`,
-                  "info",
-                )
+                auditProgress.update("→ Manual review chosen. Use /zflow-change-fix when ready.")
                 break
               }
             }
           }
         }
+
+        auditProgress.stop("Audit complete.")
       } catch (err: unknown) {
-        ctx.ui.notify(
+        auditProgress.stop(
           `Audit failed: ${err instanceof Error ? err.message : String(err)}`,
-          "error",
+          "failed",
         )
       }
     },
@@ -2075,19 +2089,25 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         return
       }
 
-      ctx.ui.notify(`🔧 Running fix workflow for change "${changeId}"...`)
+      const fixModel = await resolveWorkflowModel("zflow.implement-routine")
+      const fixProgress = createWorkflowProgressIndicator(pi, ctx, changeId, {
+        command: "zflow-change-fix",
+        model: fixModel ?? "unavailable",
+        initialMessage: "Running fix workflow",
+        statusId: "zflow-fix",
+        widgetId: "zflow-fix-progress",
+      })
 
       try {
+        fixProgress.update("Resolving review findings and building fix plan")
         const result = await runChangeFixWorkflow({
           changeId,
         })
 
-        // Present the fix plan
-        ctx.ui.notify(result.fixPlan, "info")
+        fixProgress.update(result.fixPlan)
         if (result.filesToModify.length > 0) {
-          ctx.ui.notify(
+          fixProgress.update(
             `Files to modify: ${result.filesToModify.map(f => `\`${f}\``).join(", ")}`,
-            "info",
           )
         }
 
@@ -2110,27 +2130,15 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         if (gateResult) {
           switch (gateResult.decision) {
             case "continue": {
-              // "Fix All" — proceed with full fix scope
-              ctx.ui.notify(
-                `🛠 Applying all fixes for "${changeId}".`,
-                "info",
-              )
+              fixProgress.update("Applying all fixes.")
               break
             }
             case "approve": {
-              // "Fix Critical/Major" or equivalent
-              ctx.ui.notify(
-                `🛠 Applying critical/major fixes for "${changeId}".`,
-                "info",
-              )
+              fixProgress.update("Applying critical/major fixes.")
               break
             }
             default: {
-              // "Dismiss" or "cancel"
-              ctx.ui.notify(
-                `⏭ Findings dismissed for "${changeId}". Proceeding without fixes.`,
-                "info",
-              )
+              fixProgress.update("Findings dismissed. Proceeding without fixes.")
               break
             }
           }
@@ -2138,21 +2146,17 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
 
         // Offer next steps
         if (result.verificationCommand) {
-          ctx.ui.notify(
-            `After applying fixes, run the following verification command:\n` +
-            `\`\`\`bash\n${result.verificationCommand}\n\`\`\``,
-            "info",
+          fixProgress.update(
+            `After fixes, run: ${result.verificationCommand}`,
           )
         }
-        ctx.ui.notify(
-          `Tip: After fixes are applied, update the plan lifecycle via ` +
-          `the planning workflow and re-run /zflow-review-code ${changeId} to re-verify.`,
-          "info",
+        fixProgress.stop(
+          `Tip: Update plan lifecycle and re-run /zflow-review-code ${changeId} to re-verify.`,
         )
       } catch (err: unknown) {
-        ctx.ui.notify(
+        fixProgress.stop(
           `Fix workflow failed: ${err instanceof Error ? err.message : String(err)}`,
-          "error",
+          "failed",
         )
       }
     },
