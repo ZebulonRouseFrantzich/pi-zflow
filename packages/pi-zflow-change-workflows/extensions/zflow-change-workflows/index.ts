@@ -574,13 +574,47 @@ function buildReviewerCard(reviewer: WorkflowReviewerSnapshot, width: number): s
   return cardLines
 }
 
-function renderWorkflowCards(cards: WorkflowPhaseCardSnapshot[], width: number): string[] {
+function renderReviewerCards(reviewers: WorkflowReviewerSnapshot[], width: number): string[] {
+  const available = Math.max(32, width - 2)
+  const columns = available >= 120 ? 3 : available >= 76 ? 2 : 1
+  const gap = 2
+  const cardWidth = Math.max(32, Math.floor((available - (columns - 1) * gap) / columns))
+  const ordered = [...reviewers].sort((a, b) => a.reviewerName.localeCompare(b.reviewerName))
+  const rendered: string[] = []
+
+  for (let index = 0; index < ordered.length; index += columns) {
+    const rowCards = ordered.slice(index, index + columns).map((reviewer) => buildReviewerCard(reviewer, cardWidth))
+    const rowHeight = Math.max(...rowCards.map((card) => card.length))
+    for (let line = 0; line < rowHeight; line++) {
+      rendered.push(rowCards.map((card) => card[line] ?? " ".repeat(cardWidth)).join(" ".repeat(gap)))
+    }
+  }
+
+  return rendered
+}
+
+function renderWorkflowCards(
+  cards: WorkflowPhaseCardSnapshot[],
+  width: number,
+  reviewers: WorkflowReviewerSnapshot[] = [],
+): string[] {
   const available = Math.max(32, width - 2)
   const rendered: string[] = []
+  let reviewersRendered = false
 
   for (const card of cards) {
     if (rendered.length > 0) rendered.push("")
     rendered.push(...buildPhaseCard(card, available))
+    if (card.id === "code-review" && reviewers.length > 0) {
+      rendered.push("")
+      rendered.push(...renderReviewerCards(reviewers, available))
+      reviewersRendered = true
+    }
+  }
+
+  if (!reviewersRendered && reviewers.length > 0) {
+    if (rendered.length > 0) rendered.push("")
+    rendered.push(...renderReviewerCards(reviewers, available))
   }
 
   return rendered
@@ -654,27 +688,13 @@ function makeWorkflowProgressComponent(details: WorkflowProgressMessageDetails, 
         lines.push(truncateText(`  ${theme.fg("dim", "subagents:")} ${finished}/${snapshot.subagents.length} finished`, available))
         lines.push(...renderSubagentCards(snapshot.subagents, available))
       }
+      const reviewers = snapshot.reviewers ?? []
       if (phaseCards.length > 0) {
         lines.push(truncateText(`  ${theme.fg("dim", "workflow cards:")}`, available))
-        lines.push(...renderWorkflowCards(phaseCards, available))
-      }
-      const reviewers = snapshot.reviewers ?? []
-      if (reviewers.length > 0) {
+        lines.push(...renderWorkflowCards(phaseCards, available, reviewers))
+      } else if (reviewers.length > 0) {
         lines.push(`  ${theme.fg("dim", "reviewers:")}`)
-        lines.push(...renderWorkflowCards(
-          reviewers.map((r) => ({
-            id: r.id,
-            title: r.reviewerName,
-            status: r.status === "completed" ? "completed" : r.status === "failed" ? "failed" : "running",
-            startedAt: r.startedAt,
-            messages: [
-              `${r.agentName}`,
-              `model: ${r.model ?? "unavailable"} · thinking: ${r.thinking ?? "unavailable"}`,
-              `last: ${r.lastCommand ?? r.currentTool ?? "waiting"}`,
-            ],
-          })),
-          available,
-        ))
+        lines.push(...renderReviewerCards(reviewers, available))
       }
       return lines
     },
@@ -889,13 +909,13 @@ function createWorkflowProgressIndicator(
           id: reviewerId,
           reviewerName: update.reviewerName,
           agentName: update.agentName,
-          model: update.model,
-          thinking: update.thinking,
+          model: update.model ?? existing?.model,
+          thinking: update.thinking ?? existing?.thinking,
           status: update.status,
           startedAt: existing?.startedAt ?? Date.now(),
           finishedAt: update.status === "completed" || update.status === "failed" ? existing?.finishedAt ?? Date.now() : undefined,
-          currentTool: update.currentTool,
-          lastCommand: update.lastCommand,
+          currentTool: update.currentTool ?? existing?.currentTool,
+          lastCommand: update.lastCommand ?? existing?.lastCommand,
         }
         const updatedReviewers = [...currentReviewers]
         const existingIdx = updatedReviewers.findIndex((r) => r.id === reviewerId)
