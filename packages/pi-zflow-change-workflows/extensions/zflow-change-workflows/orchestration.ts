@@ -2713,7 +2713,7 @@ async function findDurableManifestPath(inputPath: string, cwd?: string): Promise
  *
  * Users commonly pass the durable docs path (`docs/zflow-changes/<name>/` or a
  * version directory) after reviewing the committed plan documents. The runtime
- * implementation state still lives under `.zflow/plans/<changegeId>/`, so
+ * implementation state still lives under `.zflow/plans/<changeId>/`, so
  * this helper reads the durable `manifest.json` and follows
  * `previousRuntimeChangeId` when present.
  */
@@ -6092,7 +6092,7 @@ const DEFAULT_PUBLISH_REPO_PATH = "docs/zflow-changes"
  * The artifacts are copied from:
  *   `<runtime-state-dir>/plans/{changeId}/{planVersion}/`
  * into:
- *   `<repoRoot>/{repoRelativeDir}/{changeId}/{planVersion}/
+ *   `<repoRoot>/{repoRelativeDir}/{changeId}/{planVersion}/`
  *
  * A manifest file (`manifest.json`) is also written in the target directory
  * with metadata about the change, version, source paths, and pointers to
@@ -6130,7 +6130,13 @@ export async function publishPlanArtifacts(
 
   // Resolve runtime source directory
   const runtimeStateDir = options?.runtimeStateDir ?? resolveRuntimeStateDir(cwd)
-  const srcVersionDir = options?.versionDir ?? resolvePlanVersionDir(changeId, planVersion, cwd)
+  const srcVersionDir = options?.versionDir ?? (
+    // When runtimeStateDir is overridden, derive the version dir directly
+    // instead of falling back to resolvePlanVersionDir (which ignores the override).
+    options?.runtimeStateDir
+      ? path.join(runtimeStateDir, "plans", changeId, planVersion)
+      : resolvePlanVersionDir(changeId, planVersion, cwd)
+  )
 
   // Resolve repo root
   let repoRoot: string
