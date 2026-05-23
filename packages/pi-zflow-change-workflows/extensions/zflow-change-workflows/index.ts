@@ -2754,11 +2754,8 @@ async function runWorktreeDispatchAndFinalize(
         const task = runPlan.tasks[originalIdx]!
         const rResult = retryDispatchResult.results[rIdx]!
         const mappedResult: DispatchGroupResult = {
+          ...rResult,
           agent: rResult.agent ?? task.agent,
-          rawOutput: rResult.rawOutput,
-          outputPath: rResult.outputPath,
-          ok: rResult.ok,
-          error: rResult.error,
         }
         allResults[originalIdx] = mappedResult
 
