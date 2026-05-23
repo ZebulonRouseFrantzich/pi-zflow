@@ -431,6 +431,7 @@ interface WorkflowSubagentSnapshot {
   startedAt: number
   finishedAt?: number
   lastCommand?: string
+  lastActivityAt?: number
 }
 
 interface WorkflowProgressMessageDetails {
@@ -653,6 +654,16 @@ function createWorkflowProgressIndicator(
   const heartbeatInterval = setInterval(() => {
     const current = workflowProgressSnapshots.get(id)
     if (current && typeof pi.sendMessage === "function") {
+      const now = Date.now()
+      for (const subagent of current.subagents) {
+        if (subagent.status === "running" && subagent.lastActivityAt && now - subagent.lastActivityAt > 20_000) {
+          const existing = current.subagents.findIndex((s) => s.id === subagent.id)
+          if (existing >= 0) {
+            const updated = { ...subagent, lastCommand: "thinking / waiting for model..." }
+            current.subagents[existing] = updated
+          }
+        }
+      }
       pi.sendMessage({
         customType: WORKFLOW_PROGRESS_MESSAGE_TYPE,
         content: `${command} ${changePath}`,
@@ -660,7 +671,7 @@ function createWorkflowProgressIndicator(
         details: { id, snapshot: current },
       })
     }
-  }, 15000)
+  }, 5000)
 
   return {
     update(message: string) {
@@ -691,6 +702,7 @@ function createWorkflowProgressIndicator(
           startedAt: existing?.startedAt ?? Date.now(),
           finishedAt: update.finishedAt ?? existing?.finishedAt ?? (isFinishedSubagentStatus(nextStatus) ? Date.now() : undefined),
           lastCommand: update.lastCommand ?? existing?.lastCommand,
+          lastActivityAt: Date.now(),
         }
         const existingIdx = current.subagents.findIndex((subagent) => subagent.id === subagentId)
         const updatedSubagents = [...current.subagents]
