@@ -1082,7 +1082,7 @@ export async function abandonWorkflow(
   runId: string,
   cwd?: string,
 ): Promise<{ success: boolean; message: string }> {
-  const { updateStateIndexEntry } = await import("pi-zflow-artifacts/state-index")
+  const { updateStateIndexEntry, getChangeLifecycle, upsertChangeLifecycle } = await import("pi-zflow-artifacts/state-index")
 
   try {
     // Mark run as abandoned in state index
@@ -1090,6 +1090,16 @@ export async function abandonWorkflow(
       status: "abandoned",
       metadata: { reason: "user-abandoned" },
     }, cwd)
+
+    const lifecycle = await getChangeLifecycle(changeId, cwd)
+    if (lifecycle) {
+      const unfinishedRuns = lifecycle.unfinishedRuns.filter((id) => id !== runId)
+      await upsertChangeLifecycle({
+        ...lifecycle,
+        unfinishedRuns,
+        lastPhase: unfinishedRuns.length === 0 ? "cancelled" : lifecycle.lastPhase,
+      }, cwd)
+    }
 
     return {
       success: true,
@@ -1138,6 +1148,10 @@ export function buildResumePrompt(context: ResumeContext): string {
 export interface CleanWorkflowOptions {
   /** Working directory for runtime state dir resolution. */
   cwd?: string
+  /** Optional change ID whose unfinished runs should be cleaned/abandoned. */
+  changeId?: string
+  /** If true, mark unfinished runs for changeId as abandoned. */
+  abandonUnfinished?: boolean
   /** If true, only preview what would be deleted; do not actually remove. */
   dryRun?: boolean
   /** If true, also clean orphaned artifacts not tied to known state-index entries. */
@@ -1154,6 +1168,8 @@ export interface CleanWorkflowResult {
   dryRun: boolean
   /** Cleanup candidates that were found (or processed). */
   candidates: Array<{ path: string; description: string }>
+  /** Unfinished run IDs marked as abandoned. */
+  abandonedRuns: string[]
   /** Number of artifacts cleaned. */
   cleaned: number
   /** Number of artifacts kept (skipped or errors). */
@@ -1189,6 +1205,19 @@ export async function runCleanWorkflow(
 
   const runtimeDir = resolveRuntimeStateDir(options.cwd)
   const dryRun = options.dryRun ?? false
+  const abandonedRuns: string[] = []
+
+  if (options.changeId && options.abandonUnfinished) {
+    const unfinished = await discoverUnfinishedWork(options.changeId, options.cwd)
+    if (!dryRun) {
+      for (const runId of unfinished.unfinishedRuns) {
+        const result = await abandonWorkflow(options.changeId, runId, options.cwd)
+        if (result.success) abandonedRuns.push(runId)
+      }
+    } else {
+      abandonedRuns.push(...unfinished.unfinishedRuns)
+    }
+  }
 
   // Scan for cleanup candidates
   const rawCandidates = await scanForCleanup(runtimeDir, {
@@ -1211,6 +1240,7 @@ export async function runCleanWorkflow(
       path: c.path,
       description: c.description,
     })),
+    abandonedRuns,
     cleaned: result.cleaned,
     kept: result.kept,
     errors: result.errors,

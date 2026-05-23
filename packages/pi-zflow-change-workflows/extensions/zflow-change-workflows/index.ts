@@ -1330,10 +1330,15 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       // Parse arguments
       const parts = args.trim().split(/\s+/)
       const options: CleanWorkflowOptions = {}
+      let targetInput = ""
       for (let i = 0; i < parts.length; i++) {
+        if (!parts[i]) continue
         switch (parts[i]) {
           case "--dry-run":
             options.dryRun = true
+            break
+          case "--abandon":
+            options.abandonUnfinished = true
             break
           case "--orphans":
             options.orphans = true
@@ -1349,8 +1354,24 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             }
             break
           default:
-            ctx.ui.notify(`Unknown option: ${parts[i]}`, "warning")
+            if (parts[i].startsWith("--")) {
+              ctx.ui.notify(`Unknown option: ${parts[i]}`, "warning")
+            } else {
+              targetInput = targetInput ? `${targetInput} ${parts[i]}` : parts[i]
+            }
             break
+        }
+      }
+
+      if (targetInput) {
+        const target = await resolveChangeImplementTarget(targetInput)
+        options.changeId = target.changeId
+        options.abandonUnfinished = true
+        if (target.manifestPath && target.durableChangeId && target.durableChangeId !== target.changeId) {
+          ctx.ui.notify(
+            `🧹 Resolved durable change docs "${target.durableChangeId}" to runtime plan "${target.changeId}" for cleanup.`,
+            "info",
+          )
         }
       }
 
@@ -1364,6 +1385,12 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         const result = await runCleanWorkflow(options)
 
         ctx.ui.notify(result.summary, "info")
+        if (result.abandonedRuns.length > 0) {
+          ctx.ui.notify(
+            `${options.dryRun ? "Would abandon" : "Abandoned"} ${result.abandonedRuns.length} unfinished run(s): ${result.abandonedRuns.join(", ")}`,
+            "info",
+          )
+        }
 
         if (options.dryRun) {
           ctx.ui.notify(
