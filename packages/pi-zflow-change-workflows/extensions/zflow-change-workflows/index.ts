@@ -452,6 +452,41 @@ function subagentSortKey(id: string): number {
   return match ? Number.parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER
 }
 
+function visualCharWidth(char: string): number {
+  const cp = char.codePointAt(0) ?? 0
+  if (cp >= 0x1F300 && cp <= 0x1F9FF) return 2
+  if (cp >= 0x2600 && cp <= 0x27BF) return 2
+  if (cp >= 0x2300 && cp <= 0x23FF) return 2
+  if (cp >= 0x2B00 && cp <= 0x2BFF) return 2
+  if (cp >= 0xFE00 && cp <= 0xFE0F) return 0
+  if (cp >= 0x1F000 && cp <= 0x1F02F) return 2
+  return 1
+}
+
+function visualWidth(text: string): number {
+  let w = 0
+  for (const ch of text) w += visualCharWidth(ch)
+  return w
+}
+
+function visualTruncate(value: string, maxVisualWidth: number): string {
+  let w = 0
+  let idx = 0
+  for (const ch of value) {
+    const cw = visualCharWidth(ch)
+    if (w + cw > maxVisualWidth) break
+    w += cw
+    idx++
+  }
+  return value.slice(0, idx)
+}
+
+function visualPadEnd(value: string, targetVisualWidth: number): string {
+  const currentWidth = visualWidth(value)
+  if (currentWidth >= targetVisualWidth) return value
+  return value + " ".repeat(targetVisualWidth - currentWidth)
+}
+
 function isFinishedSubagentStatus(status: string): boolean {
   const normalized = status.toLowerCase()
   return normalized === "completed" || normalized === "failed"
@@ -467,7 +502,8 @@ function subagentStatusIcon(status: string): string {
 
 function padCardLine(value: string, width: number): string {
   const innerWidth = Math.max(1, width - 4)
-  return `│ ${truncateText(value, innerWidth).padEnd(innerWidth)} │`
+  const truncated = visualTruncate(value, innerWidth)
+  return `│ ${visualPadEnd(truncated, innerWidth)} │`
 }
 
 function buildSubagentCard(subagent: WorkflowSubagentSnapshot, width: number): string[] {
@@ -477,7 +513,8 @@ function buildSubagentCard(subagent: WorkflowSubagentSnapshot, width: number): s
   const thinking = subagent.thinking ?? "unavailable"
   return [
     `┌${"─".repeat(Math.max(1, width - 2))}┐`,
-    padCardLine(`${subagentStatusIcon(subagent.status)} ${subagent.id} — ${title}`, width),
+    padCardLine(`${subagentStatusIcon(subagent.status)} ${title}`, width),
+    padCardLine(`${subagent.id}`, width),
     padCardLine(`${subagent.status} · ${elapsed}`, width),
     padCardLine(`${subagent.agent} · ${model} · ${thinking}`, width),
     padCardLine(`last: ${subagent.lastCommand ?? "starting"}`, width),
@@ -644,12 +681,16 @@ function createWorkflowProgressIndicator(
           finishedAt: update.finishedAt ?? existing?.finishedAt ?? (isFinishedSubagentStatus(nextStatus) ? Date.now() : undefined),
           lastCommand: update.lastCommand ?? existing?.lastCommand,
         }
+        const existingIdx = current.subagents.findIndex((subagent) => subagent.id === subagentId)
+        const updatedSubagents = [...current.subagents]
+        if (existingIdx >= 0) {
+          updatedSubagents[existingIdx] = nextSubagent
+        } else {
+          updatedSubagents.push(nextSubagent)
+        }
         workflowProgressSnapshots.set(id, {
           ...current,
-          subagents: [
-            ...current.subagents.filter((subagent) => subagent.id !== subagentId),
-            nextSubagent,
-          ],
+          subagents: updatedSubagents,
         })
       }
       render()
