@@ -5665,3 +5665,156 @@ export async function runImplementationPostStartSequence(
     nextSteps: [],
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Durable plan artifact publishing
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Mapping of artifact names to their canonical file names.
+ */
+const PUBLISH_ARTIFACT_FILES: Record<string, string> = {
+  design: "design.md",
+  "execution-groups": "execution-groups.md",
+  standards: "standards.md",
+  verification: "verification.md",
+}
+
+/**
+ * Result of publishing plan artifacts to the durable repo path.
+ */
+export interface PublishPlanArtifactsResult {
+  /** The change identifier. */
+  changeId: string
+  /** The plan version that was published. */
+  planVersion: string
+  /** Absolute path to the durable directory under the repo. */
+  durableDir: string
+  /** Per-artifact mapping: durable file path for each published artifact. */
+  publishedArtifacts: Record<string, string>
+  /** Absolute path to the generated manifest file. */
+  manifestPath: string
+  /** Number of artifacts successfully published. */
+  artifactCount: number
+  /** Any errors encountered (non-fatal). */
+  errors: string[]
+}
+
+/**
+ * Default relative path under the repo root for durable change documents.
+ */
+const DEFAULT_PUBLISH_REPO_PATH = "docs/zflow-changes"
+
+/**
+ * Publish plan artifacts from the runtime state directory into a durable
+ * repo-visible path so they can be reviewed, committed, and shared.
+ *
+ * The artifacts are copied from:
+ *   `<runtime-state-dir>/plans/{changeId}/{planVersion}/`
+ * into:
+ *   `<repoRoot>/{repoRelativeDir}/{changeId}/{planVersion}/
+ *
+ * A manifest file (`manifest.json`) is also written in the target directory
+ * with metadata about the change, version, source paths, and pointers to
+ * runtime-only artifacts.
+ *
+ * @param changeId - Unique change identifier.
+ * @param planVersion - Plan version label (e.g. "v1").
+ * @param options
+ * @param options.cwd - Working directory (defaults to `process.cwd()`).
+ * @param options.repoRelativeDir - Relative path under repo root for durable docs
+ *   (default: `"docs/zflow-changes"`).
+ * @param options.versionDir - Explicit version directory override (auto-resolved
+ *   when omitted).
+ * @param options.runtimeStateDir - Explicit runtime state dir override.
+ * @returns A structured publish result with durable paths.
+ */
+export async function publishPlanArtifacts(
+  changeId: string,
+  planVersion: string,
+  options?: {
+    cwd?: string
+    repoRelativeDir?: string
+    versionDir?: string
+    runtimeStateDir?: string
+    reviewFindingsPath?: string
+  },
+): Promise<PublishPlanArtifactsResult> {
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+  const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+  const { resolvePlanVersionDir } = await import("pi-zflow-artifacts/artifact-paths")
+
+  const cwd = options?.cwd ?? process.cwd()
+  const repoRelativeDir = options?.repoRelativeDir ?? DEFAULT_PUBLISH_REPO_PATH
+
+  // Resolve runtime source directory
+  const runtimeStateDir = options?.runtimeStateDir ?? resolveRuntimeStateDir(cwd)
+  const srcVersionDir = options?.versionDir ?? resolvePlanVersionDir(changeId, planVersion, cwd)
+
+  // Resolve repo root
+  let repoRoot: string
+  try {
+    const { execSync } = await import("node:child_process")
+    repoRoot = execSync("git rev-parse --show-toplevel", {
+      cwd,
+      encoding: "utf-8",
+      timeout: 5_000,
+    }).trim()
+  } catch {
+    repoRoot = cwd
+  }
+
+  // Build durable target path
+  const durableDir = path.resolve(repoRoot, repoRelativeDir, changeId, planVersion)
+
+  // Published artifact paths
+  const publishedArtifacts: Record<string, string> = {}
+  const errors: string[] = []
+
+  // Create target directory
+  await fs.mkdir(durableDir, { recursive: true })
+
+  // Copy each artifact
+  for (const [artifactKey, fileName] of Object.entries(PUBLISH_ARTIFACT_FILES)) {
+    const srcPath = path.join(srcVersionDir, fileName)
+    const destPath = path.join(durableDir, fileName)
+
+    try {
+      await fs.access(srcPath)
+      await fs.copyFile(srcPath, destPath)
+      publishedArtifacts[artifactKey] = destPath
+    } catch {
+      errors.push(`Artifact "${artifactKey}" not found at source: ${srcPath}`)
+    }
+  }
+
+  // Write manifest.json
+  const runtimePlansDir = path.join(runtimeStateDir, "plans")
+  const manifestPath = path.join(durableDir, "manifest.json")
+
+  const manifest = {
+    changeId,
+    planVersion,
+    generatedAt: new Date().toISOString(),
+    sourceRuntimePath: path.join(runtimePlansDir, changeId),
+    sourceArtifacts: Object.fromEntries(
+      Object.entries(PUBLISH_ARTIFACT_FILES).map(([key, fn]) => [key, path.join(srcVersionDir, fn)]),
+    ),
+    publishedArtifacts,
+    note: "Review findings, logs, and transient runtime state remain under .git/pi-zflow/. This directory contains durable plan documents intended for review and commit.",
+    reviewFindingsRef: options?.reviewFindingsPath ?? path.join(srcVersionDir, "plan-review-findings.md"),
+  }
+
+  await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf-8")
+
+  return {
+    changeId,
+    planVersion,
+    durableDir,
+    publishedArtifacts,
+    manifestPath,
+    artifactCount: Object.keys(publishedArtifacts).length,
+    errors,
+  }
+}
