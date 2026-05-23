@@ -46,6 +46,32 @@ describe("createPiModelRegistryAdapter", () => {
     assert.equal(model!.maxOutput, 8192)
   })
 
+  it("maps model thinkingLevelMap to the highest supported thinking capability", () => {
+    const registry = createPiModelRegistryAdapter({
+      getAll() {
+        return [
+          {
+            provider: "opencode-go",
+            id: "deepseek-v4-flash",
+            reasoning: true,
+            thinkingLevelMap: {
+              high: "high",
+              xhigh: "max",
+            },
+          },
+        ]
+      },
+      hasConfiguredAuth() {
+        return true
+      },
+    })
+
+    assert.equal(
+      registry.getModel("opencode-go/deepseek-v4-flash")?.thinkingCapability,
+      "xhigh",
+    )
+  })
+
   it("uses getAllModels for fingerprints so auth and provider config changes invalidate cache", () => {
     const fp1 = computeEnvironmentFingerprintFromRegistry(
       createPiModelRegistryAdapter(makePiRegistry({ authenticated: true })),

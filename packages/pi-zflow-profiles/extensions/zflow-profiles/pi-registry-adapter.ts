@@ -48,6 +48,7 @@ export interface PiModelRegistryLike {
     input?: string[]
     contextWindow?: number
     maxTokens?: number
+    thinkingLevelMap?: Record<string, string | null>
     [key: string]: unknown
   }>
 
@@ -77,6 +78,20 @@ export interface PiModelRegistryLike {
  * @param piRegistry - The Pi runtime model registry (from ctx.modelRegistry).
  * @returns A local `ModelRegistry` suitable for lane resolution.
  */
+function resolveThinkingCapability(piModel: PiModelRegistryLike["getAll"] extends () => Array<infer T> ? T : never): ModelInfo["thinkingCapability"] {
+  if (!piModel.reasoning) return "medium"
+
+  const supportedLevels = ["xhigh", "high", "medium", "low", "off"] as const
+  const map = piModel.thinkingLevelMap
+  if (map && typeof map === "object") {
+    for (const level of supportedLevels) {
+      if (map[level] !== null) return level
+    }
+  }
+
+  return "high"
+}
+
 export function createPiModelRegistryAdapter(
   piRegistry: PiModelRegistryLike,
 ): ModelRegistry {
@@ -98,7 +113,7 @@ export function createPiModelRegistryAdapter(
       // future explicit `supportsTools: false` field is present.
       supportsTools: (piModel as { supportsTools?: boolean }).supportsTools !== false,
       supportsText: piModel.input?.includes("text") ?? true,
-      thinkingCapability: piModel.reasoning ? "high" : "medium",
+      thinkingCapability: resolveThinkingCapability(piModel),
       authenticated,
       contextWindow: piModel.contextWindow,
       maxOutput: piModel.maxTokens,
