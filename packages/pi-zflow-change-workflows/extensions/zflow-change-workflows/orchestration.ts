@@ -106,21 +106,35 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
   const groups: import("./ownership-validator.js").ExecutionGroup[] = []
   const lines = mdContent.split("\n")
   let currentGroup: Partial<import("./ownership-validator.js").ExecutionGroup> | null = null
+  let collectingFiles = false
+  let collectingVerification = false
+
+  const normalizeDependency = (dependency: string): string => {
+    const trimmed = dependency.trim().replace(/^`|`$/g, "").replace(/^\[|\]$/g, "").trim()
+    if (!trimmed) return ""
+    const gMatch = trimmed.match(/^G(\d+)$/i)
+    if (gMatch) return `group-${gMatch[1]}`
+    return trimmed
+  }
+
+  const pushCurrentGroup = (): void => {
+    if (!currentGroup?.id) return
+    groups.push({
+      id: currentGroup.id,
+      files: currentGroup.files ?? [],
+      dependencies: currentGroup.dependencies ?? [],
+      agent: currentGroup.agent ?? "zflow.implement-routine",
+      parallelizable: currentGroup.parallelizable ?? true,
+      taskPrompt: currentGroup.taskPrompt ?? "",
+      scopedVerification: currentGroup.scopedVerification,
+    })
+  }
 
   for (const line of lines) {
-    const groupMatch = line.match(/^## Group\s+(\d+):\s+(.+)$/i)
+    const groupMatch = line.match(/^## Group\s+(\d+):\s+(.+)$/i) ??
+      line.match(/^#{2,3}\s+G(\d+)\s+[—-]\s+(.+)$/i)
     if (groupMatch) {
-      if (currentGroup?.id) {
-        groups.push({
-          id: currentGroup.id,
-          files: currentGroup.files ?? [],
-          dependencies: currentGroup.dependencies ?? [],
-          agent: currentGroup.agent ?? "zflow.implement-routine",
-          parallelizable: currentGroup.parallelizable ?? true,
-          taskPrompt: currentGroup.taskPrompt ?? "",
-          scopedVerification: currentGroup.scopedVerification,
-        })
-      }
+      pushCurrentGroup()
       currentGroup = {
         id: `group-${groupMatch[1]}`,
         files: [],
@@ -129,15 +143,39 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
         taskPrompt: groupMatch[2],
         parallelizable: true,
       }
+      collectingFiles = false
+      collectingVerification = false
       continue
     }
 
     if (!currentGroup) continue
 
-    const filesMatch = line.match(/-\s+\*\*Files?:\*\*\s+(.+)/i)
+    if (/^#{1,6}\s+/.test(line)) {
+      collectingFiles = false
+      collectingVerification = false
+    }
+
+    const filesHeaderMatch = line.match(/-\s+\*\*Files?(?:\/paths)?:\*\*\s*$/i)
+    if (filesHeaderMatch) {
+      collectingFiles = true
+      collectingVerification = false
+      continue
+    }
+
+    const filesMatch = line.match(/-\s+\*\*Files?(?:\/paths)?:\*\*\s+(.+)/i)
     if (filesMatch) {
       currentGroup.files = filesMatch[1].split(",").map((f: string) => f.trim()).filter(Boolean)
+      collectingFiles = false
       continue
+    }
+
+    if (collectingFiles) {
+      const fileItemMatch = line.match(/^\s+-\s+`?([^`\n]+?)`?\s*$/)
+      if (fileItemMatch && !fileItemMatch[1].startsWith("**")) {
+        currentGroup.files = [...(currentGroup.files ?? []), fileItemMatch[1].trim()]
+        continue
+      }
+      if (line.trim().startsWith("- **")) collectingFiles = false
     }
 
     const agentMatch = line.match(/-\s+\*\*Agent:\*\*\s+(.+)/i)
@@ -146,16 +184,50 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
       continue
     }
 
-    const depMatch = line.match(/-\s+\*\*Dependencies:\*\*\s+(.+)/i)
-    if (depMatch) {
-      currentGroup.dependencies = depMatch[1].split(",").map((d: string) => d.trim()).filter(Boolean)
+    const ownerMatch = line.match(/-\s+\*\*Owner:\*\*\s+`?([^`\n]+)`?/i)
+    if (ownerMatch) {
+      currentGroup.agent = ownerMatch[1].trim()
       continue
     }
 
-    const verifMatch = line.match(/-\s+\*\*Verification:\*\*\s+(.+)/i)
+    const taskMatch = line.match(/-\s+\*\*Task:\*\*\s+(.+)/i)
+    if (taskMatch) {
+      currentGroup.taskPrompt = taskMatch[1].trim()
+      continue
+    }
+
+    const depMatch = line.match(/-\s+\*\*Dependencies:\*\*\s+(.+)/i)
+    if (depMatch) {
+      currentGroup.dependencies = depMatch[1]
+        .replace(/^`|`$/g, "")
+        .replace(/^\[|\]$/g, "")
+        .split(",")
+        .map(normalizeDependency)
+        .filter(Boolean)
+      continue
+    }
+
+    const verifHeaderMatch = line.match(/-\s+\*\*Scoped verification:\*\*\s*$/i)
+    if (verifHeaderMatch) {
+      collectingVerification = true
+      collectingFiles = false
+      continue
+    }
+
+    const verifMatch = line.match(/-\s+\*\*(?:Verification|Scoped verification):\*\*\s+(.+)/i)
     if (verifMatch) {
       currentGroup.scopedVerification = verifMatch[1].trim()
+      collectingVerification = false
       continue
+    }
+
+    if (collectingVerification) {
+      const verificationItemMatch = line.match(/^\s+-\s+(.+)$/)
+      if (verificationItemMatch && !verificationItemMatch[1].startsWith("**")) {
+        currentGroup.scopedVerification = [currentGroup.scopedVerification, verificationItemMatch[1].trim()].filter(Boolean).join("; ")
+        continue
+      }
+      if (line.trim().startsWith("- **")) collectingVerification = false
     }
 
     const parallelMatch = line.match(/-\s+\*\*Parallelizable:\*\*\s+(.+)/i)
@@ -167,17 +239,7 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
   }
 
   // Push the last group
-  if (currentGroup?.id) {
-    groups.push({
-      id: currentGroup.id,
-      files: currentGroup.files ?? [],
-      dependencies: currentGroup.dependencies ?? [],
-      agent: currentGroup.agent ?? "zflow.implement-routine",
-      parallelizable: currentGroup.parallelizable ?? true,
-      taskPrompt: currentGroup.taskPrompt ?? "",
-      scopedVerification: currentGroup.scopedVerification,
-    })
-  }
+  pushCurrentGroup()
 
   return groups
 }
