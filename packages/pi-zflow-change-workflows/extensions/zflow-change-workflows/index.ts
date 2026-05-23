@@ -525,86 +525,214 @@ function subagentStatusIcon(status: string): string {
   return "▶️"
 }
 
-function padCardLine(value: string, width: number): string {
-  const innerWidth = Math.max(1, width - 4)
-  const truncated = visualTruncate(value, innerWidth)
-  return `│ ${visualPadEnd(truncated, innerWidth)} │`
+/**
+ * View model for a single zflow card.
+ * Pure data — the card renderer consumes this to produce themed lines.
+ */
+interface ZflowCardViewModel {
+  /** Unique card identifier. */
+  id: string
+  /** Primary heading line (e.g. "✅ Code Review"). */
+  title: string
+  /** Status for coloring. */
+  status: "queued" | "running" | "completed" | "failed"
+  /** First metadata line — the status + elapsed string. */
+  statusLine: string
+  /** Additional metadata lines (model, thinking, agent, etc.). */
+  metaLines: string[]
+  /** Body lines — bullet messages or detail entries. */
+  bodyLines: string[]
+  /** Raw thinking level string if known ("off", "low", …, "xhigh"). */
+  thinking?: string
 }
 
-function statusColor(
-  status: string,
-  theme: any,
-  text: string,
-): string {
-  const s = status.toLowerCase()
-  if (s === "completed") return theme.fg("success", text)
-  if (s === "failed") return theme.fg("error", text)
-  if (s === "queued") return theme.fg("warning", text)
-  return theme.fg("accent", text)
+/**
+ * Apply the Pi theme's thinking level color to a raw thinking string.
+ * Falls back to dim when unknown or unavailable.
+ */
+function colorizeThinking(thinking: string | undefined, theme: any): string {
+  if (!thinking) return theme.fg("dim", "unavailable")
+  const t = thinking.toLowerCase()
+  const colorMap: Record<string, string> = {
+    off: "thinkingOff",
+    low: "thinkingLow",
+    medium: "thinkingMedium",
+    high: "thinkingHigh",
+    xhigh: "thinkingXhigh",
+  }
+  const colorKey = colorMap[t]
+  if (colorKey) return theme.fg(colorKey, thinking)
+  return theme.fg("dim", thinking)
 }
 
-function borderColor(theme: any, text: string): string {
+function cardBorderColor(status: ZflowCardViewModel["status"], theme: any, text: string): string {
+  if (status === "failed") return theme.fg("error", text)
+  if (status === "running") return theme.fg("borderAccent", text)
+  if (status === "queued") return theme.fg("borderMuted", text)
   return theme.fg("border", text)
 }
 
-function dimColor(theme: any, text: string): string {
-  return theme.fg("dim", text)
+function statusTextColor(status: ZflowCardViewModel["status"], theme: any, text: string): string {
+  if (status === "completed") return theme.fg("success", text)
+  if (status === "failed") return theme.fg("error", text)
+  if (status === "queued") return theme.fg("warning", text)
+  return theme.fg("accent", text)
 }
 
-function themePadLine(value: string, width: number): string {
+function cardContentLine(rawValue: string, width: number, colorize: (text: string) => string): string {
   const innerWidth = Math.max(1, width - 4)
-  const truncated = visualTruncate(value, innerWidth)
-  return `│ ${visualPadEnd(truncated, innerWidth)} │`
+  const raw = visualPadEnd(visualTruncate(rawValue, innerWidth), innerWidth)
+  return `│ ${colorize(raw)} │`
 }
 
-function buildSubagentCard(subagent: WorkflowSubagentSnapshot, width: number, theme: any): string[] {
+function colorizeMetaLine(rawMeta: string, theme: any): string {
+  const thinkingIdx = rawMeta.lastIndexOf("thinking:")
+  if (thinkingIdx === -1) return theme.fg("dim", rawMeta)
+
+  const prefix = rawMeta.slice(0, thinkingIdx)
+  const label = "thinking:"
+  const rest = rawMeta.slice(thinkingIdx + label.length)
+  const leading = rest.match(/^\s*/)?.[0] ?? ""
+  const valueAndSuffix = rest.slice(leading.length)
+  const value = valueAndSuffix.split(/\s+/)[0] ?? valueAndSuffix
+  const suffix = valueAndSuffix.slice(value.length)
+
+  return `${theme.fg("dim", prefix)}${theme.fg("dim", label)}${theme.fg("dim", leading)}${colorizeThinking(value, theme)}${theme.fg("dim", suffix)}`
+}
+
+/**
+ * Render a single zflow card into themed ANSI lines.
+ *
+ * This is the unified card renderer. Every zflow card (subagent/phase/reviewer)
+ * is modelled the same way via ZflowCardViewModel and rendered here. It follows
+ * the Pi TUI Component contract through ZflowCard.render(width): raw content is
+ * width-normalized before native theme colors are applied, so ANSI styles do not
+ * corrupt layout calculations.
+ */
+function buildCardLines(model: ZflowCardViewModel, theme: any, width: number): string[] {
+  const safeWidth = Math.max(8, width)
+  const borderTop = `┌${"─".repeat(Math.max(1, safeWidth - 2))}┐`
+  const borderBot = `└${"─".repeat(Math.max(1, safeWidth - 2))}┘`
+
+  const lines = [cardBorderColor(model.status, theme, borderTop)]
+  lines.push(cardContentLine(model.title, safeWidth, (text) => statusTextColor(model.status, theme, text)))
+  lines.push(cardContentLine(model.statusLine, safeWidth, (text) => statusTextColor(model.status, theme, text)))
+
+  for (const meta of model.metaLines) {
+    lines.push(cardContentLine(meta, safeWidth, (text) => colorizeMetaLine(text, theme)))
+  }
+
+  for (const body of model.bodyLines) {
+    lines.push(cardContentLine(body, safeWidth, (text) => theme.fg("dim", text)))
+  }
+
+  lines.push(cardBorderColor(model.status, theme, borderBot))
+  return lines
+}
+
+/**
+ * View-model adapters for each card kind.
+ */
+function toSubagentCardModel(subagent: WorkflowSubagentSnapshot): ZflowCardViewModel {
   const elapsed = formatElapsed((subagent.finishedAt ?? Date.now()) - subagent.startedAt)
-  const title = subagent.title ?? "untitled group"
   const model = subagent.model ?? "unavailable"
   const thinking = subagent.thinking ?? "unavailable"
-  const border = `┌${"─".repeat(Math.max(1, width - 2))}┐`
-  const borderEnd = `└${"─".repeat(Math.max(1, width - 2))}┘`
-  return [
-    borderColor(theme, border),
-    themePadLine(`${subagentStatusIcon(subagent.status)} ${title}`, width),
-    themePadLine(dimColor(theme, subagent.id), width),
-    themePadLine(statusColor(subagent.status, theme, `${subagent.status} · ${elapsed}`), width),
-    themePadLine(dimColor(theme, `${subagent.agent} · ${model} · ${thinking}`), width),
-    themePadLine(dimColor(theme, `last: ${subagent.lastCommand ?? "starting"}`), width),
-    borderColor(theme, borderEnd),
-  ]
+  const status = mapSubagentStatus(subagent.status)
+  return {
+    id: subagent.id,
+    title: `${subagentStatusIcon(subagent.status)} ${subagent.title ?? "untitled group"}`,
+    status,
+    statusLine: `${subagent.status} · ${elapsed}`,
+    metaLines: [
+      subagent.id,
+      `${subagent.agent} · ${model} · ${thinking}`,
+    ],
+    bodyLines: [`last: ${subagent.lastCommand ?? "starting"}`],
+    thinking: subagent.thinking,
+  }
 }
 
-function buildPhaseCard(card: WorkflowPhaseCardSnapshot, width: number, theme: any): string[] {
+function toPhaseCardModel(card: WorkflowPhaseCardSnapshot): ZflowCardViewModel {
   const elapsed = formatElapsed((card.finishedAt ?? Date.now()) - card.startedAt)
-  const messages = card.messages.slice(-4)
-  const border = `┌${"─".repeat(Math.max(1, width - 2))}┐`
-  const borderEnd = `└${"─".repeat(Math.max(1, width - 2))}┘`
-  return [
-    borderColor(theme, border),
-    themePadLine(`${subagentStatusIcon(card.status)} ${card.title}`, width),
-    themePadLine(statusColor(card.status, theme, `${card.status} · ${elapsed}`), width),
-    ...messages.map((message) => themePadLine(dimColor(theme, `• ${message}`), width)),
-    borderColor(theme, borderEnd),
-  ]
+  return {
+    id: card.id,
+    title: `${subagentStatusIcon(card.status)} ${card.title}`,
+    status: card.status,
+    statusLine: `${card.status} · ${elapsed}`,
+    metaLines: [],
+    bodyLines: card.messages.slice(-4).map((m) => `• ${m}`),
+  }
 }
 
-function buildReviewerCard(reviewer: WorkflowReviewerSnapshot, width: number, theme: any): string[] {
+function toReviewerCardModel(reviewer: WorkflowReviewerSnapshot): ZflowCardViewModel {
   const model = reviewer.model ?? "unavailable"
   const thinking = reviewer.thinking ?? "unavailable"
-  const icon = reviewer.status === "completed" ? "✅" : reviewer.status === "failed" ? "❌" : reviewer.status === "queued" ? "⏳" : "▶️"
-  const border = `┌${"─".repeat(Math.max(1, width - 2))}┐`
-  const borderEnd = `└${"─".repeat(Math.max(1, width - 2))}┘`
-  return [
-    borderColor(theme, border),
-    themePadLine(`${icon} ${reviewer.reviewerName}`, width),
-    themePadLine(statusColor(reviewer.status, theme, reviewer.status), width),
-    themePadLine(dimColor(theme, `${model} · ${thinking}`), width),
-    themePadLine(dimColor(theme, `last: ${reviewer.lastCommand ?? reviewer.currentTool ?? "starting"}`), width),
-    borderColor(theme, borderEnd),
-  ]
+  const status = reviewer.status
+  const icon = status === "completed" ? "✅" : status === "failed" ? "❌" : status === "queued" ? "⏳" : "▶️"
+  return {
+    id: reviewer.id,
+    title: `${icon} ${reviewer.reviewerName}`,
+    status,
+    statusLine: status,
+    metaLines: [
+      `${reviewer.agentName}`,
+      `model: ${model} · thinking: ${thinking}`,
+    ],
+    bodyLines: [`last: ${reviewer.lastCommand ?? reviewer.currentTool ?? "starting"}`],
+    thinking: reviewer.thinking,
+  }
 }
 
+function mapSubagentStatus(status: string): "queued" | "running" | "completed" | "failed" {
+  const s = status.toLowerCase()
+  if (s === "completed") return "completed"
+  if (s === "failed") return "failed"
+  if (s === "queued") return "queued"
+  return "running"
+}
+
+/**
+ * Component-style zflow card.
+ *
+ * Implements the Pi TUI Component interface (render + invalidate) so it can
+ * be used directly in Pi's TUI framework. Internally caches rendered output
+ * for the same width to avoid recomputation on every render cycle.
+ */
+class ZflowCard {
+  private model: ZflowCardViewModel
+  private theme: any
+  private cachedWidth?: number
+  private cachedLines?: string[]
+
+  constructor(model: ZflowCardViewModel, theme: any) {
+    this.model = model
+    this.theme = theme
+  }
+
+  /** Update the card's content. Invalidates cache. */
+  setModel(model: ZflowCardViewModel): void {
+    this.model = model
+    this.invalidate()
+  }
+
+  invalidate(): void {
+    this.cachedWidth = undefined
+    this.cachedLines = undefined
+  }
+
+  render(width: number): string[] {
+    if (this.cachedLines && this.cachedWidth === width) {
+      return this.cachedLines
+    }
+    this.cachedWidth = width
+    this.cachedLines = buildCardLines(this.model, this.theme, width)
+    return this.cachedLines
+  }
+}
+
+/**
+ * Render a grid of reviewer cards.
+ */
 function renderReviewerCards(reviewers: WorkflowReviewerSnapshot[], width: number, theme: any): string[] {
   const available = Math.max(32, width - 2)
   const columns = available >= 120 ? 3 : available >= 76 ? 2 : 1
@@ -614,7 +742,7 @@ function renderReviewerCards(reviewers: WorkflowReviewerSnapshot[], width: numbe
   const rendered: string[] = []
 
   for (let index = 0; index < ordered.length; index += columns) {
-    const rowCards = ordered.slice(index, index + columns).map((reviewer) => buildReviewerCard(reviewer, cardWidth, theme))
+    const rowCards = ordered.slice(index, index + columns).map((r) => new ZflowCard(toReviewerCardModel(r), theme).render(cardWidth))
     const rowHeight = Math.max(...rowCards.map((card) => card.length))
     for (let line = 0; line < rowHeight; line++) {
       rendered.push(rowCards.map((card) => card[line] ?? " ".repeat(cardWidth)).join(" ".repeat(gap)))
@@ -624,6 +752,10 @@ function renderReviewerCards(reviewers: WorkflowReviewerSnapshot[], width: numbe
   return rendered
 }
 
+/**
+ * Render a vertical stack of phase workflow cards, with reviewer cards
+ * inserted immediately after the Code Review phase card.
+ */
 function renderWorkflowCards(
   cards: WorkflowPhaseCardSnapshot[],
   width: number,
@@ -636,7 +768,7 @@ function renderWorkflowCards(
 
   for (const card of cards) {
     if (rendered.length > 0) rendered.push("")
-    rendered.push(...buildPhaseCard(card, available, theme))
+    rendered.push(...new ZflowCard(toPhaseCardModel(card), theme).render(available))
     if (card.id === "code-review" && reviewers.length > 0) {
       rendered.push("")
       rendered.push(...renderReviewerCards(reviewers, available, theme))
@@ -652,6 +784,9 @@ function renderWorkflowCards(
   return rendered
 }
 
+/**
+ * Render a grid of subagent cards.
+ */
 function renderSubagentCards(subagents: WorkflowSubagentSnapshot[], width: number, theme: any): string[] {
   const available = Math.max(32, width - 2)
   const columns = available >= 120 ? 3 : available >= 76 ? 2 : 1
@@ -661,7 +796,7 @@ function renderSubagentCards(subagents: WorkflowSubagentSnapshot[], width: numbe
   const rendered: string[] = []
 
   for (let index = 0; index < ordered.length; index += columns) {
-    const rowCards = ordered.slice(index, index + columns).map((subagent) => buildSubagentCard(subagent, cardWidth, theme))
+    const rowCards = ordered.slice(index, index + columns).map((sa) => new ZflowCard(toSubagentCardModel(sa), theme).render(cardWidth))
     const rowHeight = Math.max(...rowCards.map((card) => card.length))
     for (let line = 0; line < rowHeight; line++) {
       rendered.push(rowCards.map((card) => card[line] ?? " ".repeat(cardWidth)).join(" ".repeat(gap)))
