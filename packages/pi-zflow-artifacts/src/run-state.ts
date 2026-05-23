@@ -31,6 +31,7 @@ export type RunPhase =
   | "applying"
   | "completed"
   | "failed"
+  | "partial"
   | "apply-back-conflicted"
   | "drift-pending"
   | "verification-failed"

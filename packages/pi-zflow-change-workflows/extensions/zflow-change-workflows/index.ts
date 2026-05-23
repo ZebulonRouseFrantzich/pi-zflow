@@ -1526,6 +1526,309 @@ const IMPLEMENT_GROUP_MAX_RETRIES = 1
 
 type DispatchGroupResult = Awaited<ReturnType<DispatchService["runParallel"]>>["results"][number]
 
+// ── Group status ledger types and helpers ─────────────────────────
+
+/**
+ * Status for a single group in a partial/resumable run.
+ */
+export type GroupLedgerStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "retrying"
+  | "pending"
+  | "applied"
+  | "skipped"
+
+/**
+ * Semantic coupling metadata for a group.
+ *
+ * Describes how this group relates to other groups so users/automation
+ * can assess whether applying successful groups independently is safe.
+ */
+export interface SemanticCoupling {
+  /** Groups that must complete before this one. */
+  dependsOnGroups: string[]
+  /** Groups that this group blocks. */
+  blocksGroups: string[]
+  /** Files shared with other groups (potential conflict points). */
+  sharedFiles: string[]
+  /** Explanatory notes, e.g. "Coupling inferred from plan dependencies and file overlap. Not proof of independence." */
+  notes: string[]
+}
+
+/**
+ * Per-group entry in the durable group status ledger.
+ *
+ * Embedded in run.json metadata (`groupLedger` key). Updated
+ * throughout the implementation workflow lifecycle.
+ */
+export interface GroupStatusEntry {
+  /** Group identifier (e.g. "group-1"). */
+  groupId: string
+  /** Current status. */
+  status: GroupLedgerStatus
+  /** Agent assigned to this group. */
+  agent: string
+  /** Task prompt text for the group. */
+  taskPrompt: string
+  /** Files this group claims. */
+  files: string[]
+  /** Group dependencies from plan. */
+  dependencies: string[]
+  /** Semantic coupling inferred from plan metadata. */
+  semanticCoupling: SemanticCoupling
+  /** Result of scoped verification (if known). */
+  scopedVerification?: {
+    status: "pass" | "fail" | "skipped" | "missing"
+    command?: string
+    output?: string
+  }
+  /** Path to the patch artifact (if produced and captured). */
+  patchPath?: string
+  /** Absolute path to the worktree (if one was created). */
+  worktreePath?: string
+  /** Files changed by this group (if captured). */
+  changedFiles?: string[]
+  /** Number of retry attempts so far. */
+  retryCount: number
+  /** Error message if status is "failed". */
+  error?: string
+  /** Categorization of failure for retry policy. */
+  failureKind?: "retryable" | "blocker"
+  /** Whether this group's patch has been applied back to the primary. */
+  appliedToPrimary: boolean
+  /** ISO timestamp of last state change. */
+  updatedAt: string
+}
+
+/**
+ * Durable group status ledger key in run.json metadata.
+ */
+const GROUP_LEDGER_META_KEY = "groupLedger" as const
+
+/**
+ * Infer semantic coupling for a group from execution group data.
+ *
+ * Computes dependencies (explicit), reverse dependencies (groups that depend on this one),
+ * and shared files (files owned by this group that also appear in other groups).
+ */
+function inferSemanticCoupling(
+  groupId: string,
+  allGroups: ReadonlyArray<{ id: string; files: string[]; dependencies: string[] }>,
+): SemanticCoupling {
+  const group = allGroups.find((g) => g.id === groupId)
+  const dependsOnGroups = group?.dependencies ?? []
+
+  // Groups that list this group as a dependency
+  const blocksGroups = allGroups
+    .filter((g) => g.dependencies.includes(groupId))
+    .map((g) => g.id)
+
+  // Shared files: files this group owns that also appear in other groups
+  const groupFiles = new Set(group?.files ?? [])
+  const sharedFiles = new Set<string>()
+  for (const other of allGroups) {
+    if (other.id === groupId) continue
+    for (const file of other.files) {
+      if (groupFiles.has(file)) sharedFiles.add(file)
+    }
+  }
+
+  const notes: string[] = []
+  if (dependsOnGroups.length > 0 || blocksGroups.length > 0) {
+    notes.push("Dependency relationships are defined in the execution plan.")
+  }
+  if (sharedFiles.size > 0) {
+    notes.push(`Shared files with other groups: ${[...sharedFiles].join(", ")}.`)
+  }
+  notes.push("Coupling inferred from plan dependencies and file overlap. Not proof of independence.")
+
+  return {
+    dependsOnGroups,
+    blocksGroups,
+    sharedFiles: [...sharedFiles],
+    notes,
+  }
+}
+
+/**
+ * Build a durable group status ledger from execution group metadata.
+ *
+ * Creates the initial state and infers semantic coupling for every group.
+ * If an existing run.json exists (for resume), preserves previous
+ * non-failed group states.
+ */
+function buildGroupLedger(
+  groups: ReadonlyArray<{
+    id: string
+    files: string[]
+    dependencies: string[]
+    agent?: string
+    taskPrompt?: string
+    scopedVerification?: string
+  }>,
+  existingLedger?: Record<string, GroupStatusEntry>,
+): Record<string, GroupStatusEntry> {
+  const ledger: Record<string, GroupStatusEntry> = {}
+
+  for (const group of groups) {
+    const existing = existingLedger?.[group.id]
+    const newStatus: GroupLedgerStatus = existing
+      ? existing.status === "succeeded" || existing.status === "applied" || existing.status === "skipped"
+        ? existing.status
+        : "queued"
+      : "queued"
+
+    ledger[group.id] = {
+      groupId: group.id,
+      status: newStatus,
+      agent: group.agent ?? "zflow.implement-routine",
+      taskPrompt: group.taskPrompt ?? "",
+      files: [...group.files],
+      dependencies: [...group.dependencies],
+      semanticCoupling: inferSemanticCoupling(group.id, groups),
+      scopedVerification: existing?.scopedVerification,
+      patchPath: existing?.patchPath,
+      worktreePath: existing?.worktreePath,
+      changedFiles: existing?.changedFiles,
+      retryCount: existing?.retryCount ?? 0,
+      error: existing?.error,
+      failureKind: existing?.failureKind,
+      appliedToPrimary: existing?.appliedToPrimary ?? false,
+      updatedAt: new Date().toISOString(),
+    }
+  }
+
+  return ledger
+}
+
+/**
+ * Update the group ledger embedded in run.json metadata for a run.
+ *
+ * Reads the current run, merges the updates into the ledger,
+ * and writes back with refreshed updatedAt.
+ */
+async function updateGroupLedger(
+  runId: string,
+  groupId: string,
+  updates: Partial<Omit<GroupStatusEntry, "groupId">>,
+  cwd?: string,
+): Promise<void> {
+  const { readRun, updateRun } = await import("pi-zflow-artifacts")
+  const run = await readRun(runId, cwd)
+  const existingLedger = (run.metadata?.[GROUP_LEDGER_META_KEY] ?? {}) as Record<string, GroupStatusEntry>
+  const existing = existingLedger[groupId] ?? {} as GroupStatusEntry
+  existingLedger[groupId] = {
+    ...existing,
+    ...updates,
+    groupId,
+    updatedAt: new Date().toISOString(),
+  } as GroupStatusEntry
+  await updateRun(runId, {
+    metadata: {
+      ...(run.metadata ?? {}),
+      [GROUP_LEDGER_META_KEY]: existingLedger,
+    },
+  } as any, cwd)
+}
+
+/**
+ * Write a human-readable group status summary artifact.
+ *
+ * Path: `<run-dir>/group-status-summary.md`
+ */
+async function writeGroupStatusSummary(
+  runId: string,
+  changeId: string,
+  cwd?: string,
+): Promise<string> {
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+  const { readRun } = await import("pi-zflow-artifacts")
+  const { resolveRunDir } = await import("pi-zflow-artifacts/artifact-paths")
+
+  const run = await readRun(runId, cwd)
+  const ledger = (run.metadata?.[GROUP_LEDGER_META_KEY] ?? {}) as Record<string, GroupStatusEntry>
+  const entries = Object.values(ledger)
+
+  const lines: string[] = []
+  const succeeded = entries.filter((e) => e.status === "succeeded" || e.status === "applied")
+  const failed = entries.filter((e) => e.status === "failed")
+  const running_ = entries.filter((e) => e.status === "running" || e.status === "retrying")
+  const pending_ = entries.filter((e) => e.status === "queued" || e.status === "pending")
+
+  lines.push(`# Group Status Summary — ${changeId}\n`)
+  lines.push(`Run: ${runId}`)
+  lines.push(`Phase: ${run.phase}`)
+  lines.push(`Generated: ${new Date().toISOString()}\n`)
+
+  lines.push(`## Overview`)
+  lines.push(`- Total groups: ${entries.length}`)
+  lines.push(`- Succeeded: ${succeeded.length}`)
+  lines.push(`- Failed: ${failed.length}`)
+  lines.push(`- In progress: ${running_.length}`)
+  lines.push(`- Pending: ${pending_.length}\n`)
+
+  if (succeeded.length > 0) {
+    lines.push(`## Succeeded Groups`)
+    for (const g of succeeded) {
+      lines.push(`- **${g.groupId}** — ${g.agent}`)
+      lines.push(`  - Files: ${g.files.join(", ")}`)
+      lines.push(`  - Patch: ${g.patchPath ?? "(no patch)"}`)
+      if (g.semanticCoupling.notes.length > 0) {
+        for (const note of g.semanticCoupling.notes) {
+          lines.push(`  - Note: ${note}`)
+        }
+      }
+    }
+    lines.push("")
+  }
+
+  if (failed.length > 0) {
+    lines.push(`## Failed Groups`)
+    for (const g of failed) {
+      lines.push(`- **${g.groupId}** — ${g.agent}`)
+      lines.push(`  - Error: ${g.error ?? "(unknown)"}`)
+      lines.push(`  - Failure kind: ${g.failureKind ?? "unknown"}`)
+      lines.push(`  - Retry count: ${g.retryCount}`)
+      if (g.semanticCoupling.notes.length > 0) {
+        for (const note of g.semanticCoupling.notes) {
+          lines.push(`  - Note: ${note}`)
+        }
+      }
+    }
+    lines.push("")
+  }
+
+  if (pending_.length > 0) {
+    lines.push(`## Pending Groups`)
+    for (const g of pending_) {
+      lines.push(`- **${g.groupId}** — ${g.agent}`)
+      lines.push(`  - Status: ${g.status}`)
+    }
+    lines.push("")
+  }
+
+  lines.push(`## Next Steps\n`)
+  if (failed.length > 0) {
+    lines.push(`1. Inspect failed groups: /zflow-change-audit ${changeId}`)
+    lines.push(`2. Resume failed groups: /zflow-change-implement ${changeId} --resume --failed-only`)
+    lines.push(`3. Apply successful groups' patches: /zflow-change-implement ${changeId} --apply-successful (future)`)
+  } else if (entries.every((e) => e.status === "succeeded" || e.status === "applied")) {
+    lines.push("All groups completed. Run final verification and code review.")
+  } else {
+    lines.push(`1. Resume: /zflow-change-implement ${changeId} --resume`)
+  }
+
+  const summary = lines.join("\n")
+  const runDir = resolveRunDir(runId, cwd)
+  const summaryPath = path.join(runDir, "group-status-summary.md")
+  await fs.writeFile(summaryPath, summary, "utf-8")
+  return summaryPath
+}
+
 interface FailedGroupDecision {
   groupId: string
   agent: string
@@ -1592,11 +1895,12 @@ async function recordDispatchFailurePolicy(
   cwd: string | undefined,
   decisions: FailedGroupDecision[],
   reportPath: string,
+  phase: "failed" | "partial" = "failed",
 ): Promise<void> {
   const { readRun, updateRun } = await import("pi-zflow-artifacts")
   const run = await readRun(runId, cwd)
   await updateRun(runId, {
-    phase: "failed",
+    phase,
     metadata: {
       ...(run.metadata ?? {}),
       dispatchFailurePolicy: {
@@ -1739,6 +2043,17 @@ async function runWorktreeDispatchAndFinalize(
     { cwd, repoRoot, runId, force: options?.force },
   )
 
+  // ── Initialize durable group status ledger ────────────────────
+  const runBefore = await readRun(runId, cwd)
+  const existingLedger = runBefore?.metadata?.[GROUP_LEDGER_META_KEY] as Record<string, GroupStatusEntry> | undefined
+  const ledger = buildGroupLedger(groups, existingLedger)
+  await updateRun(runId, {
+    metadata: {
+      ...(runBefore?.metadata ?? {}),
+      [GROUP_LEDGER_META_KEY]: ledger,
+    },
+  } as any, cwd)
+
   // Dispatch via the dispatch service with worktree: true. Keep worker output
   // under runtime state so repo roots are not polluted with worktree-results/.
   const runDir = resolveRunDir(runId, cwd)
@@ -1785,6 +2100,10 @@ async function runWorktreeDispatchAndFinalize(
       status: initiallyScheduled ? "running" : "queued",
       lastCommand: initiallyScheduled ? "starting worktree dispatch..." : "queued waiting for dispatch slot",
     })
+    await updateGroupLedger(runId, task.groupId, {
+      status: initiallyScheduled ? "running" : "queued",
+      agent: task.agent,
+    }, cwd).catch(() => {})
   }
 
   const dispatchResult = await dispatchService.runParallel({
@@ -1812,6 +2131,14 @@ async function runWorktreeDispatchAndFinalize(
         finishedAt: Date.now(),
         lastCommand: "dispatch complete",
       })
+      // Update ledger: group succeeded
+      const gId = task?.groupId ?? runPlan.groups[idx]?.id ?? `group-${idx}`
+      await updateGroupLedger(runId, gId, {
+        status: "succeeded",
+        agent: result.agent ?? "zflow.implement-routine",
+        error: undefined,
+        failureKind: undefined,
+      }, cwd).catch(() => {})
     }
   }
 
@@ -1842,14 +2169,30 @@ async function runWorktreeDispatchAndFinalize(
           startedAt: Date.now(),
           lastCommand: "scheduling retry...",
         })
+        // Update ledger: group retrying
+        const gId = group?.id ?? task.groupId ?? `group-${idx}`
+        await updateGroupLedger(runId, gId, {
+          status: "retrying",
+          retryCount: 1,
+          error: undefined,
+          failureKind: "retryable",
+        }, cwd).catch(() => {})
       } else {
-        options?.onSubagentUpdate?.(runPlan.tasks[idx]?.groupId ?? `group-${idx}`, {
+        const gId = group?.id ?? `group-${idx}`
+        options?.onSubagentUpdate?.(runPlan.tasks[idx]?.groupId ?? gId, {
           agent: result.agent,
           title: group?.taskPrompt ?? undefined,
           status: "failed",
           finishedAt: Date.now(),
           lastCommand: decision.reason,
         })
+        // Update ledger: group failed (blocker)
+        await updateGroupLedger(runId, gId, {
+          status: "failed",
+          error: decision.error ?? decision.reason,
+          failureKind: "blocker",
+          retryCount: 0,
+        }, cwd).catch(() => {})
       }
     }
 
@@ -1917,6 +2260,12 @@ async function runWorktreeDispatchAndFinalize(
             finishedAt: Date.now(),
             lastCommand: `retry dispatch threw: ${errMsg}`,
           })
+          await updateGroupLedger(runId, group?.id ?? task.groupId, {
+            status: "failed",
+            error: `Retry dispatch threw: ${errMsg}`,
+            failureKind: "blocker",
+            retryCount: 1,
+          }, cwd).catch(() => {})
         }
         // Fall through to blocker check below
         retryDispatchResult = { ok: false, results: [] }
@@ -1953,6 +2302,13 @@ async function runWorktreeDispatchAndFinalize(
             finishedAt: Date.now(),
             lastCommand: "retry dispatch complete",
           })
+          // Update ledger: retry succeeded
+          await updateGroupLedger(runId, group?.id ?? task.groupId, {
+            status: "succeeded",
+            agent: rResult.agent ?? task.agent,
+            error: undefined,
+            failureKind: undefined,
+          }, cwd).catch(() => {})
         } else {
           decisions[decisionIdx] = classifyFailedGroup(group?.id ?? `group-${originalIdx}`, mappedResult, 1, IMPLEMENT_GROUP_MAX_RETRIES)
           options?.onSubagentUpdate?.(task.groupId, {
@@ -1962,6 +2318,13 @@ async function runWorktreeDispatchAndFinalize(
             finishedAt: Date.now(),
             lastCommand: rResult.error ?? "retry failed",
           })
+          // Update ledger: retry failed
+          await updateGroupLedger(runId, group?.id ?? task.groupId, {
+            status: "failed",
+            error: rResult.error ?? "retry failed",
+            failureKind: "blocker",
+            retryCount: 1,
+          }, cwd).catch(() => {})
         }
       }
 
@@ -1984,6 +2347,12 @@ async function runWorktreeDispatchAndFinalize(
           finishedAt: Date.now(),
           lastCommand: "retry produced no result — backend may have crashed",
         })
+        await updateGroupLedger(runId, group?.id ?? task.groupId, {
+          status: "failed",
+          error: "Retry produced no result — backend may have crashed",
+          failureKind: "blocker",
+          retryCount: 1,
+        }, cwd).catch(() => {})
       }
     }
   }
@@ -1992,11 +2361,26 @@ async function runWorktreeDispatchAndFinalize(
   if (blockers.length > 0) {
     const reportPath = path.join(worktreeResultsDir, "failure-report.json")
     await fs.writeFile(reportPath, JSON.stringify({ decisions, allResults: allResults.map(r => ({ agent: r.agent, ok: r.ok, error: r.error })) }, null, 2))
-    await recordDispatchFailurePolicy(runId, cwd, decisions, reportPath)
+
+    // ── Write group-status-summary and update phase to partial ──
+    // Even though some groups failed, preserve succeeded group data
+    // so the user can resume or apply successful groups independently.
+    const summaryPath = await writeGroupStatusSummary(runId, changeId, cwd).catch(() => reportPath)
+    await updateRun(runId, {
+      phase: "partial",
+      metadata: {
+        ...((await readRun(runId, cwd)).metadata ?? {}),
+        partialRunNote: `${blockers.length} group(s) failed. Successful groups preserved. Use --resume to retry failed groups or --apply-successful to apply successful groups.`,
+        groupStatusSummaryPath: summaryPath,
+      },
+    } as any, cwd)
+
+    await recordDispatchFailurePolicy(runId, cwd, decisions, reportPath, "partial")
     throw new Error(
       `${blockers.length} group(s) could not be dispatched after ${IMPLEMENT_GROUP_MAX_RETRIES} retry: ` +
       blockers.map((d) => `${d.groupId}: ${d.reason}`).join("; ") +
-      `\nFailure report: ${reportPath}`,
+      `\nFailure report: ${reportPath}` +
+      `\nGroup status summary: ${summaryPath}`,
     )
   }
 
@@ -2028,6 +2412,13 @@ async function runWorktreeDispatchAndFinalize(
         finishedAt: Date.now(),
         lastCommand: failure,
       })
+      // Update ledger: scoped verification failed
+      await updateGroupLedger(runId, group.id, {
+        status: "failed",
+        error: failure,
+        failureKind: "blocker",
+        scopedVerification: verification ?? { status: "missing" },
+      }, cwd).catch(() => {})
       continue
     }
 
@@ -2042,6 +2433,12 @@ async function runWorktreeDispatchAndFinalize(
         verification,
         cwd,
       }))
+      // Update ledger: capture patch/changedFiles data
+      await updateGroupLedger(runId, group.id, {
+        worktreePath: r.worktreePath,
+        changedFiles: r.changedFiles ?? group.files,
+        scopedVerification: verification ?? { status: "pass" },
+      }, cwd).catch(() => {})
       continue
     }
 
@@ -2084,6 +2481,12 @@ async function runWorktreeDispatchAndFinalize(
         verification,
         retained: false,
       })
+      // Update ledger: capture patch/changedFiles data
+      await updateGroupLedger(runId, group.id, {
+        patchPath: destPatchPath,
+        changedFiles: r.changedFiles ?? group.files,
+        scopedVerification: { status: "pass", command: verification.command, output: verification.output },
+      }, cwd).catch(() => {})
       continue
     }
 
@@ -2113,6 +2516,11 @@ async function runWorktreeDispatchAndFinalize(
     if (existingIndex >= 0) run.groups[existingIndex] = groupMeta
     else run.groups.push(groupMeta)
     await updateRun(runId, { groups: run.groups }, cwd)
+    // Update ledger: capture changedFiles data for fallback path
+    await updateGroupLedger(runId, group.id, {
+      changedFiles: r.changedFiles ?? group.files,
+      scopedVerification: { status: "pass", command: verification.command, output: verification.output },
+    }, cwd).catch(() => {})
     groupResults.push({
       groupId: group.id,
       agent: groupMeta.agent,
@@ -2130,6 +2538,16 @@ async function runWorktreeDispatchAndFinalize(
   if (postDispatchFailures.length > 0) {
     const reportPath = path.join(worktreeResultsDir, "post-dispatch-failure-report.json")
     await fs.writeFile(reportPath, JSON.stringify({ failures: postDispatchFailures }, null, 2), "utf-8")
+    // Write group-status-summary and update phase to partial
+    const summaryPath = await writeGroupStatusSummary(runId, changeId, cwd).catch(() => reportPath)
+    await updateRun(runId, {
+      phase: "partial",
+      metadata: {
+        ...((await readRun(runId, cwd)).metadata ?? {}),
+        partialRunNote: `${postDispatchFailures.length} group(s) failed post-dispatch validation. Successful groups preserved. Use --resume to retry failed groups.`,
+        groupStatusSummaryPath: summaryPath,
+      },
+    } as any, cwd)
     await recordDispatchFailurePolicy(runId, cwd, postDispatchFailures.map((failure) => ({
       groupId: failure.split(":", 1)[0] ?? "unknown",
       agent: "zflow.implement-routine",
@@ -2137,11 +2555,12 @@ async function runWorktreeDispatchAndFinalize(
       decision: "blocker" as const,
       reason: failure,
       error: failure,
-    })), reportPath)
+    })), reportPath, "partial")
     throw new Error(
       `${postDispatchFailures.length} group(s) failed post-dispatch validation: ` +
       postDispatchFailures.join("; ") +
-      `\nFailure report: ${reportPath}`,
+      `\nFailure report: ${reportPath}` +
+      `\nGroup status summary: ${summaryPath}`,
     )
   }
 
@@ -2158,6 +2577,22 @@ async function runWorktreeDispatchAndFinalize(
       executionGroups: groups,
     },
   )
+
+  for (const result of groupResults) {
+    await updateGroupLedger(runId, result.groupId, {
+      status: "applied",
+      appliedToPrimary: true,
+      patchPath: result.patchPath,
+      worktreePath: result.worktreePath,
+      changedFiles: result.changedFiles,
+      scopedVerification: {
+        status: result.verification.status,
+        command: result.verification.command,
+        output: result.verification.output,
+      },
+    }, cwd).catch(() => {})
+  }
+  await writeGroupStatusSummary(runId, changeId, cwd).catch(() => "")
 
   options?.onWorkflowUpdate?.("Apply-back complete; dispatch artifacts are ready for final verification")
 
@@ -2871,19 +3306,47 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       const force = parts.includes("--force")
       const manualDispatchComplete = parts.includes("--manual-dispatch-complete")
       const abandonUnfinished = parts.includes("--abandon") || parts.includes("--abandon-unfinished")
+      const resumeEnabled = parts.includes("--resume")
+      const failedOnly = parts.includes("--failed-only")
+      const applySuccessful = parts.includes("--apply-successful")
+      const forceApplySuccessful = parts.includes("--force-apply-successful")
       const changeInput = parts.filter(p => !p.startsWith("--")).join(" ")
 
       if (!changeInput) {
         ctx.ui.notify(
-          "Usage: /zflow-change-implement <change-id-or-docs-path> [--force] [--abandon] [--manual-dispatch-complete]\n\n" +
-          "  <change-id-or-docs-path>       Runtime change ID, or docs/zflow-changes/<id>/[version/] path.\n" +
+          "Usage: /zflow-change-implement <change-id-or-docs-path> [options]\n\n" +
+          "  <change-id-or-docs-path>       Runtime change ID, or docs/zflow-changes/<id>/[version/] path.\n\n" +
+          "  Options:\n" +
           "  --force                       Proceed even if the primary worktree has uncommitted changes.\n" +
           "  --abandon                     Mark unfinished runs for this change abandoned, then start fresh.\n" +
           "  --manual-dispatch-complete    Skip worktree dispatch and proceed directly to verification.\n" +
-          "                                Use this when you have manually applied changes outside zflow.",
+          "  --resume                      Resume latest unfinished/partial implementation run (future).\n" +
+          "  --failed-only                 Only retry groups that failed in a partial run (future).\n" +
+          "  --apply-successful            Apply successful group patches despite failed groups (future).\n" +
+          "  --force-apply-successful       Force apply successful patches even if overlaps exist (future).\n\n" +
+          "  Partial run flags (--resume, --failed-only, --apply-successful, --force-apply-successful)\n" +
+          "  are reserved for future implementation. Group status ledger is tracked persistently\n" +
+          "  and available via /zflow-change-audit.",
           "warning",
         )
         return
+      }
+
+      // Warn about unimplemented partial-run flags but do not block
+      if (resumeEnabled || failedOnly || applySuccessful || forceApplySuccessful) {
+        const unimplementedFlags = [
+          resumeEnabled && "--resume",
+          failedOnly && "--failed-only",
+          applySuccessful && "--apply-successful",
+          forceApplySuccessful && "--force-apply-successful",
+        ].filter(Boolean)
+        ctx.ui.notify(
+          `⚠️  Partial run flag(s) detected but not yet fully implemented: ${unimplementedFlags.join(", ")}.\n` +
+          `    Group status ledger is being tracked persistently.\n` +
+          `    Use /zflow-change-audit ${changeInput} to inspect group statuses.\n` +
+          "    Proceeding with full dispatch (all groups).",
+          "info",
+        )
       }
 
       const implementTarget = await resolveChangeImplementTarget(changeInput)
