@@ -162,6 +162,18 @@ void describe("parseVerificationMdCommand", () => {
     const result = parseVerificationMdCommand(md)
     assert.equal(result, "first command")
   })
+
+  void it("extracts from CRLF file", () => {
+    const md = "# Verification\r\n\r\nRun this:\r\n`\`\`bash\r\nnpm run verify:readme\r\n`\`\`\r\n"
+    const result = parseVerificationMdCommand(md)
+    assert.equal(result, "npm run verify:readme")
+  })
+
+  void it("extracts from CRLF file with shell fence", () => {
+    const md = "`\`\`shell\r\necho hello\r\n`\`\`\r\n"
+    const result = parseVerificationMdCommand(md)
+    assert.equal(result, "echo hello")
+  })
 })
 
 void describe("resolveVerificationCommand with planCommand", () => {

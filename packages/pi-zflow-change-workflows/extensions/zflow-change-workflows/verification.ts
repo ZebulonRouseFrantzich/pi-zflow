@@ -73,15 +73,16 @@ export interface VerificationResult {
 /**
  * Parse a fenced bash/sh/shell command from verification.md content.
  *
- * Looks for the first fenced code block with bash, sh, shell, or no language
- * annotation after the `## Scoped verification` or top-level content.
+ * Searches the entire document for the first non-empty fenced code block
+ * tagged with bash, sh, shell, or no language annotation. The block is
+ * identified by triple backtick fences.
  *
  * @param content - The full text of verification.md.
  * @returns The extracted command string, or `null` if none found.
  */
 export function parseVerificationMdCommand(content: string): string | null {
   // Try to find a fenced bash/sh/shell code block
-  const fences = content.matchAll(/```(?:bash|sh|shell)?\s*\n([\s\S]*?)```/gi)
+  const fences = content.matchAll(/```(?:bash|sh|shell)?\s*\r?\n([\s\S]*?)```/gi)
   for (const match of fences) {
     const command = match[1]?.trim()
     if (command && command.length > 0) {
