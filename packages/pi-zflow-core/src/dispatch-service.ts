@@ -42,6 +42,30 @@ export interface AgentDispatchInput {
   maxOutput?: { lines?: number; bytes?: number }
   /** Context mode (fresh vs fork). */
   context?: "fresh" | "fork"
+  /** Optional live progress callback from the dispatch backend. */
+  onUpdate?: (progress: AgentDispatchProgress) => void
+}
+
+/** Live progress snapshot from a running dispatched agent. */
+export interface AgentDispatchProgress {
+  /** Agent runtime name. */
+  agent: string
+  /** Current status reported by the backend. */
+  status?: string
+  /** Number of tool calls observed so far. */
+  toolCount?: number
+  /** Current tool name, if a tool is running. */
+  currentTool?: string
+  /** Compact preview of current tool arguments, if available. */
+  currentToolArgs?: string
+  /** Recent completed tool calls, if reported. */
+  recentTools?: Array<{ tool?: string; args?: string }>
+  /** Run duration in milliseconds. */
+  durationMs?: number
+  /** Most recent activity timestamp in milliseconds. */
+  lastActivityAt?: number
+  /** Recent output lines, if reported. */
+  recentOutput?: string[]
 }
 
 /**

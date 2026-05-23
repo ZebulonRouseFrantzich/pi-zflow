@@ -73,7 +73,7 @@ import type { ApplyBackResult } from "./apply-back.js"
 import { writeDeviationSummary, readDeviationReports } from "./deviations.js"
 import { getCurrentBranch } from "./git-preflight.js"
 import { getZflowRegistry } from "pi-zflow-core/registry"
-import { DISPATCH_SERVICE_CAPABILITY, type DispatchService } from "pi-zflow-core/dispatch-service"
+import { DISPATCH_SERVICE_CAPABILITY, type DispatchService, type AgentDispatchProgress } from "pi-zflow-core/dispatch-service"
 import {
   isRepoMapFresh,
   writeRepoMapCache,
@@ -3482,6 +3482,29 @@ async function resolveProfileModelForAgent(agentName: string): Promise<string | 
   }
 }
 
+function formatDispatchElapsed(ms: number | undefined): string {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) return "00:00"
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+}
+
+function formatPrepareAgentProgress(progress: AgentDispatchProgress): string {
+  const elapsed = formatDispatchElapsed(progress.durationMs)
+  const toolCount = progress.toolCount ?? 0
+  if (progress.currentTool) {
+    const args = progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""
+    return `zflow.planner-frontier running — child elapsed ${elapsed} — ${toolCount} tools — current: ${progress.currentTool}${args}`
+  }
+  const recent = progress.recentTools?.at(-1)
+  if (recent?.tool) {
+    const args = recent.args ? ` ${recent.args}` : ""
+    return `zflow.planner-frontier running — child elapsed ${elapsed} — ${toolCount} tools — last: ${recent.tool}${args}`
+  }
+  return `zflow.planner-frontier running — child elapsed ${elapsed} — ${toolCount} tools observed`
+}
+
 /**
  * Run prepare-phase agents via the registry if available.
  *
@@ -3507,6 +3530,7 @@ export async function runPrepareAgentsIfAvailable(
   cwd?: string,
   changePath?: string,
   prepareNotes?: string,
+  onAgentProgress?: (message: string) => void,
 ): Promise<PrepareAgentDispatchResult> {
   const registry = getZflowRegistry()
   const { default: fs } = await import("node:fs/promises")
@@ -3572,15 +3596,30 @@ export async function runPrepareAgentsIfAvailable(
         `Reconnaissance path: ${artifactPaths.reconnaissance}`,
       ].filter(Boolean).join("\n")
 
+      let sawChildProgress = false
+      const launchStartedAt = Date.now()
+      onAgentProgress?.("zflow.planner-frontier launch requested — waiting for first child event")
+      const heartbeat = setInterval(() => {
+        if (sawChildProgress) return
+        onAgentProgress?.(
+          `zflow.planner-frontier launch pending — no child tool events yet after ${formatDispatchElapsed(Date.now() - launchStartedAt)}`,
+        )
+      }, 15_000)
+      heartbeat.unref?.()
+
       const result = await zflowDispatch.runAgent({
         agent: "zflow.planner-frontier",
         task,
         cwd: cwd ?? process.cwd(),
         model: await resolveProfileModelForAgent("zflow.planner-frontier"),
+        onUpdate: (progress) => {
+          sawChildProgress = true
+          onAgentProgress?.(formatPrepareAgentProgress(progress))
+        },
         output: pathModule.join(versionDir, "planner-frontier-output.md"),
         outputMode: "file-only",
         maxOutput: { lines: 400, bytes: 24000 },
-      })
+      }).finally(() => clearInterval(heartbeat))
       const outputs = await collectOutputs()
 
       if (!result.ok) {
@@ -4079,6 +4118,7 @@ export async function runChangePrepareWorkflow(
     cwd,
     options.changePath,
     options.prepareNotes,
+    (message) => options.onProgress?.(message, "info"),
   )
   if (agentDispatchResult.dispatched) {
     options.onProgress?.(
@@ -4134,6 +4174,10 @@ export function buildPlanApprovalQuestions(
         question: "How would you like to proceed with this plan?",
         options: [
           {
+            label: "Inspect Artifacts",
+            content: "Pause here. Review the generated plan and review findings paths before deciding.",
+          },
+          {
             label: "Approve",
             content: "Plan looks good. Approve and proceed to implementation.",
           },
@@ -4146,7 +4190,7 @@ export function buildPlanApprovalQuestions(
             content: "Cancel this planning session. No changes will be made.",
           },
         ],
-        recommended: "Approve",
+        recommended: "Inspect Artifacts",
       },
       {
         id: "revisionNotes",

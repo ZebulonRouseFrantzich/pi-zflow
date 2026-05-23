@@ -357,6 +357,8 @@ export interface InterviewableContext {
     setWidget?: (id: string, content?: string[], options?: { placement?: "aboveEditor" | "belowEditor" }) => void
     /** Footer status indicator in interactive TUI mode. */
     setStatus?: (id: string, value?: string) => void
+    /** Request an immediate TUI redraw. */
+    requestRender?: () => void
   }
   /**
    * The Pi runtime model registry, available when the handler runs inside
@@ -393,23 +395,104 @@ function formatElapsed(ms: number): string {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
 }
 
-function createPrepareProgressIndicator(ctx: InterviewableContext): {
+const PREPARE_PROGRESS_MESSAGE_TYPE = "zflow-change-prepare-progress" as const
+
+interface PrepareProgressSnapshot {
+  id: string
+  changePath: string
+  status: "running" | "completed" | "failed"
+  startedAt: number
+  finishedAt?: number
+  lastMessage: string
+}
+
+interface PrepareProgressMessageDetails {
+  id: string
+  snapshot: PrepareProgressSnapshot
+}
+
+const prepareProgressSnapshots = new Map<string, PrepareProgressSnapshot>()
+let prepareProgressCounter = 0
+
+function truncateText(value: string, width: number): string {
+  if (width <= 0) return ""
+  if (value.length <= width) return value
+  return `${value.slice(0, Math.max(0, width - 1))}…`
+}
+
+function makePrepareProgressComponent(details: PrepareProgressMessageDetails, theme: any): {
+  invalidate: () => void
+  render: (width: number) => string[]
+} {
+  return {
+    invalidate() {},
+    render(width: number): string[] {
+      const snapshot = prepareProgressSnapshots.get(details.id) ?? details.snapshot
+      const finishedAt = snapshot.finishedAt ?? Date.now()
+      const elapsed = formatElapsed(finishedAt - snapshot.startedAt)
+      const statusLabel = snapshot.status === "running"
+        ? theme.fg("accent", "running")
+        : snapshot.status === "completed"
+          ? theme.fg("success", "completed")
+          : theme.fg("error", "failed")
+      const icon = snapshot.status === "running" ? "🤖" : snapshot.status === "completed" ? "✅" : "⚠️"
+      const available = Math.max(24, width - 2)
+      return [
+        truncateText(`${icon} ${theme.bold("zflow-change-prepare")} ${statusLabel}`, available),
+        truncateText(`  ${theme.fg("dim", "change:")} ${snapshot.changePath}`, available),
+        truncateText(`  ${theme.fg("dim", "elapsed:")} ${elapsed}`, available),
+        truncateText(`  ${theme.fg("dim", "last:")} ${snapshot.lastMessage}`, available),
+      ]
+    },
+  }
+}
+
+function registerPrepareProgressRenderer(pi: ExtensionAPI): void {
+  if (typeof pi.registerMessageRenderer !== "function") return
+  pi.registerMessageRenderer<PrepareProgressMessageDetails>(
+    PREPARE_PROGRESS_MESSAGE_TYPE,
+    (message, _options, theme) => {
+      const details = message.details as PrepareProgressMessageDetails | undefined
+      if (!details?.id || !details.snapshot) return undefined
+      return makePrepareProgressComponent(details, theme)
+    },
+  )
+}
+
+function createPrepareProgressIndicator(pi: ExtensionAPI, ctx: InterviewableContext, changePath: string): {
   update: (message: string) => void
-  stop: (message?: string) => void
+  stop: (message?: string, status?: "completed" | "failed") => void
 } {
   const ui = ctx.ui
-  const widgetId = "zflow-change-prepare-progress"
+  const id = `prepare-${Date.now().toString(36)}-${++prepareProgressCounter}`
   const statusId = "zflow-prepare"
   const startedAt = Date.now()
-  let lastMessage = "Initializing change preparation"
   let stopped = false
+  // Clear the older below-editor widget if it exists from a hot-reloaded session.
+  ui?.setWidget?.("zflow-change-prepare-progress", undefined)
+  const initialSnapshot: PrepareProgressSnapshot = {
+    id,
+    changePath,
+    status: "running",
+    startedAt,
+    lastMessage: "Initializing change preparation",
+  }
+  prepareProgressSnapshots.set(id, initialSnapshot)
+
+  if (typeof pi.sendMessage === "function") {
+    pi.sendMessage({
+      customType: PREPARE_PROGRESS_MESSAGE_TYPE,
+      content: `zflow-change-prepare ${changePath}`,
+      display: true,
+      details: { id, snapshot: initialSnapshot },
+    })
+  }
 
   const render = () => {
     if (stopped) return
     const elapsed = formatElapsed(Date.now() - startedAt)
-    const line = `🤖 zflow-change-prepare running — elapsed ${elapsed} — last: ${lastMessage}`
-    ui?.setWidget?.(widgetId, [line], { placement: "belowEditor" })
     ui?.setStatus?.(statusId, `zflow prepare ${elapsed}`)
+    ui?.requestRender?.()
   }
 
   render()
@@ -417,20 +500,30 @@ function createPrepareProgressIndicator(ctx: InterviewableContext): {
 
   return {
     update(message: string) {
-      lastMessage = message.replace(/\s+/g, " ").trim()
+      const current = prepareProgressSnapshots.get(id)
+      if (current) {
+        prepareProgressSnapshots.set(id, {
+          ...current,
+          lastMessage: message.replace(/\s+/g, " ").trim(),
+        })
+      }
       render()
     },
-    stop(message?: string) {
+    stop(message?: string, status: "completed" | "failed" = "completed") {
+      if (stopped) return
       stopped = true
       clearInterval(interval)
       ui?.setStatus?.(statusId, undefined)
-      if (message) {
-        const elapsed = formatElapsed(Date.now() - startedAt)
-        ui?.setWidget?.(widgetId, [`${message} — elapsed ${elapsed}`], { placement: "belowEditor" })
-        setTimeout(() => ui?.setWidget?.(widgetId, undefined), 3500)
-      } else {
-        ui?.setWidget?.(widgetId, undefined)
+      const current = prepareProgressSnapshots.get(id)
+      if (current) {
+        prepareProgressSnapshots.set(id, {
+          ...current,
+          status,
+          finishedAt: Date.now(),
+          lastMessage: message ?? current.lastMessage,
+        })
       }
+      ui?.requestRender?.()
     },
   }
 }
@@ -487,9 +580,31 @@ function selectToDecision(
       if (matched?.label?.startsWith?.("Cancel") || matched?.label === "No") {
         return { decision: "cancel" }
       }
+      if (matched?.label?.startsWith?.("Inspect Artifacts")) {
+        return { decision: "inspect" }
+      }
       // Other labels map to a "continue" decision
       return { decision: "continue" }
     }
+
+function formatPlanInspectionPaths(input: {
+  changeId: string
+  planVersion: string
+  planStatePath: string
+  artifactPaths: Record<string, string>
+  reviewFindingsPath?: string
+}): string {
+  return [
+    `📌 Generated plan artifacts for "${input.changeId}" ${input.planVersion}:`,
+    `  - plan state: ${input.planStatePath}`,
+    `  - design: ${input.artifactPaths.design}`,
+    `  - execution groups: ${input.artifactPaths.executionGroups}`,
+    `  - standards: ${input.artifactPaths.standards}`,
+    `  - verification: ${input.artifactPaths.verification}`,
+    input.reviewFindingsPath ? `  - review findings: ${input.reviewFindingsPath}` : undefined,
+    `\nReview these files before approving. If you need time, choose "Inspect Artifacts" or "Cancel"; the plan remains on disk and can be revisited later.`,
+  ].filter((line): line is string => Boolean(line)).join("\n")
+}
   } catch {
     // fall through
   }
@@ -1035,6 +1150,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
 
   // Provide a minimal service marker so duplicate loads see service !== undefined
   registry.provide(CHANGE_WORKFLOWS_CAPABILITY, { activated: true })
+  registerPrepareProgressRenderer(pi)
 
   // ── Agent setup check ─────────────────────────────────────────
   // Check if the zflow-agents capability is available via registry.
@@ -1281,7 +1397,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       }
 
       ctx.ui.notify(`📋 Preparing change plan for "${changePath}"...`)
-      const progress = createPrepareProgressIndicator(ctx)
+      const progress = createPrepareProgressIndicator(pi, ctx, changePath)
 
       try {
         // Step 1: Run the initial prepare workflow (creates plan state, version dir, etc.)
@@ -1372,33 +1488,51 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           )
         }
 
+        const inspectionSummary = formatPlanInspectionPaths({
+          changeId: result.changeId,
+          planVersion: result.planVersion,
+          planStatePath: result.planStatePath,
+          artifactPaths: result.artifactPaths,
+          reviewFindingsPath: reviewResult.reviewFindingsPath,
+        })
+        ctx.ui.notify(inspectionSummary, "info")
+
         // Step 4: Run structured interview for plan approval
         const approvalQuestions = buildPlanApprovalQuestions(
           result.changeId,
           result.planVersion,
-          `Change path: ${changePath}\nReview status: ${reviewResult.pass ? "passed" : "needs attention"}\nValidation: ${validation.pass ? "passed" : "has issues"}`,
+          `Change path: ${changePath}\nReview status: ${reviewResult.pass ? "passed" : "needs attention"}\nValidation: ${validation.pass ? "passed" : "has issues"}\n\n${inspectionSummary}`,
         )
 
-        const interviewResult = await runStructuredInterview(
-          ctx,
-          approvalQuestions,
-          `Plan "${result.changeId}" version ${result.planVersion} is ready. ` +
-          `Use the interactive UI to approve, request revisions, or cancel.`,
-        )
+        let interviewResult: { decision: string; revisionNotes?: string } | null = null
+        while (true) {
+          interviewResult = await runStructuredInterview(
+            ctx,
+            approvalQuestions,
+            `Plan "${result.changeId}" version ${result.planVersion} is ready. ` +
+            `Use the interactive UI to inspect, approve, request revisions, or cancel.`,
+          )
 
-        if (!interviewResult) {
-          // No usable UI at all — log paths for manual inspection
+          if (!interviewResult) {
+            // No usable UI at all — log paths for manual inspection
+            ctx.ui.notify(
+              `📌 Plan "${result.changeId}" version ${result.planVersion} is ready for review.\n` +
+              `Plan artifacts:\n` +
+              `  - design: ${result.artifactPaths.design}\n` +
+              `  - execution-groups: ${result.artifactPaths.executionGroups}\n` +
+              `  - standards: ${result.artifactPaths.standards}\n` +
+              `  - verification: ${result.artifactPaths.verification}\n\n` +
+              `Run /zflow-change-audit ${result.changeId} to inspect.`,
+              "info",
+            )
+            return
+          }
+
+          if (interviewResult.decision !== "inspect") break
           ctx.ui.notify(
-            `📌 Plan "${result.changeId}" version ${result.planVersion} is ready for review.\n` +
-            `Plan artifacts:\n` +
-            `  - design: ${result.artifactPaths.design}\n` +
-            `  - execution-groups: ${result.artifactPaths.executionGroups}\n` +
-            `  - standards: ${result.artifactPaths.standards}\n` +
-            `  - verification: ${result.artifactPaths.verification}\n\n` +
-            `Run /zflow-change-audit ${result.changeId} to inspect.`,
+            `${inspectionSummary}\n\nReview the files, then return to the decision prompt to approve, request revisions, or cancel.`,
             "info",
           )
-          return
         }
 
         switch (interviewResult.decision) {
@@ -1504,6 +1638,14 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             )
             break
           }
+          case "inspect": {
+            ctx.ui.notify(
+              `${inspectionSummary}\n\n` +
+              `When ready, rerun /zflow-change-prepare ${changePath} or use /zflow-change-audit ${result.changeId} to inspect without approval.`,
+              "info",
+            )
+            break
+          }
           default: {
             // "inspect" or unknown — log paths for manual review
             ctx.ui.notify(
@@ -1515,6 +1657,10 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           }
         }
       } catch (err: unknown) {
+        progress.stop(
+          `Change preparation failed: ${err instanceof Error ? err.message : String(err)}`,
+          "failed",
+        )
         ctx.ui.notify(
           `Change preparation failed: ${err instanceof Error ? err.message : String(err)}`,
           "error",

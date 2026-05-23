@@ -95,6 +95,7 @@ interface BackendDispatchService {
     output?: string | false
     outputMode?: "inline" | "file-only"
     maxOutput?: { lines?: number; bytes?: number }
+    onUpdate?: (progress: unknown) => void
   }): Promise<{
     ok: boolean
     exitCode: number
@@ -160,6 +161,7 @@ class SubagentsDispatchService implements DispatchService {
         output: input.output,
         outputMode: input.outputMode,
         maxOutput: input.maxOutput,
+        onUpdate: input.onUpdate,
       })
       return {
         ok: result.ok,

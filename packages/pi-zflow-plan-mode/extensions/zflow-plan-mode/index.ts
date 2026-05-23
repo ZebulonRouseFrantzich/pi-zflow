@@ -41,11 +41,13 @@ type PlanModeUiContext = {
   ui?: {
     notify?: (message: string, type?: "info" | "warning" | "error") => void
     setStatus?: (id: string, value?: string) => void
+    requestRender?: () => void
   }
 }
 
 function syncPlanModeFooter(ctx?: PlanModeUiContext): void {
   ctx?.ui?.setStatus?.("zflow-plan", isPlanModeActive() ? "Plan" : undefined)
+  ctx?.ui?.requestRender?.()
 }
 
 export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
@@ -83,6 +85,15 @@ export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
   }
 
   registry.provide("plan-mode", planModeService)
+
+  // Keep the footer indicator accurate when sessions start or turns begin.
+  pi.on("session_start", async (_event, ctx?: PlanModeUiContext) => {
+    syncPlanModeFooter(ctx)
+  })
+
+  pi.on("turn_start", async (_event, ctx?: PlanModeUiContext) => {
+    syncPlanModeFooter(ctx)
+  })
 
   // ── Tool restriction hooks ──────────────────────────────────────
 
@@ -164,6 +175,7 @@ export default function activateZflowPlanModeExtension(pi: ExtensionAPI): void {
       ui: {
         notify: (message: string, type?: "info" | "warning" | "error") => void
         setStatus?: (id: string, value?: string) => void
+        requestRender?: () => void
       }
     }): Promise<void> => {
       const subcommand = args.trim()
