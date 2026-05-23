@@ -1956,7 +1956,9 @@ export async function prepareWorktreeImplementationRun(
 ): Promise<WorktreeImplementationRunPlan> {
   const cwd = options?.cwd
   const { default: path } = await import("node:path")
-  const { execFileSync } = await import("node:child_process")
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const execFileAsync = promisify(execFile)
 
   // 1. Resolve repo root
   let repoRoot: string
@@ -1964,10 +1966,8 @@ export async function prepareWorktreeImplementationRun(
     repoRoot = options.repoRoot
   } else {
     try {
-      repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim()
+      const { stdout } = await execFileAsync("git", ["rev-parse", "--show-toplevel"])
+      repoRoot = stdout.trim()
     } catch {
       throw new Error("Not a git repository — cannot run worktree implementation.")
     }
@@ -5032,20 +5032,18 @@ export async function runChangeImplementWorkflow(
   const planVersion = options.planVersion ?? approvedVersion
 
   // 3. Check worktree cleanliness — hard error unless --force
-  const { default: childProcess } = await import("node:child_process")
-  const repoRoot = childProcess.execFileSync("git", ["rev-parse", "--show-toplevel"], {
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const execFileAsync = promisify(execFile)
+  const { stdout: repoRootRaw } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
     cwd: cwd ?? process.cwd(),
-    encoding: "utf-8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim()
+  })
+  const repoRoot = repoRootRaw.trim()
 
   let worktreeDirty = false
   try {
-    const status = childProcess.execFileSync("git", ["status", "--porcelain"], {
-      cwd: repoRoot,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim()
+    const { stdout: statusRaw } = await execFileAsync("git", ["status", "--porcelain"], { cwd: repoRoot })
+    const status = statusRaw.trim()
     if (status.length > 0) {
       worktreeDirty = true
       if (force) {

@@ -547,7 +547,11 @@ function makeWorkflowProgressComponent(details: WorkflowProgressMessageDetails, 
   render: (width: number) => string[]
 } {
   return {
-    invalidate() {},
+    invalidate() {
+      // Render always reads from workflowProgressSnapshots dynamically;
+      // no local cache to invalidate. This stub ensures Pi's TUI framework
+      // recognises the component as properly implementing the lifecycle.
+    },
     render(width: number): string[] {
       const snapshot = workflowProgressSnapshots.get(details.id) ?? details.snapshot
       const finishedAt = snapshot.finishedAt ?? Date.now()
@@ -616,6 +620,7 @@ function createWorkflowProgressIndicator(
   const widgetId = options?.widgetId ?? `${command}-progress`
   const startedAt = Date.now()
   let stopped = false
+  let lastMessageAt = 0
   // Clear the older below-editor widget if it exists from a hot-reloaded session.
   ui?.setWidget?.(widgetId, undefined)
   const initialSnapshot: WorkflowProgressSnapshot = {
@@ -642,36 +647,83 @@ function createWorkflowProgressIndicator(
     })
   }
 
-  const render = () => {
+  const renderWidgetLines = (snapshot: WorkflowProgressSnapshot): string[] => {
+    const elapsed = formatElapsed(Date.now() - snapshot.startedAt)
+    const lines: string[] = [
+      `${snapshot.command} · ${snapshot.status} · ${elapsed}`,
+      `change: ${snapshot.changePath}`,
+    ]
+    if (snapshot.model) {
+      lines.push(`model: ${snapshot.model}`)
+    }
+    if (snapshot.thinking) {
+      lines.push(`thinking: ${snapshot.thinking}`)
+    }
+    lines.push(`last: ${snapshot.lastMessage}`)
+    if (snapshot.subagents.length > 0) {
+      const finished = snapshot.subagents.filter((s) => isFinishedSubagentStatus(s.status)).length
+      lines.push(`subagents: ${finished}/${snapshot.subagents.length} finished`)
+      for (const subagent of snapshot.subagents) {
+        const subElapsed = formatElapsed((subagent.finishedAt ?? Date.now()) - subagent.startedAt)
+        lines.push(`  ${subagentStatusIcon(subagent.status)} ${subagent.id} · ${subagent.status} · ${subElapsed} · last: ${subagent.lastCommand ?? "starting"}`)
+      }
+    }
+    return lines
+  }
+
+  const sendSnapshotMessage = (force = false): void => {
+    if (stopped) return
+    const now = Date.now()
+    if (!force && now - lastMessageAt < 1000) return
+    lastMessageAt = now
+    const current = workflowProgressSnapshots.get(id)
+    if (current && typeof pi.sendMessage === "function") {
+      pi.sendMessage(
+        {
+          customType: WORKFLOW_PROGRESS_MESSAGE_TYPE,
+          content: `${command} ${changePath}`,
+          display: true,
+          details: { id, snapshot: current },
+        },
+        { deliverAs: "nextTurn" },
+      )
+    }
+  }
+
+  const render = (): void => {
     if (stopped) return
     const elapsed = formatElapsed(Date.now() - startedAt)
     ui?.setStatus?.(statusId, `${command} ${elapsed}`)
+    const snapshot = workflowProgressSnapshots.get(id)
+    if (snapshot && ui?.setWidget) {
+      ui.setWidget(widgetId, renderWidgetLines(snapshot))
+    }
     ui?.requestRender?.()
   }
 
   render()
-  const interval = setInterval(render, 1000)
-  const heartbeatInterval = setInterval(() => {
+  sendSnapshotMessage(true)
+
+  const interval = setInterval(() => {
     const current = workflowProgressSnapshots.get(id)
-    if (current && typeof pi.sendMessage === "function") {
+    if (current) {
       const now = Date.now()
-      for (const subagent of current.subagents) {
-        if (subagent.status === "running" && subagent.lastActivityAt && now - subagent.lastActivityAt > 20_000) {
-          const existing = current.subagents.findIndex((s) => s.id === subagent.id)
-          if (existing >= 0) {
-            const updated = { ...subagent, lastCommand: "thinking / waiting for model..." }
-            current.subagents[existing] = updated
-          }
+      let mutated = false
+      const updatedSubagents = [...current.subagents]
+      for (let i = 0; i < updatedSubagents.length; i++) {
+        const subagent = updatedSubagents[i]
+        if (subagent && subagent.status === "running" && subagent.lastActivityAt && now - subagent.lastActivityAt > 20_000) {
+          updatedSubagents[i] = { ...subagent, lastCommand: "thinking / waiting for model..." }
+          mutated = true
         }
       }
-      pi.sendMessage({
-        customType: WORKFLOW_PROGRESS_MESSAGE_TYPE,
-        content: `${command} ${changePath}`,
-        display: true,
-        details: { id, snapshot: current },
-      })
+      if (mutated) {
+        workflowProgressSnapshots.set(id, { ...current, subagents: updatedSubagents })
+      }
     }
-  }, 5000)
+    render()
+    sendSnapshotMessage()
+  }, 1000)
 
   return {
     update(message: string) {
@@ -686,12 +738,16 @@ function createWorkflowProgressIndicator(
         })
       }
       render()
+      sendSnapshotMessage()
     },
     updateSubagent(subagentId: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) {
       const current = workflowProgressSnapshots.get(id)
+      let shouldSendMessage = false
       if (current) {
         const existing = current.subagents.find((subagent) => subagent.id === subagentId)
         const nextStatus = update.status ?? existing?.status ?? "running"
+        const statusChanged = update.status !== undefined && update.status !== existing?.status
+        const lastCommandChanged = update.lastCommand !== undefined && update.lastCommand !== existing?.lastCommand
         const nextSubagent: WorkflowSubagentSnapshot = {
           id: subagentId,
           agent: update.agent ?? existing?.agent ?? subagentId,
@@ -715,15 +771,19 @@ function createWorkflowProgressIndicator(
           ...current,
           subagents: updatedSubagents,
         })
+        shouldSendMessage = statusChanged || lastCommandChanged
       }
       render()
+      if (shouldSendMessage) {
+        sendSnapshotMessage(true)
+      }
     },
     stop(message?: string, status: "completed" | "failed" = "completed") {
       if (stopped) return
       stopped = true
       clearInterval(interval)
-      clearInterval(heartbeatInterval)
       ui?.setStatus?.(statusId, undefined)
+      ui?.setWidget?.(widgetId, undefined)
       const current = workflowProgressSnapshots.get(id)
       if (current) {
         workflowProgressSnapshots.set(id, {
@@ -733,6 +793,7 @@ function createWorkflowProgressIndicator(
           lastMessage: message ?? current.lastMessage,
         })
       }
+      sendSnapshotMessage(true)
       ui?.requestRender?.()
     },
   }
@@ -1211,11 +1272,11 @@ async function runWorktreeDispatchAndFinalize(
   const { readRun, updateRun } = await import("pi-zflow-artifacts")
 
   const cwd = options?.cwd ?? process.cwd()
-  const repoRoot = (await import("node:child_process")).execFileSync("git", ["rev-parse", "--show-toplevel"], {
-    cwd,
-    encoding: "utf-8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim()
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const execFileAsync = promisify(execFile)
+  const { stdout: repoRootRaw } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd })
+  const repoRoot = repoRootRaw.trim()
 
   // Read execution groups from the approved plan artifact
   const executionGroupsArtifactPath = resolvePlanArtifactPath(changeId, planVersion, "execution-groups", cwd)
@@ -1305,11 +1366,15 @@ async function runWorktreeDispatchAndFinalize(
   }
 
   const WORKTREE_DISPATCH_CONCURRENCY = 6
+  const MAX_OUTPUT_LINES = 5000
+  const MAX_OUTPUT_BYTES = 500_000
+
   const dispatchResult = await dispatchService.runParallel({
     tasks,
     cwd,
     concurrency: WORKTREE_DISPATCH_CONCURRENCY,
     worktree: true,
+    maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
   })
 
   // Classify results: successful groups go into collected; failures are classified
