@@ -1204,7 +1204,7 @@ async function runWorktreeDispatchAndFinalize(
   const worktreeResultsDir = path.join(runDir, "worktree-results")
   await fs.mkdir(worktreeResultsDir, { recursive: true })
   const implementModel = await resolveWorkflowModel("zflow.implement-routine")
-  const tasks = runPlan.tasks.map(t => ({
+  const tasks = runPlan.tasks.map((t, taskIdx) => ({
     agent: t.agent,
     task: t.task,
     model: implementModel.model,
@@ -1214,7 +1214,7 @@ async function runWorktreeDispatchAndFinalize(
       const recentTool = progress.recentTools?.at(-1)
       options?.onSubagentUpdate?.(t.groupId, {
         agent: t.agent,
-        title: runPlan.groups[idx]?.taskPrompt ?? undefined,
+        title: runPlan.groups[taskIdx]?.taskPrompt ?? undefined,
         model: implementModel.model ?? "unavailable",
         thinking: implementModel.thinking ?? "unavailable",
         status: progress.status ?? "running",
@@ -1227,10 +1227,11 @@ async function runWorktreeDispatchAndFinalize(
     },
   }))
 
-  for (const task of runPlan.tasks) {
+  for (let taskIdx = 0; taskIdx < runPlan.tasks.length; taskIdx++) {
+    const task = runPlan.tasks[taskIdx]!
     options?.onSubagentUpdate?.(task.groupId, {
       agent: task.agent,
-      title: runPlan.groups[idx]?.taskPrompt ?? undefined,
+      title: runPlan.groups[taskIdx]?.taskPrompt ?? undefined,
       model: implementModel.model ?? "unavailable",
       thinking: implementModel.thinking ?? "unavailable",
       status: "queued",
