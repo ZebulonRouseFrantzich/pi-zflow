@@ -1397,6 +1397,7 @@ export async function runChangeAuditWorkflow(
   const { default: fs } = await import("node:fs/promises")
 
   // Read plan state
+  await migrateLegacyChangeArtifactsIfPresent(changeId, cwd)
   const planStatePath = resolvePlanStatePath(changeId, cwd)
   let planState: Record<string, unknown>
   try {
@@ -1535,6 +1536,7 @@ export async function runChangeFixWorkflow(
   const { default: path } = await import("node:path")
 
   // Read plan state
+  await migrateLegacyChangeArtifactsIfPresent(changeId, cwd)
   const planStatePath = resolvePlanStatePath(changeId, cwd)
   let planState: Record<string, unknown>
   try {
@@ -2650,6 +2652,27 @@ async function fileExists(filePath: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+async function migrateLegacyChangeArtifactsIfPresent(changeId: string, cwd?: string): Promise<boolean> {
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+  const { resolveGitDir, ensureRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+
+  const runtimeDir = ensureRuntimeStateDir(cwd)
+  const newChangeDir = path.join(runtimeDir, "plans", changeId)
+  if (await fileExists(path.join(newChangeDir, "plan-state.json"))) return false
+
+  const gitDir = resolveGitDir(cwd ?? process.cwd())
+  if (!gitDir) return false
+
+  const legacyChangeDir = path.join(gitDir, "pi-zflow", "plans", changeId)
+  if (!(await fileExists(path.join(legacyChangeDir, "plan-state.json")))) return false
+
+  await fs.mkdir(path.dirname(newChangeDir), { recursive: true })
+  await fs.cp(legacyChangeDir, newChangeDir, { recursive: true, force: false, errorOnExist: false })
+  console.info(`[zflow] Migrated legacy plan artifacts for change "${changeId}" from .git/pi-zflow to .zflow.`)
+  return true
 }
 
 async function findDurableManifestPath(inputPath: string, cwd?: string): Promise<string | null> {
@@ -5009,6 +5032,7 @@ export async function runChangeImplementWorkflow(
   }
 
   // 2. Resolve change and approved plan
+  await migrateLegacyChangeArtifactsIfPresent(options.changeId, cwd)
   const planStatePath = resolvePlanStatePath(options.changeId, cwd)
   let planState: Record<string, unknown>
 

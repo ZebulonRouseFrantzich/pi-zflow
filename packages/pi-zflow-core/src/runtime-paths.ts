@@ -122,14 +122,30 @@ export function ensureRuntimeStateDir(cwd: string = process.cwd()): string {
       fs.mkdirSync(dir, { recursive: true })
     }
     // Write a .gitignore that ignores everything inside .zflow/ except
-    // the .gitignore itself, so runtime artifacts are visible on disk
-    // but don't pollute `git status`.
+    // the .gitignore itself. Also add .zflow/ to .git/info/exclude when
+    // possible so the .zflow directory itself does not pollute `git status`.
     const gitignorePath = path.join(dir, ".gitignore")
     if (!fs.existsSync(gitignorePath)) {
       fs.writeFileSync(gitignorePath, "*\n!.gitignore\n", "utf-8")
     }
+
+    const gitDir = resolveGitDir(cwd)
+    if (gitDir) {
+      const excludePath = path.join(gitDir, "info", "exclude")
+      const excludeEntry = ".zflow/"
+      try {
+        fs.mkdirSync(path.dirname(excludePath), { recursive: true })
+        const existing = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, "utf-8") : ""
+        if (!existing.split(/\r?\n/).some((line) => line.trim() === excludeEntry)) {
+          const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : ""
+          fs.writeFileSync(excludePath, `${existing}${prefix}${excludeEntry}\n`, "utf-8")
+        }
+      } catch {
+        // Best-effort only.
+      }
+    }
   } catch {
-    // Non-fatal — the .gitignore is best-effort
+    // Non-fatal — ignore setup is best-effort
   }
 
   return dir
