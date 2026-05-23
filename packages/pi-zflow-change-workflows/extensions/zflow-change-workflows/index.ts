@@ -531,50 +531,81 @@ function padCardLine(value: string, width: number): string {
   return `│ ${visualPadEnd(truncated, innerWidth)} │`
 }
 
-function buildSubagentCard(subagent: WorkflowSubagentSnapshot, width: number): string[] {
+function statusColor(
+  status: string,
+  theme: any,
+  text: string,
+): string {
+  const s = status.toLowerCase()
+  if (s === "completed") return theme.fg("success", text)
+  if (s === "failed") return theme.fg("error", text)
+  if (s === "queued") return theme.fg("warning", text)
+  return theme.fg("accent", text)
+}
+
+function borderColor(theme: any, text: string): string {
+  return theme.fg("border", text)
+}
+
+function dimColor(theme: any, text: string): string {
+  return theme.fg("dim", text)
+}
+
+function themePadLine(value: string, width: number): string {
+  const innerWidth = Math.max(1, width - 4)
+  const truncated = visualTruncate(value, innerWidth)
+  return `│ ${visualPadEnd(truncated, innerWidth)} │`
+}
+
+function buildSubagentCard(subagent: WorkflowSubagentSnapshot, width: number, theme: any): string[] {
   const elapsed = formatElapsed((subagent.finishedAt ?? Date.now()) - subagent.startedAt)
   const title = subagent.title ?? "untitled group"
   const model = subagent.model ?? "unavailable"
   const thinking = subagent.thinking ?? "unavailable"
+  const border = `┌${"─".repeat(Math.max(1, width - 2))}┐`
+  const borderEnd = `└${"─".repeat(Math.max(1, width - 2))}┘`
   return [
-    `┌${"─".repeat(Math.max(1, width - 2))}┐`,
-    padCardLine(`${subagentStatusIcon(subagent.status)} ${title}`, width),
-    padCardLine(`${subagent.id}`, width),
-    padCardLine(`${subagent.status} · ${elapsed}`, width),
-    padCardLine(`${subagent.agent} · ${model} · ${thinking}`, width),
-    padCardLine(`last: ${subagent.lastCommand ?? "starting"}`, width),
-    `└${"─".repeat(Math.max(1, width - 2))}┘`,
+    borderColor(theme, border),
+    themePadLine(`${subagentStatusIcon(subagent.status)} ${title}`, width),
+    themePadLine(dimColor(theme, subagent.id), width),
+    themePadLine(statusColor(subagent.status, theme, `${subagent.status} · ${elapsed}`), width),
+    themePadLine(dimColor(theme, `${subagent.agent} · ${model} · ${thinking}`), width),
+    themePadLine(dimColor(theme, `last: ${subagent.lastCommand ?? "starting"}`), width),
+    borderColor(theme, borderEnd),
   ]
 }
 
-function buildPhaseCard(card: WorkflowPhaseCardSnapshot, width: number): string[] {
+function buildPhaseCard(card: WorkflowPhaseCardSnapshot, width: number, theme: any): string[] {
   const elapsed = formatElapsed((card.finishedAt ?? Date.now()) - card.startedAt)
   const messages = card.messages.slice(-4)
+  const border = `┌${"─".repeat(Math.max(1, width - 2))}┐`
+  const borderEnd = `└${"─".repeat(Math.max(1, width - 2))}┘`
   return [
-    `┌${"─".repeat(Math.max(1, width - 2))}┐`,
-    padCardLine(`${subagentStatusIcon(card.status)} ${card.title}`, width),
-    padCardLine(`${card.status} · ${elapsed}`, width),
-    ...messages.map((message) => padCardLine(`• ${message}`, width)),
-    `└${"─".repeat(Math.max(1, width - 2))}┘`,
+    borderColor(theme, border),
+    themePadLine(`${subagentStatusIcon(card.status)} ${card.title}`, width),
+    themePadLine(statusColor(card.status, theme, `${card.status} · ${elapsed}`), width),
+    ...messages.map((message) => themePadLine(dimColor(theme, `• ${message}`), width)),
+    borderColor(theme, borderEnd),
   ]
 }
 
-function buildReviewerCard(reviewer: WorkflowReviewerSnapshot, width: number): string[] {
+function buildReviewerCard(reviewer: WorkflowReviewerSnapshot, width: number, theme: any): string[] {
   const model = reviewer.model ?? "unavailable"
   const thinking = reviewer.thinking ?? "unavailable"
   const icon = reviewer.status === "completed" ? "✅" : reviewer.status === "failed" ? "❌" : reviewer.status === "queued" ? "⏳" : "▶️"
-  const cardLines = [
-    `┌${"─".repeat(Math.max(1, width - 2))}┐`,
-    padCardLine(`${icon} ${reviewer.reviewerName}`, width),
-    padCardLine(`${reviewer.status}`, width),
-    padCardLine(`${model} · ${thinking}`, width),
-    padCardLine(`last: ${reviewer.lastCommand ?? reviewer.currentTool ?? "starting"}`, width),
-    `└${"─".repeat(Math.max(1, width - 2))}┘`,
+  const border = `┌${"─".repeat(Math.max(1, width - 2))}┐`
+  const borderEnd = `└${"─".repeat(Math.max(1, width - 2))}┘`
+  return [
+    borderColor(theme, border),
+    themePadLine(`${icon} ${reviewer.reviewerName}`, width),
+    themePadLine(statusColor(reviewer.status, theme, reviewer.status), width),
+    themePadLine(dimColor(theme, `${model} · ${thinking}`), width),
+    themePadLine(dimColor(theme, `last: ${reviewer.lastCommand ?? reviewer.currentTool ?? "starting"}`), width),
+    borderColor(theme, borderEnd),
   ]
-  return cardLines
 }
 
-function renderReviewerCards(reviewers: WorkflowReviewerSnapshot[], width: number): string[] {
+function renderReviewerCards(reviewers: WorkflowReviewerSnapshot[], width: number, theme: any): string[] {
   const available = Math.max(32, width - 2)
   const columns = available >= 120 ? 3 : available >= 76 ? 2 : 1
   const gap = 2
@@ -583,7 +614,7 @@ function renderReviewerCards(reviewers: WorkflowReviewerSnapshot[], width: numbe
   const rendered: string[] = []
 
   for (let index = 0; index < ordered.length; index += columns) {
-    const rowCards = ordered.slice(index, index + columns).map((reviewer) => buildReviewerCard(reviewer, cardWidth))
+    const rowCards = ordered.slice(index, index + columns).map((reviewer) => buildReviewerCard(reviewer, cardWidth, theme))
     const rowHeight = Math.max(...rowCards.map((card) => card.length))
     for (let line = 0; line < rowHeight; line++) {
       rendered.push(rowCards.map((card) => card[line] ?? " ".repeat(cardWidth)).join(" ".repeat(gap)))
@@ -596,6 +627,7 @@ function renderReviewerCards(reviewers: WorkflowReviewerSnapshot[], width: numbe
 function renderWorkflowCards(
   cards: WorkflowPhaseCardSnapshot[],
   width: number,
+  theme: any,
   reviewers: WorkflowReviewerSnapshot[] = [],
 ): string[] {
   const available = Math.max(32, width - 2)
@@ -604,23 +636,23 @@ function renderWorkflowCards(
 
   for (const card of cards) {
     if (rendered.length > 0) rendered.push("")
-    rendered.push(...buildPhaseCard(card, available))
+    rendered.push(...buildPhaseCard(card, available, theme))
     if (card.id === "code-review" && reviewers.length > 0) {
       rendered.push("")
-      rendered.push(...renderReviewerCards(reviewers, available))
+      rendered.push(...renderReviewerCards(reviewers, available, theme))
       reviewersRendered = true
     }
   }
 
   if (!reviewersRendered && reviewers.length > 0) {
     if (rendered.length > 0) rendered.push("")
-    rendered.push(...renderReviewerCards(reviewers, available))
+    rendered.push(...renderReviewerCards(reviewers, available, theme))
   }
 
   return rendered
 }
 
-function renderSubagentCards(subagents: WorkflowSubagentSnapshot[], width: number): string[] {
+function renderSubagentCards(subagents: WorkflowSubagentSnapshot[], width: number, theme: any): string[] {
   const available = Math.max(32, width - 2)
   const columns = available >= 120 ? 3 : available >= 76 ? 2 : 1
   const gap = 2
@@ -629,7 +661,7 @@ function renderSubagentCards(subagents: WorkflowSubagentSnapshot[], width: numbe
   const rendered: string[] = []
 
   for (let index = 0; index < ordered.length; index += columns) {
-    const rowCards = ordered.slice(index, index + columns).map((subagent) => buildSubagentCard(subagent, cardWidth))
+    const rowCards = ordered.slice(index, index + columns).map((subagent) => buildSubagentCard(subagent, cardWidth, theme))
     const rowHeight = Math.max(...rowCards.map((card) => card.length))
     for (let line = 0; line < rowHeight; line++) {
       rendered.push(rowCards.map((card) => card[line] ?? " ".repeat(cardWidth)).join(" ".repeat(gap)))
@@ -686,15 +718,15 @@ function makeWorkflowProgressComponent(details: WorkflowProgressMessageDetails, 
       if (snapshot.subagents.length > 0) {
         const finished = snapshot.subagents.filter((subagent) => isFinishedSubagentStatus(subagent.status)).length
         lines.push(truncateText(`  ${theme.fg("dim", "subagents:")} ${finished}/${snapshot.subagents.length} finished`, available))
-        lines.push(...renderSubagentCards(snapshot.subagents, available))
+        lines.push(...renderSubagentCards(snapshot.subagents, available, theme))
       }
       const reviewers = snapshot.reviewers ?? []
       if (phaseCards.length > 0) {
         lines.push(truncateText(`  ${theme.fg("dim", "workflow cards:")}`, available))
-        lines.push(...renderWorkflowCards(phaseCards, available, reviewers))
+        lines.push(...renderWorkflowCards(phaseCards, available, theme, reviewers))
       } else if (reviewers.length > 0) {
         lines.push(`  ${theme.fg("dim", "reviewers:")}`)
-        lines.push(...renderReviewerCards(reviewers, available))
+        lines.push(...renderReviewerCards(reviewers, available, theme))
       }
       return lines
     },
