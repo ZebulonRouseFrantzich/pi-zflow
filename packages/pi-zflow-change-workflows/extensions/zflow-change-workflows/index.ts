@@ -1815,7 +1815,7 @@ async function writeGroupStatusSummary(
   if (failed.length > 0) {
     lines.push(`1. Inspect failed groups: /zflow-change-audit ${changeId}`)
     lines.push(`2. Resume failed groups: /zflow-change-implement ${changeId} --resume --failed-only`)
-    lines.push(`3. Apply successful groups' patches: /zflow-change-implement ${changeId} --apply-successful (future)`)
+    lines.push(`3. Apply successful groups' patches: /zflow-change-implement ${changeId} --apply-successful`)
   } else if (entries.every((e) => e.status === "succeeded" || e.status === "applied")) {
     lines.push("All groups completed. Run final verification and code review.")
   } else {
@@ -1836,6 +1836,475 @@ interface FailedGroupDecision {
   decision: "retry" | "blocker"
   reason: string
   error?: string
+}
+
+// ── Partial/resume run helpers ────────────────────────────────────
+
+/**
+ * Find the latest partial or unfinished run for a change.
+ *
+ * Prioritises runs with phase "partial", then "executing".
+ * Returns null if no unfinished run is found.
+ */
+async function findLatestPartialRun(
+  changeId: string,
+  cwd?: string,
+): Promise<{ runId: string; run: Record<string, unknown> } | null> {
+  const { getChangeLifecycle } = await import("pi-zflow-artifacts/state-index")
+  const { readRun } = await import("pi-zflow-artifacts")
+
+  const cl = await getChangeLifecycle(changeId, cwd)
+  if (!cl || cl.unfinishedRuns.length === 0) return null
+
+  const runIds = cl.unfinishedRuns.slice().reverse()
+  for (const runId of runIds) {
+    try {
+      const run = await readRun(runId, cwd)
+      const phase = (run as Record<string, unknown>).phase as string ?? ""
+      if (phase === "partial" || phase === "executing") {
+        return { runId, run: run as unknown as Record<string, unknown> }
+      }
+    } catch {
+      continue
+    }
+  }
+
+  return null
+}
+
+/**
+ * Read the group ledger from a run's metadata.
+ */
+async function getGroupLedger(
+  runId: string,
+  cwd?: string,
+): Promise<Record<string, GroupStatusEntry>> {
+  const { readRun } = await import("pi-zflow-artifacts")
+  const run = await readRun(runId, cwd)
+  return (run.metadata?.[GROUP_LEDGER_META_KEY] ?? {}) as Record<string, GroupStatusEntry>
+}
+
+/**
+ * Filter group ledger entries that need to be resumed (failed/pending/queued/retrying).
+ */
+function getResumableGroupIds(ledger: Record<string, GroupStatusEntry>): string[] {
+  return Object.values(ledger)
+    .filter((e) => e.status === "failed" || e.status === "pending" || e.status === "queued" || e.status === "retrying")
+    .map((e) => e.groupId)
+}
+
+/**
+ * Check whether a group is eligible for safe apply-back.
+ *
+ * Conditions:
+ * - status must be "succeeded"
+ * - appliedToPrimary must be false
+ * - scopedVerification must exist and be "pass"
+ * - patchPath must exist
+ *
+ * When `checkCoupling` is true (default), also reject if:
+ * - sharedFiles includes any file from another group
+ * - any dependency is not succeeded/applied
+ */
+function checkApplyEligibility(
+  entry: GroupStatusEntry,
+  ledger: Record<string, GroupStatusEntry>,
+  checkCoupling: boolean,
+): { ok: boolean; reason?: string } {
+  if (entry.status !== "succeeded") {
+    return { ok: false, reason: `Status is "${entry.status}", not "succeeded"` }
+  }
+  if (entry.appliedToPrimary) {
+    return { ok: false, reason: "Already applied to primary" }
+  }
+  if (!entry.scopedVerification || entry.scopedVerification.status !== "pass") {
+    return { ok: false, reason: "Scoped verification did not pass or is missing" }
+  }
+  if (!entry.patchPath) {
+    return { ok: false, reason: "No patch artifact available" }
+  }
+
+  if (checkCoupling) {
+    if (entry.semanticCoupling.sharedFiles.length > 0) {
+      return { ok: false, reason: `Has shared files: ${entry.semanticCoupling.sharedFiles.join(", ")}` }
+    }
+    for (const depId of entry.dependencies) {
+      const dep = ledger[depId]
+      if (dep && dep.status !== "applied" && !dep.appliedToPrimary && dep.status !== "skipped") {
+        return { ok: false, reason: `Dependency "${depId}" has status "${dep.status}", not applied/skipped` }
+      }
+    }
+  }
+
+  return { ok: true }
+}
+
+/**
+ * Apply patches from successful groups back to the primary worktree.
+ *
+ * Returns list of groupIds that were applied.
+ */
+async function applySuccessfulGroupPatches(
+  runId: string,
+  changeId: string,
+  cwd: string | undefined,
+  forceCoupling: boolean,
+  onProgress?: (message: string) => void,
+): Promise<{ applied: string[]; errors: string[]; summaryPath: string }> {
+  const { default: fs } = await import("node:fs/promises")
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const execFileAsync = promisify(execFile)
+
+  const ledger = await getGroupLedger(runId, cwd)
+  const entries = Object.values(ledger)
+    .sort((a, b) => a.dependencies.length - b.dependencies.length || a.groupId.localeCompare(b.groupId))
+
+  const applied: string[] = []
+  const errors: string[] = []
+
+  // Determine repo root
+  const { resolveRunDir } = await import("pi-zflow-artifacts/artifact-paths")
+  const runDir = resolveRunDir(runId, cwd)
+  const { stdout: repoRootRaw } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd: cwd ?? process.cwd() })
+  const repoRoot = repoRootRaw.trim()
+
+  for (const entry of entries) {
+    if (entry.appliedToPrimary) {
+      // If already marked applied, verify the patch file still exists
+      if (entry.patchPath) {
+        try {
+          await fs.access(entry.patchPath)
+        } catch {
+          errors.push(`Group "${entry.groupId}" marked applied but patch missing at "${entry.patchPath}"`)
+        }
+      }
+      continue
+    }
+
+    const eligibility = checkApplyEligibility(entry, ledger, !forceCoupling)
+    if (!eligibility.ok) {
+      errors.push(`Group "${entry.groupId}": ${eligibility.reason}`)
+      continue
+    }
+
+    const patchPath = entry.patchPath!
+    onProgress?.(`Applying group "${entry.groupId}" patch: ${patchPath}`)
+
+    try {
+      await execFileAsync("git", ["apply", "--3way", "--index", "--binary", patchPath], {
+        cwd: repoRoot,
+        timeout: 30_000,
+      })
+      applied.push(entry.groupId)
+      ledger[entry.groupId] = {
+        ...entry,
+        status: "applied",
+        appliedToPrimary: true,
+        updatedAt: new Date().toISOString(),
+      }
+      await updateGroupLedger(runId, entry.groupId, {
+        status: "applied",
+        appliedToPrimary: true,
+      }, cwd)
+    } catch (applyErr: unknown) {
+      const msg = applyErr instanceof Error ? applyErr.message : String(applyErr)
+      errors.push(`Group "${entry.groupId}" git apply failed: ${msg}`)
+    }
+  }
+
+  const { readRun, updateRun } = await import("pi-zflow-artifacts")
+  const run = await readRun(runId, cwd)
+  await updateRun(runId, {
+    phase: "partial",
+    metadata: {
+      ...(run.metadata ?? {}),
+      applySuccessfulResult: {
+        applied: applied.length,
+        errors: errors.length,
+      },
+    },
+  } as any, cwd)
+
+  const summaryPath = await writeGroupStatusSummary(runId, changeId, cwd).catch(() => "")
+  onProgress?.(`Applied ${applied.length} group(s). ${errors.length} error(s).`)
+
+  return { applied, errors, summaryPath }
+}
+
+/**
+ * Resume a partial run by dispatching only the failed/pending/queued groups.
+ *
+ * Returns the updated ledger after dispatch.
+ */
+async function resumeWorktreeDispatch(
+  runId: string,
+  changeId: string,
+  planVersion: string,
+  dispatchService: DispatchService,
+  options?: {
+    cwd?: string
+    force?: boolean
+    onSubagentUpdate?: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) => void
+  },
+): Promise<void> {
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+  const { parseExecutionGroupsMd } = await import("./orchestration.js")
+  const {
+    prepareWorktreeImplementationRun,
+    finalizeWorktreeImplementationRun,
+  } = await import("./orchestration.js")
+  const { captureGroupResult } = await import("./group-result.js")
+  const { readRun, updateRun } = await import("pi-zflow-artifacts")
+
+  const cwd = options?.cwd ?? process.cwd()
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const execFileAsync = promisify(execFile)
+  const { stdout: repoRootRaw } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd })
+  const repoRoot = repoRootRaw.trim()
+
+  // Read existing execution groups from plan artifact
+  const executionGroupsArtifactPath = resolvePlanArtifactPath(changeId, planVersion, "execution-groups", cwd)
+  let executionGroupsMd = ""
+  try {
+    executionGroupsMd = await fs.readFile(executionGroupsArtifactPath, "utf-8")
+  } catch {
+    throw new Error(`Cannot read execution-groups.md at: ${executionGroupsArtifactPath}`)
+  }
+  const allGroups = parseExecutionGroupsMd(executionGroupsMd)
+
+  // ── Read the existing run and ledger ───────────────────────────
+  const run = await readRun(runId, cwd)
+  const existingLedger = (run.metadata?.[GROUP_LEDGER_META_KEY] ?? {}) as Record<string, GroupStatusEntry>
+
+  // Filter groups to only those needing resume
+  const resumableGroupIds = new Set(getResumableGroupIds(existingLedger))
+  if (resumableGroupIds.size === 0) {
+    throw new Error("No groups found to resume. All groups are already succeeded/applied/skipped.")
+  }
+
+  const resumeGroups = allGroups.filter((g) => resumableGroupIds.has(g.id))
+  if (resumeGroups.length === 0) {
+    throw new Error(
+      `Resumable groups (${[...resumableGroupIds].join(", ")}) not found in execution plan. ` +
+      "The plan may have changed since the original run.",
+    )
+  }
+
+  // ── Prepare task plan for only the resumable groups ────────────
+  const planArtifactPaths = {
+    design: resolvePlanArtifactPath(changeId, planVersion, "design", cwd),
+    executionGroups: executionGroupsArtifactPath,
+    standards: resolvePlanArtifactPath(changeId, planVersion, "standards", cwd),
+    verification: resolvePlanArtifactPath(changeId, planVersion, "verification", cwd),
+  }
+
+  const runPlan = await prepareWorktreeImplementationRun(
+    changeId,
+    planVersion,
+    resumeGroups,
+    planArtifactPaths,
+    {
+      cwd,
+      repoRoot,
+      runId,
+      force: options?.force,
+    },
+  )
+
+  // ── Reuse the existing worktree-results dir ────────────────────
+  const { resolveRunDir } = await import("pi-zflow-artifacts/artifact-paths")
+  const runDir = resolveRunDir(runId, cwd)
+  const worktreeResultsDir = path.join(runDir, "worktree-results")
+  await fs.mkdir(worktreeResultsDir, { recursive: true })
+
+  const implementModel = await resolveWorkflowModel("zflow.implement-routine")
+  const tasks = runPlan.tasks.map((t) => ({
+    agent: t.agent,
+    task: t.task,
+    model: implementModel.model,
+    output: path.join(worktreeResultsDir, `${t.groupId}-resume-result.md`),
+    outputMode: "file-only" as const,
+    onUpdate: (progress: AgentDispatchProgress) => {
+      const recentTools = Array.isArray(progress.recentTools) ? progress.recentTools : []
+      const recentTool = recentTools[recentTools.length - 1]
+      const recentOutput = Array.isArray(progress.recentOutput) ? progress.recentOutput : []
+      options?.onSubagentUpdate?.(t.groupId, {
+        agent: t.agent,
+        title: undefined,
+        status: progress.status ?? "running",
+        lastCommand: progress.currentTool
+          ? `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}`
+          : recentTool?.tool
+            ? `${recentTool.tool}${recentTool.args ? ` ${recentTool.args}` : ""}`
+            : recentOutput[recentOutput.length - 1] ?? "resume dispatching...",
+      })
+    },
+  }))
+
+  const WORKTREE_DISPATCH_CONCURRENCY = 6
+  const MAX_OUTPUT_LINES = 5000
+  const MAX_OUTPUT_BYTES = 500_000
+
+  for (let taskIdx = 0; taskIdx < runPlan.tasks.length; taskIdx++) {
+    const task = runPlan.tasks[taskIdx]!
+    options?.onSubagentUpdate?.(task.groupId, {
+      agent: task.agent,
+      status: "running",
+      lastCommand: "resume dispatching...",
+    })
+    await updateGroupLedger(runId, task.groupId, {
+      status: "running",
+      agent: task.agent,
+    }, cwd).catch(() => {})
+  }
+
+  // ── Dispatch ──────────────────────────────────────────────────
+
+  const dispatchResult = await dispatchService.runParallel({
+    tasks,
+    cwd,
+    concurrency: WORKTREE_DISPATCH_CONCURRENCY,
+    worktree: true,
+    maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
+  })
+
+  // ── Collect results and update ledger ─────────────────────────
+  const newResults: Array<DispatchGroupResult> = [...dispatchResult.results]
+  const groupResults: any[] = []
+  const resumeFailures: string[] = []
+
+  for (let idx = 0; idx < newResults.length; idx++) {
+    const r = newResults[idx]!
+    const group = resumeGroups[idx]
+    if (!group) continue
+
+    if (!r.ok) {
+      resumeFailures.push(`${group.id}: ${r.error ?? "unknown error"}`)
+      await updateGroupLedger(runId, group.id, {
+        status: "failed",
+        error: r.error ?? "unknown error",
+        failureKind: "blocker",
+        retryCount: ((existingLedger[group.id]?.retryCount ?? 0) + 1),
+      }, cwd).catch(() => {})
+      options?.onSubagentUpdate?.(group.id, {
+        status: "failed",
+        finishedAt: Date.now(),
+        lastCommand: r.error ?? "resume failed",
+      })
+      continue
+    }
+
+    const verification = normalizeDispatchVerification(r.verification)
+    if (!verification || verification.status !== "pass") {
+      resumeFailures.push(`${group.id}: scoped verification ${verification?.status ?? "missing"}`)
+      await updateGroupLedger(runId, group.id, {
+        status: "failed",
+        error: `scoped verification ${verification?.status ?? "missing"}`,
+        failureKind: "blocker",
+        scopedVerification: verification ?? { status: "missing" },
+      }, cwd).catch(() => {})
+      options?.onSubagentUpdate?.(group.id, {
+        status: "failed",
+        finishedAt: Date.now(),
+        lastCommand: `scoped verification ${verification?.status ?? "missing"}`,
+      })
+      continue
+    }
+
+    // Group succeeded
+    await updateGroupLedger(runId, group.id, {
+      status: "succeeded",
+      agent: r.agent ?? "zflow.implement-routine",
+      error: undefined,
+      failureKind: undefined,
+      scopedVerification: { status: "pass", command: verification.command, output: verification.output },
+    }, cwd).catch(() => {})
+    options?.onSubagentUpdate?.(group.id, {
+      status: "completed",
+      finishedAt: Date.now(),
+      lastCommand: "resume dispatch complete",
+    })
+
+    // Collect group result for apply-back later
+    if (r.patchPath) {
+      const patchesDir = path.join(runDir, "patches")
+      await fs.mkdir(patchesDir, { recursive: true })
+      const destPatchPath = path.join(patchesDir, `${group.id}.patch`)
+      if (path.resolve(r.patchPath) !== path.resolve(destPatchPath)) {
+        await fs.copyFile(r.patchPath, destPatchPath)
+      }
+      groupResults.push({
+        groupId: group.id,
+        agent: r.agent ?? "zflow.implement-routine",
+        worktreePath: r.worktreePath ?? "(patch-based)",
+        baseCommit: run.head as string,
+        headCommit: run.head as string,
+        changedFiles: r.changedFiles ?? group.files,
+        uncommittedChanges: [],
+        patchPath: destPatchPath,
+        verification,
+        retained: false,
+      })
+      await updateGroupLedger(runId, group.id, {
+        patchPath: destPatchPath,
+        changedFiles: r.changedFiles ?? group.files,
+      }, cwd).catch(() => {})
+    } else if (r.worktreePath) {
+      const captured = await captureGroupResult({
+        groupId: group.id,
+        agent: r.agent ?? group.agent ?? "zflow.implement-routine",
+        worktreePath: r.worktreePath,
+        runId,
+        repoRoot,
+        scopedFiles: group.files,
+        verification,
+        cwd,
+      })
+      groupResults.push(captured)
+      await updateGroupLedger(runId, group.id, {
+        patchPath: captured.patchPath,
+        worktreePath: captured.worktreePath,
+        changedFiles: captured.changedFiles,
+      }, cwd).catch(() => {})
+    }
+  }
+
+  // ── Finalize — check if all groups are now complete ───────────
+  const updatedLedger = await getGroupLedger(runId, cwd)
+  const allSucceeded = Object.values(updatedLedger).every((e) =>
+    e.status === "succeeded" || e.status === "applied" || e.status === "skipped"
+  )
+
+  if (resumeFailures.length > 0) {
+    // Some resume groups still failed — update phase to partial
+    await updateRun(runId, {
+      phase: "partial",
+      metadata: {
+        ...((await readRun(runId, cwd)).metadata ?? {}),
+        partialRunNote: `${resumeFailures.length} resumed group(s) failed. Successful groups preserved.`,
+      },
+    } as any, cwd).catch(() => {})
+    await writeGroupStatusSummary(runId, changeId, cwd).catch(() => "")
+    throw new Error(
+      `Resume: ${resumeFailures.length} group(s) still failed: ${resumeFailures.join("; ")}`,
+    )
+  }
+
+  if (allSucceeded) {
+    const applyResult = await applySuccessfulGroupPatches(runId, changeId, cwd, false)
+    const finalLedger = await getGroupLedger(runId, cwd)
+    const allApplied = Object.values(finalLedger).every((e) => e.status === "applied" || e.status === "skipped")
+    if (!allApplied) {
+      throw new Error(
+        `Resume completed, but not all successful groups could be applied safely. ` +
+        `Applied ${applyResult.applied.length}; ${applyResult.errors.length} issue(s). ` +
+        `Use /zflow-change-implement ${changeId} --apply-successful to inspect/apply, or --force-apply-successful to bypass semantic-coupling checks.`,
+      )
+    }
+  }
 }
 
 function classifyFailedGroup(
@@ -3312,41 +3781,229 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       const forceApplySuccessful = parts.includes("--force-apply-successful")
       const changeInput = parts.filter(p => !p.startsWith("--")).join(" ")
 
+      const usageText =
+        "Usage: /zflow-change-implement <change-id-or-docs-path> [options]\n\n" +
+        "  <change-id-or-docs-path>       Runtime change ID, or docs/zflow-changes/<id>/[version/] path.\n\n" +
+        "  Options:\n" +
+        "  --force                       Proceed even if the primary worktree has uncommitted changes.\n" +
+        "  --abandon                     Mark unfinished runs for this change abandoned, then start fresh.\n" +
+        "  --manual-dispatch-complete    Skip worktree dispatch and proceed directly to verification.\n" +
+        "  --resume                      Resume latest unfinished/partial run, dispatching only failed/pending groups.\n" +
+        "  --failed-only                 Same as --resume; only retry groups that failed in a partial run.\n" +
+        "  --apply-successful            Apply successful group patches despite failed groups (safe check).\n" +
+        "  --force-apply-successful       Force apply successful patches even if overlaps exist.\n\n" +
+        "  Partial run flags (--resume, --failed-only, --apply-successful, --force-apply-successful)\n" +
+        "  use the durable group ledger tracked throughout the implementation lifecycle.\n" +
+        "  Inspect status with: /zflow-change-audit <change-id>"
+
       if (!changeInput) {
-        ctx.ui.notify(
-          "Usage: /zflow-change-implement <change-id-or-docs-path> [options]\n\n" +
-          "  <change-id-or-docs-path>       Runtime change ID, or docs/zflow-changes/<id>/[version/] path.\n\n" +
-          "  Options:\n" +
-          "  --force                       Proceed even if the primary worktree has uncommitted changes.\n" +
-          "  --abandon                     Mark unfinished runs for this change abandoned, then start fresh.\n" +
-          "  --manual-dispatch-complete    Skip worktree dispatch and proceed directly to verification.\n" +
-          "  --resume                      Resume latest unfinished/partial implementation run (future).\n" +
-          "  --failed-only                 Only retry groups that failed in a partial run (future).\n" +
-          "  --apply-successful            Apply successful group patches despite failed groups (future).\n" +
-          "  --force-apply-successful       Force apply successful patches even if overlaps exist (future).\n\n" +
-          "  Partial run flags (--resume, --failed-only, --apply-successful, --force-apply-successful)\n" +
-          "  are reserved for future implementation. Group status ledger is tracked persistently\n" +
-          "  and available via /zflow-change-audit.",
-          "warning",
-        )
+        ctx.ui.notify(usageText, "warning")
         return
       }
 
-      // Warn about unimplemented partial-run flags but do not block
-      if (resumeEnabled || failedOnly || applySuccessful || forceApplySuccessful) {
-        const unimplementedFlags = [
-          resumeEnabled && "--resume",
-          failedOnly && "--failed-only",
-          applySuccessful && "--apply-successful",
-          forceApplySuccessful && "--force-apply-successful",
-        ].filter(Boolean)
-        ctx.ui.notify(
-          `⚠️  Partial run flag(s) detected but not yet fully implemented: ${unimplementedFlags.join(", ")}.\n` +
-          `    Group status ledger is being tracked persistently.\n` +
-          `    Use /zflow-change-audit ${changeInput} to inspect group statuses.\n` +
-          "    Proceeding with full dispatch (all groups).",
-          "info",
-        )
+      // ── Parse partial-run flags ───────────────────────────────
+      const useResume = resumeEnabled || failedOnly
+      const useApplySuccessful = applySuccessful || forceApplySuccessful
+      const useForceApplySuccessful = forceApplySuccessful
+
+      if (useResume || useApplySuccessful) {
+        // ── Partial/Resume apply path ────────────────────────────
+        const implementTarget = await resolveChangeImplementTarget(changeInput)
+        const changeId = implementTarget.changeId
+
+        await ensureProfileResolved(ctx)
+        setActiveWorkflowMode("change-implement")
+        const cleanupMode = (): void => { resetWorkflowState() }
+
+        const partialRun = await findLatestPartialRun(changeId, ctx.cwd)
+        if (!partialRun) {
+          ctx.ui.notify(
+            `No partial or unfinished run found for change "${changeId}". ` +
+            "Starting a full implementation run.\n" +
+            usageText,
+            "warning",
+          )
+        }
+
+        if (useApplySuccessful) {
+          // ── Apply successful groups path ────────────────────────
+          if (!partialRun) {
+            ctx.ui.notify(`No previous run found for "${changeId}". Nothing to apply.`, "error")
+            cleanupMode()
+            return
+          }
+
+          ctx.ui.notify(
+            `📋 Applying successful group patches from run "${partialRun.runId}"...`,
+            "info",
+          )
+
+          try {
+            const applyResult = await applySuccessfulGroupPatches(
+              partialRun.runId,
+              changeId,
+              ctx.cwd,
+              useForceApplySuccessful,
+              (msg) => ctx.ui.notify(msg, "info"),
+            )
+
+            const summaryEntry = applyResult.summaryPath
+              ? `\n  Summary: ${applyResult.summaryPath}`
+              : ""
+
+            if (applyResult.errors.length > 0) {
+              ctx.ui.notify(
+                `⚠️ Applied ${applyResult.applied.length} group(s) with ${applyResult.errors.length} error(s):\n` +
+                applyResult.errors.map((e) => `  - ${e}`).join("\n") +
+                summaryEntry,
+                "warning",
+              )
+            } else {
+              ctx.ui.notify(
+                `✅ Applied ${applyResult.applied.length} group(s) successfully.` +
+                summaryEntry,
+                "info",
+              )
+            }
+
+            // Check if all groups are now applied
+            const updatedLedger = await getGroupLedger(partialRun.runId, ctx.cwd)
+            const allDone = Object.values(updatedLedger).every((e) =>
+              e.status === "applied" || e.status === "skipped"
+            )
+            if (allDone) {
+              ctx.ui.notify(
+                "✅ All groups applied. To run final verification and code review:\n" +
+                `  /zflow-change-implement ${changeInput} --manual-dispatch-complete`,
+                "info",
+              )
+            }
+          } catch (err: unknown) {
+            ctx.ui.notify(
+              `Apply successful groups failed: ${err instanceof Error ? err.message : String(err)}`,
+              "error",
+            )
+          }
+
+          cleanupMode()
+          return
+        }
+
+        // ── Resume path ──────────────────────────────────────────
+        if (partialRun) {
+          const partialRunId = partialRun.runId
+          const partialRunData = partialRun.run as Record<string, unknown>
+          const planVersion = partialRunData.planVersion as string ?? "v1"
+          const resumeChangeId = partialRunData.changeId as string ?? changeId
+
+          const dispatchService = await tryGetDispatchServiceViaRegistry()
+          if (!dispatchService) {
+            ctx.ui.notify(
+              "⚠️ No dispatch service available. Cannot resume without worktree isolation.\n" +
+              "Use --apply-successful if patches exist, or install pi-subagents.",
+              "error",
+            )
+            cleanupMode()
+            return
+          }
+
+          const implementModel = await resolveWorkflowModel("zflow.implement-routine")
+          const implProgress = createWorkflowProgressIndicator(pi, ctx, changeInput, {
+            command: "zflow-change-implement",
+            model: implementModel.model ?? "unavailable",
+            thinking: implementModel.thinking ?? "unavailable",
+            initialMessage: "Resuming implementation run",
+            statusId: "zflow-implement",
+            widgetId: "zflow-implement-progress",
+          })
+
+          try {
+            implProgress.update(`Resuming run "${partialRunId}" — dispatching only failed/pending groups`)
+
+            await resumeWorktreeDispatch(
+              partialRunId,
+              resumeChangeId,
+              planVersion,
+              dispatchService,
+              {
+                cwd: ctx.cwd,
+                force,
+                onSubagentUpdate: (id, update) => implProgress.updateSubagent(id, update),
+              },
+            )
+
+            implProgress.update("Resume dispatch complete; all groups now succeeded")
+
+            // ── Post-start sequence ──────────────────────────────
+            const updatePostImplementationCard = (message: string): void => {
+              const normalized = message.toLowerCase()
+              if (normalized.includes("running code review")) {
+                implProgress.updatePhaseCard("code-review", "Code Review", message, "running")
+                return
+              }
+              if (normalized.includes("code review passed")) {
+                implProgress.updatePhaseCard("code-review", "Code Review", message, "completed")
+                implProgress.updatePhaseCard("post-code-review", "Post Code Review", "Preparing final workflow completion", "running")
+                return
+              }
+              if (normalized.includes("code review found") || normalized.includes("review failed")) {
+                implProgress.updatePhaseCard("code-review", "Code Review", message, "failed")
+                implProgress.updatePhaseCard("post-code-review", "Post Code Review", "Review failed; preparing next steps", "failed")
+                return
+              }
+              if (normalized.includes("persisting completed") || normalized.includes("workflow completion persisted")) {
+                implProgress.updatePhaseCard("post-code-review", "Post Code Review", message, normalized.includes("persisted") ? "completed" : "running")
+                return
+              }
+              const postStatus = normalized.includes("final verification passed") ? "completed" : "running"
+              implProgress.updatePhaseCard("post-implementation", "Post Implementation", message, postStatus)
+              if (normalized.includes("final verification passed")) {
+                implProgress.updatePhaseCard("code-review", "Code Review", "Waiting for code review to start", "running")
+              }
+            }
+
+            updatePostImplementationCard("Starting post-dispatch sequence: final verification, review, and completion")
+            const onReviewerUpdate = (reviewerUpdate: {
+              reviewerName: string
+              agentName: string
+              status: "queued" | "running" | "completed" | "failed"
+              model?: string
+              thinking?: string
+              currentTool?: string
+              lastCommand?: string
+            }): void => {
+              implProgress.updateReviewer(reviewerUpdate.reviewerName, reviewerUpdate)
+            }
+            const postResult = await runImplementationPostStartSequence(
+              partialRunId,
+              {
+                skipDispatchWait: false,
+                onProgress: updatePostImplementationCard,
+                onReviewerUpdate,
+              },
+            )
+
+            const finalCardStatus = postResult.status === "completed" ? "completed" : "failed"
+            const finalCardTitle = postResult.status === "completed" ? "Workflow Complete" : "Workflow Needs Attention"
+            const nextStepsLine = postResult.nextSteps.length > 0
+              ? `Next steps: ${postResult.nextSteps.map((s) => s.replace(/^\d+\.\s*/, "")).join("; ")}`
+              : "No further steps — workflow is complete."
+
+            implProgress.updatePhaseCard("workflow-complete", finalCardTitle, `Phase: ${postResult.phase}, status: ${postResult.status}`, finalCardStatus)
+            implProgress.updatePhaseCard("workflow-complete", finalCardTitle, nextStepsLine, finalCardStatus)
+            implProgress.stop(finalCardTitle)
+          } catch (err: unknown) {
+            implProgress.stop(
+              `Resume failed: ${err instanceof Error ? err.message : String(err)}`,
+              "failed",
+            )
+          }
+
+          cleanupMode()
+          return
+        }
+
+        // No partial run found — fall through to full dispatch
       }
 
       const implementTarget = await resolveChangeImplementTarget(changeInput)
@@ -3365,7 +4022,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       setActiveWorkflowMode("change-implement")
       const cleanupMode = (): void => { resetWorkflowState() }
 
-      // Check for unfinished work on this change
+      // Check for unfinished work on this change (non-resume path)
       const unfinishedCheck = await checkUnfinishedOnEntry(changeId, ctx.cwd)
       if (unfinishedCheck.hasUnfinishedWork) {
         if (abandonUnfinished) {
