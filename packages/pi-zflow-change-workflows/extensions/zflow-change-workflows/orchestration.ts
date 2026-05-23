@@ -1731,7 +1731,7 @@ export function buildWorktreeDispatchPlan(
     task: buildWorkerTask(group, config, planArtifactPaths),
     claimedFiles: group.files,
     scopedVerification: group.scopedVerification,
-    outputRelativePath: `worktree-results/${group.id}-result.md`,
+    outputRelativePath: `.git/pi-zflow/runs/<runId>/worktree-results/${group.id}-result.md`,
   }))
 }
 

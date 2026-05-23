@@ -424,6 +424,7 @@ interface WorkflowProgressSnapshot {
 interface WorkflowSubagentSnapshot {
   id: string
   agent: string
+  title?: string
   model?: string
   thinking?: string
   status: string
@@ -444,6 +445,63 @@ function truncateText(value: string, width: number): string {
   if (width <= 0) return ""
   if (value.length <= width) return value
   return `${value.slice(0, Math.max(0, width - 1))}…`
+}
+
+function subagentSortKey(id: string): number {
+  const match = id.match(/(\d+)$/)
+  return match ? Number.parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER
+}
+
+function isFinishedSubagentStatus(status: string): boolean {
+  const normalized = status.toLowerCase()
+  return normalized === "completed" || normalized === "failed"
+}
+
+function subagentStatusIcon(status: string): string {
+  const normalized = status.toLowerCase()
+  if (normalized === "completed") return "✅"
+  if (normalized === "failed") return "❌"
+  if (normalized === "queued") return "⏳"
+  return "▶️"
+}
+
+function padCardLine(value: string, width: number): string {
+  const innerWidth = Math.max(1, width - 4)
+  return `│ ${truncateText(value, innerWidth).padEnd(innerWidth)} │`
+}
+
+function buildSubagentCard(subagent: WorkflowSubagentSnapshot, width: number): string[] {
+  const elapsed = formatElapsed((subagent.finishedAt ?? Date.now()) - subagent.startedAt)
+  const title = subagent.title ?? "untitled group"
+  const model = subagent.model ?? "unavailable"
+  const thinking = subagent.thinking ?? "unavailable"
+  return [
+    `┌${"─".repeat(Math.max(1, width - 2))}┐`,
+    padCardLine(`${subagentStatusIcon(subagent.status)} ${subagent.id} — ${title}`, width),
+    padCardLine(`${subagent.status} · ${elapsed}`, width),
+    padCardLine(`${subagent.agent} · ${model} · ${thinking}`, width),
+    padCardLine(`last: ${subagent.lastCommand ?? "starting"}`, width),
+    `└${"─".repeat(Math.max(1, width - 2))}┘`,
+  ]
+}
+
+function renderSubagentCards(subagents: WorkflowSubagentSnapshot[], width: number): string[] {
+  const available = Math.max(32, width - 2)
+  const columns = available >= 120 ? 3 : available >= 76 ? 2 : 1
+  const gap = 2
+  const cardWidth = Math.max(32, Math.floor((available - (columns - 1) * gap) / columns))
+  const ordered = [...subagents].sort((a, b) => subagentSortKey(a.id) - subagentSortKey(b.id) || a.id.localeCompare(b.id))
+  const rendered: string[] = []
+
+  for (let index = 0; index < ordered.length; index += columns) {
+    const rowCards = ordered.slice(index, index + columns).map((subagent) => buildSubagentCard(subagent, cardWidth))
+    const rowHeight = Math.max(...rowCards.map((card) => card.length))
+    for (let line = 0; line < rowHeight; line++) {
+      rendered.push(rowCards.map((card) => card[line] ?? " ".repeat(cardWidth)).join(" ".repeat(gap)))
+    }
+  }
+
+  return rendered
 }
 
 function makeWorkflowProgressComponent(details: WorkflowProgressMessageDetails, theme: any): {
@@ -482,15 +540,9 @@ function makeWorkflowProgressComponent(details: WorkflowProgressMessageDetails, 
         lines.push(truncateText(`  ${theme.fg("dim", "•")} ${message}`, available))
       }
       if (snapshot.subagents.length > 0) {
-        lines.push(truncateText(`  ${theme.fg("dim", "subagents:")}`, available))
-        for (const subagent of snapshot.subagents) {
-          const subElapsed = formatElapsed((subagent.finishedAt ?? Date.now()) - subagent.startedAt)
-          const model = subagent.model ?? "unavailable"
-          const thinking = subagent.thinking ? `, thinking ${subagent.thinking}` : ""
-          lines.push(truncateText(`    ${subagent.id}: ${subagent.status} ${subElapsed}`, available))
-          lines.push(truncateText(`      ${subagent.agent} · model ${model}${thinking}`, available))
-          lines.push(truncateText(`      last: ${subagent.lastCommand ?? "starting"}`, available))
-        }
+        const finished = snapshot.subagents.filter((subagent) => isFinishedSubagentStatus(subagent.status)).length
+        lines.push(truncateText(`  ${theme.fg("dim", "subagents:")} ${finished}/${snapshot.subagents.length} finished`, available))
+        lines.push(...renderSubagentCards(snapshot.subagents, available))
       }
       return lines
     },
@@ -580,14 +632,16 @@ function createWorkflowProgressIndicator(
       const current = workflowProgressSnapshots.get(id)
       if (current) {
         const existing = current.subagents.find((subagent) => subagent.id === subagentId)
+        const nextStatus = update.status ?? existing?.status ?? "running"
         const nextSubagent: WorkflowSubagentSnapshot = {
           id: subagentId,
           agent: update.agent ?? existing?.agent ?? subagentId,
+          title: update.title ?? existing?.title,
           model: update.model ?? existing?.model,
           thinking: update.thinking ?? existing?.thinking,
-          status: update.status ?? existing?.status ?? "running",
+          status: nextStatus,
           startedAt: existing?.startedAt ?? Date.now(),
-          finishedAt: update.finishedAt ?? existing?.finishedAt,
+          finishedAt: update.finishedAt ?? existing?.finishedAt ?? (isFinishedSubagentStatus(nextStatus) ? Date.now() : undefined),
           lastCommand: update.lastCommand ?? existing?.lastCommand,
         }
         workflowProgressSnapshots.set(id, {
@@ -928,8 +982,94 @@ export function resetWorkflowState(): void {
 import type { AgentDispatchProgress, DispatchService } from "pi-zflow-core/dispatch-service"
 import { DISPATCH_SERVICE_CAPABILITY } from "pi-zflow-core/dispatch-service"
 
+const IMPLEMENT_GROUP_MAX_RETRIES = 1
+
+type DispatchGroupResult = Awaited<ReturnType<DispatchService["runParallel"]>>["results"][number]
+
+interface FailedGroupDecision {
+  groupId: string
+  agent: string
+  attempt: number
+  decision: "retry" | "blocker"
+  reason: string
+  error?: string
+}
+
+function classifyFailedGroup(
+  groupId: string,
+  result: DispatchGroupResult,
+  attempt: number,
+  maxRetries: number = IMPLEMENT_GROUP_MAX_RETRIES,
+): FailedGroupDecision {
+  const error = result.error ?? "unknown error"
+  const normalized = error.toLowerCase()
+  const retryBudgetRemaining = attempt < maxRetries
+
+  const blockerPatterns = [
+    "unknown agent",
+    "no agents discovered",
+    "scoped verification failed",
+    "verification failed",
+    "path guard",
+    "permission denied",
+    "not a git repository",
+  ]
+
+  if (blockerPatterns.some((pattern) => normalized.includes(pattern))) {
+    return {
+      groupId,
+      agent: result.agent,
+      attempt,
+      decision: "blocker",
+      reason: "Failure is deterministic or requires user/code changes before retry.",
+      error,
+    }
+  }
+
+  if (!retryBudgetRemaining) {
+    return {
+      groupId,
+      agent: result.agent,
+      attempt,
+      decision: "blocker",
+      reason: `Retry budget exhausted after ${maxRetries} retry attempt(s).`,
+      error,
+    }
+  }
+
+  return {
+    groupId,
+    agent: result.agent,
+    attempt,
+    decision: "retry",
+    reason: "Failure may be transient; one bounded retry is allowed.",
+    error,
+  }
+}
+
+async function recordDispatchFailurePolicy(
+  runId: string,
+  cwd: string | undefined,
+  decisions: FailedGroupDecision[],
+  reportPath: string,
+): Promise<void> {
+  const { readRun, updateRun } = await import("pi-zflow-artifacts")
+  const run = await readRun(runId, cwd)
+  await updateRun(runId, {
+    phase: "failed",
+    metadata: {
+      ...(run.metadata ?? {}),
+      dispatchFailurePolicy: {
+        maxRetries: IMPLEMENT_GROUP_MAX_RETRIES,
+        reportPath,
+        decisions,
+      },
+    },
+  } as any, cwd)
+}
+
 function normalizeDispatchVerification(
-  verification: Awaited<ReturnType<DispatchService["runParallel"]>>["results"][number]["verification"],
+  verification: DispatchGroupResult["verification"],
 ) {
   if (!verification) return undefined
   const status = verification.status === "passed"
@@ -1058,18 +1198,23 @@ async function runWorktreeDispatchAndFinalize(
     { cwd, repoRoot, runId, force: options?.force },
   )
 
-  // Dispatch via the dispatch service with worktree: true
+  // Dispatch via the dispatch service with worktree: true. Keep worker output
+  // under runtime state so repo roots are not polluted with worktree-results/.
+  const runDir = resolveRunDir(runId, cwd)
+  const worktreeResultsDir = path.join(runDir, "worktree-results")
+  await fs.mkdir(worktreeResultsDir, { recursive: true })
   const implementModel = await resolveWorkflowModel("zflow.implement-routine")
   const tasks = runPlan.tasks.map(t => ({
     agent: t.agent,
     task: t.task,
     model: implementModel.model,
-    output: t.outputRelativePath,
+    output: path.join(worktreeResultsDir, `${t.groupId}-result.md`),
     outputMode: "file-only" as const,
     onUpdate: (progress: AgentDispatchProgress) => {
       const recentTool = progress.recentTools?.at(-1)
       options?.onSubagentUpdate?.(t.groupId, {
         agent: t.agent,
+        title: runPlan.groups[idx]?.taskPrompt ?? undefined,
         model: implementModel.model ?? "unavailable",
         thinking: implementModel.thinking ?? "unavailable",
         status: progress.status ?? "running",
@@ -1085,6 +1230,7 @@ async function runWorktreeDispatchAndFinalize(
   for (const task of runPlan.tasks) {
     options?.onSubagentUpdate?.(task.groupId, {
       agent: task.agent,
+      title: runPlan.groups[idx]?.taskPrompt ?? undefined,
       model: implementModel.model ?? "unavailable",
       thinking: implementModel.thinking ?? "unavailable",
       status: "queued",
@@ -1098,63 +1244,150 @@ async function runWorktreeDispatchAndFinalize(
     worktree: true,
   })
 
-  if (!dispatchResult.ok) {
-    for (let idx = 0; idx < dispatchResult.results.length; idx++) {
-      const result = dispatchResult.results[idx]
-      const task = runPlan.tasks[idx]
-      if (task && result) {
-        options?.onSubagentUpdate?.(task.groupId, {
-          agent: result.agent,
-          status: result.ok ? "completed" : "failed",
-          finishedAt: Date.now(),
-          lastCommand: result.error ?? "dispatch complete",
-        })
-      }
-    }
-    throw new Error(
-      `Worktree dispatch failed via "${dispatchService.name}": ` +
-      dispatchResult.results
-        .filter((r) => !r.ok)
-        .map((r) => `${r.agent}: ${r.error ?? "unknown error"}`)
-        .join("; "),
-    )
-  }
+  // Classify results: successful groups go into collected; failures are classified
+  // as retryable or blocker. Retryable groups get one bounded re-run via runAgent.
+  const decisions: FailedGroupDecision[] = []
+  const allResults: Array<DispatchGroupResult> = [...dispatchResult.results]
 
-  for (let idx = 0; idx < dispatchResult.results.length; idx++) {
-    const result = dispatchResult.results[idx]
+  for (let idx = 0; idx < allResults.length; idx++) {
+    const result = allResults[idx]!
     const task = runPlan.tasks[idx]
-    if (task && result) {
-      options?.onSubagentUpdate?.(task.groupId, {
+    if (result.ok) {
+      options?.onSubagentUpdate?.(task?.groupId ?? `group-${idx}`, {
         agent: result.agent,
-        status: result.ok ? "completed" : "failed",
+        title: runPlan.groups[idx]?.taskPrompt ?? undefined,
+        status: "completed",
         finishedAt: Date.now(),
-        lastCommand: result.ok ? "dispatch complete" : result.error ?? "dispatch failed",
+        lastCommand: "dispatch complete",
       })
     }
   }
 
+  const failedIndices: number[] = []
+  for (let idx = 0; idx < allResults.length; idx++) {
+    if (!allResults[idx]!.ok) failedIndices.push(idx)
+  }
+
+  if (failedIndices.length > 0) {
+    for (const idx of failedIndices) {
+      const result = allResults[idx]!
+      const group = runPlan.groups[idx]
+      const decision = classifyFailedGroup(group?.id ?? `group-${idx}`, result, 0, IMPLEMENT_GROUP_MAX_RETRIES)
+      decisions.push(decision)
+
+      if (decision.decision === "retry") {
+        const task = runPlan.tasks[idx]!
+        options?.onSubagentUpdate?.(task.groupId, {
+          agent: result.agent,
+          title: group?.taskPrompt ?? undefined,
+          status: "retry",
+          finishedAt: undefined,
+          startedAt: Date.now(),
+          lastCommand: "retrying...",
+        })
+
+        try {
+          const retryResult = await dispatchService.runAgent({
+            agent: task.agent,
+            task: task.task,
+            cwd,
+            model: implementModel.model,
+            output: path.join(worktreeResultsDir, `${task.groupId}-result.md`),
+            outputMode: "file-only",
+          })
+          // Replace the failed result with retry result
+          const retryDispatchResult: DispatchGroupResult = {
+            agent: retryResult.agent ?? task.agent,
+            rawOutput: retryResult.rawOutput,
+            outputPath: retryResult.outputPath,
+            ok: retryResult.ok,
+            error: retryResult.error,
+          }
+          allResults[idx] = retryDispatchResult
+
+          if (retryResult.ok) {
+            decisions[decisions.length - 1] = { ...decision, decision: "retry", reason: "Retry succeeded." }
+            options?.onSubagentUpdate?.(task.groupId, {
+              agent: retryResult.agent ?? task.agent,
+              title: group?.taskPrompt ?? undefined,
+              status: "completed",
+              finishedAt: Date.now(),
+            })
+          } else {
+            decisions[decisions.length - 1] = classifyFailedGroup(group?.id ?? `group-${idx}`, retryDispatchResult, 1, IMPLEMENT_GROUP_MAX_RETRIES)
+            options?.onSubagentUpdate?.(task.groupId, {
+              agent: retryResult.agent ?? task.agent,
+              title: group?.taskPrompt ?? undefined,
+              status: "failed",
+              finishedAt: Date.now(),
+              lastCommand: retryResult.error ?? "retry failed",
+            })
+          }
+        } catch (retryErr: unknown) {
+          decisions[decisions.length - 1] = {
+            groupId: group?.id ?? `group-${idx}`,
+            agent: result.agent,
+            attempt: 1,
+            decision: "blocker",
+            reason: `Retry threw: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`,
+            error: result.error,
+          }
+          options?.onSubagentUpdate?.(task.groupId, {
+            agent: result.agent,
+            title: group?.taskPrompt ?? undefined,
+            status: "failed",
+            finishedAt: Date.now(),
+            lastCommand: "retry crashed",
+          })
+        }
+      } else {
+        options?.onSubagentUpdate?.(runPlan.tasks[idx]?.groupId ?? `group-${idx}`, {
+          agent: result.agent,
+          title: group?.taskPrompt ?? undefined,
+          status: "failed",
+          finishedAt: Date.now(),
+          lastCommand: decision.reason,
+        })
+      }
+    }
+  }
+
+  const blockers = decisions.filter((d) => d.decision === "blocker")
+  if (blockers.length > 0) {
+    const reportPath = path.join(worktreeResultsDir, "failure-report.json")
+    await fs.writeFile(reportPath, JSON.stringify({ decisions, allResults: allResults.map(r => ({ agent: r.agent, ok: r.ok, error: r.error })) }, null, 2))
+    await recordDispatchFailurePolicy(runId, cwd, decisions, reportPath)
+    throw new Error(
+      `${blockers.length} group(s) could not be dispatched after ${IMPLEMENT_GROUP_MAX_RETRIES} retry: ` +
+      blockers.map((d) => `${d.groupId}: ${d.reason}`).join("; ") +
+      `\nFailure report: ${reportPath}`,
+    )
+  }
+
   // Collect group results from dispatch outputs
   const groupResults = []
-  const runDir = resolveRunDir(runId, cwd)
   const patchesDir = path.join(runDir, "patches")
   await fs.mkdir(patchesDir, { recursive: true })
 
-  for (let idx = 0; idx < dispatchResult.results.length; idx++) {
-    const r = dispatchResult.results[idx]!
+  for (let idx = 0; idx < allResults.length; idx++) {
+    const r = allResults[idx]!
     const group = groups[idx]
     if (!group) continue
 
     if (!r.ok) {
-      throw new Error(`Dispatch failed for ${group.id}: ${r.error ?? "unknown error"}`)
+      continue
     }
 
     const verification = normalizeDispatchVerification(r.verification)
 
     if (!verification || verification.status !== "pass") {
-      throw new Error(
-        `Scoped verification did not pass for ${group.id}. ` +
-        `Status: ${verification?.status ?? "missing"}`,
-      )
+      const vStatus = verification?.status ?? "missing"
+      options?.onSubagentUpdate?.(group.id, {
+        status: "failed",
+        finishedAt: Date.now(),
+        lastCommand: `scoped verification ${vStatus}`,
+      })
+      continue
     }
 
     if (r.worktreePath) {
