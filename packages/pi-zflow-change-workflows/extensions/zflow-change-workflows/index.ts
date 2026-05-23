@@ -1439,6 +1439,11 @@ async function runWorktreeDispatchAndFinalize(
     }
 
     // ── Phase 2: dispatch all retries in parallel (not one-at-a-time)
+    // IMPORTANT: retries run WITHOUT worktree isolation (matching the original
+    // runAgent behaviour). The initial dispatch already created worktrees for
+    // these groups; creating new ones would fail because git rejects duplicate
+    // worktree paths. Running retries in the main working directory lets the
+    // agent access the full repo and retry the implementation from scratch.
     if (retryIndices.length > 0) {
       const retryTasks = retryIndices.map((idx) => {
         const task = runPlan.tasks[idx]!
@@ -1447,7 +1452,7 @@ async function runWorktreeDispatchAndFinalize(
           agent: task.agent,
           task: task.task,
           model: implementModel.model,
-          output: path.join(worktreeResultsDir, `${task.groupId}-result.md`),
+          output: path.join(worktreeResultsDir, `${task.groupId}-retry-result.md`),
           outputMode: "file-only" as const,
           onUpdate: (progress: AgentDispatchProgress) => {
             const recentTools = Array.isArray(progress.recentTools) ? progress.recentTools : []
@@ -1475,7 +1480,6 @@ async function runWorktreeDispatchAndFinalize(
           tasks: retryTasks,
           cwd,
           concurrency: WORKTREE_DISPATCH_CONCURRENCY,
-          worktree: true,
           maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
         })
       } catch (retryDispatchErr: unknown) {
@@ -1503,10 +1507,16 @@ async function runWorktreeDispatchAndFinalize(
         retryDispatchResult = { ok: false, results: [] }
       }
 
-      // ── Phase 3: map retry results back to original indices
+      // ── Phase 3: map retry results back to original indices.
+      // Guard against result/expectation length mismatches — if the backend
+      // returned fewer results than tasks (e.g. internal error), mark every
+      // unmapped retry as a blocker so it doesn't silently hang.
+      const mappedSet = new Set<number>()
       for (let rIdx = 0; rIdx < retryDispatchResult.results.length; rIdx++) {
-        const originalIdx = retryIndices[rIdx]!
-        const decisionIdx = retryDecisionIndices[rIdx]!
+        const originalIdx = retryIndices[rIdx]
+        const decisionIdx = retryDecisionIndices[rIdx]
+        if (originalIdx === undefined || decisionIdx === undefined) continue
+        mappedSet.add(rIdx)
         const group = runPlan.groups[originalIdx]
         const task = runPlan.tasks[originalIdx]!
         const rResult = retryDispatchResult.results[rIdx]!
@@ -1538,6 +1548,27 @@ async function runWorktreeDispatchAndFinalize(
             lastCommand: rResult.error ?? "retry failed",
           })
         }
+      }
+
+      // Mark any retries that weren't mapped (backend returned fewer results)
+      for (let rIdx = 0; rIdx < retryIndices.length; rIdx++) {
+        if (mappedSet.has(rIdx)) continue
+        const originalIdx = retryIndices[rIdx]!
+        const decisionIdx = retryDecisionIndices[rIdx]!
+        const group = runPlan.groups[originalIdx]
+        const task = runPlan.tasks[originalIdx]!
+        decisions[decisionIdx] = {
+          ...decisions[decisionIdx]!,
+          decision: "blocker",
+          reason: `Retry produced no result for ${group?.id ?? `group-${originalIdx}`} — backend may have crashed`,
+        }
+        options?.onSubagentUpdate?.(task.groupId, {
+          agent: task.agent,
+          title: group?.taskPrompt ?? undefined,
+          status: "failed",
+          finishedAt: Date.now(),
+          lastCommand: "retry produced no result — backend may have crashed",
+        })
       }
     }
   }
@@ -1636,10 +1667,44 @@ async function runWorktreeDispatchAndFinalize(
       continue
     }
 
-    throw new Error(
-      `Dispatch result for ${group.id} did not include worktreePath or patchPath. ` +
-      "A zflow dispatch service must expose enough worktree metadata to capture or apply patches.",
-    )
+    // Fallback: dispatch ran without worktree isolation (e.g. because the
+    // backend's worktree path is broken). The agent made changes directly in
+    // the working directory. Record the group as completed in-place — the
+    // apply-back step will skip it (no patch file to apply) and verification
+    // will run against the working directory.
+    const run = await readRun(runId, cwd)
+    const groupMeta = {
+      groupId: group.id,
+      agent: tasks[idx]?.agent ?? group.agent ?? "unknown",
+      worktreePath: "(in-place — no worktree isolation)",
+      baseCommit: run.head,
+      headCommit: run.head,
+      changedFiles: r.changedFiles ?? group.files,
+      uncommittedChanges: [],
+      patchPath: undefined as string | undefined,
+      scopedVerification: {
+        status: verification.status,
+        command: verification.command,
+        output: verification.output,
+      },
+      retained: false,
+    }
+    const existingIndex = run.groups.findIndex((g) => g.groupId === group.id)
+    if (existingIndex >= 0) run.groups[existingIndex] = groupMeta
+    else run.groups.push(groupMeta)
+    await updateRun(runId, { groups: run.groups }, cwd)
+    groupResults.push({
+      groupId: group.id,
+      agent: groupMeta.agent,
+      worktreePath: groupMeta.worktreePath,
+      baseCommit: groupMeta.baseCommit,
+      headCommit: groupMeta.headCommit,
+      changedFiles: groupMeta.changedFiles,
+      uncommittedChanges: [],
+      patchPath: undefined,
+      verification,
+      retained: false,
+    })
   }
 
   // Finalize: apply patches back, check deviations
