@@ -5500,11 +5500,56 @@ export async function finalizeCodeReview(
 
   if (reviewService && typeof reviewService.runCodeReview === "function") {
     try {
+      const { default: path } = await import("node:path")
+      const { default: fs } = await import("node:fs/promises")
+
       const planningArtifacts = {
         design: resolvePlanArtifactPath(run.changeId, run.planVersion, "design", cwd),
         executionGroups: resolvePlanArtifactPath(run.changeId, run.planVersion, "execution-groups", cwd),
         standards: resolvePlanArtifactPath(run.changeId, run.planVersion, "standards", cwd),
         verification: resolvePlanArtifactPath(run.changeId, run.planVersion, "verification", cwd),
+      }
+
+      // Build a unified diff bundle from all applied group patch files
+      let diffBundle = ""
+      const groupPatchPaths: string[] = []
+      for (const group of run.groups) {
+        if (group.patchPath) groupPatchPaths.push(group.patchPath)
+      }
+
+      if (groupPatchPaths.length > 0) {
+        const parts: string[] = []
+        for (const patchPath of groupPatchPaths) {
+          try {
+            const content = await fs.readFile(patchPath, "utf-8")
+            parts.push(content.trimEnd())
+          } catch {
+            parts.push(`# Patch not found: ${patchPath}`)
+          }
+        }
+        diffBundle = parts.length > 0 ? parts.join("\n") : ""
+      }
+
+      const modifiedFiles: string[] = []
+      for (const group of run.groups) {
+        if (Array.isArray(group.changedFiles)) {
+          for (const f of group.changedFiles) {
+            if (!modifiedFiles.includes(f)) modifiedFiles.push(f)
+          }
+        }
+      }
+
+      // Resolve execution groups from the plan artifact for tier triggers
+      let executionGroups: Array<{ reviewTags?: string | string[] }> | undefined
+      try {
+        const execPath = resolvePlanArtifactPath(run.changeId, run.planVersion, "execution-groups", cwd)
+        const execMd = await fs.readFile(execPath, "utf-8")
+        const parsed = parseExecutionGroupsMd(execMd)
+        executionGroups = parsed.map((g) => ({
+          reviewTags: g.reviewTags ?? undefined,
+        }))
+      } catch {
+        // execution-groups.md may not exist — non-fatal
       }
 
       const result = await (reviewService.runCodeReview as Function)({
@@ -5513,6 +5558,10 @@ export async function finalizeCodeReview(
         branch: run.branch || "(unknown)",
         planningArtifacts,
         verificationStatus: (run.verification as any)?.status || "unknown",
+        diffBundle: diffBundle || undefined,
+        diffSource: diffBundle ? "run-patches" : undefined,
+        modifiedFiles: modifiedFiles.length > 0 ? modifiedFiles : undefined,
+        executionGroups,
         cwd,
       })
 

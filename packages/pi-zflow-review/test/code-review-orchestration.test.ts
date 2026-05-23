@@ -416,3 +416,63 @@ void describe("runCodeReview with DispatchService", () => {
     assert.equal(result.recommendation, "NO-GO")
   })
 })
+
+// ── diffBundle support ──────────────────────────────────────────
+
+void describe("runCodeReview with explicit diffBundle", () => {
+  it("uses diffBundle content when provided instead of running git diff", async () => {
+    const planningArtifacts = await writeArtifacts(tmpDir, "ch-bundle", "v1")
+    const jsonOutput = JSON.stringify({ findings: [] })
+
+    const fakeService = makeFakeDispatchService(jsonOutput)
+    const registry = getZflowRegistry()
+    registry.claim({
+      capability: DISPATCH_SERVICE_CAPABILITY,
+      version: "0.1.0",
+      provider: "test",
+      sourcePath: import.meta.url,
+      compatibilityMode: "compatible",
+    })
+    registry.provide(DISPATCH_SERVICE_CAPABILITY, fakeService)
+
+    const bundleContent = `diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..e69de29`
+
+    const result = await runCodeReview(makeInput(planningArtifacts, {
+      diffBundle: bundleContent,
+      diffSource: "test-bundle",
+    }))
+
+    // Coverage notes should mention the bundle source
+    const hasSourceNote = result.coverageNotes.some(n => n.includes("test-bundle"))
+    assert.ok(hasSourceNote, "coverage notes should contain diff source label")
+    // Coverage notes should mention bytes
+    const hasBytesNote = result.coverageNotes.some(n => n.includes("bytes"))
+    assert.ok(hasBytesNote, "coverage notes should mention diff bundle size")
+  })
+
+  it("emits empty-diff coverage note when explicit diffBundle is empty", async () => {
+    const planningArtifacts = await writeArtifacts(tmpDir, "ch-emptybundle", "v1")
+    const jsonOutput = JSON.stringify({ findings: [] })
+
+    const fakeService = makeFakeDispatchService(jsonOutput)
+    const registry = getZflowRegistry()
+    registry.claim({
+      capability: DISPATCH_SERVICE_CAPABILITY,
+      version: "0.1.0",
+      provider: "test",
+      sourcePath: import.meta.url,
+      compatibilityMode: "compatible",
+    })
+    registry.provide(DISPATCH_SERVICE_CAPABILITY, fakeService)
+
+    const result = await runCodeReview(makeInput(planningArtifacts, {
+      diffBundle: "",
+      diffSource: "empty-test",
+    }))
+
+    const hasEmptyNote = result.coverageNotes.some(n => n.includes("no changes"))
+    assert.ok(hasEmptyNote, "coverage notes should mention empty diff when bundle is empty")
+  })
+})

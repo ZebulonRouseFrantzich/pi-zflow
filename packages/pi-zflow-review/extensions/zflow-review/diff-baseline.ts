@@ -77,7 +77,7 @@ export interface ResolvedBaseline {
  * 1. `baseRef` explicit override (if provided).
  * 2. `useHead` → baseline "HEAD".
  * 3. `useMergeBase` → baseline "main" (three-dot diff).
- * 4. Default → baseline "main".
+ * 4. Default → baseline "HEAD" (staged + unstaged changes).
  *
  * @param input - Baseline resolution input.
  * @returns A resolved baseline with the ref, resolution type, and
@@ -113,11 +113,11 @@ export function resolveDiffBaseline(input: DiffBaselineInput = {}): ResolvedBase
     }
   }
 
-  // Priority 4: default
+  // Priority 4: default — include staged + unstaged changes
   return {
-    baseRef: "main",
+    baseRef: "HEAD",
     resolution: "default",
-    diffCommand: buildDiffCommand("main", "HEAD"),
+    diffCommand: "git diff HEAD",
   }
 }
 

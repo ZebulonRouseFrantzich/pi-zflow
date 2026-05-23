@@ -244,6 +244,10 @@ export interface CodeReviewInput {
   branch: string
   /** Baseline override options. */
   baseline?: DiffBaselineInput
+  /** Explicit diff bundle content (overrides git diff execution when provided). */
+  diffBundle?: string
+  /** Optional label for the diff source (e.g. "run-patches", "git-diff"). */
+  diffSource?: string
   /** Execution groups with review tags for tier selection. */
   executionGroups?: Array<{ reviewTags?: string | string[] }>
   /** Verification document content for tier triggers. */
@@ -413,23 +417,34 @@ export async function runCodeReview(
   const branch = input.branch || getCurrentBranch(cwd)
 
   // Step 1: Resolve diff baseline and produce diff bundle
-  const resolved = resolveDiffBaseline(input.baseline ?? {})
-  const baseRef = resolved.baseRef
-
-  const diffCommand = input.targetPath
-    ? `${resolved.diffCommand} -- ${shellQuote(input.targetPath)}`
-    : resolved.diffCommand
-
   let diffContent: string
-  try {
-    diffContent = execSync(diffCommand, {
-      cwd,
-      encoding: "utf-8",
-      timeout: 15_000,
-      maxBuffer: 10 * 1024 * 1024,
-    })
-  } catch {
-    diffContent = "(diff unavailable)"
+  let baseRef: string
+  let diffSource: string
+
+  if (input.diffBundle !== undefined) {
+    // Caller provided an explicit diff bundle — use it directly
+    diffContent = input.diffBundle
+    baseRef = input.diffSource ?? "explicit-bundle"
+    diffSource = input.diffSource ?? "explicit-bundle"
+  } else {
+    const resolved = resolveDiffBaseline(input.baseline ?? {})
+    baseRef = resolved.baseRef
+    diffSource = resolved.resolution
+
+    const diffCommand = input.targetPath
+      ? `${resolved.diffCommand} -- ${shellQuote(input.targetPath)}`
+      : resolved.diffCommand
+
+    try {
+      diffContent = execSync(diffCommand, {
+        cwd,
+        encoding: "utf-8",
+        timeout: 15_000,
+        maxBuffer: 10 * 1024 * 1024,
+      })
+    } catch {
+      diffContent = "(diff unavailable)"
+    }
   }
 
   // Step 2: Determine code-review tier
@@ -454,6 +469,13 @@ export async function runCodeReview(
   const reviewerOutputs: Record<string, string> = {}
   const coverageNotes: string[] = [`Tier: ${tier}`, `Base ref: ${baseRef}`]
   if (input.targetPath) coverageNotes.push(`Target path: ${input.targetPath}`)
+
+  // Diff coverage note
+  if (diffContent.length === 0) {
+    coverageNotes.push(`Diff bundle is empty — no changes to review (source: ${diffSource}).`)
+  } else {
+    coverageNotes.push(`Diff bundle: ${diffContent.length} bytes (source: ${diffSource}).`)
+  }
 
   const internalCtx: InternalReviewContext = {
     planningArtifacts: input.planningArtifacts,
