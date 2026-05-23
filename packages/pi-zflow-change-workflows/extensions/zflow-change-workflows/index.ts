@@ -24,6 +24,7 @@ import {
   resolveStateIndexPath,
   resolvePlanStatePath,
   resolvePlanVersionDir,
+  resolvePlanArtifactPath,
   resolveChangeDir,
   resolveRunStatePath,
   resolveRunDir,
