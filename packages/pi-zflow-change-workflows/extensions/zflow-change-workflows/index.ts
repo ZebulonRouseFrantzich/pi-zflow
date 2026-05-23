@@ -419,6 +419,16 @@ interface WorkflowProgressSnapshot {
   updateCount: number
   recentMessages: string[]
   subagents: WorkflowSubagentSnapshot[]
+  phaseCards: WorkflowPhaseCardSnapshot[]
+}
+
+interface WorkflowPhaseCardSnapshot {
+  id: string
+  title: string
+  status: "running" | "completed" | "failed"
+  startedAt: number
+  finishedAt?: number
+  messages: string[]
 }
 
 interface WorkflowSubagentSnapshot {
@@ -523,6 +533,30 @@ function buildSubagentCard(subagent: WorkflowSubagentSnapshot, width: number): s
   ]
 }
 
+function buildPhaseCard(card: WorkflowPhaseCardSnapshot, width: number): string[] {
+  const elapsed = formatElapsed((card.finishedAt ?? Date.now()) - card.startedAt)
+  const messages = card.messages.slice(-4)
+  return [
+    `┌${"─".repeat(Math.max(1, width - 2))}┐`,
+    padCardLine(`${subagentStatusIcon(card.status)} ${card.title}`, width),
+    padCardLine(`${card.status} · ${elapsed}`, width),
+    ...messages.map((message) => padCardLine(`• ${message}`, width)),
+    `└${"─".repeat(Math.max(1, width - 2))}┘`,
+  ]
+}
+
+function renderWorkflowCards(cards: WorkflowPhaseCardSnapshot[], width: number): string[] {
+  const available = Math.max(32, width - 2)
+  const rendered: string[] = []
+
+  for (const card of cards) {
+    if (rendered.length > 0) rendered.push("")
+    rendered.push(...buildPhaseCard(card, available))
+  }
+
+  return rendered
+}
+
 function renderSubagentCards(subagents: WorkflowSubagentSnapshot[], width: number): string[] {
   const available = Math.max(32, width - 2)
   const columns = available >= 120 ? 3 : available >= 76 ? 2 : 1
@@ -586,6 +620,11 @@ function makeWorkflowProgressComponent(details: WorkflowProgressMessageDetails, 
         lines.push(truncateText(`  ${theme.fg("dim", "subagents:")} ${finished}/${snapshot.subagents.length} finished`, available))
         lines.push(...renderSubagentCards(snapshot.subagents, available))
       }
+      const phaseCards = snapshot.phaseCards ?? []
+      if (phaseCards.length > 0) {
+        lines.push(truncateText(`  ${theme.fg("dim", "workflow cards:")}`, available))
+        lines.push(...renderWorkflowCards(phaseCards, available))
+      }
       return lines
     },
   }
@@ -610,6 +649,7 @@ function createWorkflowProgressIndicator(
   options?: { command?: string; model?: string; thinking?: string; initialMessage?: string; statusId?: string; widgetId?: string },
 ): {
   update: (message: string) => void
+  updatePhaseCard: (id: string, title: string, message: string, status?: "running" | "completed" | "failed") => void
   updateSubagent: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id">>) => void
   stop: (message?: string, status?: "completed" | "failed") => void
 } {
@@ -634,6 +674,7 @@ function createWorkflowProgressIndicator(
     updateCount: 0,
     recentMessages: [options?.initialMessage ?? "Initializing workflow"],
     subagents: [],
+    phaseCards: [],
   }
   workflowProgressSnapshots.set(id, initialSnapshot)
 
@@ -695,6 +736,35 @@ function createWorkflowProgressIndicator(
           lastMessage: normalizedMessage,
           updateCount: current.updateCount + 1,
           recentMessages: [...current.recentMessages, normalizedMessage].slice(-5),
+        })
+      }
+      render()
+      refreshProgressMessage()
+    },
+    updatePhaseCard(cardId: string, title: string, message: string, status: "running" | "completed" | "failed" = "running") {
+      const current = workflowProgressSnapshots.get(id)
+      const normalizedMessage = message.replace(/\s+/g, " ").trim()
+      if (current) {
+        const currentPhaseCards = current.phaseCards ?? []
+        const existing = currentPhaseCards.find((card) => card.id === cardId)
+        const nextCard: WorkflowPhaseCardSnapshot = {
+          id: cardId,
+          title,
+          status,
+          startedAt: existing?.startedAt ?? Date.now(),
+          finishedAt: status === "running" ? undefined : existing?.finishedAt ?? Date.now(),
+          messages: [...(existing?.messages ?? []), normalizedMessage].slice(-8),
+        }
+        const phaseCards = [...currentPhaseCards]
+        const existingIdx = phaseCards.findIndex((card) => card.id === cardId)
+        if (existingIdx >= 0) phaseCards[existingIdx] = nextCard
+        else phaseCards.push(nextCard)
+        workflowProgressSnapshots.set(id, {
+          ...current,
+          lastMessage: normalizedMessage,
+          updateCount: current.updateCount + 1,
+          recentMessages: [...current.recentMessages, normalizedMessage].slice(-5),
+          phaseCards,
         })
       }
       render()
@@ -2518,6 +2588,32 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         statusId: "zflow-implement",
         widgetId: "zflow-implement-progress",
       })
+      const updatePostImplementationCard = (message: string): void => {
+        const normalized = message.toLowerCase()
+        if (normalized.includes("running code review")) {
+          implProgress.updatePhaseCard("code-review", "Code Review", message, "running")
+          return
+        }
+        if (normalized.includes("code review passed")) {
+          implProgress.updatePhaseCard("code-review", "Code Review", message, "completed")
+          implProgress.updatePhaseCard("post-code-review", "Post Code Review", "Preparing final workflow completion", "running")
+          return
+        }
+        if (normalized.includes("code review found") || normalized.includes("review failed")) {
+          implProgress.updatePhaseCard("code-review", "Code Review", message, "failed")
+          implProgress.updatePhaseCard("post-code-review", "Post Code Review", "Review failed; preparing next steps", "failed")
+          return
+        }
+        if (normalized.includes("persisting completed") || normalized.includes("workflow completion persisted")) {
+          implProgress.updatePhaseCard("post-code-review", "Post Code Review", message, normalized.includes("persisted") ? "completed" : "running")
+          return
+        }
+        const postStatus = normalized.includes("final verification passed") ? "completed" : "running"
+        implProgress.updatePhaseCard("post-implementation", "Post Implementation", message, postStatus)
+        if (normalized.includes("final verification passed")) {
+          implProgress.updatePhaseCard("code-review", "Code Review", "Waiting for code review to start", "running")
+        }
+      }
 
       try {
         addReminder("approved-plan-loaded")
@@ -2542,18 +2638,18 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           await runWorktreeDispatchAndFinalize(result.runId, result.changeId, result.planVersion, dispatchService!, {
             cwd: undefined,
             force,
-            onWorkflowUpdate: (message) => implProgress.update(message),
+            onWorkflowUpdate: updatePostImplementationCard,
             onSubagentUpdate: (id, update) => implProgress.updateSubagent(id, update),
           })
         }
 
         // ── Phase 4: Post-start sequence (verification, review, complete) ──
-        implProgress.update("Starting post-start sequence: final verification, review, and completion")
+        updatePostImplementationCard("Starting post-start sequence: final verification, review, and completion")
         const postResult = await runImplementationPostStartSequence(
           result.runId,
           {
             skipDispatchWait: manualDispatchComplete,
-            onProgress: (message) => implProgress.update(message),
+            onProgress: updatePostImplementationCard,
           },
         )
 
@@ -2572,6 +2668,26 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
               .map((s, i) => `  ${i + 1}. ${s.replace(/^\d+\.\s*/, "")}`)
               .join("\n")
           : "  No further steps — workflow is complete."
+        const finalCardStatus = postResult.status === "completed"
+          ? "completed"
+          : postResult.status === "failed"
+            ? "failed"
+            : "running"
+        const finalCardTitle = postResult.status === "completed" ? "Workflow Complete" : "Workflow Needs Attention"
+        implProgress.updatePhaseCard(
+          "workflow-complete",
+          finalCardTitle,
+          `Phase: ${postResult.phase}, status: ${postResult.status}`,
+          finalCardStatus,
+        )
+        implProgress.updatePhaseCard(
+          "workflow-complete",
+          finalCardTitle,
+          postResult.nextSteps.length > 0
+            ? `Next steps: ${postResult.nextSteps.map((s) => s.replace(/^\d+\.\s*/, "")).join("; ")}`
+            : "No further steps — workflow is complete.",
+          finalCardStatus,
+        )
         implProgress.stop(
           `Phase: ${postResult.phase}, status: ${postResult.status}.\n${nextStepsText}`,
         )

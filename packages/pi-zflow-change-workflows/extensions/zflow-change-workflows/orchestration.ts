@@ -5880,6 +5880,7 @@ export async function runImplementationPostStartSequence(
     await transitionTo("completed")
     reportProgress("Persisting completed workflow state")
     await completeWorkflow(changeId, runId, cwd)
+    reportProgress("Workflow completion persisted")
 
     return {
       phase: "completed",
