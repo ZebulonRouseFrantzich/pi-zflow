@@ -2491,27 +2491,64 @@ export async function markPlanVersionState(
   await fs.writeFile(planStatePath, JSON.stringify(planState, null, 2), "utf-8")
 }
 
+const CHANGE_ID_NOISE_TOKENS = new Set([
+  "change",
+  "changes",
+  "idea",
+  "ideas",
+  "doc",
+  "docs",
+  "plan",
+  "draft",
+  "spec",
+  "specification",
+  "combined",
+])
+
 /**
- * Generate a deterministic but unique change identifier.
+ * Derive a stable, semantic change identifier from a path or title.
  *
- * If a `changePath` is provided, derives a slug from it and appends a
- * timestamp suffix for uniqueness. Otherwise creates a timestamp-only ID.
+ * The durable change-doc directory is intended to be reviewed and committed,
+ * so it should describe the change rather than the source file location or a
+ * timestamp. For file paths, this uses the basename/stem and removes common
+ * planning-document noise words such as `combined` and `spec`.
  *
- * @param changePath - Optional path to derive the slug from.
+ * @param changePath - Path or title supplied to `/zflow-change-prepare`.
+ * @returns A kebab-case semantic identifier, or null when no useful slug exists.
+ */
+export function deriveSemanticChangeId(changePath?: string): string | null {
+  if (!changePath) return null
+  const cleaned = changePath.trim().replace(/^@+/, "")
+  if (!cleaned) return null
+
+  const segment = cleaned.split(/[\\/]/).filter(Boolean).at(-1) ?? cleaned
+  const stem = segment.replace(/\.[^.]+$/, "")
+  const tokens = stem
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .toLowerCase()
+    .split("-")
+    .filter(Boolean)
+
+  const semanticTokens = tokens.filter((token) => !CHANGE_ID_NOISE_TOKENS.has(token))
+  const chosenTokens = semanticTokens.length >= 2 ? semanticTokens : tokens
+  const slug = chosenTokens.join("-").slice(0, 72).replace(/-+$/g, "")
+  return slug || null
+}
+
+/**
+ * Generate a change identifier.
+ *
+ * If a `changePath` is provided, derives a stable semantic slug from its
+ * basename/title. Otherwise creates a timestamp-only fallback ID.
+ *
+ * @param changePath - Optional path/title to derive the slug from.
  * @returns A kebab-case change ID string.
  */
 function generateChangeId(changePath?: string): string {
-  const timestamp = Date.now().toString(36)
-  if (changePath) {
-    const slug = changePath
-      .replace(/[^a-zA-Z0-9]/g, "-")
-      .replace(/-+/g, "-")
-      .replace(/^-|-$/g, "")
-      .toLowerCase()
-      .slice(0, 20)
-    return `${slug}-${timestamp}`
-  }
-  return `change-${timestamp}`
+  return deriveSemanticChangeId(changePath) ?? `change-${Date.now().toString(36)}`
 }
 
 /**

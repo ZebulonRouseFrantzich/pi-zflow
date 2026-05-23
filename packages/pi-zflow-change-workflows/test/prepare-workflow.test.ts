@@ -130,7 +130,21 @@ describe("runChangePrepareWorkflow", () => {
       })
 
       assert.ok(result.changeId, "changeId should be generated")
-      assert.ok(result.changeId.startsWith("my-feature-change-"), "changeId should derive from changePath")
+      assert.strictEqual(result.changeId, "my-feature")
+    } finally {
+      await removeTestRepo(repoRoot)
+    }
+  })
+
+  test("generates semantic change ID from change document basename", async () => {
+    const repoRoot = await createTestRepo()
+    try {
+      const result = await runChangePrepareWorkflow({
+        cwd: repoRoot,
+        changePath: "@docs/change-ideas/cloudflare-target-architecture-combined-spec.md",
+      })
+
+      assert.strictEqual(result.changeId, "cloudflare-target-architecture")
     } finally {
       await removeTestRepo(repoRoot)
     }

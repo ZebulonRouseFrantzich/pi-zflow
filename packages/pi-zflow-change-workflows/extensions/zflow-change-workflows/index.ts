@@ -303,6 +303,7 @@ export {
   parseInterviewResponse,
   runStructuredInterview,
   publishPlanArtifacts,
+  deriveSemanticChangeId,
 }
 
 export type {
@@ -1404,13 +1405,8 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       setActiveWorkflowMode("change-prepare")
       const cleanupMode = () => { resetWorkflowState() }
 
-      // Derive a path slug (same logic as generateChangeId without the timestamp)
-      const pathSlug = changePath
-        .replace(/[^a-zA-Z0-9]/g, "-")
-        .replace(/-+/g, "-")
-        .replace(/^-|-$/g, "")
-        .toLowerCase()
-        .slice(0, 20)
+      // Derive the semantic change ID used by the prepare workflow.
+      const pathSlug = deriveSemanticChangeId(changePath)
 
       // Check for unfinished work via checkUnfinishedOnEntry if we can derive changeId
       if (pathSlug) {
