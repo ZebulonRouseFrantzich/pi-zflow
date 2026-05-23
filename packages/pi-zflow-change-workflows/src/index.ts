@@ -102,6 +102,7 @@ export {
   bumpPlanVersion,
   markPlanVersionState,
   deriveSemanticChangeId,
+  resolveChangeImplementTarget,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
 // Interview gates (Phase 7 — structured human checkpoints with pi-interview)

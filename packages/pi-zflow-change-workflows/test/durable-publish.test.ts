@@ -11,7 +11,7 @@ import * as path from "node:path"
 import * as os from "node:os"
 import { execFileSync } from "node:child_process"
 
-import { publishPlanArtifacts } from "../extensions/zflow-change-workflows/orchestration.js"
+import { publishPlanArtifacts, resolveChangeImplementTarget } from "../extensions/zflow-change-workflows/orchestration.js"
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -202,6 +202,46 @@ describe("publishPlanArtifacts", () => {
         manifest.note.includes(".git/pi-zflow"),
         "manifest note should reference runtime state dir",
       )
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
+  })
+
+  test("resolveChangeImplementTarget maps durable docs path to previous runtime change id", async () => {
+    const repoRoot = await createTestRepo()
+    try {
+      const runtimeStateDir = path.join(repoRoot, ".git", "pi-zflow")
+      const runtimeChangeId = "docs-change-ideas-cl-mphn61g6"
+      const durableChangeId = "cloudflare-target-architecture"
+      const planVersion = "v1"
+
+      await writeRuntimePlanArtifacts(runtimeStateDir, runtimeChangeId, planVersion)
+      await fs.writeFile(
+        path.join(runtimeStateDir, "plans", runtimeChangeId, "plan-state.json"),
+        JSON.stringify({ changeId: runtimeChangeId, approvedVersion: planVersion }, null, 2),
+        "utf-8",
+      )
+
+      const result = await publishPlanArtifacts(runtimeChangeId, planVersion, {
+        cwd: repoRoot,
+        runtimeStateDir,
+      })
+      const durableDir = path.join(repoRoot, "docs", "zflow-changes", durableChangeId, planVersion)
+      await fs.mkdir(path.dirname(durableDir), { recursive: true })
+      await fs.rename(result.durableDir, durableDir)
+      await fs.rm(path.dirname(result.durableDir), { recursive: true, force: true })
+      const manifestPath = path.join(durableDir, "manifest.json")
+      const manifest = JSON.parse(await fs.readFile(manifestPath, "utf-8"))
+      manifest.changeId = durableChangeId
+      manifest.previousRuntimeChangeId = runtimeChangeId
+      await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf-8")
+
+      const fromChangeDir = await resolveChangeImplementTarget(`@docs/zflow-changes/${durableChangeId}/`, repoRoot)
+      assert.equal(fromChangeDir.changeId, runtimeChangeId)
+      assert.equal(fromChangeDir.durableChangeId, durableChangeId)
+
+      const fromVersionDir = await resolveChangeImplementTarget(`docs/zflow-changes/${durableChangeId}/${planVersion}/`, repoRoot)
+      assert.equal(fromVersionDir.changeId, runtimeChangeId)
     } finally {
       await fs.rm(repoRoot, { recursive: true, force: true })
     }

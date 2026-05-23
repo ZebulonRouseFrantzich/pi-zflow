@@ -172,6 +172,7 @@ import {
   buildCodeReviewInputFromContext,
   publishPlanArtifacts,
   deriveSemanticChangeId,
+  resolveChangeImplementTarget,
   type PublishPlanArtifactsResult,
 } from "./orchestration.js"
 
@@ -305,6 +306,7 @@ export {
   runStructuredInterview,
   publishPlanArtifacts,
   deriveSemanticChangeId,
+  resolveChangeImplementTarget,
 }
 
 export type {
@@ -1761,17 +1763,27 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       const parts = args.trim().split(/\s+/)
       const force = parts.includes("--force")
       const manualDispatchComplete = parts.includes("--manual-dispatch-complete")
-      const changeId = parts.filter(p => !p.startsWith("--")).join(" ")
+      const changeInput = parts.filter(p => !p.startsWith("--")).join(" ")
 
-      if (!changeId) {
+      if (!changeInput) {
         ctx.ui.notify(
-          "Usage: /zflow-change-implement <change-id> [--force] [--manual-dispatch-complete]\n\n" +
+          "Usage: /zflow-change-implement <change-id-or-docs-path> [--force] [--manual-dispatch-complete]\n\n" +
+          "  <change-id-or-docs-path>       Runtime change ID, or docs/zflow-changes/<id>/[version/] path.\n" +
           "  --force                       Proceed even if the primary worktree has uncommitted changes.\n" +
           "  --manual-dispatch-complete    Skip worktree dispatch and proceed directly to verification.\n" +
           "                                Use this when you have manually applied changes outside zflow.",
           "warning",
         )
         return
+      }
+
+      const implementTarget = await resolveChangeImplementTarget(changeInput)
+      const changeId = implementTarget.changeId
+      if (implementTarget.manifestPath && implementTarget.durableChangeId && implementTarget.durableChangeId !== changeId) {
+        ctx.ui.notify(
+          `📋 Resolved durable change docs "${implementTarget.durableChangeId}" to runtime plan "${changeId}".`,
+          "info",
+        )
       }
 
       // Step 0: Profile preflight (Phase 7 — Profile.ensureResolved() is step 1)

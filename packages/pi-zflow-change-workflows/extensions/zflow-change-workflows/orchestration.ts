@@ -2538,6 +2538,103 @@ export function deriveSemanticChangeId(changePath?: string): string | null {
   return slug || null
 }
 
+export interface ChangeImplementTarget {
+  /** Runtime change ID used for `.git/pi-zflow/plans/<changeId>`. */
+  changeId: string
+  /** Original command argument. */
+  input: string
+  /** Durable docs change ID, when input pointed at `docs/zflow-changes/<id>/...`. */
+  durableChangeId?: string
+  /** Manifest path used to resolve the runtime change ID, when applicable. */
+  manifestPath?: string
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  const { default: fs } = await import("node:fs/promises")
+  try {
+    await fs.access(filePath)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function findDurableManifestPath(inputPath: string, cwd?: string): Promise<string | null> {
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+  const repoRoot = cwd ?? process.cwd()
+  const cleaned = inputPath.trim().replace(/^@+/, "").replace(/[\\/]$/, "")
+  if (!cleaned) return null
+  const absolutePath = path.isAbsolute(cleaned) ? cleaned : path.join(repoRoot, cleaned)
+
+  const directManifest = path.join(absolutePath, "manifest.json")
+  if (await fileExists(directManifest)) return directManifest
+
+  const parts = absolutePath.split(path.sep)
+  const zflowIndex = parts.lastIndexOf("zflow-changes")
+  if (zflowIndex === -1 || !parts[zflowIndex + 1]) return null
+
+  const changeDir = parts.slice(0, zflowIndex + 2).join(path.sep) || path.sep
+  try {
+    const entries = await fs.readdir(changeDir, { withFileTypes: true })
+    const versionDirs = entries
+      .filter((entry) => entry.isDirectory() && /^v\d+$/.test(entry.name))
+      .map((entry) => entry.name)
+      .sort((a, b) => Number.parseInt(b.slice(1), 10) - Number.parseInt(a.slice(1), 10))
+    for (const version of versionDirs) {
+      const candidate = path.join(changeDir, version, "manifest.json")
+      if (await fileExists(candidate)) return candidate
+    }
+  } catch {
+    return null
+  }
+
+  return null
+}
+
+/**
+ * Resolve a `/zflow-change-implement` argument to the runtime plan change ID.
+ *
+ * Users commonly pass the durable docs path (`docs/zflow-changes/<name>/` or a
+ * version directory) after reviewing the committed plan documents. The runtime
+ * implementation state still lives under `.git/pi-zflow/plans/<changeId>/`, so
+ * this helper reads the durable `manifest.json` and follows
+ * `previousRuntimeChangeId` when present.
+ */
+export async function resolveChangeImplementTarget(
+  input: string,
+  cwd?: string,
+): Promise<ChangeImplementTarget> {
+  const { default: fs } = await import("node:fs/promises")
+  const cleaned = input.trim().replace(/^@+/, "").replace(/[\\/]$/, "")
+
+  if (cleaned && await fileExists(resolvePlanStatePath(cleaned, cwd))) {
+    return { changeId: cleaned, input }
+  }
+
+  const manifestPath = await findDurableManifestPath(input, cwd)
+  if (manifestPath) {
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf-8")) as {
+      changeId?: string
+      previousRuntimeChangeId?: string
+      sourceRuntimePath?: string
+    }
+    const candidates = [manifest.previousRuntimeChangeId, manifest.changeId].filter((value): value is string => Boolean(value))
+    for (const candidate of candidates) {
+      if (await fileExists(resolvePlanStatePath(candidate, cwd))) {
+        return {
+          changeId: candidate,
+          input,
+          durableChangeId: manifest.changeId,
+          manifestPath,
+        }
+      }
+    }
+  }
+
+  return { changeId: cleaned || input, input }
+}
+
 /**
  * Generate a change identifier.
  *
