@@ -233,6 +233,26 @@ function parseSynthesizerOutput(raw: string): {
 // ── Interfaces ──────────────────────────────────────────────────
 
 /**
+ * Per-reviewer progress update emitted during code review.
+ */
+export interface ReviewerUpdate {
+  /** Short reviewer name (e.g. "correctness", "integration"). */
+  reviewerName: string
+  /** Full agent name (e.g. "zflow.review-correctness"). */
+  agentName: string
+  /** Reviewer status. */
+  status: "queued" | "running" | "completed" | "failed"
+  /** Resolved model identifier, if available. */
+  model?: string
+  /** Effective thinking level, if available. */
+  thinking?: string
+  /** Active tool name, if a tool is running. */
+  currentTool?: string
+  /** Last command or activity line. */
+  lastCommand?: string
+}
+
+/**
  * Input to the internal code review flow.
  */
 export interface CodeReviewInput {
@@ -277,6 +297,8 @@ export interface CodeReviewInput {
   verificationStatus: "passed" | "failed" | "skipped" | "unknown"
   /** Optional reviewer runner to dispatch real reviewer agents. */
   reviewerRunner?: ReviewerRunner
+  /** Optional progress callback for per-reviewer status updates. */
+  onReviewUpdate?: (update: ReviewerUpdate) => void
   /** Working directory for runtime-state resolution. */
   cwd?: string
 }
@@ -378,16 +400,53 @@ function isRequiredCodeReviewer(reviewerName: string): boolean {
   return reviewerName === "correctness" || reviewerName === "integration" || reviewerName === "security"
 }
 
+interface AgentModelInfo {
+  model?: string
+  thinking?: string
+}
+
 async function resolveProfileModelForAgent(agentName: string): Promise<string | undefined> {
+  const info = await resolveAgentModelInfo(agentName)
+  return info.model
+}
+
+async function resolveAgentModelInfo(agentName: string): Promise<AgentModelInfo> {
   try {
     const profileService = getZflowRegistry().optional<{
-      getResolvedAgentBinding?: (agentName: string) => Promise<{ resolvedModel?: string | null } | null>
+      getResolvedAgentBinding?: (agentName: string) => Promise<{ resolvedModel?: string | null; lane?: string } | null>
+      getResolvedLane?: (laneName: string) => Promise<{ thinking?: string } | null>
     }>("profiles")
-    const binding = await profileService?.getResolvedAgentBinding?.(agentName)
-    return binding?.resolvedModel ?? undefined
+    if (!profileService) return {}
+    const binding = await profileService.getResolvedAgentBinding?.(agentName)
+    if (!binding) return {}
+    let thinking: string | undefined
+    if (binding.lane && profileService.getResolvedLane) {
+      const lane = await profileService.getResolvedLane(binding.lane)
+      if (lane) thinking = lane.thinking
+    }
+    return {
+      model: binding.resolvedModel ?? undefined,
+      thinking,
+    }
   } catch {
-    return undefined
+    return {}
   }
+}
+
+function emitReviewerUpdate(
+  callback: CodeReviewInput["onReviewUpdate"] | undefined,
+  name: string,
+  agentName: string,
+  status: ReviewerUpdate["status"],
+  extra?: { model?: string; thinking?: string; currentTool?: string; lastCommand?: string },
+): void {
+  if (!callback) return
+  callback({
+    reviewerName: name,
+    agentName,
+    status,
+    ...extra,
+  })
 }
 
 // ── Code review orchestration ───────────────────────────────────
@@ -487,16 +546,25 @@ export async function runCodeReview(
   if (input.reviewerRunner) {
     // Run reviewers in parallel via the injected runner
     const runner = input.reviewerRunner
+    // Emit queued for all reviewers
+    for (const name of reviewerNames) {
+      const agentName = toCodeReviewAgentName(name)
+      emitReviewerUpdate(input.onReviewUpdate, name, agentName, "queued")
+    }
     const results = await Promise.allSettled(
       reviewerNames.map(async (name) => {
+        const agentName = toCodeReviewAgentName(name)
+        emitReviewerUpdate(input.onReviewUpdate, name, agentName, "running")
         const prompt = await buildInternalReviewPrompt(name, internalCtx)
-        return { name, prompt, output: await runner(name, prompt) }
+        const output = await runner(name, prompt)
+        return { name, prompt, output }
       }),
     )
 
     for (const result of results) {
       if (result.status === "fulfilled") {
         const { name, prompt, output } = result.value
+        const agentName = toCodeReviewAgentName(name)
         reviewerOutputs[name] = output.rawOutput
         manifest = {
           ...manifest,
@@ -504,6 +572,7 @@ export async function runCodeReview(
             r.name === name ? { ...r, status: "executed" as const } : r,
           ),
         }
+        emitReviewerUpdate(input.onReviewUpdate, name, agentName, "completed")
         for (const f of output.findings) {
           allFindings.push({
             reviewerName: name,
@@ -529,20 +598,51 @@ export async function runCodeReview(
     const dispatchService = getZflowRegistry().optional<DispatchService>(DISPATCH_SERVICE_CAPABILITY)
 
     if (dispatchService) {
+      // Pre-resolve model/thinking for all reviewers
+      const reviewerAgentInfo = new Map<string, AgentModelInfo>()
+      for (const name of reviewerNames) {
+        const agentName = toCodeReviewAgentName(name)
+        const info = await resolveAgentModelInfo(agentName)
+        reviewerAgentInfo.set(name, info)
+        emitReviewerUpdate(input.onReviewUpdate, name, agentName, "queued", {
+          model: info.model,
+          thinking: info.thinking,
+        })
+      }
+
       const results = await Promise.allSettled(
         reviewerNames.map(async (name) => {
+          const agentName = toCodeReviewAgentName(name)
+          const agentInfo = reviewerAgentInfo.get(name) ?? {}
+          emitReviewerUpdate(input.onReviewUpdate, name, agentName, "running", {
+            model: agentInfo.model,
+            thinking: agentInfo.thinking,
+          })
           const prompt = await buildInternalReviewPrompt(name, internalCtx)
           let output: ReviewerOutput
           let dispatchOk = true
           let dispatchError: string | undefined
           try {
-            const agentName = toCodeReviewAgentName(name)
-            const model = await resolveProfileModelForAgent(agentName)
             const raw = await dispatchService.runAgent({
               agent: agentName,
               task: prompt,
               cwd,
-              ...(model ? { model } : {}),
+              ...(agentInfo.model ? { model: agentInfo.model } : {}),
+              onUpdate: (progress) => {
+                if (!input.onReviewUpdate) return
+                const currentTool = progress.currentTool
+                const args = progress.currentToolArgs
+                const lastCommand = currentTool ? `${currentTool}${args ? " " + args : ""}` : undefined
+                input.onReviewUpdate({
+                  reviewerName: name,
+                  agentName,
+                  status: "running",
+                  model: agentInfo.model,
+                  thinking: agentInfo.thinking,
+                  currentTool: currentTool ?? undefined,
+                  lastCommand: lastCommand ?? progress.recentOutput?.[progress.recentOutput.length - 1],
+                })
+              },
             })
             if (raw.ok) {
               output = parseReviewerOutput(raw.rawOutput)
@@ -556,13 +656,13 @@ export async function runCodeReview(
             dispatchError = err instanceof Error ? err.message : String(err)
             output = { findings: [], rawOutput: `dispatch error: ${dispatchError}` }
           }
-          return { name, prompt, output, ok: dispatchOk, error: dispatchError }
+          return { name, agentName, agentInfo, prompt, output, ok: dispatchOk, error: dispatchError }
         }),
       )
 
       for (const result of results) {
         if (result.status === "fulfilled") {
-          const { name, output, ok, error } = result.value
+          const { name, agentName, agentInfo, output, ok, error } = result.value
           if (!ok) {
             reviewerOutputs[name] = output.rawOutput
             manifest = {
@@ -571,6 +671,11 @@ export async function runCodeReview(
                 r.name === name ? { ...r, status: "failed" as const, detail: error ?? "dispatch failed" } : r,
               ),
             }
+            emitReviewerUpdate(input.onReviewUpdate, name, agentName, "failed", {
+              model: agentInfo.model,
+              thinking: agentInfo.thinking,
+              lastCommand: error ?? "dispatch failed",
+            })
             coverageNotes.push(`Reviewer "${name}" dispatch failed: ${error ?? "unknown error"}`)
           } else {
             reviewerOutputs[name] = output.rawOutput
@@ -580,6 +685,10 @@ export async function runCodeReview(
                 r.name === name ? { ...r, status: "executed" as const } : r,
               ),
             }
+            emitReviewerUpdate(input.onReviewUpdate, name, agentName, "completed", {
+              model: agentInfo.model,
+              thinking: agentInfo.thinking,
+            })
             for (const f of output.findings) {
               allFindings.push({
                 reviewerName: name,

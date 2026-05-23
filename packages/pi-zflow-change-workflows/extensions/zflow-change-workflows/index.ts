@@ -420,6 +420,20 @@ interface WorkflowProgressSnapshot {
   recentMessages: string[]
   subagents: WorkflowSubagentSnapshot[]
   phaseCards: WorkflowPhaseCardSnapshot[]
+  reviewers: WorkflowReviewerSnapshot[]
+}
+
+interface WorkflowReviewerSnapshot {
+  id: string
+  reviewerName: string
+  agentName: string
+  model?: string
+  thinking?: string
+  status: "queued" | "running" | "completed" | "failed"
+  startedAt: number
+  finishedAt?: number
+  currentTool?: string
+  lastCommand?: string
 }
 
 interface WorkflowPhaseCardSnapshot {
@@ -545,6 +559,21 @@ function buildPhaseCard(card: WorkflowPhaseCardSnapshot, width: number): string[
   ]
 }
 
+function buildReviewerCard(reviewer: WorkflowReviewerSnapshot, width: number): string[] {
+  const model = reviewer.model ?? "unavailable"
+  const thinking = reviewer.thinking ?? "unavailable"
+  const icon = reviewer.status === "completed" ? "✅" : reviewer.status === "failed" ? "❌" : reviewer.status === "queued" ? "⏳" : "▶️"
+  const cardLines = [
+    `┌${"─".repeat(Math.max(1, width - 2))}┐`,
+    padCardLine(`${icon} ${reviewer.reviewerName}`, width),
+    padCardLine(`${reviewer.status}`, width),
+    padCardLine(`${model} · ${thinking}`, width),
+    padCardLine(`last: ${reviewer.lastCommand ?? reviewer.currentTool ?? "starting"}`, width),
+    `└${"─".repeat(Math.max(1, width - 2))}┘`,
+  ]
+  return cardLines
+}
+
 function renderWorkflowCards(cards: WorkflowPhaseCardSnapshot[], width: number): string[] {
   const available = Math.max(32, width - 2)
   const rendered: string[] = []
@@ -625,6 +654,24 @@ function makeWorkflowProgressComponent(details: WorkflowProgressMessageDetails, 
         lines.push(truncateText(`  ${theme.fg("dim", "workflow cards:")}`, available))
         lines.push(...renderWorkflowCards(phaseCards, available))
       }
+      const reviewers = snapshot.reviewers ?? []
+      if (reviewers.length > 0) {
+        lines.push(`  ${theme.fg("dim", "reviewers:")}`)
+        lines.push(...renderWorkflowCards(
+          reviewers.map((r) => ({
+            id: r.id,
+            title: r.reviewerName,
+            status: r.status === "completed" ? "completed" : r.status === "failed" ? "failed" : "running",
+            startedAt: r.startedAt,
+            messages: [
+              `${r.agentName}`,
+              `model: ${r.model ?? "unavailable"} · thinking: ${r.thinking ?? "unavailable"}`,
+              `last: ${r.lastCommand ?? r.currentTool ?? "waiting"}`,
+            ],
+          })),
+          available,
+        ))
+      }
       return lines
     },
   }
@@ -651,6 +698,15 @@ function createWorkflowProgressIndicator(
   update: (message: string) => void
   updatePhaseCard: (id: string, title: string, message: string, status?: "running" | "completed" | "failed") => void
   updateSubagent: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id">>) => void
+  updateReviewer: (id: string, update: {
+    reviewerName: string
+    agentName: string
+    status: "queued" | "running" | "completed" | "failed"
+    model?: string
+    thinking?: string
+    currentTool?: string
+    lastCommand?: string
+  }) => void
   stop: (message?: string, status?: "completed" | "failed") => void
 } {
   const ui = ctx.ui
@@ -675,6 +731,7 @@ function createWorkflowProgressIndicator(
     recentMessages: [options?.initialMessage ?? "Initializing workflow"],
     subagents: [],
     phaseCards: [],
+    reviewers: [],
   }
   workflowProgressSnapshots.set(id, initialSnapshot)
 
@@ -808,6 +865,45 @@ function createWorkflowProgressIndicator(
       if (shouldSendMessage) {
         refreshProgressMessage()
       }
+    },
+    updateReviewer(reviewerId: string, update: {
+      reviewerName: string
+      agentName: string
+      status: "queued" | "running" | "completed" | "failed"
+      model?: string
+      thinking?: string
+      currentTool?: string
+      lastCommand?: string
+    }) {
+      const current = workflowProgressSnapshots.get(id)
+      if (current) {
+        const currentReviewers = current.reviewers ?? []
+        const existing = currentReviewers.find((r) => r.id === reviewerId)
+        const statusChanged = update.status !== existing?.status
+        const activityChanged = update.lastCommand !== existing?.lastCommand || update.currentTool !== existing?.currentTool
+        const nextReviewer: WorkflowReviewerSnapshot = {
+          id: reviewerId,
+          reviewerName: update.reviewerName,
+          agentName: update.agentName,
+          model: update.model,
+          thinking: update.thinking,
+          status: update.status,
+          startedAt: existing?.startedAt ?? Date.now(),
+          finishedAt: update.status === "completed" || update.status === "failed" ? existing?.finishedAt ?? Date.now() : undefined,
+          currentTool: update.currentTool,
+          lastCommand: update.lastCommand,
+        }
+        const updatedReviewers = [...currentReviewers]
+        const existingIdx = updatedReviewers.findIndex((r) => r.id === reviewerId)
+        if (existingIdx >= 0) updatedReviewers[existingIdx] = nextReviewer
+        else updatedReviewers.push(nextReviewer)
+        workflowProgressSnapshots.set(id, {
+          ...current,
+          reviewers: updatedReviewers,
+        })
+        if (statusChanged || activityChanged) refreshProgressMessage()
+      }
+      render()
     },
     stop(message?: string, status: "completed" | "failed" = "completed") {
       if (stopped) return
@@ -2645,11 +2741,23 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
 
         // ── Phase 4: Post-start sequence (verification, review, complete) ──
         updatePostImplementationCard("Starting post-start sequence: final verification, review, and completion")
+        const onReviewerUpdate = (reviewerUpdate: {
+          reviewerName: string
+          agentName: string
+          status: "queued" | "running" | "completed" | "failed"
+          model?: string
+          thinking?: string
+          currentTool?: string
+          lastCommand?: string
+        }): void => {
+          implProgress.updateReviewer(reviewerUpdate.reviewerName, reviewerUpdate)
+        }
         const postResult = await runImplementationPostStartSequence(
           result.runId,
           {
             skipDispatchWait: manualDispatchComplete,
             onProgress: updatePostImplementationCard,
+            onReviewerUpdate,
           },
         )
 

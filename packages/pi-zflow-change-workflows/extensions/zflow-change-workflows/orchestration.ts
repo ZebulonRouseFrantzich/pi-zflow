@@ -5486,9 +5486,25 @@ export async function runBoundedFixLoop(
  * @param cwd - Working directory (optional).
  * @returns Code review result.
  */
+/**
+ * Per-reviewer progress callback used by implement workflow progress cards.
+ */
+export interface ReviewerProgressCallback {
+  (update: {
+    reviewerName: string
+    agentName: string
+    status: "queued" | "running" | "completed" | "failed"
+    model?: string
+    thinking?: string
+    currentTool?: string
+    lastCommand?: string
+  }): void
+}
+
 export async function finalizeCodeReview(
   runId: string,
   cwd?: string,
+  onReviewerUpdate?: ReviewerProgressCallback,
 ): Promise<{
   pass: boolean
   findingsPath?: string
@@ -5552,6 +5568,21 @@ export async function finalizeCodeReview(
         // execution-groups.md may not exist — non-fatal
       }
 
+      // Map to runCodeReview's callback shape
+      const onReviewUpdate = onReviewerUpdate
+        ? (update: { reviewerName: string; agentName: string; status: string; model?: string; thinking?: string; currentTool?: string; lastCommand?: string }): void => {
+            onReviewerUpdate({
+              reviewerName: update.reviewerName,
+              agentName: update.agentName,
+              status: update.status as "queued" | "running" | "completed" | "failed",
+              model: update.model,
+              thinking: update.thinking,
+              currentTool: update.currentTool,
+              lastCommand: update.lastCommand,
+            })
+          }
+        : undefined
+
       const result = await (reviewService.runCodeReview as Function)({
         source: `Implementation of ${run.changeId}`,
         repoPath: run.repoRoot || cwd || process.cwd(),
@@ -5562,6 +5593,7 @@ export async function finalizeCodeReview(
         diffSource: diffBundle ? "run-patches" : undefined,
         modifiedFiles: modifiedFiles.length > 0 ? modifiedFiles : undefined,
         executionGroups,
+        onReviewUpdate,
         cwd,
       })
 
@@ -5656,6 +5688,8 @@ export interface PostStartSequenceOptions {
   skipReview?: boolean
   /** Receives user-visible phase updates for long post-dispatch work. */
   onProgress?: (message: string) => void
+  /** Per-reviewer progress callback for code review cards. */
+  onReviewerUpdate?: ReviewerProgressCallback
   /** If false, do not attempt auto-fix loop on verification failure (default: true). */
   autoFix?: boolean
   /**
@@ -5807,7 +5841,7 @@ export async function runImplementationPostStartSequence(
 
     // Go directly to code review (advisory)
     if (!opts.skipReview) {
-      const reviewResult = await finalizeCodeReview(runId, cwd)
+      const reviewResult = await finalizeCodeReview(runId, cwd, opts.onReviewerUpdate)
       await transitionTo(reviewResult.pass ? "executing" : "review-failed")
 
       if (reviewResult.pass) {
@@ -5934,7 +5968,7 @@ export async function runImplementationPostStartSequence(
   // 4. Verification passed (or fix loop resolved it) → code review
   if (!opts.skipReview) {
     reportProgress("Running code review on the applied implementation")
-    const reviewResult = await finalizeCodeReview(runId, cwd)
+    const reviewResult = await finalizeCodeReview(runId, cwd, opts.onReviewerUpdate)
     reportProgress(reviewResult.pass ? "Code review passed; completing workflow" : "Code review found issues; marking review failed")
 
     if (!reviewResult.pass) {

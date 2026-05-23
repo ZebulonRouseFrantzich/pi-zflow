@@ -169,11 +169,10 @@ void describe("runCodeReview with DispatchService", () => {
     assert.ok(fakeService.callLog.length > 0, "runAgent should be called")
     for (const rawInput of fakeService.callLog) {
       const keys = Object.keys(rawInput).sort()
-      assert.deepEqual(
-        keys,
-        ["agent", "cwd", "task"],
-        `runAgent must receive exactly { agent, cwd, task }, got keys: ${keys.join(", ")}`,
-      )
+      assert.ok(keys.includes("agent"), `runAgent input should include agent, got keys: ${keys.join(", ")}`)
+      assert.ok(keys.includes("cwd"), `runAgent input should include cwd, got keys: ${keys.join(", ")}`)
+      assert.ok(keys.includes("task"), `runAgent input should include task, got keys: ${keys.join(", ")}`)
+      assert.ok(!keys.includes("context"), `runAgent input must not include nested context, got keys: ${keys.join(", ")}`)
       assert.equal(typeof rawInput.agent, "string", "agent must be a string")
       assert.match(String(rawInput.agent), /^zflow\.(review-|synthesizer$)/, "agent should be a packaged zflow runtime name")
       assert.equal(rawInput.cwd, tmpDir, "cwd must be forwarded to dispatch")
