@@ -320,6 +320,8 @@ describe("ensureImplementationTasksArtifact", () => {
         "",
         "Scoped verification:",
         "",
+        "Preferred: use `dart-flutter` MCP analyze/test tools. Human fallback from `apps/mobile`:",
+        "",
         "```bash",
         "pnpm --dir apps/cloudflare-api typecheck",
         "pnpm --dir apps/cloudflare-api test -- auth/config",

@@ -144,6 +144,10 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
     currentGroup.scopedVerification = [currentGroup.scopedVerification, trimmed].filter(Boolean).join("\n")
   }
 
+  const isNextGroupSubsection = (value: string): boolean => {
+    return /^(Expected outcome|Expected outcome \/ acceptance criteria|Acceptance criteria|Self-checks|Drift trigger|reviewTags|Manual checks|Implementation task spec):/i.test(value.trim())
+  }
+
   const pushCurrentGroup = (): void => {
     if (!currentGroup?.id) return
     groups.push({
@@ -288,12 +292,15 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
         appendVerification(line)
         continue
       }
+      if (isNextGroupSubsection(line)) {
+        collectingVerification = false
+        continue
+      }
       const verificationItemMatch = line.match(/^\s+-\s+(.+)$/)
       if (verificationItemMatch && !verificationItemMatch[1].startsWith("**")) {
         currentGroup.scopedVerification = [currentGroup.scopedVerification, verificationItemMatch[1].trim()].filter(Boolean).join("; ")
         continue
       }
-      if (/^[A-Z][A-Za-z\s]+:/.test(line.trim())) collectingVerification = false
     }
 
     const parallelMatch = line.match(/-\s+\*\*Parallelizable:\*\*\s+(.+)/i) ??
