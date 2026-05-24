@@ -309,14 +309,14 @@ describe("reconcileResumeState", () => {
     const groupLedger: Record<string, Record<string, unknown>> = {
       "group-1": {
         groupId: "group-1",
-        status: "succeeded",
+        status: "applied",
         agent: "zflow.implement-routine",
         taskPrompt: "Do work on a.ts",
         files: ["a.ts"],
         dependencies: [],
         semanticCoupling: { dependsOnGroups: [], blocksGroups: [], sharedFiles: [], notes: [] },
         patchPath: patch1,
-        appliedToPrimary: false,
+        appliedToPrimary: true,
         retryCount: 1,
         updatedAt: new Date().toISOString(),
       },
@@ -333,6 +333,7 @@ describe("reconcileResumeState", () => {
     const result = await reconcileResumeState(runId, changeId, "v1", repo)
     assert.equal(result.hasPreviousRun, true)
     assert.equal(result.reusableGroups.length, 1)
+    assert.equal(result.alreadyAppliedGroups.length, 0)
     assert.equal(result.applyBackNeeded, true)
     assert.equal(result.applyBackCanUseCascade, true)
     assert.equal(result.recommendedNextStep, "apply-back")

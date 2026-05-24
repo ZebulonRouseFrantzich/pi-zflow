@@ -187,6 +187,13 @@ export async function reconcileResumeState(
 
   const previousPhase = run.phase
   const previousRunId = runId
+  const applyBackStatus = run.applyBack?.status
+  const distrustAppliedLedger =
+    previousPhase === "apply-back-conflicted" ||
+    previousPhase === "applying" ||
+    (previousPhase === "failed" && applyBackStatus === "conflicted") ||
+    applyBackStatus === "conflicted" ||
+    applyBackStatus === "rolled-back"
 
   // 2. Read the current execution groups from the approved plan
   let currentGroups: ExecutionGroup[] = []
@@ -243,7 +250,17 @@ export async function reconcileResumeState(
       continue
     }
 
-    if (state.appliedToPrimary || state.status === "applied" || state.status === "skipped") {
+    // Check if the patch file exists on disk. In apply-back-conflicted or
+    // rolled-back states, run-level state wins over stale group ledger flags:
+    // a prior atomic rollback may have left entries marked applied even though
+    // the primary tree was restored. In that case, reuse preserved patches and
+    // rerun apply-back through the smart cascade.
+    let patchExists = false
+    if (state.patchPath) {
+      patchExists = await fileExists(state.patchPath)
+    }
+
+    if (!distrustAppliedLedger && (state.appliedToPrimary || state.status === "applied" || state.status === "skipped")) {
       alreadyAppliedGroups.push({
         groupId: group.id,
         canReuse: true,
@@ -258,19 +275,15 @@ export async function reconcileResumeState(
       continue
     }
 
-    // Check if the patch file exists on disk
-    let patchExists = false
-    if (state.patchPath) {
-      patchExists = await fileExists(state.patchPath)
-    }
-
-    if (patchExists && state.status === "succeeded") {
+    if (patchExists && (state.status === "succeeded" || distrustAppliedLedger)) {
       reusableGroups.push({
         groupId: group.id,
         canReuse: true,
-        reason: "Patch exists on disk and group succeeded.",
+        reason: distrustAppliedLedger
+          ? "Previous apply-back did not complete cleanly; reusing preserved patch and retrying smart apply-back."
+          : "Patch exists on disk and group succeeded.",
         patchPath: state.patchPath,
-        patchVerified: state.scopedVerificationPassed,
+        patchVerified: state.scopedVerificationPassed || distrustAppliedLedger,
         alreadyApplied: false,
       })
     } else {
