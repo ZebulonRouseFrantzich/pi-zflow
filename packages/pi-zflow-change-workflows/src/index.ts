@@ -98,6 +98,7 @@ export {
 // Formal prepare workflow (Phase 7 — /zflow-change-prepare orchestration)
 export {
   runChangePrepareWorkflow,
+  ensureImplementationTasksArtifact,
   updatePlanState,
   bumpPlanVersion,
   markPlanVersionState,

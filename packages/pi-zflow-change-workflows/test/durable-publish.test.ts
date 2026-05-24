@@ -72,7 +72,7 @@ async function writeRuntimePlanArtifacts(
 // ---------------------------------------------------------------------------
 
 describe("publishPlanArtifacts", () => {
-  test("publishes four plan artifacts to durable repo path", async () => {
+  test("publishes five plan artifacts to durable repo path", async () => {
     const repoRoot = await createTestRepo()
     try {
       // Simulate runtime state directory structure

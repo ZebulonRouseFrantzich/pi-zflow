@@ -3566,7 +3566,8 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             `  - design: ${result.artifactPaths.design}\n` +
             `  - execution-groups: ${result.artifactPaths.executionGroups}\n` +
             `  - standards: ${result.artifactPaths.standards}\n` +
-            `  - verification: ${result.artifactPaths.verification}\n\n` +
+            `  - verification: ${result.artifactPaths.verification}\n` +
+            `  - implementation-tasks: ${result.artifactPaths.implementationTasks}\n\n` +
             `No approval prompt will be shown until validation passes.`,
             "warning",
           )

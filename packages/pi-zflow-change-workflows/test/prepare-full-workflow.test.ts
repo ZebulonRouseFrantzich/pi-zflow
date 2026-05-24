@@ -10,6 +10,7 @@ import { execFileSync } from "node:child_process"
 
 import {
   runChangePrepareWorkflow,
+  ensureImplementationTasksArtifact,
   advancePlanLifecycle,
   runPlanValidation,
   runPlanReview,
@@ -232,6 +233,57 @@ describe("runPlanValidation", () => {
       const validation = await runPlanValidation("test-placeholder-markers", "v1", repoRoot)
       assert.strictEqual(validation.pass, false)
       assert.ok(validation.issues.length >= 3, "should detect at least 3 placeholder issues")
+    } finally {
+      await removeTestRepo(repoRoot)
+    }
+  })
+})
+
+describe("ensureImplementationTasksArtifact", () => {
+  test("synthesizes missing implementation-tasks.md from execution-groups.md", async () => {
+    const repoRoot = await createTestRepo()
+    try {
+      const result = await runChangePrepareWorkflow({
+        cwd: repoRoot,
+        changeId: "test-synthesize-implementation-tasks",
+      })
+
+      await fs.writeFile(
+        result.artifactPaths.executionGroups,
+        [
+          "# Execution Groups",
+          "",
+          "## Group 1: Update authentication service",
+          "",
+          "- **Files:** src/auth/service.ts, src/auth/service.test.ts",
+          "- **Agent:** zflow.implement-routine",
+          "- **Dependencies:** none",
+          "- **Scoped verification:** npm test -- src/auth/service.test.ts",
+          "- **Parallelizable:** true",
+        ].join("\n"),
+        "utf-8",
+      )
+
+      const created = await ensureImplementationTasksArtifact(
+        "test-synthesize-implementation-tasks",
+        "v1",
+        repoRoot,
+      )
+
+      assert.strictEqual(created, true)
+      const content = await fs.readFile(result.artifactPaths.implementationTasks, "utf-8")
+      assert.ok(content.includes("# Implementation Tasks"))
+      assert.ok(content.includes("## Group 1: Update authentication service"))
+      assert.ok(content.includes("src/auth/service.ts"))
+      assert.ok(content.includes("npm test -- src/auth/service.test.ts"))
+      assert.ok(content.includes("Self-check before completion"))
+
+      const secondCreated = await ensureImplementationTasksArtifact(
+        "test-synthesize-implementation-tasks",
+        "v1",
+        repoRoot,
+      )
+      assert.strictEqual(secondCreated, false, "existing implementation-tasks.md should not be overwritten")
     } finally {
       await removeTestRepo(repoRoot)
     }

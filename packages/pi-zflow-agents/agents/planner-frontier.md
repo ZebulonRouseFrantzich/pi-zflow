@@ -1,7 +1,7 @@
 ---
 name: planner-frontier
 package: zflow
-description: Produce versioned planning artifacts for a requested change. Explores the codebase, resolves decisions with the user, and writes structured plan artifacts (design, execution-groups, standards, verification).
+description: Produce versioned planning artifacts for a requested change. Explores the codebase, resolves decisions with the user, and writes structured plan artifacts (design, execution-groups, standards, verification, implementation-tasks).
 tools: read, grep, find, ls, bash, zflow_write_plan_artifact, web_search, fetch_content, subagent
 thinking: high
 # model is resolved via the profile system at launch time; placeholder means "must be overridden by profile"
