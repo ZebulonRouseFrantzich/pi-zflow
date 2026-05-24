@@ -12,10 +12,11 @@ import * as os from "node:os"
 import {
   executeApplyBack,
   PatchReplayStrategy,
+  ConsolidatedPatchStrategy,
   recoverFromApplyBack,
 } from "../extensions/zflow-change-workflows/apply-back.js"
 
-import type { ApplyBackOptions, RecoveryOptions } from "../extensions/zflow-change-workflows/apply-back.js"
+import type { ApplyBackOptions, RecoveryOptions, CascadeApplyBackOptions, CascadeApplyBackResult } from "../extensions/zflow-change-workflows/apply-back.js"
 
 import { createRun, createRecoveryRef, readRun, updateRun } from "pi-zflow-artifacts/run-state"
 import type { PreApplySnapshot } from "pi-zflow-artifacts/run-state"
@@ -339,5 +340,177 @@ describe("recoverFromApplyBack", () => {
     // Verify untracked file was NOT deleted
     const content = await fs.readFile(untrackedPath, "utf-8")
     assert.equal(content.trim(), "a,b,c\n1,2,3")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ConsolidatedPatchStrategy
+// ---------------------------------------------------------------------------
+
+describe("ConsolidatedPatchStrategy", () => {
+  let repoRoot: string
+
+  before(async () => {
+    repoRoot = await createTempRepo()
+  })
+
+  after(async () => {
+    await fs.rm(repoRoot, { recursive: true, force: true })
+  })
+
+  test("applies consolidated patch successfully", async () => {
+    const headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf-8" }).trim()
+
+    // Make a change and create a patch
+    await fs.writeFile(path.join(repoRoot, "src", "main.ts"), 'console.log("v2")\n', "utf-8")
+    execFileSync("git", ["add", "src/main.ts"], { cwd: repoRoot, stdio: "pipe" })
+    execFileSync("git", ["commit", "-m", "v2"], { cwd: repoRoot, stdio: "pipe" })
+
+    const diff = execFileSync("git", ["diff", headSha, "HEAD", "--binary"], {
+      cwd: repoRoot, encoding: "utf-8",
+    })
+
+    // Reset to original
+    execFileSync("git", ["reset", "--hard", headSha], { cwd: repoRoot, stdio: "pipe" })
+
+    // Write consolidated patch
+    const patchPath = path.join(os.tmpdir(), "consolidated-test.patch")
+    fsSync.writeFileSync(patchPath, diff, "utf-8")
+
+    const strategy = new ConsolidatedPatchStrategy(patchPath)
+    await strategy.applyPatch(patchPath, repoRoot, "_test")
+
+    // Verify
+    const content = await fs.readFile(path.join(repoRoot, "src", "main.ts"), "utf-8")
+    assert.equal(content, 'console.log("v2")\n')
+  })
+
+  test("throws on invalid consolidated patch", async () => {
+    const patchPath = path.join(os.tmpdir(), "bad-consolidated.patch")
+    fsSync.writeFileSync(patchPath, "not a valid patch", "utf-8")
+
+    const strategy = new ConsolidatedPatchStrategy(patchPath)
+    await assert.rejects(
+      () => strategy.applyPatch(patchPath, repoRoot, "_bad"),
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// executeApplyBack with cascade (cascade mode)
+// ---------------------------------------------------------------------------
+
+describe("executeApplyBack cascade mode", () => {
+  let repoRoot: string
+  let runId: string
+  let snapshot: import("pi-zflow-artifacts/run-state").PreApplySnapshot
+
+  before(async () => {
+    repoRoot = await createTempRepo()
+    runId = "test-cascade"
+  })
+
+  after(async () => {
+    await fs.rm(repoRoot, { recursive: true, force: true })
+  })
+
+  test("cascade succeeds on first strategy (non-overlapping patches)", async () => {
+    const headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf-8" }).trim()
+    snapshot = { head: headSha, indexState: "clean", recoveryRef: `refs/zflow/recovery/${runId}` }
+
+    // Create run
+    await createRun(runId, repoRoot, "ch42", "v1", repoRoot)
+    const runDir = await import("path").then((p) =>
+      import("pi-zflow-artifacts/artifact-paths").then((a) => a.resolveRunDir(runId, repoRoot))
+    )
+    const patchesDir = path.join(runDir, "patches")
+    await fs.mkdir(patchesDir, { recursive: true })
+
+    // Create two non-overlapping patches
+    await fs.writeFile(path.join(repoRoot, "src", "main.ts"), 'console.log("g1")\n', "utf-8")
+    execFileSync("git", ["add", "src/main.ts"], { cwd: repoRoot, stdio: "pipe" })
+    execFileSync("git", ["commit", "-m", "g1"], { cwd: repoRoot, stdio: "pipe" })
+    const g1Head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf-8" }).trim()
+    const g1Diff = execFileSync("git", ["diff", headSha, g1Head, "--", "src/main.ts"], {
+      cwd: repoRoot, encoding: "utf-8",
+    })
+
+    execFileSync("git", ["reset", "--hard", headSha], { cwd: repoRoot, stdio: "pipe" })
+
+    await fs.writeFile(path.join(repoRoot, "README.md"), "# Test G2\n", "utf-8")
+    execFileSync("git", ["add", "README.md"], { cwd: repoRoot, stdio: "pipe" })
+    execFileSync("git", ["commit", "-m", "g2"], { cwd: repoRoot, stdio: "pipe" })
+    const g2Head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf-8" }).trim()
+    const g2Diff = execFileSync("git", ["diff", headSha, g2Head, "--", "README.md"], {
+      cwd: repoRoot, encoding: "utf-8",
+    })
+
+    execFileSync("git", ["reset", "--hard", headSha], { cwd: repoRoot, stdio: "pipe" })
+
+    // Write patches
+    fsSync.writeFileSync(path.join(patchesDir, "group-1.patch"), g1Diff, "utf-8")
+    fsSync.writeFileSync(path.join(patchesDir, "group-2.patch"), g2Diff, "utf-8")
+
+    const groups = [
+      { id: "group-1", files: ["src/main.ts"], dependencies: [], parallelizable: true },
+      { id: "group-2", files: ["README.md"], dependencies: [], parallelizable: true },
+    ]
+
+    const result = await executeApplyBack({
+      runId,
+      repoRoot,
+      snapshot,
+      groups,
+      cwd: repoRoot,
+      useCascade: true,
+    })
+
+    assert.equal(result.success, true)
+    assert.equal(result.groupsApplied, 2)
+    assert.equal(result.strategiesAttempted[0], "patch-replay")
+    assert.equal(result.successfulStrategy, "patch-replay")
+
+    // Verify files
+    const mainContent = await fs.readFile(path.join(repoRoot, "src", "main.ts"), "utf-8")
+    assert.equal(mainContent, 'console.log("g1")\n')
+    const readmeContent = await fs.readFile(path.join(repoRoot, "README.md"), "utf-8")
+    assert.equal(readmeContent, "# Test G2\n")
+  })
+
+  test("cascade returns failure details when all strategies fail", async () => {
+    const headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf-8" }).trim()
+    snapshot = { head: headSha, indexState: "clean", recoveryRef: `refs/zflow/recovery/${runId}-fail` }
+
+    runId = "test-cascade-fail"
+    await createRun(runId, repoRoot, "ch42-nope", "v1", repoRoot)
+
+    const runDir = await import("path").then((p) =>
+      import("pi-zflow-artifacts/artifact-paths").then((a) => a.resolveRunDir(runId, repoRoot))
+    )
+    const patchesDir = path.join(runDir, "patches")
+    await fs.mkdir(patchesDir, { recursive: true })
+
+    // Create invalid patches
+    fsSync.writeFileSync(path.join(patchesDir, "group-1.patch"), "invalid patch content", "utf-8")
+    fsSync.writeFileSync(path.join(patchesDir, "group-2.patch"), "also invalid", "utf-8")
+
+    const groups = [
+      { id: "group-1", files: ["src/main.ts"], dependencies: [], parallelizable: true },
+      { id: "group-2", files: ["README.md"], dependencies: ["group-1"], parallelizable: true },
+    ]
+
+    const result = await executeApplyBack({
+      runId,
+      repoRoot,
+      snapshot,
+      groups,
+      cwd: repoRoot,
+      useCascade: true,
+    })
+
+    // Should fail but report strategies attempted
+    assert.equal(result.success, false)
+    assert.ok(result.strategiesAttempted.length > 0)
+    assert.equal(result.subagentAvailable, true)
   })
 })

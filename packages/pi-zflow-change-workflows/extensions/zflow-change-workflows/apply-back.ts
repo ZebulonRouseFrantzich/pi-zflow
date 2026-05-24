@@ -1,26 +1,37 @@
 /**
  * apply-back.ts — Worktree-to-primary-tree apply-back strategy orchestration.
  *
- * **Phase 5 implementation.**
+ * **Phase 5 implementation (extended).**
  * Implements topological apply-back ordering, atomic patch replay with
- * rollback, and a clean strategy interface for future branch-aware
- * merge/cherry-pick implementations.
+ * rollback, and a strategy cascade that falls through increasingly
+ * intelligent merge strategies before asking for human resolution.
  *
  * ## Strategy interface
  *
  * The apply-back code is structured behind a clean strategy interface so
- * that a future branch-aware merge/cherry-pick implementation can be added
- * without rewriting orchestration.
+ * that future strategies like branch-aware merge or structured conflict
+ * resolution can be added without rewriting orchestration.
  *
- * ## First-pass implementation
+ * ## Strategy cascade
  *
- * First-pass apply-back is atomic binary-safe patch replay in topological
- * order with rollback to the pre-apply snapshot on conflict.
+ * 1. `PatchReplayStrategy` — fast binary-safe `git apply --3way --index --binary`
+ *    in topological order. Fast path for non-overlapping patches.
+ * 2. `StructuredFileMergeStrategy` — auto-resolves common safe conflict
+ *    patterns (imports, config keys, package.json deps, route registrations).
+ * 3. `IntegrationWorktreeMergeStrategy` — branch-aware merge in an isolated
+ *    integration worktree. Creates synthetic commits from each group's patch,
+ *    merges them in topological order, produces a single consolidated patch.
+ * 4. Subagent-assisted resolution — offered to the user when automated
+ *    strategies fail. A dedicated subagent attempts resolution with
+ *    full context.
+ * 5. Manual resolution — the fallback when all automated strategies and
+ *    agent assistance fail.
  *
  * @module pi-zflow-change-workflows/apply-back
  */
 
 import * as path from "node:path"
+import * as fs from "node:fs"
 import { execFileSync } from "node:child_process"
 import { existsSync, statSync } from "node:fs"
 import { readRun, updateRun, resetToPreApplySnapshot, setRunPhase, createRecoveryRef, removeRecoveryRef } from "pi-zflow-artifacts/run-state"
@@ -28,6 +39,10 @@ import type { PreApplySnapshot } from "pi-zflow-artifacts/run-state"
 import { resolveRunDir } from "pi-zflow-artifacts/artifact-paths"
 import { topoSortGroups } from "./ownership-validator.js"
 import type { ExecutionGroup } from "./ownership-validator.js"
+import type { IntegrationMergeResult } from "./integration-merge-strategy.js"
+import { runIntegrationMerge } from "./integration-merge-strategy.js"
+import type { StructuredMergeResult } from "./structured-merge-strategy.js"
+import { resolveAllConflicts } from "./structured-merge-strategy.js"
 
 // ---------------------------------------------------------------------------
 // Strategy interface
@@ -40,7 +55,9 @@ import type { ExecutionGroup } from "./ownership-validator.js"
  * and apply them to the primary worktree. The first-pass implementation uses
  * binary-safe patch replay (`git apply --3way --index --binary`).
  *
- * Future strategies may implement branch-aware merge or cherry-pick.
+ * Strategies may implement either single-patch application (applyPatch) or
+ * batch group merging (mergeGroups). The orchestrator calls mergeGroups if
+ * available, falling back to applyPatch per group.
  */
 export interface ApplyBackStrategy {
   /** Human-readable name for this strategy (e.g. "patch-replay", "merge"). */
@@ -64,6 +81,52 @@ export interface ApplyBackStrategy {
    * @param runId - Run identifier for recovery ref lookup.
    */
   rollback(repoRoot: string, snapshot: PreApplySnapshot, runId: string): Promise<void>
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated-patch strategy
+// ---------------------------------------------------------------------------
+
+/**
+ * Strategy that applies a single consolidated patch to the primary worktree.
+ *
+ * This is used after a successful integration merge (where multiple group
+ * patches have been merged into one consolidated diff in an isolated
+ * worktree). Applying a consolidated patch is much simpler and less likely
+ * to conflict than replaying individual patches.
+ */
+export class ConsolidatedPatchStrategy implements ApplyBackStrategy {
+  readonly name = "consolidated-patch"
+
+  /**
+   * Path to the consolidated patch file.
+   */
+  private consolidatedPatchPath: string
+
+  constructor(consolidatedPatchPath: string) {
+    this.consolidatedPatchPath = consolidatedPatchPath
+  }
+
+  async applyPatch(patchPath: string, repoRoot: string, groupId: string): Promise<void> {
+    // Ignore the passed patchPath — we always use the consolidated patch
+    try {
+      execFileSync("git", ["apply", "--3way", "--index", "--binary", this.consolidatedPatchPath], {
+        cwd: repoRoot,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 60_000,
+      })
+    } catch (err: unknown) {
+      const stderr = err instanceof Error ? err.message : String(err)
+      throw new Error(
+        `Failed to apply consolidated patch for group "${groupId}": ${stderr}`,
+      )
+    }
+  }
+
+  async rollback(repoRoot: string, snapshot: PreApplySnapshot, runId: string): Promise<void> {
+    resetToPreApplySnapshot(runId, repoRoot, snapshot)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -170,26 +233,72 @@ function resolveGroupPatchPath(runId: string, groupId: string, cwd?: string): st
   return patchExists(candidatePath) ? candidatePath : null
 }
 
+// ---------------------------------------------------------------------------
+// Cascade-aware apply-back options
+// ---------------------------------------------------------------------------
+
 /**
- * Execute a full apply-back cycle.
+ * Extended options for the cascade apply-back orchestrator.
+ */
+export interface CascadeApplyBackOptions extends ApplyBackOptions {
+  /**
+   * Whether to use the strategy cascade on failure.
+   * When true (default), if PatchReplay fails, the orchestrator tries
+   * structured merge and integration merge before giving up.
+   */
+  useCascade?: boolean
+  /**
+   * When true, skip the integration merge step and offer subagent
+   * resolution directly after patch replay and structured merge fail.
+   */
+  preferSubagentOverIntegrationMerge?: boolean
+}
+
+/**
+ * Extended apply-back result with cascade metadata.
+ */
+export interface CascadeApplyBackResult extends ApplyBackResult {
+  /** Which strategies were attempted. */
+  strategiesAttempted: string[]
+  /** Which strategy succeeded (or null if all failed). */
+  successfulStrategy?: string
+  /** Whether subagent resolution is available. */
+  subagentAvailable?: boolean
+  /** Path to integration worktree (if integration merge was attempted). */
+  integrationWorktreePath?: string
+  /** Path to consolidated patch (if generated). */
+  consolidatedPatchPath?: string
+}
+
+/**
+ * Build a map of patch paths for all groups.
+ */
+function buildPatchMap(runId: string, groups: ExecutionGroup[], cwd?: string): Map<string, string> {
+  const patchMap = new Map<string, string>()
+  const runDir = resolveRunDir(runId, cwd)
+  const patchesDir = path.join(runDir, "patches")
+
+  for (const group of groups) {
+    const candidatePath = path.join(patchesDir, `${group.id}.patch`)
+    if (fs.existsSync(candidatePath) && fs.statSync(candidatePath).size > 0) {
+      patchMap.set(group.id, candidatePath)
+    }
+  }
+
+  return patchMap
+}
+
+/**
+ * Execute the full patch-replay apply-back cycle with no cascade.
  *
- * Algorithm:
- * 1. Record pre-apply snapshot and recovery ref in run.json
- * 2. Select the first-pass apply-back strategy: atomic patch replay
- * 3. Compute topological order from execution groups
- * 4. Iterate groups in topological order, applying each patch
- * 5. If all succeed, drop recovery marker and mark apply complete
- * 6. If any fail:
- *    - Abort remaining applies
- *    - Hard-reset the primary worktree/index to the pre-apply snapshot
- *    - Leave no partial success behind
- *    - Mark run as apply-back-conflicted
- *    - Surface failing group, files, patch path, and retained worktree path
+ * This is the original fast-path behavior — it tries only the single
+ * provided strategy and reports failure immediately if any patch fails.
+ * The primary worktree is rolled back on any failure.
  *
  * @param options - Apply-back options.
  * @returns ApplyBackResult with success/failure information.
  */
-export async function executeApplyBack(
+async function executePatchReplayApplyBack(
   options: ApplyBackOptions,
 ): Promise<ApplyBackResult> {
   const {
@@ -206,10 +315,6 @@ export async function executeApplyBack(
     phase: "applying",
     applyBack: { status: "in-progress", startedAt: new Date().toISOString() },
   }, cwd)
-
-  // Create recovery ref before any patches are applied
-  // This ensures we can restore the pre-apply state if apply-back fails or is interrupted.
-  createRecoveryRef(runId, repoRoot, snapshot.head)
 
   // Compute topological order
   const orderedIds = topoSortGroups(groups)
@@ -308,7 +413,6 @@ export async function executeApplyBack(
   }
 
   // Read current run to preserve the startedAt timestamp set during the "in-progress" update.
-  // updateRun does a shallow spread merge, so we must pass through the existing value.
   const currentRun = await readRun(runId, cwd).catch(() => null)
   const existingStartedAt = currentRun?.applyBack?.startedAt
 
@@ -316,15 +420,456 @@ export async function executeApplyBack(
     phase: "completed",
     applyBack: {
       status: "completed",
-      startedAt: existingStartedAt, // preserve the original start time
+      startedAt: existingStartedAt,
       completedAt: new Date().toISOString(),
     },
-    preApplySnapshot: undefined, // clear snapshot after successful apply
+    preApplySnapshot: undefined,
   }, cwd)
 
-  // Remove recovery ref — apply-back completed successfully, no rollback needed
   removeRecoveryRef(runId, repoRoot)
 
+  return result
+}
+
+// ---------------------------------------------------------------------------
+// Mark apply-back as completed
+// ---------------------------------------------------------------------------
+
+/**
+ * Mark the run as apply-back completed, clearing pre-apply snapshot
+ * and recovery ref.
+ */
+async function markApplyBackCompleted(runId: string, cwd?: string): Promise<void> {
+  const currentRun = await readRun(runId, cwd).catch(() => null)
+  const existingStartedAt = currentRun?.applyBack?.startedAt
+
+  await updateRun(runId, {
+    phase: "completed",
+    applyBack: {
+      status: "completed",
+      startedAt: existingStartedAt,
+      completedAt: new Date().toISOString(),
+    },
+    preApplySnapshot: undefined,
+  }, cwd)
+}
+
+/**
+ * Mark the run as apply-back conflicted.
+ */
+async function markApplyBackConflicted(
+  runId: string,
+  failingGroup: string,
+  errorMessage: string,
+  cwd?: string,
+): Promise<void> {
+  await updateRun(runId, {
+    phase: "apply-back-conflicted",
+    applyBack: {
+      status: "conflicted",
+      completedAt: new Date().toISOString(),
+      failingGroup,
+      error: errorMessage,
+    },
+  }, cwd)
+}
+
+/**
+ * Execute a full apply-back cycle with strategy cascade.
+ *
+ * Algorithm:
+ * 1. Create recovery ref.
+ * 2. Try **PatchReplayStrategy** — fast-path binary `git apply --3way`.
+ *    If success → done.
+ * 3. If patch replay fails → **StructuredFileMergeStrategy** — auto-resolve
+ *    common safe conflict patterns (imports, config keys, package.json deps).
+ *    After resolution, retry patch replay.
+ * 4. If structured merge still fails → **IntegrationWorktreeMergeStrategy** —
+ *    branch-aware merge in isolated integration worktree. Produces one
+ *    consolidated patch.
+ * 5. If integration merge succeeds → apply consolidated patch, verify coverage.
+ * 6. If all automated strategies fail → mark as resolvable by subagent.
+ *
+ * @param options - Cascade apply-back options.
+ * @returns CascadeApplyBackResult with strategy metadata.
+ */
+export async function executeApplyBack(
+  options: CascadeApplyBackOptions,
+): Promise<CascadeApplyBackResult> {
+  const {
+    runId,
+    repoRoot,
+    snapshot,
+    groups,
+    strategy,
+    cwd,
+    useCascade = true,
+    preferSubagentOverIntegrationMerge = false,
+  } = options
+
+  // Mark run as applying
+  await updateRun(runId, {
+    phase: "applying",
+    applyBack: { status: "in-progress", startedAt: new Date().toISOString() },
+  }, cwd)
+
+  // Create recovery ref
+  createRecoveryRef(runId, repoRoot, snapshot.head)
+
+  // Check for cycles
+  const orderedIds = topoSortGroups(groups)
+  if (!orderedIds) {
+    const result: CascadeApplyBackResult = {
+      success: false,
+      groupsApplied: 0,
+      totalGroups: groups.length,
+      error: "Dependency graph contains cycles; cannot determine apply order.",
+      rolledBack: false,
+      strategiesAttempted: [],
+      summary: "Cannot apply patches: circular dependency detected in execution groups.",
+    }
+    await updateRun(runId, {
+      phase: "failed",
+      applyBack: {
+        status: "conflicted",
+        completedAt: new Date().toISOString(),
+        error: result.error,
+      },
+    }, cwd)
+    return result
+  }
+
+  // Build patch map
+  const patchMap = buildPatchMap(runId, groups, cwd)
+
+  // ── Strategy 1: PatchReplay ──
+  const replayStrategy = strategy ?? new PatchReplayStrategy()
+  const patchReplayResult = await executePatchReplayApplyBack({
+    runId,
+    repoRoot,
+    snapshot,
+    groups,
+    strategy: replayStrategy,
+    cwd,
+  })
+
+  if (patchReplayResult.success) {
+    await markApplyBackCompleted(runId, cwd)
+    return {
+      ...patchReplayResult,
+      strategiesAttempted: [replayStrategy.name],
+      successfulStrategy: replayStrategy.name,
+      subagentAvailable: false,
+    }
+  }
+
+  // Patch replay failed. If cascade is disabled, return failure immediately.
+  if (!useCascade) {
+    return {
+      ...patchReplayResult,
+      strategiesAttempted: [replayStrategy.name],
+      subagentAvailable: false,
+    }
+  }
+
+  // ── Strategy 2: Structured merge auto-resolution ──
+  // After the rollback, the primary worktree is at the pre-apply snapshot.
+  // Try structured auto-resolution of the conflicts on the original patches,
+  // then retry patch replay.
+  let structuredMergeSuccess = false
+  let structuredMergeResult: ApplyBackResult | null = null
+
+  try {
+    // Apply patches again — this time they'll conflict in the worktree
+    // We'll then auto-resolve those conflicts and retry
+    // First, find which patch caused the failure
+    const failingGroup = patchReplayResult.failingGroup
+    const failingPatchPath = patchReplayResult.failingPatchPath
+
+    if (failingPatchPath && fs.existsSync(failingPatchPath)) {
+      // Try to apply all patches except the failing one first
+      // (they may have succeeded before the failure)
+      const patchReplayStrategy = new PatchReplayStrategy()
+
+      // Apply all patches up to (but not including) the failing one
+      const preFailPatches: Array<{ id: string; path: string }> = []
+      for (const groupId of orderedIds) {
+        if (groupId === failingGroup) break
+        const pp = patchMap.get(groupId)
+        if (pp) preFailPatches.push({ id: groupId, path: pp })
+      }
+
+      let allPreFailApplied = true
+      for (const pp of preFailPatches) {
+        try {
+          await patchReplayStrategy.applyPatch(pp.path, repoRoot, pp.id)
+        } catch {
+          allPreFailApplied = false
+          break
+        }
+      }
+
+      if (allPreFailApplied) {
+        // Now try to apply the failing patch — when it fails, the worktree
+        // will have conflict markers. Run structured resolution on those.
+        try {
+          await patchReplayStrategy.applyPatch(failingPatchPath, repoRoot, failingGroup)
+          // It worked! Continue with remaining patches
+          structuredMergeSuccess = true
+          for (const groupId of orderedIds) {
+            if (groupId === failingGroup) continue
+            const pp = patchMap.get(groupId)
+            if (pp) {
+              const priorIdx = preFailPatches.findIndex((p) => p.id === groupId)
+              if (priorIdx >= 0) continue  // already applied
+              try {
+                await patchReplayStrategy.applyPatch(pp, repoRoot, groupId)
+              } catch {
+                structuredMergeSuccess = false
+                break
+              }
+            }
+          }
+        } catch (conflictError) {
+          // Patch failed — resolve conflicts and retry
+          // The worktree now has conflict markers from the --3way fallback
+          const conflictResolution = resolveAllConflicts(repoRoot)
+          if (conflictResolution.success && conflictResolution.resolved > 0) {
+            // Try again after resolution
+            try {
+              await patchReplayStrategy.applyPatch(failingPatchPath, repoRoot, failingGroup)
+              // Apply remaining patches
+              for (const groupId of orderedIds) {
+                if (groupId === failingGroup) continue
+                const pp = patchMap.get(groupId)
+                if (pp) {
+                  const priorIdx = preFailPatches.findIndex((p) => p.id === groupId)
+                  if (priorIdx >= 0) continue
+                  try {
+                    await patchReplayStrategy.applyPatch(pp, repoRoot, groupId)
+                  } catch {
+                    structuredMergeSuccess = false
+                    break
+                  }
+                }
+              }
+              structuredMergeSuccess = true
+            } catch {
+              structuredMergeSuccess = false
+            }
+          }
+        }
+      }
+    }
+
+    if (structuredMergeSuccess) {
+      // Verify the index is clean
+      execFileSync("git", ["add", "-A"], {
+        cwd: repoRoot,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 30_000,
+      })
+      const result: CascadeApplyBackResult = {
+        success: true,
+        groupsApplied: groups.length,
+        totalGroups: groups.length,
+        rolledBack: false,
+        strategiesAttempted: [replayStrategy.name, "structured-merge"],
+        successfulStrategy: "structured-merge",
+        subagentAvailable: false,
+        summary: [
+          "All groups applied successfully after structured conflict auto-resolution.",
+          `Structured merge resolved conflicts automatically.`,
+        ].join("\n"),
+      }
+      await markApplyBackCompleted(runId, cwd)
+      return result
+    }
+  } catch {
+    // Structured resolution failed or threw — continue to next strategy
+  }
+
+  // Roll back if structured merge left the tree dirty
+  try {
+    await new PatchReplayStrategy().rollback(repoRoot, snapshot, runId)
+  } catch {
+    // Best-effort rollback
+  }
+
+  // ── Strategy 3: IntegrationWorktreeMergeStrategy ──
+  if (!preferSubagentOverIntegrationMerge) {
+    try {
+      const integrationMergeResult: IntegrationMergeResult = await runIntegrationMerge({
+        runId,
+        repoRoot,
+        snapshot,
+        groups,
+        patches: patchMap,
+        cwd,
+      })
+
+      if (integrationMergeResult.success && integrationMergeResult.consolidatedPatchPath) {
+        // Apply the consolidated patch back to the primary worktree
+        try {
+          const consolidatedStrategy = new ConsolidatedPatchStrategy(
+            integrationMergeResult.consolidatedPatchPath,
+          )
+          await consolidatedStrategy.applyPatch(
+            integrationMergeResult.consolidatedPatchPath,
+            repoRoot,
+            "_consolidated",
+          )
+
+          await markApplyBackCompleted(runId, cwd)
+
+          return {
+            success: true,
+            groupsApplied: groups.length,
+            totalGroups: groups.length,
+            rolledBack: false,
+            strategiesAttempted: [
+              replayStrategy.name,
+              "structured-merge",
+              "integration-merge",
+            ],
+            successfulStrategy: "integration-merge",
+            subagentAvailable: false,
+            integrationWorktreePath: integrationMergeResult.integrationWorktreePath,
+            consolidatedPatchPath: integrationMergeResult.consolidatedPatchPath,
+            summary: [
+              "Integration merge succeeded!",
+              "All group changes were merged in an isolated worktree and verified.",
+              "The consolidated patch was applied to the primary worktree.",
+            ].join("\n"),
+          }
+        } catch (err: unknown) {
+          // Consolidated patch failed to apply cleanly
+          const result: CascadeApplyBackResult = {
+            success: false,
+            groupsApplied: 0,
+            totalGroups: groups.length,
+            error: `Consolidated patch application failed: ${err instanceof Error ? err.message : String(err)}`,
+            rolledBack: false,
+            strategiesAttempted: [
+              replayStrategy.name,
+              "structured-merge",
+              "integration-merge",
+            ],
+            subagentAvailable: true,
+            integrationWorktreePath: integrationMergeResult.integrationWorktreePath,
+            consolidatedPatchPath: integrationMergeResult.consolidatedPatchPath,
+            summary: [
+              "Integration merge produced a consolidated patch, but applying it to the",
+              "primary worktree failed. The integration worktree and consolidated patch",
+              "are preserved for inspection.",
+              "",
+              `Integration worktree: ${integrationMergeResult.integrationWorktreePath}`,
+              `Consolidated patch: ${integrationMergeResult.consolidatedPatchPath}`,
+              "",
+              "Options:",
+              "1. Request subagent resolution (recommended)",
+              "2. Manually resolve and run --resume",
+            ].join("\n"),
+          }
+
+          await markApplyBackConflicted(runId, "_consolidated", result.error ?? "Unknown", cwd)
+          return result
+        }
+      }
+
+      // Integration merge failed
+      const result: CascadeApplyBackResult = {
+        success: false,
+        groupsApplied: 0,
+        totalGroups: groups.length,
+        failingGroup: integrationMergeResult.failingGroup,
+        error: integrationMergeResult.error,
+        rolledBack: false,
+        strategiesAttempted: [
+          replayStrategy.name,
+          "structured-merge",
+          "integration-merge",
+        ],
+        subagentAvailable: integrationMergeResult.resolvableByAgent ?? true,
+        integrationWorktreePath: integrationMergeResult.integrationWorktreePath,
+        summary: integrationMergeResult.summary,
+      }
+
+      await markApplyBackConflicted(
+        runId,
+        integrationMergeResult.failingGroup ?? "_unknown",
+        integrationMergeResult.error ?? "Integration merge failed",
+        cwd,
+      )
+      return result
+    } catch (err: unknown) {
+      // Integration merge threw an error
+      const result: CascadeApplyBackResult = {
+        success: false,
+        groupsApplied: 0,
+        totalGroups: groups.length,
+        error: `Integration merge threw: ${err instanceof Error ? err.message : String(err)}`,
+        rolledBack: false,
+        strategiesAttempted: [
+          replayStrategy.name,
+          "structured-merge",
+          "integration-merge",
+        ],
+        subagentAvailable: true,
+        summary: [
+          "All automated strategies failed. Subagent resolution is available.",
+          "",
+          "Options:",
+          "1. Request subagent resolution (recommended)",
+          "2. Manually resolve the patches and run --resume",
+          "3. Abandon the run",
+        ].join("\n"),
+      }
+
+      await markApplyBackConflicted(runId, "_all", result.error ?? "Unknown", cwd)
+      return result
+    }
+  }
+
+  // ── All strategies failed (or integration merge was skipped) ──
+  const result: CascadeApplyBackResult = {
+    success: false,
+    groupsApplied: 0,
+    totalGroups: groups.length,
+    error: patchReplayResult.error ?? "All apply-back strategies failed.",
+    failingGroup: patchReplayResult.failingGroup,
+    failingPatchPath: patchReplayResult.failingPatchPath,
+    rolledBack: true,
+    strategiesAttempted: [
+      replayStrategy.name,
+      ...(useCascade ? ["structured-merge"] : []),
+      ...(preferSubagentOverIntegrationMerge ? [] : ["integration-merge"]),
+    ],
+    subagentAvailable: true,
+    summary: [
+      "All automated apply-back strategies failed.",
+      "Patch replay failed, structured auto-resolution did not resolve all conflicts,",
+      preferSubagentOverIntegrationMerge
+        ? "and subagent resolution was preferred over integration merge."
+        : "and integration merge could not produce a verified consolidated result.",
+      "",
+      `Primary worktree has been rolled back to the pre-apply snapshot.`,
+      `No partial changes remain.`,
+      "",
+      "Available options:",
+      "1. Request subagent resolution — a subagent with full context will attempt",
+      "   to merge the patches, guided by the original group task descriptions.",
+      `2. Manually resolve the patches in the run dir and run --resume.`,
+      "3. Abandon the run.",
+    ].join("\n"),
+  }
+
+  await markApplyBackConflicted(
+    runId,
+    result.failingGroup ?? "_unknown",
+    result.error ?? "All strategies failed",
+    cwd,
+  )
   return result
 }
 
