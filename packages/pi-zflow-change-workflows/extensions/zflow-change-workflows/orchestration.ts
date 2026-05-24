@@ -5622,10 +5622,49 @@ export async function finalizeCodeReview(
         cwd,
       })
 
+      const severity = (result as any).severity as { critical: number; major: number; minor: number; nit: number }
+      const recommendation = (result as any).recommendation as string | undefined
+      const manifest = (result as any).manifest as { reviewers: Array<{ name: string; status: string; required?: boolean }> } | undefined
+      const coverageNotes = (result as any).coverageNotes as string[] | undefined
+
+      // Check for required reviewer failures (defence in depth — runCodeReview
+      // already sets recommendation = "NO-GO" when required reviewers fail,
+      // but we also check here directly since this is the gating interface).
+      const failedRequiredReviewers: string[] = []
+      if (manifest?.reviewers) {
+        for (const r of manifest.reviewers) {
+          if (r.status === "failed" && (r.required !== false)) {
+            failedRequiredReviewers.push(r.name)
+          }
+        }
+      }
+
+      // pass = no critical/major issues AND no failed required reviewers AND recommendation is not NO-GO
+      const hasPassableSeverity = severity.critical === 0 && severity.major === 0
+      const hasFailedRequiredReviewers = failedRequiredReviewers.length > 0
+      const isNoGo = recommendation === "NO-GO"
+
+      const pass = hasPassableSeverity && !hasFailedRequiredReviewers && !isNoGo
+
+      // Build a summary that includes coverage notes for failed reviewers
+      let summary = `Code review: ${severity.critical} critical, ${severity.major} major, ${severity.minor} minor issues.`
+      if (hasFailedRequiredReviewers) {
+        summary += ` Required reviewer(s) failed: ${failedRequiredReviewers.join(", ")}.`
+      }
+      if (isNoGo && !hasFailedRequiredReviewers) {
+        summary += ` Review recommendation: NO-GO.`
+      }
+      if (coverageNotes && coverageNotes.length > 0) {
+        const relevantNotes = coverageNotes.filter(n => n.includes("Fail-closed") || n.includes("failed") || n.includes("error") || n.includes("ENOENT") || n.includes("severity"))
+        if (relevantNotes.length > 0) {
+          summary += ` ${relevantNotes.join("; ")}`
+        }
+      }
+
       return {
-        pass: (result as any).severity.critical === 0 && (result as any).severity.major === 0,
+        pass,
         findingsPath: (result as any).findingsPath,
-        summary: `Code review: ${(result as any).severity.critical} critical, ${(result as any).severity.major} major, ${(result as any).severity.minor} minor issues.`,
+        summary,
       }
     } catch (err) {
       const summary = `Code review via registry failed: ${err instanceof Error ? err.message : String(err)}`
@@ -5741,7 +5780,7 @@ export interface PostStartSequenceResult {
   /** Current phase after the sequence ran (reflects run.json). */
   phase: string
   /** Symbolic status label. */
-  status: "waiting-for-dispatch" | "verifying" | "reviewing" | "completed" | "failed"
+  status: "waiting-for-dispatch" | "verifying" | "reviewing" | "completed" | "failed" | "verification-skipped"
   /** Verification outcome. */
   verificationStatus: "passed" | "failed" | "skipped" | "pending"
   /** Whether code review passed (if run). */
@@ -5773,9 +5812,11 @@ export interface PostStartSequenceResult {
  * 3. **fix-loop** — Verification failed; runs `runBoundedFixLoop()` if
  *    options.autoFix is not false.
  * 4. **verification-failed** — Fix loop exhausted without success.
- * 5. **reviewing** — Verification passed (or advisory skip); runs
- *    `finalizeCodeReview()`.
- * 6. **completed** — Review passed (or skipped); calls `completeWorkflow()`.
+ * 5. **verification-skipped** — No verification command resolved. Does not
+ *    automatically proceed to code review. User must address or explicitly
+ *    override.
+ * 6. **reviewing** — Verification passed; runs `finalizeCodeReview()`.
+ * 7. **completed** — Review passed (or skipped); calls `completeWorkflow()`.
  *
  * Every phase transition is persisted to run.json and state-index.
  *
@@ -5971,8 +6012,32 @@ export async function runImplementationPostStartSequence(
   reportProgress("Running final verification on the primary worktree")
   const verificationResult = await finalizeVerification(runId, cwd)
   if (verificationResult.status === "skipped") {
-    reportProgress("Final verification was skipped (no command resolved); proceeding to code review")
-  } else if (verificationResult.pass) {
+    // Verification was skipped (no command resolved). Do NOT automatically
+    // proceed to code review and completion. Gate: the user must either
+    // provide a verification command or explicitly pass skipVerification.
+    reportProgress("Final verification was skipped (no command resolved). Gating workflow — user action required.")
+    await transitionTo("verification-skipped" as RunPhase)
+    await updateRun(runId, {
+      verification: { status: "skipped" },
+    } as any, cwd)
+    return {
+      phase: "verification-skipped",
+      status: "failed",
+      verificationStatus: "skipped",
+      runId,
+      changeId,
+      error: "Final verification skipped — no command resolved. The implementation patches are applied but haven't been verified. Run /zflow-change-audit or pass --skip-verification to proceed without verification.",
+      nextSteps: [
+        "⚠️ Final verification was skipped because no verification command was resolved.",
+        "   The implementation patches have been applied but not validated.",
+        "1. Provide a verification command (e.g. in the plan's verification.md) and run --resume.",
+        "2. Or manually run verification checks outside of zflow.",
+        "3. Use /zflow-change-audit to inspect the run status.",
+      ],
+    }
+  }
+
+  if (verificationResult.pass) {
     reportProgress("Final verification passed; starting code review")
   } else {
     reportProgress("Final verification failed; evaluating fix loop")

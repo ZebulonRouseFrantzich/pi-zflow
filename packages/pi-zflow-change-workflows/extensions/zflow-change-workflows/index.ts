@@ -4007,6 +4007,13 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
               if (normalized.includes("final verification passed")) {
                 implProgress.updatePhaseCard("code-review", "Code Review", "Waiting for code review to start", "running")
               }
+              // When verification is skipped, mark the Post Implementation card appropriately
+              if (normalized.includes("verification skipped") || normalized.includes("skipped —")) {
+                implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification skipped — needs review", "failed")
+              }
+              if (normalized.includes("gating")) {
+                implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification skipped — needs review", "failed")
+              }
             }
 
             updatePostImplementationCard("Starting post-dispatch sequence: final verification, review, and completion")
