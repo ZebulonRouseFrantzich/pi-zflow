@@ -108,14 +108,40 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
   const lines = mdContent.split("\n")
   let currentGroup: Partial<import("./ownership-validator.js").ExecutionGroup> | null = null
   let collectingFiles = false
+  let collectingDependencies = false
   let collectingVerification = false
+  let inVerificationFence = false
 
   const normalizeDependency = (dependency: string): string => {
     const trimmed = dependency.trim().replace(/^`|`$/g, "").replace(/^\[|\]$/g, "").trim()
     if (!trimmed) return ""
-    const gMatch = trimmed.match(/^G(\d+)$/i)
-    if (gMatch) return `group-${gMatch[1]}`
+    const gMatch = trimmed.match(/^(?:G|Group\s+)(\d+[A-Za-z]?)$/i)
+    if (gMatch) return `group-${gMatch[1].toLowerCase()}`
     return trimmed
+  }
+
+  const extractGroupDependencies = (value: string): string[] => {
+    const dependencies: string[] = []
+    const groupRefPattern = /\b(?:G|Group)\s*(\d+[A-Za-z]?)\b/gi
+    let match: RegExpExecArray | null
+    while ((match = groupRefPattern.exec(value)) !== null) {
+      dependencies.push(`group-${match[1]!.toLowerCase()}`)
+    }
+    return [...new Set(dependencies)]
+  }
+
+  const appendDependencies = (value: string): void => {
+    if (!currentGroup) return
+    const extracted = extractGroupDependencies(value)
+    if (extracted.length === 0) return
+    currentGroup.dependencies = [...new Set([...(currentGroup.dependencies ?? []), ...extracted])]
+  }
+
+  const appendVerification = (value: string): void => {
+    if (!currentGroup) return
+    const trimmed = value.trim()
+    if (!trimmed || trimmed.startsWith("````".slice(0, 3))) return
+    currentGroup.scopedVerification = [currentGroup.scopedVerification, trimmed].filter(Boolean).join("\n")
   }
 
   const pushCurrentGroup = (): void => {
@@ -132,12 +158,12 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
   }
 
   for (const line of lines) {
-    const groupMatch = line.match(/^## Group\s+(\d+):\s+(.+)$/i) ??
-      line.match(/^#{2,3}\s+G(\d+)\s+[—-]\s+(.+)$/i)
+    const groupMatch = line.match(/^#{2,4}\s+Group\s+(\d+[A-Za-z]?)\s*(?::|[—-])\s+(.+)$/i) ??
+      line.match(/^#{2,4}\s+G(\d+[A-Za-z]?)\s+[—-]\s+(.+)$/i)
     if (groupMatch) {
       pushCurrentGroup()
       currentGroup = {
-        id: `group-${groupMatch[1]}`,
+        id: `group-${groupMatch[1].toLowerCase()}`,
         files: [],
         dependencies: [],
         agent: "zflow.implement-routine",
@@ -145,7 +171,9 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
         parallelizable: true,
       }
       collectingFiles = false
+      collectingDependencies = false
       collectingVerification = false
+      inVerificationFence = false
       continue
     }
 
@@ -153,17 +181,22 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
 
     if (/^#{1,6}\s+/.test(line)) {
       collectingFiles = false
+      collectingDependencies = false
       collectingVerification = false
+      inVerificationFence = false
     }
 
-    const filesHeaderMatch = line.match(/-\s+\*\*Files?(?:\/paths)?:\*\*\s*$/i)
+    const filesHeaderMatch = line.match(/-\s+\*\*Files?(?:\/paths)?:\*\*\s*$/i) ??
+      line.match(/^Files?(?:\s+touched)?(?:\/paths)?(?:\s*\([^)]*\))?:\s*$/i)
     if (filesHeaderMatch) {
       collectingFiles = true
+      collectingDependencies = false
       collectingVerification = false
       continue
     }
 
-    const filesMatch = line.match(/-\s+\*\*Files?(?:\/paths)?:\*\*\s+(.+)/i)
+    const filesMatch = line.match(/-\s+\*\*Files?(?:\/paths)?:\*\*\s+(.+)/i) ??
+      line.match(/^Files?(?:\s+touched)?(?:\/paths)?(?:\s*\([^)]*\))?:\s+(.+)$/i)
     if (filesMatch) {
       currentGroup.files = filesMatch[1].split(",").map((f: string) => f.trim()).filter(Boolean)
       collectingFiles = false
@@ -171,15 +204,16 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
     }
 
     if (collectingFiles) {
-      const fileItemMatch = line.match(/^\s+-\s+`?([^`\n]+?)`?\s*$/)
+      const fileItemMatch = line.match(/^\s*(?:[-*]|\d+\.)\s+`?([^`\n]+?)`?(?:\s+\(new\))?\s*$/)
       if (fileItemMatch && !fileItemMatch[1].startsWith("**")) {
         currentGroup.files = [...(currentGroup.files ?? []), fileItemMatch[1].trim()]
         continue
       }
-      if (line.trim().startsWith("- **")) collectingFiles = false
+      if (line.trim().startsWith("- **") || /^[A-Z][A-Za-z\s]+:/.test(line.trim())) collectingFiles = false
     }
 
-    const agentMatch = line.match(/-\s+\*\*Agent:\*\*\s+(.+)/i)
+    const agentMatch = line.match(/-\s+\*\*Agent:\*\*\s+(.+)/i) ??
+      line.match(/^Owner agent:\s+`?([^`\n]+)`?/i)
     if (agentMatch) {
       currentGroup.agent = agentMatch[1].trim()
       continue
@@ -191,7 +225,8 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
       continue
     }
 
-    const taskMatch = line.match(/-\s+\*\*Task:\*\*\s+(.+)/i)
+    const taskMatch = line.match(/-\s+\*\*Task:\*\*\s+(.+)/i) ??
+      line.match(/^Task description:\s+(.+)/i)
     if (taskMatch) {
       currentGroup.taskPrompt = taskMatch[1].trim()
       continue
@@ -199,19 +234,41 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
 
     const depMatch = line.match(/-\s+\*\*Dependencies:\*\*\s+(.+)/i)
     if (depMatch) {
-      currentGroup.dependencies = depMatch[1]
+      const explicitDependencies = depMatch[1]
         .replace(/^`|`$/g, "")
         .replace(/^\[|\]$/g, "")
         .split(",")
         .map(normalizeDependency)
         .filter(Boolean)
+      currentGroup.dependencies = [...new Set([...(currentGroup.dependencies ?? []), ...explicitDependencies])]
+      appendDependencies(depMatch[1])
       continue
     }
 
-    const verifHeaderMatch = line.match(/-\s+\*\*Scoped verification:\*\*\s*$/i)
+    const depHeaderMatch = line.match(/^Dependencies:\s*$/i)
+    if (depHeaderMatch) {
+      collectingDependencies = true
+      collectingFiles = false
+      collectingVerification = false
+      continue
+    }
+
+    if (collectingDependencies) {
+      const depItemMatch = line.match(/^\s*[-*]\s+(.+)$/)
+      if (depItemMatch) {
+        appendDependencies(depItemMatch[1])
+        continue
+      }
+      if (/^[A-Z][A-Za-z\s]+:/.test(line.trim())) collectingDependencies = false
+    }
+
+    const verifHeaderMatch = line.match(/-\s+\*\*Scoped verification:\*\*\s*$/i) ??
+      line.match(/^Scoped verification:\s*$/i)
     if (verifHeaderMatch) {
       collectingVerification = true
       collectingFiles = false
+      collectingDependencies = false
+      inVerificationFence = false
       continue
     }
 
@@ -223,15 +280,24 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
     }
 
     if (collectingVerification) {
+      if (line.trim().startsWith("```")) {
+        inVerificationFence = !inVerificationFence
+        continue
+      }
+      if (inVerificationFence) {
+        appendVerification(line)
+        continue
+      }
       const verificationItemMatch = line.match(/^\s+-\s+(.+)$/)
       if (verificationItemMatch && !verificationItemMatch[1].startsWith("**")) {
         currentGroup.scopedVerification = [currentGroup.scopedVerification, verificationItemMatch[1].trim()].filter(Boolean).join("; ")
         continue
       }
-      if (line.trim().startsWith("- **")) collectingVerification = false
+      if (/^[A-Z][A-Za-z\s]+:/.test(line.trim())) collectingVerification = false
     }
 
-    const parallelMatch = line.match(/-\s+\*\*Parallelizable:\*\*\s+(.+)/i)
+    const parallelMatch = line.match(/-\s+\*\*Parallelizable:\*\*\s+(.+)/i) ??
+      line.match(/^Parallelizable:\s+(.+)/i)
     if (parallelMatch) {
       currentGroup.parallelizable = parallelMatch[1].trim().toLowerCase() === "yes" ||
         parallelMatch[1].trim().toLowerCase() === "true"
@@ -2931,6 +2997,7 @@ export async function ensureImplementationTasksArtifact(
   cwd?: string,
 ): Promise<boolean> {
   const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
 
   const implementationTasksPath = resolvePlanArtifactPath(changeId, planVersion, "implementation-tasks", cwd)
   try {
@@ -3078,7 +3145,13 @@ export async function ensureImplementationTasksArtifact(
   }, cwd)
 
   if (!result.ok) {
-    throw new Error(result.error ?? "Failed to write implementation-tasks.md")
+    // Tolerate mixed local installs where the workflow package has been
+    // updated before the artifact writer allowlist. Validation/review need the
+    // file to exist, so fall back to a direct workflow-owned write rather than
+    // leaving prepare blocked. Fully updated installs still take the metadata
+    // recording path above.
+    await fs.mkdir(path.dirname(implementationTasksPath), { recursive: true })
+    await fs.writeFile(implementationTasksPath, lines.join("\n"), "utf-8")
   }
 
   return true

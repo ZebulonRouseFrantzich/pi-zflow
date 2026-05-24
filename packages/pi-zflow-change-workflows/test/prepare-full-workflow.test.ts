@@ -10,6 +10,7 @@ import { execFileSync } from "node:child_process"
 
 import {
   runChangePrepareWorkflow,
+  parseExecutionGroupsMd,
   ensureImplementationTasksArtifact,
   advancePlanLifecycle,
   runPlanValidation,
@@ -284,6 +285,92 @@ describe("ensureImplementationTasksArtifact", () => {
         repoRoot,
       )
       assert.strictEqual(secondCreated, false, "existing implementation-tasks.md should not be overwritten")
+    } finally {
+      await removeTestRepo(repoRoot)
+    }
+  })
+
+  test("parses and synthesizes task specs from planner markdown with alphanumeric groups", async () => {
+    const repoRoot = await createTestRepo()
+    try {
+      const result = await runChangePrepareWorkflow({
+        cwd: repoRoot,
+        changeId: "test-planner-format-implementation-tasks",
+      })
+
+      const executionGroups = [
+        "# Execution Groups",
+        "",
+        "## Phase 1 - Runtime Auth Completion",
+        "",
+        "### Group 1A - ZITADEL Config And Verifier Hardening",
+        "",
+        "Owner agent: `typescript-worker-implementer`",
+        "",
+        "Task description: harden Worker ZITADEL environment parsing and verifier audience behavior.",
+        "",
+        "Files touched (≤7):",
+        "",
+        "1. `apps/cloudflare-api/src/api/env.ts`",
+        "2. `apps/cloudflare-api/test/auth/config.test.ts`",
+        "",
+        "Dependencies:",
+        "",
+        "- Existing JWKS cache and token verifier scaffold.",
+        "",
+        "Scoped verification:",
+        "",
+        "```bash",
+        "pnpm --dir apps/cloudflare-api typecheck",
+        "pnpm --dir apps/cloudflare-api test -- auth/config",
+        "```",
+        "",
+        "### Group 1B - AuthPort Adapter",
+        "",
+        "Owner agent: `typescript-worker-implementer`",
+        "",
+        "Task description: turn a bearer token into an internal appUserId.",
+        "",
+        "Files touched (≤7):",
+        "",
+        "1. `apps/cloudflare-api/src/adapters/zitadel/auth_port.ts` (new)",
+        "2. `apps/cloudflare-api/test/auth/auth_port.test.ts` (new)",
+        "",
+        "Dependencies:",
+        "",
+        "- Group 1A.",
+        "",
+        "Scoped verification:",
+        "",
+        "```bash",
+        "pnpm --dir apps/cloudflare-api test -- auth/auth_port",
+        "```",
+      ].join("\n")
+
+      await fs.writeFile(result.artifactPaths.executionGroups, executionGroups, "utf-8")
+
+      const groups = parseExecutionGroupsMd(executionGroups)
+      assert.strictEqual(groups.length, 2)
+      assert.strictEqual(groups[0]!.id, "group-1a")
+      assert.strictEqual(groups[0]!.agent, "typescript-worker-implementer")
+      assert.deepStrictEqual(groups[0]!.files, [
+        "apps/cloudflare-api/src/api/env.ts",
+        "apps/cloudflare-api/test/auth/config.test.ts",
+      ])
+      assert.ok(groups[0]!.scopedVerification?.includes("pnpm --dir apps/cloudflare-api typecheck"))
+      assert.deepStrictEqual(groups[1]!.dependencies, ["group-1a"])
+
+      const created = await ensureImplementationTasksArtifact(
+        "test-planner-format-implementation-tasks",
+        "v1",
+        repoRoot,
+      )
+
+      assert.strictEqual(created, true)
+      const content = await fs.readFile(result.artifactPaths.implementationTasks, "utf-8")
+      assert.ok(content.includes("## Group 1a: harden Worker ZITADEL environment parsing"))
+      assert.ok(content.includes("apps/cloudflare-api/src/api/env.ts"))
+      assert.ok(content.includes("pnpm --dir apps/cloudflare-api typecheck"))
     } finally {
       await removeTestRepo(repoRoot)
     }
