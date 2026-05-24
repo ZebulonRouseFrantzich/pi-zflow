@@ -871,17 +871,24 @@ function renderWorkflowCards(
 
 /**
  * Render a grid of subagent cards.
+ *
+ * Features:
+ * - Variable-width rows: if a row has fewer cards than the max column count,
+ *   cards expand to fill the available width evenly.
+ * - Vertical spacing: a blank line separates each row for readability.
  */
 function renderSubagentCards(subagents: WorkflowSubagentSnapshot[], width: number, theme: any): string[] {
   const available = Math.max(32, width - 2)
-  const columns = available >= 120 ? 3 : available >= 76 ? 2 : 1
+  const maxColumns = available >= 120 ? 3 : available >= 76 ? 2 : 1
   const gap = 2
-  const cardWidth = Math.max(32, Math.floor((available - (columns - 1) * gap) / columns))
   const ordered = [...subagents].sort((a, b) => subagentSortKey(a.id) - subagentSortKey(b.id) || a.id.localeCompare(b.id))
   const rendered: string[] = []
 
-  for (let index = 0; index < ordered.length; index += columns) {
-    const rowSlice = ordered.slice(index, index + columns)
+  for (let index = 0; index < ordered.length;) {
+    const remainingCards = ordered.length - index
+    const rowColumns = Math.min(maxColumns, remainingCards)
+    const cardWidth = Math.max(32, Math.floor((available - (rowColumns - 1) * gap) / rowColumns))
+    const rowSlice = ordered.slice(index, index + rowColumns)
     const rowCardData = rowSlice.map((sa) => {
       const model = toSubagentCardModel(sa)
       return {
@@ -896,6 +903,11 @@ function renderSubagentCards(subagents: WorkflowSubagentSnapshot[], width: numbe
           .map((d) => d.lines[line] ?? d.bg(" ".repeat(cardWidth)))
           .join(" ".repeat(gap)),
       )
+    }
+    index += rowColumns
+    if (index < ordered.length) {
+      // Vertical spacer between rows
+      rendered.push("")
     }
   }
 

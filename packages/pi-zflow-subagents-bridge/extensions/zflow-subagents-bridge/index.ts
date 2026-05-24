@@ -285,6 +285,36 @@ function generateRunId(): string {
   return crypto.randomUUID().slice(0, 8)
 }
 
+/**
+ * Run tasks with rolling concurrency.
+ *
+ * Starts up to `limit` tasks immediately.
+ * When any task completes, the next queued task begins.
+ * Results are returned in original task order.
+ */
+async function runTasksWithRollingConcurrency<T>(
+  tasks: (() => Promise<T>)[],
+  limit: number,
+): Promise<T[]> {
+  const results: T[] = new Array(tasks.length)
+  let nextIndex = 0
+
+  async function worker(): Promise<void> {
+    while (nextIndex < tasks.length) {
+      const idx = nextIndex++
+      results[idx] = await tasks[idx]()
+    }
+  }
+
+  const active = Math.min(limit, tasks.length)
+  const workers: Promise<void>[] = []
+  for (let i = 0; i < active; i++) {
+    workers.push(worker())
+  }
+  await Promise.all(workers)
+  return results
+}
+
 function safeGetCwd(override?: string): string {
   if (override) {
     try {
@@ -570,11 +600,8 @@ async function runParallelWithCompatWorktrees(
       }
     })
 
-    const taskResults: Awaited<ReturnType<BackendDispatchService["runParallel"]>>["results"] = []
-    for (let i = 0; i < runQueue.length; i += concurrencyLimit) {
-      const batch = runQueue.slice(i, i + concurrencyLimit)
-      taskResults.push(...await Promise.all(batch.map((fn) => fn())))
-    }
+    const taskResults: Awaited<ReturnType<BackendDispatchService["runParallel"]>>["results"] =
+      await runTasksWithRollingConcurrency(runQueue, concurrencyLimit)
 
     const diffsDir = `${cwd}/.zflow/worktree-diffs/${runId}`
     try {
@@ -631,11 +658,7 @@ async function runParallelCompatConcurrent(
       }
     }
   })
-  const results: Awaited<ReturnType<BackendDispatchService["runParallel"]>>["results"] = []
-  for (let i = 0; i < runQueue.length; i += concurrencyLimit) {
-    const batch = runQueue.slice(i, i + concurrencyLimit)
-    results.push(...await Promise.all(batch.map((fn) => fn())))
-  }
+  const results = await runTasksWithRollingConcurrency(runQueue, concurrencyLimit)
   return { ok: results.every((result) => result.ok), results }
 }
 
