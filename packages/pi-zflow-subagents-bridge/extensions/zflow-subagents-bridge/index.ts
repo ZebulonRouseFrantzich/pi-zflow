@@ -27,6 +27,12 @@
  * @module pi-zflow-subagents-bridge
  */
 
+import * as crypto from "node:crypto"
+import { spawnSync } from "node:child_process"
+import * as fs from "node:fs"
+import * as os from "node:os"
+import * as path from "node:path"
+
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { getZflowRegistry } from "pi-zflow-core/registry"
 import type { CapabilityClaim } from "pi-zflow-core/registry"
@@ -61,12 +67,23 @@ const UNAVAILABLE_GUIDANCE =
 
 class UnavailableDispatchService implements DispatchService {
   readonly name = "pi-zflow-subagents-bridge:unavailable"
+  private readonly reason?: string
+
+  constructor(reason?: string) {
+    this.reason = reason
+  }
+
+  private message(agent: string): string {
+    return `Cannot dispatch agent "${agent}" via "${this.name}".\n\n` +
+      (this.reason ? `Load failure: ${this.reason}\n\n` : "") +
+      UNAVAILABLE_GUIDANCE
+  }
 
   async runAgent(input: AgentDispatchInput): Promise<AgentDispatchResult> {
     return {
       ok: false,
       rawOutput: "",
-      error: `Cannot dispatch agent "${input.agent}" via "${this.name}".\n\n${UNAVAILABLE_GUIDANCE}`,
+      error: this.message(input.agent),
     }
   }
 
@@ -75,7 +92,7 @@ class UnavailableDispatchService implements DispatchService {
       agent: task.agent,
       rawOutput: "",
       ok: false,
-      error: `Cannot dispatch agent "${task.agent}" via "${this.name}".\n\n${UNAVAILABLE_GUIDANCE}`,
+      error: this.message(task.agent),
     }))
     return { ok: false, results }
   }
@@ -225,6 +242,403 @@ class SubagentsDispatchService implements DispatchService {
   }
 }
 
+// ── Compatibility backend (builds zflow bridge from installed pi-subagents) ──
+
+interface CompatAgentProgress {
+  agent: string
+  status?: string
+  toolCount?: number
+  currentTool?: string
+  currentToolArgs?: string
+  recentTools?: Array<{ tool?: string; args?: string }>
+  durationMs?: number
+  lastActivityAt?: number
+  recentOutput?: string[]
+}
+
+interface CompatSingleResult {
+  exitCode: number
+  error?: string
+  finalOutput?: string
+  savedOutputPath?: string
+}
+
+interface CompatRunSyncOptions {
+  runId: string
+  cwd?: string
+  modelOverride?: string
+  outputPath?: string
+  outputMode?: "inline" | "file-only"
+  maxOutput?: { lines?: number; bytes?: number }
+  onUpdate?: (update: { details?: { progress?: unknown[] } }) => void
+}
+
+interface CompatModules {
+  discoverAgents: (cwd: string, scope?: "user" | "project" | "both") => { agents: unknown[] }
+  runSync: (runtimeCwd: string, agents: unknown[], agentName: string, task: string, options: CompatRunSyncOptions) => Promise<CompatSingleResult>
+  createWorktrees: (cwd: string, runId: string, count: number, options?: { agents?: string[] }) => { worktrees: Array<{ agentCwd: string }> }
+  diffWorktrees: (setup: unknown, agents: string[], diffsDir: string) => Array<{ index: number; patchPath: string; filesChanged: number }>
+  cleanupWorktrees: (setup: unknown) => void
+}
+
+function generateRunId(): string {
+  return crypto.randomUUID().slice(0, 8)
+}
+
+function safeGetCwd(override?: string): string {
+  if (override) {
+    try {
+      fs.accessSync(override, fs.constants.R_OK)
+      return override
+    } catch {
+      // fall through to process.cwd()
+    }
+  }
+  return process.cwd()
+}
+
+function findAgent(agents: unknown[], name: string): { name: string } | undefined {
+  return agents.find((agent) => {
+    const agentName = (agent as { name?: unknown }).name
+    return agentName === name || agentName === `builtin:${name}`
+  }) as { name: string } | undefined
+}
+
+function mapCompatProgress(agentName: string, progress: Record<string, unknown>): CompatAgentProgress {
+  const recentTools = Array.isArray(progress.recentTools)
+    ? progress.recentTools.map((tool) => ({
+      tool: (tool as { tool?: unknown }).tool as string | undefined,
+      args: (tool as { args?: unknown }).args as string | undefined,
+    }))
+    : undefined
+  return {
+    agent: agentName,
+    status: typeof progress.status === "string" ? progress.status : undefined,
+    toolCount: typeof progress.toolCount === "number" ? progress.toolCount : undefined,
+    currentTool: typeof progress.currentTool === "string" ? progress.currentTool : undefined,
+    currentToolArgs: typeof progress.currentToolArgs === "string" ? progress.currentToolArgs : undefined,
+    recentTools,
+    durationMs: typeof progress.durationMs === "number" ? progress.durationMs : undefined,
+    lastActivityAt: typeof progress.lastActivityAt === "number" ? progress.lastActivityAt : undefined,
+    recentOutput: Array.isArray(progress.recentOutput) ? progress.recentOutput.filter((line): line is string => typeof line === "string") : undefined,
+  }
+}
+
+function forwardCompatProgress(
+  agentName: string,
+  onUpdate: ((progress: CompatAgentProgress) => void) | undefined,
+): CompatRunSyncOptions["onUpdate"] | undefined {
+  if (!onUpdate) return undefined
+  return (update) => {
+    const progress = update.details?.progress?.[0]
+    if (!progress || typeof progress !== "object") return
+    onUpdate(mapCompatProgress(agentName, progress as Record<string, unknown>))
+  }
+}
+
+function mapCompatSingleResult(result: CompatSingleResult): {
+  ok: boolean
+  exitCode: number
+  error?: string
+  rawOutput: string
+  outputPath?: string
+  savedOutputPath?: string
+} {
+  return {
+    ok: result.exitCode === 0 && !result.error,
+    exitCode: result.exitCode,
+    error: result.error,
+    rawOutput: result.finalOutput ?? "",
+    savedOutputPath: result.savedOutputPath,
+    outputPath: result.savedOutputPath,
+  }
+}
+
+function extractScopedVerificationCommand(task: string): string | undefined {
+  const match = task.match(/## Scoped verification[\s\S]*?```(?:bash|sh|shell)?\s*\n([\s\S]*?)```/i)
+  const command = match?.[1]?.trim()
+  return command ? command : undefined
+}
+
+function runScopedVerification(command: string, cwd: string): BackendVerification {
+  const result = spawnSync(command, {
+    cwd,
+    shell: true,
+    encoding: "utf-8",
+    timeout: 10 * 60 * 1000,
+  })
+
+  const output = [result.stdout, result.stderr]
+    .filter((part) => typeof part === "string" && part.length > 0)
+    .join("\n")
+    .trim()
+
+  if (result.error) {
+    return {
+      status: "fail",
+      command,
+      output: output ? `${output}\n${result.error.message}` : result.error.message,
+    }
+  }
+
+  return {
+    status: result.status === 0 ? "pass" : "fail",
+    command,
+    output,
+  }
+}
+
+async function loadCompatModules(): Promise<CompatModules> {
+  // Use jiti for this fallback because Node's built-in type stripping refuses
+  // to load TypeScript files from node_modules, while Pi packages are shipped
+  // as TypeScript source.
+  async function importJiti(): Promise<{ createJiti: typeof import("jiti").createJiti }> {
+    try {
+      return await import("jiti")
+    } catch {
+      return await import(path.join(os.homedir(), ".pi", "agent", "npm", "node_modules", "jiti", "lib", "jiti.mjs"))
+    }
+  }
+
+  const { createJiti } = await importJiti()
+  const jiti = createJiti(import.meta.url, { interopDefault: true })
+
+  async function importPiSubagentsInternal(relativePath: string): Promise<unknown> {
+    const packageSpecifier = `pi-subagents/${relativePath}`
+    try {
+      return await jiti.import(packageSpecifier)
+    } catch (specifierErr) {
+      const candidates = [
+        path.join(os.homedir(), ".pi", "agent", "npm", "node_modules", "pi-subagents", relativePath),
+      ]
+      for (const candidate of candidates) {
+        try {
+          return await jiti.import(candidate)
+        } catch {
+          // Try the next known install location.
+        }
+      }
+      throw specifierErr
+    }
+  }
+
+  const [agentsModule, executionModule, worktreeModule] = await Promise.all([
+    importPiSubagentsInternal("src/agents/agents.ts"),
+    importPiSubagentsInternal("src/runs/foreground/execution.ts"),
+    importPiSubagentsInternal("src/runs/shared/worktree.ts"),
+  ])
+  const modules = {
+    discoverAgents: (agentsModule as { discoverAgents?: unknown }).discoverAgents,
+    runSync: (executionModule as { runSync?: unknown }).runSync,
+    createWorktrees: (worktreeModule as { createWorktrees?: unknown }).createWorktrees,
+    diffWorktrees: (worktreeModule as { diffWorktrees?: unknown }).diffWorktrees,
+    cleanupWorktrees: (worktreeModule as { cleanupWorktrees?: unknown }).cleanupWorktrees,
+  }
+  for (const [name, value] of Object.entries(modules)) {
+    if (typeof value !== "function") {
+      throw new Error(`installed pi-subagents is missing required internal export: ${name}`)
+    }
+  }
+  return modules as CompatModules
+}
+
+async function createCompatZflowDispatchService(): Promise<BackendDispatchService> {
+  const modules = await loadCompatModules()
+
+  function resolveAgents(cwd: string): { agents: unknown[]; error?: string } {
+    try {
+      const result = modules.discoverAgents(cwd, "both")
+      if (result.agents.length === 0) return { agents: [], error: "No agents discovered" }
+      return { agents: result.agents }
+    } catch (err) {
+      return {
+        agents: [],
+        error: `Agent discovery failed: ${err instanceof Error ? err.message : String(err)}`,
+      }
+    }
+  }
+
+  const runAgent = async (input: Parameters<BackendDispatchService["runAgent"]>[0]) => {
+    const cwd = safeGetCwd(input.cwd)
+    const { agents, error: discoveryError } = resolveAgents(cwd)
+    if (discoveryError || agents.length === 0) {
+      return { ok: false, exitCode: 1, error: discoveryError ?? "No agents discovered", rawOutput: "" }
+    }
+    const agent = findAgent(agents, input.agent)
+    if (!agent) {
+      const available = agents.map((a) => (a as { name?: unknown }).name).filter(Boolean).join(", ")
+      return { ok: false, exitCode: 1, error: `Unknown agent "${input.agent}". Available: ${available}`, rawOutput: "" }
+    }
+    const result = await modules.runSync(cwd, agents, agent.name, input.task, {
+      runId: generateRunId(),
+      cwd,
+      modelOverride: input.model,
+      outputPath: input.output === false ? undefined : (typeof input.output === "string" ? input.output : undefined),
+      outputMode: input.outputMode === "file-only" ? "file-only" : undefined,
+      maxOutput: input.maxOutput,
+      onUpdate: forwardCompatProgress(agent.name, input.onUpdate),
+    })
+    return mapCompatSingleResult(result)
+  }
+
+  const runParallel = async (input: Parameters<BackendDispatchService["runParallel"]>[0]) => {
+    if (input.tasks.length === 0) return { ok: false, results: [] }
+    const cwd = safeGetCwd(input.cwd)
+    const { agents, error: discoveryError } = resolveAgents(cwd)
+    if (discoveryError || agents.length === 0) {
+      return {
+        ok: false,
+        results: input.tasks.map((task) => ({ agent: task.agent, ok: false, error: discoveryError ?? "No agents discovered", rawOutput: "" })),
+      }
+    }
+    for (const task of input.tasks) {
+      if (!findAgent(agents, task.agent)) {
+        const available = agents.map((a) => (a as { name?: unknown }).name).filter(Boolean).join(", ")
+        return {
+          ok: false,
+          results: input.tasks.map((t) => ({
+            agent: t.agent,
+            ok: false,
+            error: t.agent === task.agent
+              ? `Unknown agent "${task.agent}". Available: ${available}`
+              : `Sibling task failed before start due to unknown agent "${task.agent}"`,
+            rawOutput: "",
+          })),
+        }
+      }
+    }
+
+    if (input.worktree) {
+      return runParallelWithCompatWorktrees(cwd, input, agents, modules)
+    }
+    return runParallelCompatConcurrent(cwd, input, agents, modules)
+  }
+
+  return {
+    name: "pi-subagents-compat:operational",
+    runAgent,
+    runParallel,
+  }
+}
+
+async function runParallelWithCompatWorktrees(
+  cwd: string,
+  input: Parameters<BackendDispatchService["runParallel"]>[0],
+  agents: unknown[],
+  modules: CompatModules,
+): Promise<Awaited<ReturnType<BackendDispatchService["runParallel"]>>> {
+  const runId = generateRunId()
+  const count = input.tasks.length
+  let worktreeSetup: unknown | undefined
+  try {
+    worktreeSetup = modules.createWorktrees(cwd, runId, count, { agents: input.tasks.map((task) => task.agent) })
+    const setup = worktreeSetup as { worktrees: Array<{ agentCwd: string }> }
+    const concurrencyLimit = Math.max(1, Math.min(input.concurrency ?? count, count))
+    const runQueue = input.tasks.map((task, index) => async () => {
+      const agentCwd = setup.worktrees[index]!.agentCwd
+      try {
+        const resolvedAgent = findAgent(agents, task.agent)!
+        const result = await modules.runSync(agentCwd, agents, resolvedAgent.name, task.task, {
+          runId: `${runId}-${index}`,
+          cwd: agentCwd,
+          modelOverride: task.model,
+          outputPath: task.output === false ? undefined : (typeof task.output === "string" ? task.output : undefined),
+          outputMode: task.outputMode === "file-only" ? "file-only" : undefined,
+          maxOutput: task.maxOutput,
+          onUpdate: forwardCompatProgress(task.agent, task.onUpdate),
+        })
+        const agentOk = result.exitCode === 0 && !result.error
+        const verificationCommand = agentOk ? extractScopedVerificationCommand(task.task) : undefined
+        const verification = verificationCommand ? runScopedVerification(verificationCommand, agentCwd) : undefined
+        const verificationOk = verification ? verification.status === "pass" : true
+        return {
+          agent: task.agent,
+          ok: agentOk && verificationOk,
+          error: result.error ?? (verificationOk ? undefined : `Scoped verification failed: ${verification?.command ?? "unknown command"}`),
+          rawOutput: result.finalOutput ?? "",
+          savedOutputPath: result.savedOutputPath,
+          outputPath: result.savedOutputPath,
+          verification,
+        }
+      } catch (err) {
+        return {
+          agent: task.agent,
+          ok: false,
+          error: `Worktree dispatch error: ${err instanceof Error ? err.message : String(err)}`,
+          rawOutput: "",
+        }
+      }
+    })
+
+    const taskResults: Awaited<ReturnType<BackendDispatchService["runParallel"]>>["results"] = []
+    for (let i = 0; i < runQueue.length; i += concurrencyLimit) {
+      const batch = runQueue.slice(i, i + concurrencyLimit)
+      taskResults.push(...await Promise.all(batch.map((fn) => fn())))
+    }
+
+    const diffsDir = `${cwd}/.zflow/worktree-diffs/${runId}`
+    try {
+      fs.mkdirSync(diffsDir, { recursive: true })
+      const diffs = modules.diffWorktrees(worktreeSetup, input.tasks.map((task) => task.agent), diffsDir)
+      for (const diff of diffs) {
+        if (diff.index < taskResults.length) taskResults[diff.index]!.patchPath = diff.patchPath
+      }
+    } catch {
+      // Best-effort diff capture.
+    }
+
+    return { ok: taskResults.every((result) => result.ok), results: taskResults }
+  } finally {
+    if (worktreeSetup) {
+      try {
+        modules.cleanupWorktrees(worktreeSetup)
+      } catch {
+        // Best-effort cleanup.
+      }
+    }
+  }
+}
+
+async function runParallelCompatConcurrent(
+  cwd: string,
+  input: Parameters<BackendDispatchService["runParallel"]>[0],
+  agents: unknown[],
+  modules: CompatModules,
+): Promise<Awaited<ReturnType<BackendDispatchService["runParallel"]>>> {
+  const concurrencyLimit = Math.max(1, Math.min(input.concurrency ?? input.tasks.length, input.tasks.length))
+  const runQueue = input.tasks.map((task) => async () => {
+    try {
+      const resolvedAgent = findAgent(agents, task.agent)!
+      const result = await modules.runSync(task.cwd ?? cwd, agents, resolvedAgent.name, task.task, {
+        runId: generateRunId(),
+        cwd: task.cwd ?? cwd,
+        modelOverride: task.model,
+        outputPath: task.output === false ? undefined : (typeof task.output === "string" ? task.output : undefined),
+        outputMode: task.outputMode === "file-only" ? "file-only" : undefined,
+        maxOutput: task.maxOutput,
+        onUpdate: forwardCompatProgress(task.agent, task.onUpdate),
+      })
+      return {
+        agent: task.agent,
+        ...mapCompatSingleResult(result),
+      }
+    } catch (err) {
+      return {
+        agent: task.agent,
+        ok: false,
+        error: `Dispatch error: ${err instanceof Error ? err.message : String(err)}`,
+        rawOutput: "",
+      }
+    }
+  })
+  const results: Awaited<ReturnType<BackendDispatchService["runParallel"]>>["results"] = []
+  for (let i = 0; i < runQueue.length; i += concurrencyLimit) {
+    const batch = runQueue.slice(i, i + concurrencyLimit)
+    results.push(...await Promise.all(batch.map((fn) => fn())))
+  }
+  return { ok: results.every((result) => result.ok), results }
+}
+
 // ── Activation ─────────────────────────────────────────────────────
 
 /**
@@ -264,15 +678,24 @@ export default async function activateZflowSubagentsBridgeExtension(_pi: Extensi
 
   let service: DispatchService
 
-  // Try to load the pi-subagents-zflow backend.
-  // The fork is a file: dependency during local development.
+  // Prefer the fork-provided backend when available. Pi git installs may load
+  // this package without its npm dependencies, so fall back to a compatibility
+  // backend built from the installed pi-subagents internals before reporting
+  // dispatch as unavailable.
   try {
     const { createZflowDispatchService } = await import("pi-subagents/zflow-bridge")
     const backend = createZflowDispatchService()
     service = new SubagentsDispatchService(backend)
-  } catch {
-    // Fork unavailable — use diagnostic service
-    service = new UnavailableDispatchService()
+  } catch (forkErr) {
+    try {
+      const backend = await createCompatZflowDispatchService()
+      service = new SubagentsDispatchService(backend)
+    } catch (compatErr) {
+      service = new UnavailableDispatchService(
+        `fork import failed: ${forkErr instanceof Error ? forkErr.message : String(forkErr)}; ` +
+        `compat import failed: ${compatErr instanceof Error ? compatErr.message : String(compatErr)}`,
+      )
+    }
   }
 
   registry.provide(DISPATCH_SERVICE_CAPABILITY, service)
