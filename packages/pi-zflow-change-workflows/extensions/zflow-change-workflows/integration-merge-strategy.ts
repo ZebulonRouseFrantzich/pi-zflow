@@ -261,15 +261,17 @@ function createSyntheticCommit(
   groupId: string,
   branchName: string,
 ): string {
-  // Ensure we're on the base commit to start
-  execFileSync("git", ["checkout", "--force", baseCommit], {
+  // Build each group's synthetic commit on its own branch rooted at the
+  // original base commit. Do not create these commits on the integration
+  // branch itself; the caller will switch back to the integration branch and
+  // merge each group branch in topological order.
+  execFileSync("git", ["checkout", "-B", branchName, baseCommit], {
     cwd: worktreePath,
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 30_000,
   })
 
-  // Reset branch to base commit
-  execFileSync("git", ["reset", "--soft", baseCommit], {
+  execFileSync("git", ["reset", "--hard", baseCommit], {
     cwd: worktreePath,
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 30_000,
@@ -290,12 +292,9 @@ function createSyntheticCommit(
     timeout: 30_000,
   })
 
-  // Point the group branch at this commit so it can be merged later
-  execFileSync("git", ["branch", "-f", branchName, "HEAD"], {
-    cwd: worktreePath,
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: 30_000,
-  })
+  // The worktree is currently on branchName, so the branch already points at
+  // the synthetic commit. The caller will switch back to the integration
+  // branch before merging this branch.
 
   // Get the new commit SHA
   return git(worktreePath, "rev-parse", "HEAD")
@@ -482,7 +481,14 @@ export async function runIntegrationMerge(
       break
     }
 
-    // Merge group into integration branch
+    // Merge group into the integration branch. createSyntheticCommit leaves
+    // the worktree checked out on the group branch, so switch back before the
+    // merge or the final integration result can silently lose prior groups.
+    execFileSync("git", ["checkout", "--force", intBranch], {
+      cwd: worktreePath,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30_000,
+    })
     const mergeResult = mergeGroupIntoIntegration(worktreePath, groupBranch, groupId)
     if (!mergeResult.success) {
       failingGroup = groupId
