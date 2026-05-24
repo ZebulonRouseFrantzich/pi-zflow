@@ -2254,7 +2254,7 @@ async function resumeWorktreeDispatch(
     options?.onSubagentUpdate?.(group.id, {
       status: "completed",
       finishedAt: Date.now(),
-      lastCommand: "resume dispatch complete",
+      lastCommand: "agent complete; scoped verification deferred to final verification",
     })
 
     // Collect group result for apply-back later
@@ -2627,7 +2627,7 @@ async function runWorktreeDispatchAndFinalize(
         title: runPlan.groups[idx]?.taskPrompt ?? undefined,
         status: "completed",
         finishedAt: Date.now(),
-        lastCommand: "dispatch complete",
+        lastCommand: "agent complete; scoped verification deferred to final verification",
       })
       // Update ledger: group succeeded
       const gId = task?.groupId ?? runPlan.groups[idx]?.id ?? `group-${idx}`
@@ -2795,7 +2795,7 @@ async function runWorktreeDispatchAndFinalize(
             title: group?.taskPrompt ?? undefined,
             status: "completed",
             finishedAt: Date.now(),
-            lastCommand: "retry dispatch complete",
+            lastCommand: "agent complete; scoped verification deferred to final verification",
           })
           // Update ledger: retry succeeded
           await updateGroupLedger(runId, group?.id ?? task.groupId, {

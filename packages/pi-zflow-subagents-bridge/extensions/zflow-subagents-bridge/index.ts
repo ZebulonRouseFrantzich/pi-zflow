@@ -301,7 +301,19 @@ async function runTasksWithRollingConcurrency<T>(
   async function worker(): Promise<void> {
     while (nextIndex < tasks.length) {
       const idx = nextIndex++
-      results[idx] = await tasks[idx]()
+      // If a task factory throws unexpectedly, catch and set the result to a
+      // best-effort failure sentinel so the slot is freed and the pool
+      // continues. Call-site task factories already catch their own errors
+      // and return { ok: false, error }, so this is defence-in-depth.
+      try {
+        results[idx] = await tasks[idx]()
+      } catch (err) {
+        results[idx] = {
+          ok: false,
+          error: `Unexpected worker crash: ${err instanceof Error ? err.message : String(err)}`,
+          rawOutput: "",
+        } as unknown as T
+      }
     }
   }
 
@@ -531,6 +543,15 @@ async function runParallelWithCompatWorktrees(
     const concurrencyLimit = Math.max(1, Math.min(input.concurrency ?? count, count))
     const runQueue = input.tasks.map((task, index) => async () => {
       const agentCwd = setup.worktrees[index]!.agentCwd
+      // Emit starting progress before the agent run so the UI transitions
+      // from "queued" to "running" immediately, even before runSync emits
+      // its first progress event.
+      task.onUpdate?.({
+        agent: task.agent,
+        status: "running",
+        recentOutput: ["starting worktree dispatch..."],
+        lastActivityAt: Date.now(),
+      })
       try {
         const resolvedAgent = findAgent(agents, task.agent)!
         const result = await modules.runSync(agentCwd, agents, resolvedAgent.name, task.task, {
@@ -595,6 +616,13 @@ async function runParallelCompatConcurrent(
 ): Promise<Awaited<ReturnType<BackendDispatchService["runParallel"]>>> {
   const concurrencyLimit = Math.max(1, Math.min(input.concurrency ?? input.tasks.length, input.tasks.length))
   const runQueue = input.tasks.map((task) => async () => {
+    // Emit starting progress so the UI shows "running" immediately.
+    task.onUpdate?.({
+      agent: task.agent,
+      status: "running",
+      recentOutput: ["starting dispatch..."],
+      lastActivityAt: Date.now(),
+    })
     try {
       const resolvedAgent = findAgent(agents, task.agent)!
       const result = await modules.runSync(task.cwd ?? cwd, agents, resolvedAgent.name, task.task, {
