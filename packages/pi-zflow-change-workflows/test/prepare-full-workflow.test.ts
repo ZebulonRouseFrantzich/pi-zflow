@@ -21,6 +21,7 @@ import {
   finalizeVerification,
   completeWorkflow,
 } from "../extensions/zflow-change-workflows/orchestration.js"
+import { validateOwnershipAndDependencies } from "../extensions/zflow-change-workflows/ownership-validator.js"
 
 import { resolvePlanStatePath, resolvePlanVersionDir, resolveRunStatePath, resolveStateIndexPath, resolveReconnaissancePath, resolveRepoMapPath } from "pi-zflow-artifacts/artifact-paths"
 
@@ -376,6 +377,84 @@ describe("ensureImplementationTasksArtifact", () => {
     } finally {
       await removeTestRepo(repoRoot)
     }
+  })
+
+  test("parses plural alphanumeric dependency ranges that order overlapping files", () => {
+    const executionGroups = [
+      "# Execution Groups",
+      "",
+      "### Group 1A - Config",
+      "",
+      "Files touched (≤7):",
+      "",
+      "1. `apps/cloudflare-api/src/api/env.ts`",
+      "",
+      "Scoped verification:",
+      "",
+      "```bash",
+      "pnpm --dir apps/cloudflare-api typecheck",
+      "```",
+      "",
+      "### Group 1B - AuthPort",
+      "",
+      "Files touched (≤7):",
+      "",
+      "1. `apps/cloudflare-api/src/api/app.ts`",
+      "",
+      "Dependencies:",
+      "",
+      "- Group 1A.",
+      "",
+      "Scoped verification:",
+      "",
+      "```bash",
+      "pnpm --dir apps/cloudflare-api test -- auth/auth_port",
+      "```",
+      "",
+      "### Group 1C - Sync Auth Gate",
+      "",
+      "Files touched (≤7):",
+      "",
+      "1. `apps/cloudflare-api/src/api/app.ts`",
+      "2. `apps/cloudflare-api/wrangler.toml`",
+      "",
+      "Dependencies:",
+      "",
+      "- Groups 1A-1B.",
+      "",
+      "Scoped verification:",
+      "",
+      "```bash",
+      "pnpm --dir apps/cloudflare-api test -- sync",
+      "```",
+      "",
+      "### Group 3B - Tooling",
+      "",
+      "Files touched (≤7):",
+      "",
+      "1. `apps/cloudflare-api/wrangler.toml`",
+      "2. `README.md`",
+      "",
+      "Dependencies:",
+      "",
+      "- Groups 1A-1C for Workers auth config names.",
+      "",
+      "Scoped verification:",
+      "",
+      "```bash",
+      "pnpm --dir apps/cloudflare-api typecheck",
+      "```",
+    ].join("\n")
+
+    const groups = parseExecutionGroupsMd(executionGroups)
+    assert.deepStrictEqual(groups.find((group) => group.id === "group-1c")?.dependencies, [
+      "group-1a",
+      "group-1b",
+    ])
+    assert.ok(groups.find((group) => group.id === "group-3b")?.dependencies.includes("group-1c"))
+
+    const validation = validateOwnershipAndDependencies(groups)
+    assert.strictEqual(validation.valid, true, validation.summary)
   })
 })
 

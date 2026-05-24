@@ -115,14 +115,36 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
   const normalizeDependency = (dependency: string): string => {
     const trimmed = dependency.trim().replace(/^`|`$/g, "").replace(/^\[|\]$/g, "").trim()
     if (!trimmed) return ""
-    const gMatch = trimmed.match(/^(?:G|Group\s+)(\d+[A-Za-z]?)$/i)
+    const gMatch = trimmed.match(/^(?:G|Groups?\s+)(\d+[A-Za-z]?)$/i)
     if (gMatch) return `group-${gMatch[1].toLowerCase()}`
     return trimmed
   }
 
   const extractGroupDependencies = (value: string): string[] => {
     const dependencies: string[] = []
-    const groupRefPattern = /\b(?:G|Group)\s*(\d+[A-Za-z]?)\b/gi
+    const rangePattern = /\b(?:G|Groups?)\s*(\d+)([A-Za-z])\s*(?:-|–|—|to)\s*(?:(\d+))?([A-Za-z])\b/gi
+    let rangeMatch: RegExpExecArray | null
+    while ((rangeMatch = rangePattern.exec(value)) !== null) {
+      const startNumber = Number.parseInt(rangeMatch[1]!, 10)
+      const startLetter = rangeMatch[2]!.toLowerCase()
+      const endNumber = Number.parseInt(rangeMatch[3] ?? rangeMatch[1]!, 10)
+      const endLetter = rangeMatch[4]!.toLowerCase()
+
+      if (startNumber === endNumber && startLetter.length === 1 && endLetter.length === 1) {
+        const startCode = startLetter.charCodeAt(0)
+        const endCode = endLetter.charCodeAt(0)
+        if (startCode <= endCode) {
+          for (let code = startCode; code <= endCode; code++) {
+            dependencies.push(`group-${startNumber}${String.fromCharCode(code)}`)
+          }
+        }
+      } else if (startNumber <= endNumber) {
+        dependencies.push(`group-${startNumber}${startLetter}`)
+        dependencies.push(`group-${endNumber}${endLetter}`)
+      }
+    }
+
+    const groupRefPattern = /\b(?:G|Groups?)\s*(\d+[A-Za-z]?)\b/gi
     let match: RegExpExecArray | null
     while ((match = groupRefPattern.exec(value)) !== null) {
       dependencies.push(`group-${match[1]!.toLowerCase()}`)
