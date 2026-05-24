@@ -14,6 +14,8 @@ import {
   runVerification,
   parseVerificationMdCommand,
   resolveVerificationCommand,
+  execAsync,
+  detectDevServerSmoke,
 } from "../extensions/zflow-change-workflows/verification.js"
 
 function withTempRepo(): { repoRoot: string; cleanup: () => void } {
@@ -121,6 +123,109 @@ void describe("runVerification", () => {
       )
 
       assert.match(result.command, /^node -e true$/)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+void describe("detectDevServerSmoke", () => {
+  void it("rejects just cf-dev with curl", () => {
+    const result = detectDevServerSmoke("just cf-dev then curl -fsS http://127.0.0.1:8787/health")
+    assert.equal(result.detected, true)
+    assert.ok(result.reason)
+    assert.match(result.reason!, /dev-server/i)
+  })
+
+  void it("rejects wrangler dev", () => {
+    const result = detectDevServerSmoke("wrangler dev")
+    assert.equal(result.detected, true)
+  })
+
+  void it("rejects npm run dev", () => {
+    const result = detectDevServerSmoke("npm run dev")
+    assert.equal(result.detected, true)
+  })
+
+  void it("rejects pnpm --dir dev command", () => {
+    const result = detectDevServerSmoke("pnpm --dir apps/api run dev")
+    assert.equal(result.detected, true)
+  })
+
+  void it("rejects vite", () => {
+    const result = detectDevServerSmoke("vite")
+    assert.equal(result.detected, true)
+  })
+
+  void it("allows normal test commands", () => {
+    const result = detectDevServerSmoke("npm test")
+    assert.equal(result.detected, false)
+  })
+
+  void it("allows typecheck commands", () => {
+    const result = detectDevServerSmoke("pnpm --dir apps/api typecheck")
+    assert.equal(result.detected, false)
+  })
+
+  void it("allows just ci-fast", () => {
+    const result = detectDevServerSmoke("just ci-fast")
+    assert.equal(result.detected, false)
+  })
+
+  void it("allows plain curl without dev server", () => {
+    const result = detectDevServerSmoke("curl -fsS http://localhost:8787/health")
+    assert.equal(result.detected, false)
+  })
+})
+
+void describe("execAsync", () => {
+  void it("captures stdout from a normal command", async () => {
+    const result = await execAsync("echo", ["hello"], { cwd: "/tmp" })
+    assert.ok(result.stdout.includes("hello"))
+    assert.equal(result.status, 0)
+    assert.equal(result.killed, false)
+  })
+
+  void it("captures stderr from a failing command", async () => {
+    const result = await execAsync("bash", ["-c", "echo fail-message >&2; exit 5"], { cwd: "/tmp" })
+    assert.ok(result.stderr.includes("fail-message"))
+    assert.equal(result.status, 5)
+    assert.equal(result.killed, false)
+  })
+
+  void it("times out and kills a long-running command", async () => {
+    const start = Date.now()
+    const result = await execAsync("bash", ["-c", "sleep 30"], {
+      cwd: "/tmp",
+      timeout: 500,
+    })
+    const elapsed = Date.now() - start
+    assert.equal(result.killed, true)
+    assert.ok(elapsed < 10000, `should complete before 10s (took ${elapsed}ms)`)
+  })
+
+  void it("respects an AbortSignal and kills the process", async () => {
+    const ac = new AbortController()
+    const promise = execAsync("bash", ["-c", "sleep 30"], {
+      cwd: "/tmp",
+      signal: ac.signal,
+    })
+    ac.abort()
+    const result = await promise
+    assert.equal(result.killed, true)
+  })
+})
+
+void describe("runVerification — dev-server protection", () => {
+  void it("skips dev-server commands with a clear fail result", async () => {
+    const { repoRoot, cleanup } = withTempRepo()
+    try {
+      const result = await runVerification(
+        "just cf-dev && curl http://localhost:8787/health",
+        repoRoot,
+      )
+      assert.equal(result.pass, false)
+      assert.ok(result.error!.includes("Dev-server command detected"))
     } finally {
       cleanup()
     }

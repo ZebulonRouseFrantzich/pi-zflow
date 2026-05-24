@@ -29,7 +29,7 @@
  * @module pi-zflow-change-workflows/verification
  */
 
-import { spawnSync } from "node:child_process"
+import { spawn } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
 import * as path from "node:path"
 import { resolveFailureLogPath } from "pi-zflow-artifacts/artifact-paths"
@@ -198,10 +198,180 @@ export function resolveVerificationCommand(
   return null
 }
 
+// ── Dev-server command pattern detection ─────────────────────
+
+/**
+ * Known dev-server command prefixes that are long-running by nature and
+ * should not be run as blocking verification.
+ *
+ * When a verification command matches one of these prefixes, the runner
+ * will refuse to run it unbounded and instead return a clear skipped/fail
+ * result.  Users should run these commands manually or use a smoke-test
+ * harness that starts the server, waits for readiness, runs checks, and
+ * terminates the server.
+ */
+const DEV_SERVER_PATTERNS = [
+  /^just\s+(?:cf-dev|dev|run)/i,
+  /^wrangler\s+dev/i,
+  /^(?:npm|pnpm|yarn|bun)\s+run\s+\w*dev\w*/i,
+  /^(?:npm|pnpm|yarn|bun)\s+(?:start|dev)/i,
+  /^vite/i,
+  /^next\s+dev/i,
+  /^(?:node\s+)?(?:tsx|ts-node)\s+.*\b(?:server|listen|\bdev\b)/i,
+  /^(?:pnpm|npm)\s+(?:--dir\s+\S+\s+)?run\s+\w*dev\w*/i,
+]
+
+/**
+ * Check whether a shell command string contains a dev-server subcommand
+ * followed by a curl/health-check pattern (the common "start server, then
+ * curl" trap that hangs verification).
+ *
+ * Examples that match:
+ *   - `just cf-dev then curl -fsS http://127.0.0.1:8787/health`
+ *   - `wrangler dev && curl http://localhost:8787/health`
+ *   - `just cf-dev; curl http://127.0.0.1:8787/health`
+ *   - `pnpm --dir apps/api dev & curl --retry 10 ...`
+ */
+export function detectDevServerSmoke(command: string): { detected: boolean; reason?: string } {
+  const trimmed = command.trim()
+
+  for (const pattern of DEV_SERVER_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return {
+        detected: true,
+        reason:
+          `Long-running dev-server command detected: command starts with a known dev-server pattern.\n` +
+          `The verification runner cannot safely start an unbounded dev server.\n` +
+          `Use a dedicated smoke-test script that starts the server, waits for readiness, ` +
+          `runs checks, and terminates the server, or run the smoke manually.`,
+      }
+    }
+  }
+
+  return { detected: false }
+}
+
+// ── Async child process execution ────────────────────────────
+
+/**
+ * Default timeout for verification commands (15 minutes).
+ */
+const DEFAULT_VERIFICATION_TIMEOUT_MS = 15 * 60 * 1000
+
+/**
+ * Grace period after SIGTERM before SIGKILL.
+ */
+const VERIFICATION_TERM_GRACE_MS = 5_000
+
+/**
+ * Run a command with async spawn, capturing output, with timeout and signal support.
+ *
+ * The process is spawned with a process group so signals can be sent to the
+ * entire group.  On timeout the process group receives SIGTERM first, then
+ * SIGKILL after VERIFICATION_TERM_GRACE_MS.
+ *
+ * @param file - The command to execute.
+ * @param args - Arguments to the command.
+ * @param options - Execution options.
+ * @returns Object with stdout, stderr, status (null if killed), and killed bool.
+ */
+export function execAsync(
+  file: string,
+  args: string[],
+  options: {
+    cwd: string
+    timeout?: number
+    signal?: AbortSignal
+  },
+): Promise<{
+  stdout: string
+  stderr: string
+  status: number | null
+  killed: boolean
+  signalName?: string
+}> {
+  return new Promise((resolve) => {
+    const timeoutMs = options.timeout ?? DEFAULT_VERIFICATION_TIMEOUT_MS
+    const child = spawn(file, args, {
+      cwd: options.cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      // Start a new process group so timeout/abort can terminate the full
+      // verification process tree, including shell-launched grandchildren.
+      detached: true,
+    })
+
+    let stdout = ""
+    let stderr = ""
+    let settled = false
+    let killed = false
+    let signalName: string | undefined
+
+    const killProcessTree = (signal: NodeJS.Signals): void => {
+      try {
+        if (child.pid !== undefined) process.kill(-child.pid, signal)
+        else child.kill(signal)
+      } catch {
+        try { child.kill(signal) } catch { /* ignore */ }
+      }
+    }
+
+    const settle = (status: number | null, sig?: string) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (options.signal) {
+        try { options.signal.removeEventListener("abort", onAbort) } catch { /* ignore */ }
+      }
+      if (sig) signalName = sig
+      resolve({ stdout, stderr, status, killed, signalName })
+    }
+
+    // ── Timeout handler ──────────────────────────────────────
+    let timer: NodeJS.Timeout | undefined
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        killed = true
+        // SIGTERM first, then SIGKILL the process group after grace period.
+        killProcessTree("SIGTERM")
+        setTimeout(() => {
+          killProcessTree("SIGKILL")
+        }, VERIFICATION_TERM_GRACE_MS).unref()
+      }, timeoutMs)
+      timer.unref()
+    }
+
+    // ── Abort signal handler ─────────────────────────────────
+    const onAbort = () => {
+      killed = true
+      killProcessTree("SIGTERM")
+      setTimeout(() => {
+        killProcessTree("SIGKILL")
+      }, VERIFICATION_TERM_GRACE_MS).unref()
+    }
+    if (options.signal) {
+      if (options.signal.aborted) {
+        onAbort()
+      } else {
+        options.signal.addEventListener("abort", onAbort, { once: true })
+      }
+    }
+
+    child.stdout?.on("data", (d: Buffer) => { stdout += d.toString() })
+    child.stderr?.on("data", (d: Buffer) => { stderr += d.toString() })
+    child.on("error", () => settle(null))
+    child.on("close", (code, sig) => settle(code, sig ?? undefined))
+  })
+}
+
 // ── Verification execution ────────────────────────────────────
 
 /**
  * Run a verification command and capture the result.
+ *
+ * The command is executed asynchronously so the Node event loop is never
+ * blocked.  Dev-server style commands that would start a long-running
+ * server and then curl it are detected and rejected with a clear failure
+ * result.
  *
  * Accepts either:
  * - A **shell string** — executed via `bash -c`. This is the expected path for
@@ -209,10 +379,14 @@ export function resolveVerificationCommand(
  *   execution path, not a security boundary. Shell metacharacters and
  *   chaining are honoured by design.
  * - An **argv‑array object** `{ command, args }` — executed directly via
- *   `spawnSync` without shell. All args are passed literally; shell
+ *   async spawn without shell. All args are passed literally; shell
  *   metacharacters are treated as plain text, not interpreted.
  *
  * Captures combined stdout/stderr, exit code, and duration in all cases.
+ * Only a 15-minute timeout is applied; no AbortSignal is passed since the
+ * caller (finalizeVerification / runBoundedFixLoop in orchestration.ts)
+ * does not yet pass one.  The async execution helpers accept a signal for
+ * future use in Ctrl+C / abort handling from the caller.
  *
  * @param command - The verification command (shell string or argv array).
  * @param repoRoot - Absolute path to the repository root.
@@ -226,29 +400,39 @@ export async function runVerification(
 
   if (typeof command === "string") {
     // ── Shell string — trusted shell execution path ──────────────
-    // Repo/profile commands are intentional product behavior. This is
-    // NOT a security boundary; shell metacharacters are honoured.
-    const result = spawnSync("bash", ["-c", command], {
+
+    // Check for dev-server commands before executing
+    const devServerCheck = detectDevServerSmoke(command)
+    if (devServerCheck.detected) {
+      return {
+        pass: false,
+        command,
+        output: devServerCheck.reason!,
+        duration: Date.now() - start,
+        error: `Dev-server command detected: "${command}" — cannot run unbounded verification. ${devServerCheck.reason}`,
+      }
+    }
+
+    const result = await execAsync("bash", ["-c", command], {
       cwd: repoRoot,
-      encoding: "utf-8",
-      timeout: 15 * 60 * 1000, // 15 minutes
-      stdio: ["ignore", "pipe", "pipe"],
-      maxBuffer: 10 * 1024 * 1024, // 10 MB
+      timeout: DEFAULT_VERIFICATION_TIMEOUT_MS,
     })
 
-    const stdout: string = result.stdout ?? ""
-    const stderr: string = result.stderr ?? ""
-    const combined = stdout + (stderr ? "\n" + stderr : "")
+    const combined = result.stdout + (result.stderr ? "\n" + result.stderr : "")
     const redacted = redactSecrets(combined)
 
-    const pass = result.status === 0
+    const pass = result.status === 0 && !result.killed
 
     return {
       pass,
       command,
       output: redacted,
       duration: Date.now() - start,
-      error: pass ? undefined : result.error?.message ?? `exit code ${result.status ?? "unknown"}`,
+      error: pass
+        ? undefined
+        : result.killed
+          ? `Verification command timed out after ${DEFAULT_VERIFICATION_TIMEOUT_MS}ms`
+          : `exit code ${result.status ?? "unknown"}`,
     }
   }
 
@@ -256,27 +440,26 @@ export async function runVerification(
   // Shell metacharacters in args are treated literally, not interpreted.
   const displayCommand = [command.command, ...command.args].join(" ")
 
-  const result = spawnSync(command.command, command.args, {
+  const result = await execAsync(command.command, command.args, {
     cwd: repoRoot,
-    encoding: "utf-8",
-    timeout: 15 * 60 * 1000,
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: 10 * 1024 * 1024,
+    timeout: DEFAULT_VERIFICATION_TIMEOUT_MS,
   })
 
-  const stdout: string = result.stdout ?? ""
-  const stderr: string = result.stderr ?? ""
-  const combined = stdout + (stderr ? "\n" + stderr : "")
+  const combined = result.stdout + (result.stderr ? "\n" + result.stderr : "")
   const redacted = redactSecrets(combined)
 
-  const pass = result.status === 0
+  const pass = result.status === 0 && !result.killed
 
   return {
     pass,
     command: displayCommand,
     output: redacted,
     duration: Date.now() - start,
-    error: pass ? undefined : result.error?.message ?? `exit code ${result.status ?? "unknown"}`,
+    error: pass
+      ? undefined
+      : result.killed
+        ? `Verification command timed out after ${DEFAULT_VERIFICATION_TIMEOUT_MS}ms`
+        : `exit code ${result.status ?? "unknown"}`,
   }
 }
 
