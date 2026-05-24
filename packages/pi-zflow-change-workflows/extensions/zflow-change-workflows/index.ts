@@ -3226,6 +3226,196 @@ async function resolveWorkflowModel(agentName: string): Promise<{ model?: string
   }
 }
 
+async function resolveApplyBackWithSubagent(
+  runId: string,
+  ctx: InterviewableContext,
+): Promise<void> {
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const execFileAsync = promisify(execFile)
+  const { readRun, updateRun } = await import("pi-zflow-artifacts")
+  const { generateCoverageReport } = await import("./coverage-verifier.js")
+
+  const cwd = ctx.cwd ?? process.cwd()
+  const run = await readRun(runId, cwd)
+  const runDir = resolveRunDir(runId, cwd)
+  const integrationWorktreePath = path.join(runDir, "integration-worktree")
+  const promptPath = path.join(runDir, "subagent-resolution-prompt.md")
+  const resultPath = path.join(runDir, "subagent-resolution-result.md")
+  const resolvedPatchPath = path.join(runDir, "patches", "_subagent-resolved.patch")
+  const baseCommit = run.preApplySnapshot?.head ?? run.head
+
+  await fs.access(integrationWorktreePath).catch(() => {
+    throw new Error(
+      `Integration worktree not found at ${integrationWorktreePath}. ` +
+      "Run /zflow-change-implement --resume first so the smart cascade can preserve an integration worktree.",
+    )
+  })
+
+  const groups = run.groups.map((g) => ({
+    id: g.groupId,
+    files: g.changedFiles ?? [],
+    taskPrompt: undefined,
+  }))
+  const prompt = await buildSubagentResolutionPrompt(runId, run.changeId, groups, cwd)
+  const task = [
+    prompt,
+    "",
+    "## Command-specific instructions",
+    "",
+    `You are running in the integration worktree: ${integrationWorktreePath}`,
+    "Resolve the merge/integration result in this worktree only.",
+    "Do not apply changes to the primary worktree.",
+    "When done, leave the worktree with no conflict markers and commit the resolved result.",
+    "If you cannot safely preserve every group change, stop and explain exactly why.",
+  ].join("\n")
+  await fs.writeFile(promptPath, task, "utf-8")
+
+  const dispatchService = await tryGetDispatchServiceViaRegistry()
+  if (!dispatchService) {
+    throw new Error("No zflow dispatch service is available. Install/enable pi-subagents and retry.")
+  }
+
+  const model = await resolveWorkflowModel("zflow.implement-hard")
+  ctx.ui?.notify?.(`🤖 Dispatching apply-back resolver subagent for run ${runId}...`, "info")
+  const dispatchResult = await dispatchService.runAgent({
+    agent: "zflow.implement-hard",
+    task,
+    cwd: integrationWorktreePath,
+    model: model.dispatchModel,
+    output: resultPath,
+    outputMode: "file-only",
+    context: "fresh",
+    maxOutput: { lines: 5000, bytes: 500_000 },
+  })
+
+  if (!dispatchResult.ok) {
+    await updateRun(runId, {
+      metadata: {
+        ...(run.metadata ?? {}),
+        subagentResolutionAttempted: true,
+        subagentResolutionError: dispatchResult.error ?? "resolver subagent failed",
+      },
+    } as any, cwd)
+    throw new Error(dispatchResult.error ?? "Resolver subagent failed")
+  }
+
+  const grepResult = await execFileAsync("git", ["grep", "-n", "^<<<<<<< \\|^=======\\|^>>>>>>> ", "--", "."], {
+    cwd: integrationWorktreePath,
+  }).then((r) => r.stdout.trim()).catch((err: unknown) => {
+    const e = err as { code?: number }
+    if (e.code === 1) return ""
+    throw err
+  })
+  if (grepResult) {
+    await updateRun(runId, {
+      metadata: {
+        ...(run.metadata ?? {}),
+        subagentResolutionAttempted: true,
+        subagentResolutionError: "conflict markers remain",
+        subagentResolutionRemainingConflicts: grepResult,
+      },
+    } as any, cwd)
+    throw new Error(`Resolver left conflict markers:\n${grepResult}`)
+  }
+
+  const statusBeforeCommit = await execFileAsync("git", ["status", "--porcelain"], {
+    cwd: integrationWorktreePath,
+  }).then((r) => r.stdout.trim())
+  if (statusBeforeCommit) {
+    await execFileAsync("git", ["add", "-A"], { cwd: integrationWorktreePath })
+    await execFileAsync("git", ["commit", "--allow-empty", "-m", `zflow: subagent resolution for run ${runId}`], {
+      cwd: integrationWorktreePath,
+    })
+  }
+
+  const resolvedDiff = await execFileAsync("git", ["diff", "--binary", baseCommit, "HEAD"], {
+    cwd: integrationWorktreePath,
+    maxBuffer: 20 * 1024 * 1024,
+  }).then((r) => r.stdout)
+  if (!resolvedDiff.trim()) {
+    throw new Error("Resolver produced no diff from the integration worktree.")
+  }
+  await fs.mkdir(path.dirname(resolvedPatchPath), { recursive: true })
+  await fs.writeFile(resolvedPatchPath, resolvedDiff, "utf-8")
+
+  const coverageInputs = run.groups
+    .map((g) => ({ groupId: g.groupId, patchPath: path.join(runDir, "patches", `${g.groupId}.patch`) }))
+  const coverageReport = await generateCoverageReport(coverageInputs, integrationWorktreePath, baseCommit)
+  await fs.writeFile(
+    path.join(runDir, "subagent-resolution-coverage.json"),
+    JSON.stringify(coverageReport, null, 2),
+    "utf-8",
+  )
+  if (!coverageReport.allCovered) {
+    await updateRun(runId, {
+      metadata: {
+        ...(run.metadata ?? {}),
+        subagentResolutionAttempted: true,
+        subagentResolutionCoverageFailed: true,
+        subagentResolutionCoverageSummary: coverageReport.summary,
+        subagentResolvedPatchPath: resolvedPatchPath,
+      },
+    } as any, cwd)
+    throw new Error(`Coverage verification failed after subagent resolution:\n${coverageReport.summary}`)
+  }
+
+  const primaryStatus = await execFileAsync("git", ["status", "--porcelain"], {
+    cwd: run.repoRoot,
+  }).then((r) => r.stdout.trim())
+  if (primaryStatus) {
+    throw new Error(
+      "Primary worktree is not clean; refusing to apply resolved patch. " +
+      `Resolved patch is preserved at ${resolvedPatchPath}.`,
+    )
+  }
+
+  await execFileAsync("git", ["apply", "--3way", "--index", "--binary", resolvedPatchPath], {
+    cwd: run.repoRoot,
+    timeout: 60_000,
+    maxBuffer: 20 * 1024 * 1024,
+  })
+
+  const latestRun = await readRun(runId, cwd)
+  const ledger = { ...((latestRun.metadata?.groupLedger ?? {}) as Record<string, Record<string, unknown>>) }
+  for (const group of run.groups) {
+    ledger[group.groupId] = {
+      ...(ledger[group.groupId] ?? {}),
+      groupId: group.groupId,
+      status: "applied",
+      appliedToPrimary: true,
+      patchPath: path.join(runDir, "patches", `${group.groupId}.patch`),
+      updatedAt: new Date().toISOString(),
+    }
+  }
+
+  await updateRun(runId, {
+    phase: "partial",
+    applyBack: {
+      status: "completed",
+      startedAt: latestRun.applyBack?.startedAt,
+      completedAt: new Date().toISOString(),
+    },
+    metadata: {
+      ...(latestRun.metadata ?? {}),
+      groupLedger: ledger,
+      subagentResolutionAttempted: true,
+      subagentResolutionSucceeded: true,
+      subagentResolvedPatchPath: resolvedPatchPath,
+      subagentResolutionCoverageSummary: coverageReport.summary,
+    },
+  } as any, cwd)
+
+  ctx.ui?.notify?.(
+    `✅ Subagent resolved apply-back and applied the verified patch.\n` +
+    `Resolved patch: ${resolvedPatchPath}\n` +
+    "Next: run /zflow-change-implement <change> --resume to continue final verification and review.",
+    "info",
+  )
+}
+
 // ── Extension activation ────────────────────────────────────────
 
 const CHANGE_WORKFLOWS_CAPABILITY = "change-workflows" as const
@@ -3791,6 +3981,33 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         progress.stop("zflow-change-prepare finished")
         // Clear mode and reminders regardless of outcome
         resetWorkflowState()
+      }
+    },
+  })
+
+  // ── Command: /zflow-resolve-apply-back ────────────────────────
+
+  pi.registerCommand("zflow-resolve-apply-back", {
+    description: "Resolve a failed apply-back using a subagent and preserved integration worktree",
+    handler: async (args: string, ctx: InterviewableContext): Promise<void> => {
+      const runId = args.trim().split(/\s+/).filter(Boolean)[0]
+      if (!runId) {
+        ctx.ui?.notify?.(
+          "Usage: /zflow-resolve-apply-back <run-id>\n\n" +
+          "Runs a resolver subagent in the preserved integration worktree, verifies coverage, " +
+          "and applies the verified consolidated patch to the primary worktree.",
+          "warning",
+        )
+        return
+      }
+
+      try {
+        await resolveApplyBackWithSubagent(runId, ctx)
+      } catch (err: unknown) {
+        ctx.ui?.notify?.(
+          `Apply-back subagent resolution failed: ${err instanceof Error ? err.message : String(err)}`,
+          "error",
+        )
       }
     },
   })

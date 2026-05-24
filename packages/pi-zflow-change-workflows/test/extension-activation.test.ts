@@ -49,6 +49,7 @@ describe("zflow-change-workflows extension activation", () => {
     assert.ok(registered.includes("zflow-change-implement"), "zflow-change-implement must be registered")
     assert.ok(registered.includes("zflow-change-audit"), "zflow-change-audit must be registered")
     assert.ok(registered.includes("zflow-change-fix"), "zflow-change-fix must be registered")
+    assert.ok(registered.includes("zflow-resolve-apply-back"), "zflow-resolve-apply-back must be registered")
   })
 
   it("registers each command exactly once on single load", () => {
@@ -78,6 +79,7 @@ describe("zflow-change-workflows extension activation", () => {
     assert.ok(firstCommands.includes("zflow-clean"))
     assert.ok(firstCommands.includes("zflow-change-prepare"))
     assert.ok(firstCommands.includes("zflow-change-implement"))
+    assert.ok(firstCommands.includes("zflow-resolve-apply-back"))
 
     // Second call should register nothing (capability claim prevents duplicate)
     assert.deepEqual([...second.commands.keys()], [])
