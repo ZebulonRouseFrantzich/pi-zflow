@@ -34,6 +34,16 @@ import { readRun, updateRun } from "pi-zflow-artifacts/run-state"
 
 import * as fsSync from "node:fs"
 
+/**
+ * Pathspec patterns to exclude from diff/patch capture.
+ * These match generated or runtime state files that should not be committed
+ * or included in implementation patches.
+ */
+export const PATCH_EXCLUDE_PATTERNS = [
+  ":!.wrangler/**",
+  ":!node_modules/**",
+]
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -146,6 +156,8 @@ function getChangedFiles(
   baseCommit: string,
   scopedFiles: string[],
 ): string[] {
+  const excludePatterns = PATCH_EXCLUDE_PATTERNS
+
   // Committed changes between base and HEAD
   let committed: string[] = []
   try {
@@ -153,11 +165,16 @@ function getChangedFiles(
       worktreeCwd,
       "diff", "--name-only", baseCommit, "HEAD", "--",
       ...scopedFiles,
+      ...excludePatterns,
     )
     committed = out ? out.split("\n").filter(Boolean) : []
   } catch {
     try {
-      const out = git(worktreeCwd, "diff", "--name-only", baseCommit, "HEAD")
+      const out = git(
+        worktreeCwd,
+        "diff", "--name-only", baseCommit, "HEAD", "--",
+        ...excludePatterns,
+      )
       committed = out ? out.split("\n").filter(Boolean) : []
     } catch {
       committed = []
@@ -171,11 +188,16 @@ function getChangedFiles(
       worktreeCwd,
       "diff", "--name-only", "HEAD", "--",
       ...scopedFiles,
+      ...excludePatterns,
     )
     uncommittedTracked = out ? out.split("\n").filter(Boolean) : []
   } catch {
     try {
-      const out = git(worktreeCwd, "diff", "--name-only", "HEAD")
+      const out = git(
+        worktreeCwd,
+        "diff", "--name-only", "HEAD", "--",
+        ...excludePatterns,
+      )
       uncommittedTracked = out ? out.split("\n").filter(Boolean) : []
     } catch {
       uncommittedTracked = []
@@ -217,6 +239,8 @@ function writeBinaryPatch(
   patchPath: string,
   scopedFiles: string[],
 ): void {
+  const excludePatterns = PATCH_EXCLUDE_PATTERNS
+
   // 1. Get committed diff (base -> HEAD) with --binary
   let committedDiff = ""
   try {
@@ -224,10 +248,15 @@ function writeBinaryPatch(
       worktreeCwd,
       "diff", "--binary", baseCommit, "HEAD", "--",
       ...scopedFiles,
+      ...excludePatterns,
     )
   } catch {
     try {
-      committedDiff = gitDiff(worktreeCwd, "diff", "--binary", baseCommit, "HEAD")
+      committedDiff = gitDiff(
+        worktreeCwd,
+        "diff", "--binary", baseCommit, "HEAD", "--",
+        ...excludePatterns,
+      )
     } catch {
       committedDiff = ""
     }
@@ -254,10 +283,15 @@ function writeBinaryPatch(
       worktreeCwd,
       "diff", "--binary", "HEAD", "--",
       ...scopedFiles,
+      ...excludePatterns,
     )
   } catch {
     try {
-      uncommittedDiff = gitDiff(worktreeCwd, "diff", "--binary", "HEAD")
+      uncommittedDiff = gitDiff(
+        worktreeCwd,
+        "diff", "--binary", "HEAD", "--",
+        ...excludePatterns,
+      )
     } catch {
       uncommittedDiff = ""
     }
