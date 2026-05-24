@@ -4207,6 +4207,19 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             onWorkflowUpdate: updatePostImplementationCard,
             onSubagentUpdate: (id, update) => implProgress.updateSubagent(id, update),
           })
+
+          // 3a. Check apply-back status after dispatch. If apply-back conflicted
+          //     or failed, stop the workflow here — do not proceed to verification,
+          //     review, or completion. Patches are preserved in the run directory.
+          const { readRun } = await import("pi-zflow-artifacts")
+          const dispatchRun = await readRun(result.runId, ctx.cwd)
+          if (dispatchRun.applyBack.status === "conflicted" || dispatchRun.applyBack.status === "rolled-back" || dispatchRun.applyBack.status === "failed") {
+            const errorMsg = `Apply-back ${dispatchRun.applyBack.status}. Implementation patches are preserved but not applied. Resolve manually, then run --resume.`
+            implProgress.updatePhaseCard("post-implementation", "Post Implementation", errorMsg, "failed")
+            implProgress.updatePhaseCard("workflow-complete", "Workflow Needs Attention", errorMsg, "failed")
+            implProgress.stop("Apply-back failed. See patches/ in the run directory.")
+            return
+          }
         }
 
         // ── Phase 4: Post-start sequence (verification, review, complete) ──

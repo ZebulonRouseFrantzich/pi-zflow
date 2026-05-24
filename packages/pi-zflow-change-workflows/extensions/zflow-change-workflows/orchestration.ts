@@ -5655,6 +5655,14 @@ export async function completeWorkflow(
 ): Promise<void> {
   const { default: fs } = await import("node:fs/promises")
 
+  // Guard: refuse to mark as completed if apply-back is conflicted or failed.
+  const currentRun = await readRun(runId, cwd)
+  if (currentRun.applyBack.status === "conflicted" || currentRun.applyBack.status === "rolled-back" || currentRun.applyBack.status === "failed") {
+    const errMsg = `Cannot complete workflow for run ${runId}: apply-back status is "${currentRun.applyBack.status}". Resolve the apply-back conflict first.`
+    console.error(`[zflow] ${errMsg}`)
+    throw new Error(errMsg)
+  }
+
   // 1. Update plan lifecycle to "completed"
   await updatePlanState(changeId, { lifecycleState: "completed" }, cwd)
 
@@ -5791,6 +5799,34 @@ export async function runImplementationPostStartSequence(
   // 1. Read the current run state
   const run = await readRun(runId, cwd)
   const changeId = run.changeId
+
+  // 1a. Check for apply-back conflict/failure before proceeding.
+  //     If apply-back failed, the primary worktree does not have the
+  //     implementation changes — do not run verification, review, or
+  //     completion against this invalid state.  The patches are preserved
+  //     in the run directory for manual resolution.
+  if (run.applyBack.status === "conflicted" || run.applyBack.status === "rolled-back" || run.applyBack.status === "failed") {
+    const reason = run.applyBack.error ?? `apply-back ${run.applyBack.status}`
+    const failPhase = "apply-back-conflicted" as RunPhase
+    await transitionTo(failPhase)
+    const nextSteps = [
+      `⚠️ Apply-back ${run.applyBack.status}. The primary worktree does not have the implementation changes.`,
+      `   Reason: ${reason}`,
+      "1. Retained patches are available in the run directory for manual recovery.",
+      "2. Resolve the apply-back conflict, then run /zflow-change-implement --resume to continue.",
+      "3. Use /zflow-change-audit to inspect the run status.",
+    ]
+    await recordImplementationNextSteps(runId, nextSteps, cwd)
+    return {
+      phase: failPhase,
+      status: "failed",
+      verificationStatus: "pending",
+      error: reason,
+      runId,
+      changeId,
+      nextSteps,
+    }
+  }
 
   // Helper: persist phase transition to run.json and state-index
   async function transitionTo(phase: RunPhase): Promise<void> {
