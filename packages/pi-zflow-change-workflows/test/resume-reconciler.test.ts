@@ -51,7 +51,7 @@ async function createRunJson(
   }>,
   groupLedger?: Record<string, Record<string, unknown>>,
 ): Promise<void> {
-  await fs.mkdir(path.join(runDir, "runs", runId), { recursive: true })
+  await fs.mkdir(path.join(runDir, ".zflow", "runs", runId), { recursive: true })
   const runJson = {
     runId,
     repoRoot,
@@ -79,7 +79,7 @@ async function createRunJson(
     metadata: groupLedger ? { groupLedger } : {},
   }
   await fs.writeFile(
-    path.join(runDir, "runs", runId, "run.json"),
+    path.join(runDir, ".zflow", "runs", runId, "run.json"),
     JSON.stringify(runJson, null, 2),
     "utf-8",
   )
@@ -115,7 +115,7 @@ describe("reconcileResumeState", () => {
     const runDir = repo
 
     // Create patch files on disk
-    const patchesDir = path.join(runDir, "runs", runId, "patches")
+    const patchesDir = path.join(runDir, ".zflow", "runs", runId, "patches")
     await fs.mkdir(patchesDir, { recursive: true })
     const patch1 = path.join(patchesDir, "group-1.patch")
     const patch2 = path.join(patchesDir, "group-2.patch")
@@ -186,7 +186,7 @@ describe("reconcileResumeState", () => {
     const runDir = repo
 
     // Create only one patch file
-    const patchesDir = path.join(runDir, "runs", runId, "patches")
+    const patchesDir = path.join(runDir, ".zflow", "runs", runId, "patches")
     await fs.mkdir(patchesDir, { recursive: true })
     const patch1 = path.join(patchesDir, "group-1.patch")
     fsSync.writeFileSync(patch1, "diff --git a/a.ts b/a.ts\nindex a..b 100644\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-// old\n+// new\n", "utf-8")
@@ -252,7 +252,7 @@ describe("reconcileResumeState", () => {
     const changeId = "test-change"
     const runDir = repo
 
-    const patchesDir = path.join(runDir, "runs", runId, "patches")
+    const patchesDir = path.join(runDir, ".zflow", "runs", runId, "patches")
     await fs.mkdir(patchesDir, { recursive: true })
     const patch1 = path.join(patchesDir, "group-1.patch")
     fsSync.writeFileSync(patch1, "diff --git a/a.ts b/a.ts\nindex a..b 100644\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-// old\n+// new\n", "utf-8")
@@ -301,7 +301,7 @@ describe("reconcileResumeState", () => {
     const changeId = "test-change"
     const runDir = repo
 
-    const patchesDir = path.join(runDir, "runs", runId, "patches")
+    const patchesDir = path.join(runDir, ".zflow", "runs", runId, "patches")
     await fs.mkdir(patchesDir, { recursive: true })
     const patch1 = path.join(patchesDir, "group-1.patch")
     fsSync.writeFileSync(patch1, "diff --git a/a.ts b/a.ts\nindex a..b 100644\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-// old\n+// new\n", "utf-8")
@@ -358,48 +358,34 @@ describe("findBestResumeRun", () => {
     writeFile(repo, "README.md", "# Test\n")
     gitAddCommit(repo, "initial")
 
-    // Create a state-index entry for the change
+    // Create a state-index entry for the change with proper changes map
     const stateIndexDir = path.join(repo, ".zflow")
-    await fs.mkdir(path.join(stateIndexDir, "state-index"), { recursive: true })
+    await fs.mkdir(stateIndexDir, { recursive: true })
 
     // Create two runs: one partial, one completed
     const partialRunId = "run-partial"
     const completedRunId = "run-completed"
 
-    // Write the state-index
+    // Write the state-index with the correct schema (changes map, not entries array)
     const stateIndex = {
       version: 1,
-      entries: [
-        {
-          type: "change",
-          id: "test-change",
-          metadata: {
-            unfinishedRuns: [completedRunId, partialRunId],
-            lastPhase: "partial",
-          },
+      entries: [],
+      changes: {
+        "test-change": {
+          changeId: "test-change",
+          unfinishedRuns: [completedRunId, partialRunId],
+          lastPhase: "partial",
         },
-        {
-          type: "run",
-          id: partialRunId,
-          status: "partial",
-          metadata: { changeId: "test-change" },
-        },
-        {
-          type: "run",
-          id: completedRunId,
-          status: "completed",
-          metadata: { changeId: "test-change", phase: "completed" },
-        },
-      ],
+      },
     }
 
     await fs.writeFile(
-      path.join(stateIndexDir, "state-index", "state-index.json"),
+      path.join(stateIndexDir, "state-index.json"),
       JSON.stringify(stateIndex, null, 2),
       "utf-8",
     )
 
-    // Create run.json files
+    // Create run.json files at .zflow/runs/<runId>/run.json
     for (const [runId, phase] of [[partialRunId, "partial"], [completedRunId, "completed"]] as const) {
       const runJson = {
         runId,
@@ -436,12 +422,12 @@ describe("findBestResumeRun", () => {
     gitAddCommit(repo, "initial")
 
     const stateIndexDir = path.join(repo, ".zflow")
-    await fs.mkdir(path.join(stateIndexDir, "state-index"), { recursive: true })
+    await fs.mkdir(stateIndexDir, { recursive: true })
 
-    // Empty state index — no entries
-    const stateIndex = { version: 1, entries: [] }
+    // Empty state index — no entries, no changes
+    const stateIndex = { version: 1, entries: [], changes: {} }
     await fs.writeFile(
-      path.join(stateIndexDir, "state-index", "state-index.json"),
+      path.join(stateIndexDir, "state-index.json"),
       JSON.stringify(stateIndex, null, 2),
       "utf-8",
     )
