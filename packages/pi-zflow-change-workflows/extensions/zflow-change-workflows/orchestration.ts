@@ -2484,13 +2484,17 @@ export async function applyPatchesWithLedger(
 
   const repoRoot = run.repoRoot
 
-  // Build ExecutionGroup[] from the stored group metadata in run.json
+  // Build ExecutionGroup[] from the stored group metadata in run.json.
+  // Preserve explicit dependencies from the group ledger when available; do
+  // not invent dependencies from all other groups because that creates cycles
+  // and prevents resume apply-back from running.
+  const ledger = (run.metadata?.groupLedger ?? {}) as Record<string, { dependencies?: string[] }>
   const applyBackGroups: ExecutionGroup[] = run.groups.map((g) => ({
     id: g.groupId,
     files: g.changedFiles,
-    dependencies: run.groups
-      .filter((other) => other.groupId !== g.groupId)
-      .map((other) => other.groupId),
+    dependencies: Array.isArray(ledger[g.groupId]?.dependencies)
+      ? ledger[g.groupId]!.dependencies!
+      : [],
     parallelizable: true,
   }))
 
