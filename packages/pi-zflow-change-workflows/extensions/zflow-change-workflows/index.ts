@@ -3202,8 +3202,15 @@ async function ensureProfileResolved(ctx: InterviewableContext): Promise<boolean
 
 const THINKING_SUFFIX_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"])
 
+function isUsableWorkflowModel(model: string | null | undefined): model is string {
+  if (!model) return false
+  const normalized = model.trim().toLowerCase()
+  if (!normalized) return false
+  return normalized !== "placeholder" && !normalized.startsWith("placeholder:")
+}
+
 function applyProfileThinkingSuffix(model: string | undefined, thinking: string | undefined): string | undefined {
-  if (!model || !thinking || thinking === "off") return model
+  if (!isUsableWorkflowModel(model) || !thinking || thinking === "off") return model
   const colonIdx = model.lastIndexOf(":")
   if (colonIdx !== -1 && THINKING_SUFFIX_LEVELS.has(model.slice(colonIdx + 1))) return model
   return `${model}:${thinking}`
@@ -3214,7 +3221,13 @@ async function resolveWorkflowModel(agentName: string): Promise<{ model?: string
     const { getResolvedAgentBinding, getResolvedLane } = await import("pi-zflow-profiles")
     const binding = await getResolvedAgentBinding(agentName)
     const lane = binding?.lane ? await getResolvedLane(binding.lane) : null
-    const model = binding?.resolvedModel ?? undefined
+    const bindingModel = binding?.resolvedModel ?? undefined
+    const laneModel = lane?.model ?? undefined
+    const model = isUsableWorkflowModel(bindingModel)
+      ? bindingModel
+      : isUsableWorkflowModel(laneModel)
+        ? laneModel
+        : undefined
     const thinking = lane?.thinking ?? undefined
     return {
       model,
@@ -3288,6 +3301,13 @@ async function resolveApplyBackWithSubagent(
   }
 
   const model = await resolveWorkflowModel("zflow.implement-hard")
+  if (!model.dispatchModel) {
+    progress?.onPhase?.("resolver", "Resolver Subagent", "No usable model resolved for resolver", "failed")
+    throw new Error(
+      "No usable model resolved for zflow.implement-hard. " +
+      "Run /zflow-profile validate or switch to a profile with a non-placeholder implementation model.",
+    )
+  }
   ctx.ui?.notify?.(`🤖 Dispatching apply-back resolver subagent for run ${runId}...`, "info")
   progress?.onPhase?.("resolver", "Resolver Subagent", "Dispatching resolver subagent", "running")
   progress?.onSubagent?.("apply-back-resolver", {
