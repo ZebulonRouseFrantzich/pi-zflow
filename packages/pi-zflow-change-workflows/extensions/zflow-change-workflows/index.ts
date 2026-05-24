@@ -3984,7 +3984,20 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             // ── Post-start sequence ──────────────────────────────
             const updatePostImplementationCard = (message: string): void => {
               const normalized = message.toLowerCase()
+
+              // When verification is skipped (gating), mark Post Implementation terminal
+              // and return early — no code review should start in this state.
+              if (normalized.includes("verification skipped") || normalized.includes("skipped —") || normalized.includes("gating")) {
+                implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification skipped — needs review", "failed")
+                implProgress.updatePhaseCard("code-review", "Code Review", "Verification skipped; code review blocked", "failed")
+                return
+              }
+
               if (normalized.includes("running code review")) {
+                // Code review is starting — Post Implementation must already be in a
+                // terminal state (completed or failed). Transition it now in case
+                // earlier messages did not set the final card state.
+                implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification complete", "completed")
                 implProgress.updatePhaseCard("code-review", "Code Review", message, "running")
                 return
               }
@@ -4006,13 +4019,6 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
               implProgress.updatePhaseCard("post-implementation", "Post Implementation", message, postStatus)
               if (normalized.includes("final verification passed")) {
                 implProgress.updatePhaseCard("code-review", "Code Review", "Waiting for code review to start", "running")
-              }
-              // When verification is skipped, mark the Post Implementation card appropriately
-              if (normalized.includes("verification skipped") || normalized.includes("skipped —")) {
-                implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification skipped — needs review", "failed")
-              }
-              if (normalized.includes("gating")) {
-                implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification skipped — needs review", "failed")
               }
             }
 
@@ -4163,7 +4169,20 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       })
       const updatePostImplementationCard = (message: string): void => {
         const normalized = message.toLowerCase()
+
+        // When verification is skipped (gating), mark Post Implementation terminal
+        // and return early — no code review should start in this state.
+        if (normalized.includes("verification skipped") || normalized.includes("skipped —") || normalized.includes("gating")) {
+          implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification skipped — needs review", "failed")
+          implProgress.updatePhaseCard("code-review", "Code Review", "Verification skipped; code review blocked", "failed")
+          return
+        }
+
         if (normalized.includes("running code review")) {
+          // Code review is starting — Post Implementation must already be in a
+          // terminal state (completed or failed). Transition it now in case
+          // earlier messages did not set the final card state.
+          implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification complete", "completed")
           implProgress.updatePhaseCard("code-review", "Code Review", message, "running")
           return
         }
