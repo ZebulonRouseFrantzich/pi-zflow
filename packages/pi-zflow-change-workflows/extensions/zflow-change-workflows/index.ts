@@ -174,8 +174,19 @@ import {
   publishPlanArtifacts,
   deriveSemanticChangeId,
   resolveChangeImplementTarget,
+  applyPatchesWithLedger,
+  buildSubagentResolutionPrompt,
   type PublishPlanArtifactsResult,
 } from "./orchestration.js"
+
+import {
+  reconcileResumeState,
+  findBestResumeRun,
+} from "./resume-reconciler.js"
+import type {
+  ResumeReconciliation,
+  GroupResumeStatus,
+} from "./resume-reconciler.js"
 
 import {
   loadFragment,
@@ -3834,10 +3845,10 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         setActiveWorkflowMode("change-implement")
         const cleanupMode = (): void => { resetWorkflowState() }
 
-        const partialRun = await findLatestPartialRun(changeId, ctx.cwd)
-        if (!partialRun) {
+        const partialRunId = await findBestResumeRun(changeId, ctx.cwd)
+        if (!partialRunId) {
           ctx.ui.notify(
-            `No partial or unfinished run found for change "${changeId}". ` +
+            `No unfinished run found for change "${changeId}". ` +
             "Starting a full implementation run.\n" +
             usageText,
             "warning",
@@ -3846,47 +3857,104 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
 
         if (useApplySuccessful) {
           // ── Apply successful groups path ────────────────────────
-          if (!partialRun) {
+          if (!partialRunId) {
             ctx.ui.notify(`No previous run found for "${changeId}". Nothing to apply.`, "error")
             cleanupMode()
             return
           }
 
           ctx.ui.notify(
-            `📋 Applying successful group patches from run "${partialRun.runId}"...`,
+            `📋 Applying successful group patches from run "${partialRunId}"...`,
+            "info",
+          )
+
+          // Read the run to get planVersion for reconciler
+          const { default: runStateFs } = await import("node:fs/promises")
+          const { readRun } = await import("pi-zflow-artifacts")
+          let runData: Record<string, unknown>
+          try {
+            runData = await readRun(partialRunId, ctx.cwd) as unknown as Record<string, unknown>
+          } catch {
+            ctx.ui.notify(`Cannot read run "${partialRunId}".`, "error")
+            cleanupMode()
+            return
+          }
+          const planVersion = (runData.planVersion as string) ?? "v1"
+
+          // Run reconciliation to find which patches are reusable
+          const reconciliation = await reconcileResumeState(partialRunId, changeId, planVersion, ctx.cwd)
+          if (!reconciliation.hasPreviousRun) {
+            ctx.ui.notify(`No previous run data found for "${partialRunId}".`, "error")
+            cleanupMode()
+            return
+          }
+
+          ctx.ui.notify(
+            `📋 Apply-back analysis: ${reconciliation.reusableGroups.length} group(s) reusable, ` +
+            `${reconciliation.groupsNeedingRerun.length} need rerun. Applying via smart cascade...`,
             "info",
           )
 
           try {
-            const applyResult = await applySuccessfulGroupPatches(
-              partialRun.runId,
-              changeId,
-              ctx.cwd,
-              useForceApplySuccessful,
-              (msg) => ctx.ui.notify(msg, "info"),
-            )
+            // Use the smart cascade via applyPatchesWithLedger
+            const cascadeResult = await applyPatchesWithLedger(partialRunId, ctx.cwd, {
+              applyAll: true,
+              onProgress: (msg) => ctx.ui.notify(msg, "info"),
+            })
 
-            const summaryEntry = applyResult.summaryPath
-              ? `\n  Summary: ${applyResult.summaryPath}`
-              : ""
-
-            if (applyResult.errors.length > 0) {
+            if (cascadeResult.success) {
               ctx.ui.notify(
-                `⚠️ Applied ${applyResult.applied.length} group(s) with ${applyResult.errors.length} error(s):\n` +
-                applyResult.errors.map((e) => `  - ${e}`).join("\n") +
-                summaryEntry,
-                "warning",
-              )
-            } else {
-              ctx.ui.notify(
-                `✅ Applied ${applyResult.applied.length} group(s) successfully.` +
-                summaryEntry,
+                `✅ Applied all patches successfully via "${cascadeResult.successfulStrategy ?? "patch-replay"}" strategy.`,
                 "info",
               )
+              // Update ledger for applied groups
+              for (const g of reconciliation.reusableGroups) {
+                await updateGroupLedger(partialRunId, g.groupId, {
+                  status: "applied",
+                  appliedToPrimary: true,
+                }, ctx.cwd).catch(() => {})
+              }
+            } else {
+              ctx.ui.notify(
+                `⚠️ Apply-back incomplete: ${cascadeResult.groupsApplied}/${cascadeResult.totalGroups} applied. ` +
+                (cascadeResult.error ?? ""),
+                "warning",
+              )
+              if (cascadeResult.subagentAvailable) {
+                const runDir = resolveRunDir(partialRunId, ctx.cwd)
+                const resolutionPrompt = await buildSubagentResolutionPrompt(
+                  partialRunId,
+                  changeId,
+                  reconciliation.reusableGroups.map((g) => ({
+                    id: g.groupId,
+                    files: [],
+                    taskPrompt: "",
+                  })),
+                  ctx.cwd,
+                )
+                await import("node:fs/promises").then((fs2) =>
+                  fs2.writeFile(
+                    path.join(runDir, "subagent-resolution-prompt.md"),
+                    resolutionPrompt,
+                    "utf-8",
+                  )
+                )
+                ctx.ui.notify(
+                  `🤖 Apply-back could not be automatically verified.\n` +
+                  `Strategies tried: ${(cascadeResult.strategiesAttempted ?? []).join(", ")}\n\n` +
+                  `No code was lost. All patches preserved.\n\n` +
+                  `Options:\n` +
+                  `  1. Ask a subagent to resolve: subagent-resolution-prompt.md written to ${runDir}\n` +
+                  `  2. Manually resolve using preserved patches\n` +
+                  `  3. Inspect artifacts at: ${runDir}\n` +
+                  `  4. Abandon: /zflow-change-implement ${changeInput} --abandon`,
+                  "warning",
+                )
+              }
             }
 
             // Check if all groups are now applied
-            const updatedLedger = await getGroupLedger(partialRun.runId, ctx.cwd)
+            const updatedLedger = await getGroupLedger(partialRunId, ctx.cwd)
             const allDone = Object.values(updatedLedger).every((e) =>
               e.status === "applied" || e.status === "skipped"
             )
@@ -3899,7 +3967,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             }
           } catch (err: unknown) {
             ctx.ui.notify(
-              `Apply successful groups failed: ${err instanceof Error ? err.message : String(err)}`,
+              `Apply failed: ${err instanceof Error ? err.message : String(err)}`,
               "error",
             )
           }
@@ -3908,131 +3976,322 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           return
         }
 
-        // ── Resume path ──────────────────────────────────────────
-        if (partialRun) {
-          const partialRunId = partialRun.runId
-          const partialRunData = partialRun.run as Record<string, unknown>
-          const planVersion = partialRunData.planVersion as string ?? "v1"
-          const resumeChangeId = partialRunData.changeId as string ?? changeId
-
-          const dispatchService = await tryGetDispatchServiceViaRegistry()
-          if (!dispatchService) {
+        // ── Resume path (smart reconciler) ──────────────────────
+        // partialRunId is already set via findBestResumeRun above
+        if (partialRunId) {
+          // Read the run to get metadata
+          const { readRun } = await import("pi-zflow-artifacts")
+          let runData: Record<string, unknown>
+          try {
+            runData = await readRun(partialRunId, ctx.cwd) as unknown as Record<string, unknown>
+          } catch {
             ctx.ui.notify(
-              "⚠️ No dispatch service available. Cannot resume without worktree isolation.\n" +
-              "Use --apply-successful if patches exist, or install pi-subagents.",
+              `Cannot read run "${partialRunId}". Cannot resume.`,
               "error",
             )
             cleanupMode()
             return
           }
 
-          const implementModel = await resolveWorkflowModel("zflow.implement-routine")
-          const implProgress = createWorkflowProgressIndicator(pi, ctx, changeInput, {
-            command: "zflow-change-implement",
-            model: implementModel.model ?? "unavailable",
-            thinking: implementModel.thinking ?? "unavailable",
-            initialMessage: "Resuming implementation run",
-            statusId: "zflow-implement",
-            widgetId: "zflow-implement-progress",
-          })
+          const planVersion = (runData.planVersion as string) ?? "v1"
+          const resumeChangeId = (runData.changeId as string) ?? changeId
 
-          try {
-            implProgress.update(`Resuming run "${partialRunId}" — dispatching only failed/pending groups`)
+          // Run reconciliation to understand what can be reused
+          const reconciliation = await reconcileResumeState(
+            partialRunId,
+            resumeChangeId,
+            planVersion,
+            ctx.cwd,
+          )
 
-            await resumeWorktreeDispatch(
-              partialRunId,
-              resumeChangeId,
-              planVersion,
-              dispatchService,
-              {
-                cwd: ctx.cwd,
-                force,
-                onSubagentUpdate: (id, update) => implProgress.updateSubagent(id, update),
-              },
+          if (!reconciliation.hasPreviousRun) {
+            ctx.ui.notify(
+              `No previous run data found for "${partialRunId}". Starting fresh.`,
+              "warning",
+            )
+            // Fall through to full dispatch below
+          } else {
+            // Show reconciliation summary
+            ctx.ui.notify(
+              `📋 Resume analysis:\n` +
+              `  - Found previous run: ${partialRunId}\n` +
+              `  - ${reconciliation.reusableGroups.length} group(s) with reusable patches\n` +
+              `  - ${reconciliation.groupsNeedingRerun.length} group(s) need rerun\n` +
+              `  - ${reconciliation.alreadyAppliedGroups.length} group(s) already applied\n` +
+              `  - Apply-back needed: ${reconciliation.applyBackNeeded}\n` +
+              `  - Recommended next step: ${reconciliation.recommendedNextStep}\n` +
+              reconciliation.summary,
+              "info",
             )
 
-            implProgress.update("Resume dispatch complete; all groups now succeeded")
-
-            // ── Post-start sequence ──────────────────────────────
-            const updatePostImplementationCard = (message: string): void => {
-              const normalized = message.toLowerCase()
-
-              // When verification is skipped (gating), mark Post Implementation terminal
-              // and return early — no code review should start in this state.
-              if (normalized.includes("verification skipped") || normalized.includes("skipped —") || normalized.includes("gating")) {
-                implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification skipped — needs review", "failed")
-                implProgress.updatePhaseCard("code-review", "Code Review", "Verification skipped; code review blocked", "failed")
+            // ── Step 1: Rerun groups that need it ────────────────
+            if (reconciliation.groupsNeedingRerun.length > 0) {
+              const dispatchService = await tryGetDispatchServiceViaRegistry().catch(() => null)
+              if (!dispatchService) {
+                ctx.ui.notify(
+                  "⚠️ Groups need rerun but no dispatch service available.\n" +
+                  "Use --apply-successful to apply existing patches only, or install pi-subagents.",
+                  "error",
+                )
+                cleanupMode()
                 return
               }
 
-              if (normalized.includes("running code review")) {
-                // Code review is starting — Post Implementation must already be in a
-                // terminal state (completed or failed). Transition it now in case
-                // earlier messages did not set the final card state.
-                implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification complete", "completed")
-                implProgress.updatePhaseCard("code-review", "Code Review", message, "running")
+              const implementModel = await resolveWorkflowModel("zflow.implement-routine")
+              const implProgress = createWorkflowProgressIndicator(pi, ctx, changeInput, {
+                command: "zflow-change-implement",
+                model: implementModel.model ?? "unavailable",
+                thinking: implementModel.thinking ?? "unavailable",
+                initialMessage: "Resuming with rerun for failed groups",
+                statusId: "zflow-implement",
+                widgetId: "zflow-implement-progress",
+              })
+
+              try {
+                implProgress.update(
+                  `Rerunning ${reconciliation.groupsNeedingRerun.length} failed/pending group(s) in "${partialRunId}"`,
+                )
+
+                await resumeWorktreeDispatch(
+                  partialRunId,
+                  resumeChangeId,
+                  planVersion,
+                  dispatchService,
+                  {
+                    cwd: ctx.cwd,
+                    force,
+                    onSubagentUpdate: (id, update) => implProgress.updateSubagent(id, update),
+                  },
+                )
+
+                implProgress.update("Resume dispatch complete")
+                implProgress.stop("Resume dispatch complete")
+              } catch (err: unknown) {
+                implProgress.stop(
+                  `Resume dispatch failed: ${err instanceof Error ? err.message : String(err)}`,
+                  "failed",
+                )
+                cleanupMode()
                 return
-              }
-              if (normalized.includes("code review passed")) {
-                implProgress.updatePhaseCard("code-review", "Code Review", message, "completed")
-                implProgress.updatePhaseCard("post-code-review", "Post Code Review", "Preparing final workflow completion", "running")
-                return
-              }
-              if (normalized.includes("code review found") || normalized.includes("review failed")) {
-                implProgress.updatePhaseCard("code-review", "Code Review", message, "failed")
-                implProgress.updatePhaseCard("post-code-review", "Post Code Review", "Review failed; preparing next steps", "failed")
-                return
-              }
-              if (normalized.includes("persisting completed") || normalized.includes("workflow completion persisted")) {
-                implProgress.updatePhaseCard("post-code-review", "Post Code Review", message, normalized.includes("persisted") ? "completed" : "running")
-                return
-              }
-              const postStatus = normalized.includes("final verification passed") ? "completed" : "running"
-              implProgress.updatePhaseCard("post-implementation", "Post Implementation", message, postStatus)
-              if (normalized.includes("final verification passed")) {
-                implProgress.updatePhaseCard("code-review", "Code Review", "Waiting for code review to start", "running")
               }
             }
 
-            updatePostImplementationCard("Starting post-dispatch sequence: final verification, review, and completion")
-            const onReviewerUpdate = (reviewerUpdate: {
-              reviewerName: string
-              agentName: string
-              status: "queued" | "running" | "completed" | "failed"
-              model?: string
-              thinking?: string
-              currentTool?: string
-              lastCommand?: string
-            }): void => {
-              implProgress.updateReviewer(reviewerUpdate.reviewerName, reviewerUpdate)
+            // ── Step 2: Apply patches via smart cascade ──────────
+            if (reconciliation.applyBackNeeded) {
+              ctx.ui.notify(
+                "📋 Running smart apply-back cascade...",
+                "info",
+              )
+
+              const cascadeResult = await applyPatchesWithLedger(partialRunId, ctx.cwd, {
+                applyAll: true,
+                onProgress: (msg) => ctx.ui.notify(msg, "info"),
+              })
+
+              if (cascadeResult.success) {
+                ctx.ui.notify(
+                  `✅ Apply-back completed: ${cascadeResult.groupsApplied} group(s) applied ` +
+                  `via "${cascadeResult.successfulStrategy ?? "patch-replay"}" strategy.`,
+                  "info",
+                )
+
+                // Mark reusable+applied groups
+                for (const g of reconciliation.reusableGroups) {
+                  if (!g.alreadyApplied) {
+                    await updateGroupLedger(partialRunId, g.groupId, {
+                      status: "applied",
+                      appliedToPrimary: true,
+                    }, ctx.cwd).catch(() => {})
+                  }
+                }
+
+                // ── Step 3: Post-start sequence (verification, review) ──
+                const implProgress = createWorkflowProgressIndicator(pi, ctx, changeInput, {
+                  command: "zflow-change-implement",
+                  model: "resolved",
+                  thinking: "unavailable",
+                  initialMessage: "Continuing to final verification and review",
+                  statusId: "zflow-implement",
+                  widgetId: "zflow-implement-progress",
+                })
+
+                const updatePostImplementationCard = (message: string): void => {
+                  const normalized = message.toLowerCase()
+                  if (normalized.includes("verification skipped") || normalized.includes("skipped —") || normalized.includes("gating")) {
+                    implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification skipped — needs review", "failed")
+                    implProgress.updatePhaseCard("code-review", "Code Review", "Verification skipped; code review blocked", "failed")
+                    return
+                  }
+                  if (normalized.includes("running code review")) {
+                    implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification complete", "completed")
+                    implProgress.updatePhaseCard("code-review", "Code Review", message, "running")
+                    return
+                  }
+                  if (normalized.includes("code review passed")) {
+                    implProgress.updatePhaseCard("code-review", "Code Review", message, "completed")
+                    implProgress.updatePhaseCard("post-code-review", "Post Code Review", "Preparing final workflow completion", "running")
+                    return
+                  }
+                  if (normalized.includes("code review found") || normalized.includes("review failed")) {
+                    implProgress.updatePhaseCard("code-review", "Code Review", message, "failed")
+                    implProgress.updatePhaseCard("post-code-review", "Post Code Review", "Review failed; preparing next steps", "failed")
+                    return
+                  }
+                  if (normalized.includes("persisting completed") || normalized.includes("workflow completion persisted")) {
+                    implProgress.updatePhaseCard("post-code-review", "Post Code Review", message, normalized.includes("persisted") ? "completed" : "running")
+                    return
+                  }
+                  const postStatus = normalized.includes("final verification passed") ? "completed" : "running"
+                  implProgress.updatePhaseCard("post-implementation", "Post Implementation", message, postStatus)
+                  if (normalized.includes("final verification passed")) {
+                    implProgress.updatePhaseCard("code-review", "Code Review", "Waiting for code review to start", "running")
+                  }
+                }
+
+                updatePostImplementationCard("Starting final verification, review, and completion")
+                const onReviewerUpdate = (reviewerUpdate: {
+                  reviewerName: string; agentName: string
+                  status: "queued" | "running" | "completed" | "failed"
+                  model?: string; thinking?: string
+                  currentTool?: string; lastCommand?: string
+                }): void => {
+                  implProgress.updateReviewer(reviewerUpdate.reviewerName, reviewerUpdate)
+                }
+                const postResult = await runImplementationPostStartSequence(
+                  partialRunId,
+                  {
+                    skipDispatchWait: false,
+                    onProgress: updatePostImplementationCard,
+                    onReviewerUpdate,
+                  },
+                )
+
+                const finalCardStatus = postResult.status === "completed" ? "completed" : "failed"
+                const finalCardTitle = postResult.status === "completed" ? "Workflow Complete" : "Workflow Needs Attention"
+                implProgress.updatePhaseCard("workflow-complete", finalCardTitle, `Phase: ${postResult.phase}, status: ${postResult.status}`, finalCardStatus)
+                implProgress.stop(finalCardTitle)
+              } else {
+                // Apply-back failed — offer subagent resolution
+                ctx.ui.notify(
+                  `⚠️ Apply-back could not be automatically verified.\n` +
+                  `Strategies tried: ${(cascadeResult.strategiesAttempted ?? []).join(", ")}\n\n` +
+                  `No code was lost. All patches and integration worktree are preserved.\n\n` +
+                  `Options:\n` +
+                  `  1. Ask a subagent to resolve: /zflow-resolve-apply-back ${partialRunId}\n` +
+                  `  2. Manually resolve and then run:\n` +
+                  `     /zflow-change-implement ${changeInput} --force-apply-successful\n` +
+                  `  3. Inspect artifacts at: ${resolveRunDir(partialRunId, ctx.cwd)}\n` +
+                  `  4. Abandon: /zflow-change-implement ${changeInput} --abandon`,
+                  "warning",
+                )
+
+                // Write subagent resolution prompt
+                try {
+                  const runDir = resolveRunDir(partialRunId, ctx.cwd)
+                  const resolutionPrompt = await buildSubagentResolutionPrompt(
+                    partialRunId,
+                    resumeChangeId,
+                    [...reconciliation.reusableGroups, ...reconciliation.groupsNeedingRerun].map((g) => ({
+                      id: g.groupId,
+                      files: [],
+                      taskPrompt: "",
+                    })),
+                    ctx.cwd,
+                  )
+                  const { default: fs3 } = await import("node:fs/promises")
+                  await fs3.writeFile(
+                    path.join(runDir, "subagent-resolution-prompt.md"),
+                    resolutionPrompt,
+                    "utf-8",
+                  )
+                  ctx.ui.notify(
+                    `🤖 Subagent resolution prompt written to: ${path.join(runDir, "subagent-resolution-prompt.md")}`,
+                    "info",
+                  )
+                } catch {
+                  // Best-effort
+                }
+
+                // Update run metadata
+                try {
+                  const curRun = await readRun(partialRunId, ctx.cwd)
+                  await import("pi-zflow-artifacts").then(({ updateRun }) =>
+                    updateRun(partialRunId, {
+                      metadata: {
+                        ...(curRun.metadata ?? {}),
+                        subagentResolutionAvailable: true,
+                        resolutionPromptPath: path.join(resolveRunDir(partialRunId, ctx.cwd), "subagent-resolution-prompt.md"),
+                      },
+                    } as any, ctx.cwd)
+                  )
+                } catch {
+                  // Best-effort
+                }
+              }
+            } else if (reconciliation.verificationNeeded) {
+              // All groups applied — just continue to verification/review
+              const implProgress = createWorkflowProgressIndicator(pi, ctx, changeInput, {
+                command: "zflow-change-implement",
+                model: "resolved",
+                thinking: "unavailable",
+                initialMessage: "Continuing to verification and review",
+                statusId: "zflow-implement",
+                widgetId: "zflow-implement-progress",
+              })
+              const updatePostImplementationCard = (message: string): void => {
+                const normalized = message.toLowerCase()
+                if (normalized.includes("verification skipped") || normalized.includes("skipped —") || normalized.includes("gating")) {
+                  implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification skipped — needs review", "failed")
+                  implProgress.updatePhaseCard("code-review", "Code Review", "Verification skipped; code review blocked", "failed")
+                  return
+                }
+                if (normalized.includes("running code review")) {
+                  implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification complete", "completed")
+                  implProgress.updatePhaseCard("code-review", "Code Review", message, "running")
+                  return
+                }
+                if (normalized.includes("code review passed")) {
+                  implProgress.updatePhaseCard("code-review", "Code Review", message, "completed")
+                  implProgress.updatePhaseCard("post-code-review", "Post Code Review", "Preparing final workflow completion", "running")
+                  return
+                }
+                if (normalized.includes("code review found") || normalized.includes("review failed")) {
+                  implProgress.updatePhaseCard("code-review", "Code Review", message, "failed")
+                  implProgress.updatePhaseCard("post-code-review", "Post Code Review", "Review failed; preparing next steps", "failed")
+                  return
+                }
+                if (normalized.includes("persisting completed") || normalized.includes("workflow completion persisted")) {
+                  implProgress.updatePhaseCard("post-code-review", "Post Code Review", message, normalized.includes("persisted") ? "completed" : "running")
+                  return
+                }
+                const postStatus = normalized.includes("final verification passed") ? "completed" : "running"
+                implProgress.updatePhaseCard("post-implementation", "Post Implementation", message, postStatus)
+                if (normalized.includes("final verification passed")) {
+                  implProgress.updatePhaseCard("code-review", "Code Review", "Waiting for code review to start", "running")
+                }
+              }
+              updatePostImplementationCard("Starting final verification, review, and completion")
+              const onReviewerUpdate = (reviewerUpdate: {
+                reviewerName: string; agentName: string
+                status: "queued" | "running" | "completed" | "failed"
+                model?: string; thinking?: string
+                currentTool?: string; lastCommand?: string
+              }): void => {
+                implProgress.updateReviewer(reviewerUpdate.reviewerName, reviewerUpdate)
+              }
+              const postResult = await runImplementationPostStartSequence(
+                partialRunId,
+                { skipDispatchWait: false, onProgress: updatePostImplementationCard, onReviewerUpdate },
+              )
+              const finalCardStatus = postResult.status === "completed" ? "completed" : "failed"
+              const finalCardTitle = postResult.status === "completed" ? "Workflow Complete" : "Workflow Needs Attention"
+              implProgress.updatePhaseCard("workflow-complete", finalCardTitle, `Phase: ${postResult.phase}, status: ${postResult.status}`, finalCardStatus)
+              implProgress.stop(finalCardTitle)
             }
-            const postResult = await runImplementationPostStartSequence(
-              partialRunId,
-              {
-                skipDispatchWait: false,
-                onProgress: updatePostImplementationCard,
-                onReviewerUpdate,
-              },
-            )
 
-            const finalCardStatus = postResult.status === "completed" ? "completed" : "failed"
-            const finalCardTitle = postResult.status === "completed" ? "Workflow Complete" : "Workflow Needs Attention"
-            const nextStepsLine = postResult.nextSteps.length > 0
-              ? `Next steps: ${postResult.nextSteps.map((s) => s.replace(/^\d+\.\s*/, "")).join("; ")}`
-              : "No further steps — workflow is complete."
-
-            implProgress.updatePhaseCard("workflow-complete", finalCardTitle, `Phase: ${postResult.phase}, status: ${postResult.status}`, finalCardStatus)
-            implProgress.updatePhaseCard("workflow-complete", finalCardTitle, nextStepsLine, finalCardStatus)
-            implProgress.stop(finalCardTitle)
-          } catch (err: unknown) {
-            implProgress.stop(
-              `Resume failed: ${err instanceof Error ? err.message : String(err)}`,
-              "failed",
-            )
+            cleanupMode()
+            return
           }
-
-          cleanupMode()
-          return
         }
 
         // No partial run found — fall through to full dispatch
