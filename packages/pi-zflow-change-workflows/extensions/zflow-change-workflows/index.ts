@@ -3229,6 +3229,11 @@ async function resolveWorkflowModel(agentName: string): Promise<{ model?: string
 async function resolveApplyBackWithSubagent(
   runId: string,
   ctx: InterviewableContext,
+  progress?: {
+    onProgress?: (message: string) => void
+    onPhase?: (id: string, title: string, message: string, status?: "running" | "completed" | "failed") => void
+    onSubagent?: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) => void
+  },
 ): Promise<void> {
   const { default: fs } = await import("node:fs/promises")
   const { default: path } = await import("node:path")
@@ -3247,7 +3252,9 @@ async function resolveApplyBackWithSubagent(
   const resolvedPatchPath = path.join(runDir, "patches", "_subagent-resolved.patch")
   const baseCommit = run.preApplySnapshot?.head ?? run.head
 
+  progress?.onPhase?.("prepare", "Prepare Resolution", "Inspecting preserved apply-back artifacts", "running")
   await fs.access(integrationWorktreePath).catch(() => {
+    progress?.onPhase?.("prepare", "Prepare Resolution", "Integration worktree is missing", "failed")
     throw new Error(
       `Integration worktree not found at ${integrationWorktreePath}. ` +
       "Run /zflow-change-implement --resume first so the smart cascade can preserve an integration worktree.",
@@ -3272,14 +3279,25 @@ async function resolveApplyBackWithSubagent(
     "If you cannot safely preserve every group change, stop and explain exactly why.",
   ].join("\n")
   await fs.writeFile(promptPath, task, "utf-8")
+  progress?.onPhase?.("prepare", "Prepare Resolution", `Resolution prompt written: ${promptPath}`, "completed")
 
   const dispatchService = await tryGetDispatchServiceViaRegistry()
   if (!dispatchService) {
+    progress?.onPhase?.("resolver", "Resolver Subagent", "No dispatch service available", "failed")
     throw new Error("No zflow dispatch service is available. Install/enable pi-subagents and retry.")
   }
 
   const model = await resolveWorkflowModel("zflow.implement-hard")
   ctx.ui?.notify?.(`🤖 Dispatching apply-back resolver subagent for run ${runId}...`, "info")
+  progress?.onPhase?.("resolver", "Resolver Subagent", "Dispatching resolver subagent", "running")
+  progress?.onSubagent?.("apply-back-resolver", {
+    agent: "zflow.implement-hard",
+    title: "Apply-back resolver",
+    model: model.model,
+    thinking: model.thinking,
+    status: "running",
+    lastCommand: "dispatching resolver subagent",
+  })
   const dispatchResult = await dispatchService.runAgent({
     agent: "zflow.implement-hard",
     task,
@@ -3289,9 +3307,28 @@ async function resolveApplyBackWithSubagent(
     outputMode: "file-only",
     context: "fresh",
     maxOutput: { lines: 5000, bytes: 500_000 },
+    onUpdate: (agentProgress) => {
+      progress?.onSubagent?.("apply-back-resolver", {
+        agent: agentProgress.agent,
+        title: "Apply-back resolver",
+        model: model.model,
+        thinking: model.thinking,
+        status: agentProgress.status ?? "running",
+        lastCommand: agentProgress.currentTool
+          ? `${agentProgress.currentTool}${agentProgress.currentToolArgs ? ` ${agentProgress.currentToolArgs}` : ""}`
+          : agentProgress.recentOutput?.[agentProgress.recentOutput.length - 1] ?? "resolver running...",
+      })
+    },
   })
 
   if (!dispatchResult.ok) {
+    progress?.onPhase?.("resolver", "Resolver Subagent", dispatchResult.error ?? "Resolver subagent failed", "failed")
+    progress?.onSubagent?.("apply-back-resolver", {
+      agent: "zflow.implement-hard",
+      status: "failed",
+      finishedAt: Date.now(),
+      lastCommand: dispatchResult.error ?? "resolver subagent failed",
+    })
     await updateRun(runId, {
       metadata: {
         ...(run.metadata ?? {}),
@@ -3301,7 +3338,15 @@ async function resolveApplyBackWithSubagent(
     } as any, cwd)
     throw new Error(dispatchResult.error ?? "Resolver subagent failed")
   }
+  progress?.onPhase?.("resolver", "Resolver Subagent", "Resolver subagent completed", "completed")
+  progress?.onSubagent?.("apply-back-resolver", {
+    agent: dispatchResult.agent ?? "zflow.implement-hard",
+    status: "completed",
+    finishedAt: Date.now(),
+    lastCommand: "resolver complete; validating result",
+  })
 
+  progress?.onPhase?.("verify", "Verify Resolution", "Checking for conflict markers", "running")
   const grepResult = await execFileAsync("git", ["grep", "-n", "^<<<<<<< \\|^=======\\|^>>>>>>> ", "--", "."], {
     cwd: integrationWorktreePath,
   }).then((r) => r.stdout.trim()).catch((err: unknown) => {
@@ -3318,6 +3363,7 @@ async function resolveApplyBackWithSubagent(
         subagentResolutionRemainingConflicts: grepResult,
       },
     } as any, cwd)
+    progress?.onPhase?.("verify", "Verify Resolution", "Conflict markers remain", "failed")
     throw new Error(`Resolver left conflict markers:\n${grepResult}`)
   }
 
@@ -3336,6 +3382,7 @@ async function resolveApplyBackWithSubagent(
     maxBuffer: 20 * 1024 * 1024,
   }).then((r) => r.stdout)
   if (!resolvedDiff.trim()) {
+    progress?.onPhase?.("verify", "Verify Resolution", "Resolver produced no diff", "failed")
     throw new Error("Resolver produced no diff from the integration worktree.")
   }
   await fs.mkdir(path.dirname(resolvedPatchPath), { recursive: true })
@@ -3343,6 +3390,7 @@ async function resolveApplyBackWithSubagent(
 
   const coverageInputs = run.groups
     .map((g) => ({ groupId: g.groupId, patchPath: path.join(runDir, "patches", `${g.groupId}.patch`) }))
+  progress?.onPhase?.("verify", "Verify Resolution", "Running no-lost-code coverage verification", "running")
   const coverageReport = await generateCoverageReport(coverageInputs, integrationWorktreePath, baseCommit)
   await fs.writeFile(
     path.join(runDir, "subagent-resolution-coverage.json"),
@@ -3359,19 +3407,24 @@ async function resolveApplyBackWithSubagent(
         subagentResolvedPatchPath: resolvedPatchPath,
       },
     } as any, cwd)
+    progress?.onPhase?.("verify", "Verify Resolution", "Coverage verification failed", "failed")
     throw new Error(`Coverage verification failed after subagent resolution:\n${coverageReport.summary}`)
   }
+  progress?.onPhase?.("verify", "Verify Resolution", "Coverage verified; all group changes preserved", "completed")
 
+  progress?.onPhase?.("apply", "Apply Resolved Patch", "Checking primary worktree cleanliness", "running")
   const primaryStatus = await execFileAsync("git", ["status", "--porcelain"], {
     cwd: run.repoRoot,
   }).then((r) => r.stdout.trim())
   if (primaryStatus) {
+    progress?.onPhase?.("apply", "Apply Resolved Patch", "Primary worktree is not clean", "failed")
     throw new Error(
       "Primary worktree is not clean; refusing to apply resolved patch. " +
       `Resolved patch is preserved at ${resolvedPatchPath}.`,
     )
   }
 
+  progress?.onPhase?.("apply", "Apply Resolved Patch", "Applying verified resolved patch", "running")
   await execFileAsync("git", ["apply", "--3way", "--index", "--binary", resolvedPatchPath], {
     cwd: run.repoRoot,
     timeout: 60_000,
@@ -3408,6 +3461,7 @@ async function resolveApplyBackWithSubagent(
     },
   } as any, cwd)
 
+  progress?.onPhase?.("apply", "Apply Resolved Patch", "Verified patch applied to primary worktree", "completed")
   ctx.ui?.notify?.(
     `✅ Subagent resolved apply-back and applied the verified patch.\n` +
     `Resolved patch: ${resolvedPatchPath}\n` +
@@ -4001,11 +4055,31 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         return
       }
 
+      const model = await resolveWorkflowModel("zflow.implement-hard")
+      const progress = createWorkflowProgressIndicator(pi, ctx, runId, {
+        command: "zflow-resolve-apply-back",
+        model: model.model ?? "resolved",
+        thinking: model.thinking ?? "unavailable",
+        initialMessage: "Preparing apply-back resolver",
+        statusId: "zflow-resolve-apply-back",
+        widgetId: "zflow-resolve-apply-back-progress",
+      })
+      progress.updatePhaseCard("prepare", "Prepare Resolution", "Loading run artifacts", "running")
+
       try {
-        await resolveApplyBackWithSubagent(runId, ctx)
+        await resolveApplyBackWithSubagent(runId, ctx, {
+          onProgress: (message) => progress.update(message),
+          onPhase: (id, title, message, status = "running") => progress.updatePhaseCard(id, title, message, status),
+          onSubagent: (id, update) => progress.updateSubagent(id, update),
+        })
+        progress.updatePhaseCard("complete", "Resolution Complete", "Apply-back resolution completed", "completed")
+        progress.stop("Apply-back resolution complete", "completed")
       } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err)
+        progress.updatePhaseCard("complete", "Resolution Needs Attention", message, "failed")
+        progress.stop("Apply-back resolution failed", "failed")
         ctx.ui?.notify?.(
-          `Apply-back subagent resolution failed: ${err instanceof Error ? err.message : String(err)}`,
+          `Apply-back subagent resolution failed: ${message}`,
           "error",
         )
       }
