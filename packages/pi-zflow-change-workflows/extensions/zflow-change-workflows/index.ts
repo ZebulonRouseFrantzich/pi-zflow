@@ -3298,28 +3298,48 @@ async function resolveApplyBackWithSubagent(
     status: "running",
     lastCommand: "dispatching resolver subagent",
   })
-  const dispatchResult = await dispatchService.runAgent({
-    agent: "zflow.implement-hard",
-    task,
-    cwd: integrationWorktreePath,
-    model: model.dispatchModel,
-    output: resultPath,
-    outputMode: "file-only",
-    context: "fresh",
-    maxOutput: { lines: 5000, bytes: 500_000 },
-    onUpdate: (agentProgress) => {
-      progress?.onSubagent?.("apply-back-resolver", {
-        agent: agentProgress.agent,
-        title: "Apply-back resolver",
-        model: model.model,
-        thinking: model.thinking,
-        status: agentProgress.status ?? "running",
-        lastCommand: agentProgress.currentTool
-          ? `${agentProgress.currentTool}${agentProgress.currentToolArgs ? ` ${agentProgress.currentToolArgs}` : ""}`
-          : agentProgress.recentOutput?.[agentProgress.recentOutput.length - 1] ?? "resolver running...",
-      })
-    },
-  })
+  const resolverStartedAt = Date.now()
+  const heartbeat = setInterval(() => {
+    const elapsed = formatElapsed(Date.now() - resolverStartedAt)
+    const message = `Resolver subagent still running (${elapsed}); waiting for dispatch backend output.`
+    progress?.onPhase?.("resolver", "Resolver Subagent", message, "running")
+    progress?.onSubagent?.("apply-back-resolver", {
+      agent: "zflow.implement-hard",
+      title: "Apply-back resolver",
+      model: model.model,
+      thinking: model.thinking,
+      status: "running",
+      lastCommand: "still running; backend may not stream tool-level progress",
+    })
+  }, 30_000)
+
+  let dispatchResult: Awaited<ReturnType<DispatchService["runAgent"]>>
+  try {
+    dispatchResult = await dispatchService.runAgent({
+      agent: "zflow.implement-hard",
+      task,
+      cwd: integrationWorktreePath,
+      model: model.dispatchModel,
+      output: resultPath,
+      outputMode: "file-only",
+      context: "fresh",
+      maxOutput: { lines: 5000, bytes: 500_000 },
+      onUpdate: (agentProgress) => {
+        progress?.onSubagent?.("apply-back-resolver", {
+          agent: agentProgress.agent,
+          title: "Apply-back resolver",
+          model: model.model,
+          thinking: model.thinking,
+          status: agentProgress.status ?? "running",
+          lastCommand: agentProgress.currentTool
+            ? `${agentProgress.currentTool}${agentProgress.currentToolArgs ? ` ${agentProgress.currentToolArgs}` : ""}`
+            : agentProgress.recentOutput?.[agentProgress.recentOutput.length - 1] ?? "resolver running...",
+        })
+      },
+    })
+  } finally {
+    clearInterval(heartbeat)
+  }
 
   if (!dispatchResult.ok) {
     progress?.onPhase?.("resolver", "Resolver Subagent", dispatchResult.error ?? "Resolver subagent failed", "failed")
