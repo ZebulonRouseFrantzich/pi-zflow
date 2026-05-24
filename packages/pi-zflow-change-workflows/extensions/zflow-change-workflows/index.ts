@@ -2219,29 +2219,37 @@ async function resumeWorktreeDispatch(
     }
 
     const verification = normalizeDispatchVerification(r.verification)
-    if (!verification || verification.status !== "pass") {
-      resumeFailures.push(`${group.id}: scoped verification ${verification?.status ?? "missing"}`)
+
+    // If the bridge explicitly reported failed scoped verification, fail the group.
+    // Missing verification (bridge no longer runs it) = deferred to final verification.
+    if (verification && verification.status === "fail") {
+      resumeFailures.push(`${group.id}: scoped verification failed`)
       await updateGroupLedger(runId, group.id, {
         status: "failed",
-        error: `scoped verification ${verification?.status ?? "missing"}`,
+        error: "scoped verification failed",
         failureKind: "blocker",
-        scopedVerification: verification ?? { status: "missing" },
+        scopedVerification: verification,
       }, cwd).catch(() => {})
       options?.onSubagentUpdate?.(group.id, {
         status: "failed",
         finishedAt: Date.now(),
-        lastCommand: `scoped verification ${verification?.status ?? "missing"}`,
+        lastCommand: "scoped verification failed",
       })
       continue
     }
 
     // Group succeeded
+    const scopedVerification = verification ?? {
+      status: "skipped" as const,
+      command: undefined,
+      output: "Scoped verification deferred to the final verification phase.",
+    }
     await updateGroupLedger(runId, group.id, {
       status: "succeeded",
       agent: r.agent ?? "zflow.implement-routine",
       error: undefined,
       failureKind: undefined,
-      scopedVerification: { status: "pass", command: verification.command, output: verification.output },
+      scopedVerification: { status: scopedVerification.status, command: scopedVerification.command, output: scopedVerification.output },
     }, cwd).catch(() => {})
     options?.onSubagentUpdate?.(group.id, {
       status: "completed",
@@ -2266,7 +2274,7 @@ async function resumeWorktreeDispatch(
         changedFiles: r.changedFiles ?? group.files,
         uncommittedChanges: [],
         patchPath: destPatchPath,
-        verification,
+        verification: scopedVerification,
         retained: false,
       })
       await updateGroupLedger(runId, group.id, {
@@ -2281,7 +2289,7 @@ async function resumeWorktreeDispatch(
         runId,
         repoRoot,
         scopedFiles: group.files,
-        verification,
+        verification: scopedVerification,
         cwd,
       })
       groupResults.push(captured)
@@ -2871,7 +2879,7 @@ async function runWorktreeDispatchAndFinalize(
     )
   }
 
-  options?.onWorkflowUpdate?.("All subagents finished; validating scoped verification and collecting worktree results")
+  options?.onWorkflowUpdate?.("All subagents finished; collecting worker results. Scoped verification is deferred to the final verification phase.")
 
   // Collect group results from dispatch outputs
   const groupResults = []
@@ -2890,23 +2898,32 @@ async function runWorktreeDispatchAndFinalize(
 
     const verification = normalizeDispatchVerification(r.verification)
 
-    if (!verification || verification.status !== "pass") {
-      const vStatus = verification?.status ?? "missing"
-      const failure = `${group.id}: scoped verification ${vStatus}`
+    // If the bridge explicitly reported failed scoped verification, fail the group.
+    // Missing verification (bridge no longer runs it) = deferred to final verification, not a blocker.
+    if (verification && verification.status === "fail") {
+      const failure = `${group.id}: scoped verification failed`
       postDispatchFailures.push(failure)
       options?.onSubagentUpdate?.(group.id, {
         status: "failed",
         finishedAt: Date.now(),
         lastCommand: failure,
       })
-      // Update ledger: scoped verification failed
       await updateGroupLedger(runId, group.id, {
         status: "failed",
         error: failure,
         failureKind: "blocker",
-        scopedVerification: verification ?? { status: "missing" },
+        scopedVerification: verification,
       }, cwd).catch(() => {})
       continue
+    }
+
+    // When the bridge does not provide verification (undefined), treat as
+    // "skipped — deferred to final verification" so group capture/apply-back
+    // can still proceed.
+    const scopedVerification = verification ?? {
+      status: "skipped" as const,
+      command: undefined,
+      output: "Scoped verification deferred to the final verification phase.",
     }
 
     if (r.worktreePath) {
@@ -2917,14 +2934,14 @@ async function runWorktreeDispatchAndFinalize(
         runId,
         repoRoot,
         scopedFiles: group.files,
-        verification,
+        verification: scopedVerification,
         cwd,
       }))
       // Update ledger: capture patch/changedFiles data
       await updateGroupLedger(runId, group.id, {
         worktreePath: r.worktreePath,
         changedFiles: r.changedFiles ?? group.files,
-        scopedVerification: verification ?? { status: "pass" },
+        scopedVerification,
       }, cwd).catch(() => {})
       continue
     }
@@ -2946,9 +2963,9 @@ async function runWorktreeDispatchAndFinalize(
         uncommittedChanges: [],
         patchPath: destPatchPath,
         scopedVerification: {
-          status: verification.status,
-          command: verification.command,
-          output: verification.output,
+          status: scopedVerification.status,
+          command: scopedVerification.command,
+          output: scopedVerification.output,
         },
         retained: false,
       }
@@ -2965,14 +2982,14 @@ async function runWorktreeDispatchAndFinalize(
         changedFiles: groupMeta.changedFiles,
         uncommittedChanges: [],
         patchPath: destPatchPath,
-        verification,
+        verification: scopedVerification,
         retained: false,
       })
       // Update ledger: capture patch/changedFiles data
       await updateGroupLedger(runId, group.id, {
         patchPath: destPatchPath,
         changedFiles: r.changedFiles ?? group.files,
-        scopedVerification: { status: "pass", command: verification.command, output: verification.output },
+        scopedVerification,
       }, cwd).catch(() => {})
       continue
     }
@@ -2993,9 +3010,9 @@ async function runWorktreeDispatchAndFinalize(
       uncommittedChanges: [],
       patchPath: undefined as string | undefined,
       scopedVerification: {
-        status: verification.status,
-        command: verification.command,
-        output: verification.output,
+        status: scopedVerification.status,
+        command: scopedVerification.command,
+        output: scopedVerification.output,
       },
       retained: false,
     }
@@ -3006,7 +3023,7 @@ async function runWorktreeDispatchAndFinalize(
     // Update ledger: capture changedFiles data for fallback path
     await updateGroupLedger(runId, group.id, {
       changedFiles: r.changedFiles ?? group.files,
-      scopedVerification: { status: "pass", command: verification.command, output: verification.output },
+      scopedVerification,
     }, cwd).catch(() => {})
     groupResults.push({
       groupId: group.id,
@@ -3017,7 +3034,7 @@ async function runWorktreeDispatchAndFinalize(
       changedFiles: groupMeta.changedFiles,
       uncommittedChanges: [],
       patchPath: undefined,
-      verification,
+      verification: scopedVerification,
       retained: false,
     })
   }
