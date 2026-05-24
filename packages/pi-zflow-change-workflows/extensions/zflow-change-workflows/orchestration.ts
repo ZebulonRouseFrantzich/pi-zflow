@@ -149,6 +149,20 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
     while ((match = groupRefPattern.exec(value)) !== null) {
       dependencies.push(`group-${match[1]!.toLowerCase()}`)
     }
+
+    // Dependency prose often uses a single plural prefix followed by a list,
+    // e.g. "Groups 1A and 1B" or "Groups 1A, 1B, and 1C". After the prefix,
+    // later IDs may not repeat "Group", so collect alphanumeric group tokens
+    // from that list-like tail as well. Numeric-only refs are handled above
+    // when directly prefixed by Group/G to avoid confusing prose numbers with
+    // group IDs.
+    if (/\bGroups?\b/i.test(value)) {
+      const alphanumericRefs = value.match(/\b\d+[A-Za-z]\b/g) ?? []
+      for (const ref of alphanumericRefs) {
+        dependencies.push(`group-${ref.toLowerCase()}`)
+      }
+    }
+
     return [...new Set(dependencies)]
   }
 

@@ -438,6 +438,7 @@ describe("ensureImplementationTasksArtifact", () => {
       "Dependencies:",
       "",
       "- Groups 1A-1C for Workers auth config names.",
+      "- Groups 2A and 2B for Flutter redirect/config names.",
       "",
       "Scoped verification:",
       "",
@@ -452,6 +453,8 @@ describe("ensureImplementationTasksArtifact", () => {
       "group-1b",
     ])
     assert.ok(groups.find((group) => group.id === "group-3b")?.dependencies.includes("group-1c"))
+    assert.ok(groups.find((group) => group.id === "group-3b")?.dependencies.includes("group-2a"))
+    assert.ok(groups.find((group) => group.id === "group-3b")?.dependencies.includes("group-2b"))
 
     const validation = validateOwnershipAndDependencies(groups)
     assert.strictEqual(validation.valid, true, validation.summary)
