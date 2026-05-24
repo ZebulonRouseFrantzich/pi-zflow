@@ -61,7 +61,7 @@ export const CANONICAL_ARTIFACTS: readonly ArtifactEntry[] = [
   {
     id: "approved-plan",
     path: "plans/{changeId}/v{planVersion}/",
-    description: "Approved plan artifact files: design.md, execution-groups.md, standards.md, verification.md (per-changeId, per-version)",
+    description: "Approved plan artifact files: design.md, execution-groups.md, standards.md, verification.md, implementation-tasks.md (per-changeId, per-version)",
     mandatory: true,
   },
   {

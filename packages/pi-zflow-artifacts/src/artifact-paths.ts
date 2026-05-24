@@ -53,18 +53,18 @@ export function resolvePlanDir(
  * Contract (see README.md for full details):
  * - `changeId` must be a safe kebab-case identifier (validated by `assertSafeChangeId()`).
  * - `planVersion` must match `/^v\d+$/` (e.g. "v1", "v2").
- * - `artifact` must be one of: "design", "execution-groups", "standards", "verification".
+ * - `artifact` must be one of: "design", "execution-groups", "standards", "verification", "implementation-tasks".
  * - The result is always `<resolvePlanDir(changeId, planVersion, cwd)>/{artifact}.md`.
  *
  * @param changeId - Resolved safe change identifier (kebab-case)
  * @param planVersion - Version label starting with "v" (e.g. "v1")
- * @param artifact - Artifact kind: "design" | "execution-groups" | "standards" | "verification"
+ * @param artifact - Artifact kind: "design" | "execution-groups" | "standards" | "verification" | "implementation-tasks"
  * @param cwd - Working directory (optional)
  */
 export function resolvePlanArtifactPath(
   changeId: string,
   planVersion: string,
-  artifact: "design" | "execution-groups" | "standards" | "verification",
+  artifact: "design" | "execution-groups" | "standards" | "verification" | "implementation-tasks",
   cwd?: string,
 ): string {
   return path.join(resolvePlanDir(changeId, planVersion.replace(/^v/, ""), cwd), `${artifact}.md`)

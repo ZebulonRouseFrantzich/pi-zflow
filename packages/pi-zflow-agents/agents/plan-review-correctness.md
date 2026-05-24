@@ -41,7 +41,8 @@ are logically sound and complete.
 4. **RuneContext adherence.** If a RuneContext doc exists, does the plan
    correctly reflect its decisions?
 5. **Internal consistency.** Do artifact references match? Are change IDs and
-   version labels consistent across all four artifacts?
+   version labels consistent across all five artifacts? Do `implementation-tasks.md`
+   task specs align with their corresponding groups in `execution-groups.md`?
 
 ## Finding format
 

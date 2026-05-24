@@ -45,15 +45,15 @@ export function assertValidPlanVersion(planVersion: string): void {
 }
 
 /**
- * Validate that an artifact type is one of the four approved kinds.
+ * Validate that an artifact type is one of the five approved kinds.
  *
  * @param artifact - Artifact type string.
  * @throws Error if the artifact type is not recognized.
  */
 export function assertValidArtifactType(
   artifact: string,
-): asserts artifact is "design" | "execution-groups" | "standards" | "verification" {
-  const allowed = ["design", "execution-groups", "standards", "verification"] as const
+): asserts artifact is "design" | "execution-groups" | "standards" | "verification" | "implementation-tasks" {
+  const allowed = ["design", "execution-groups", "standards", "verification", "implementation-tasks"] as const
   if (!(allowed as readonly string[]).includes(artifact)) {
     throw new Error(
       `Invalid artifact type: "${artifact}". Must be one of: ${allowed.join(", ")}`,
@@ -78,7 +78,7 @@ export function assertValidArtifactType(
 export async function recordArtifactMetadata(
   changeId: string,
   planVersion: string,
-  artifact: "design" | "execution-groups" | "standards" | "verification",
+  artifact: "design" | "execution-groups" | "standards" | "verification" | "implementation-tasks",
   hash: string,
   cwd?: string,
 ): Promise<void> {

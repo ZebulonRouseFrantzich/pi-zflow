@@ -37,7 +37,8 @@ progress: false
 Review the planning artifacts for logical correctness. Check that the
 design addresses the change request, execution groups produce the
 intended outcome, dependencies are sound, and edge cases are accounted
-for. Read all four artifacts before reviewing.
+for. Read all five artifacts before reviewing, including
+implementation-tasks.md for task-level correctness.
 
 Use severity: critical / major / minor / nit.
 Return structured findings.
@@ -74,7 +75,7 @@ output: false
 progress: false
 
 Run a structural validation pass on the planning artifacts. Check
-that all four artifacts exist, groups respect ≤7 files and ≤3 phases,
+that all five artifacts exist, groups respect ≤7 files and ≤3 phases,
 dependencies are consistent, and verification steps are concrete.
 Report PASS / FAIL / CONDITIONAL-PASS.
 

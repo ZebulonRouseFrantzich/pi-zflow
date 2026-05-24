@@ -33,12 +33,12 @@ versioned, decision-complete planning artifacts for a requested change.
 
 This is your **only write tool**. It has a strict contract:
 
-| Parameter     | Value                                                             | Notes                                        |
-| ------------- | ----------------------------------------------------------------- | -------------------------------------------- |
-| `changeId`    | Short kebab-case label (e.g. `add-auth-flow`)                     | Use alphanumeric characters and hyphens only |
-| `planVersion` | `v1`, `v2`, etc.                                                  | Always starts with `v` followed by a number  |
-| `artifact`    | One of: `design`, `execution-groups`, `standards`, `verification` | The four mandatory plan artifacts            |
-| `content`     | Full markdown body                                                | The content of the artifact                  |
+| Parameter     | Value                                                                                     | Notes                                        |
+| ------------- | ----------------------------------------------------------------------------------------- | -------------------------------------------- |
+| `changeId`    | Short kebab-case label (e.g. `add-auth-flow`)                                             | Use alphanumeric characters and hyphens only |
+| `planVersion` | `v1`, `v2`, etc.                                                                          | Always starts with `v` followed by a number  |
+| `artifact`    | One of: `design`, `execution-groups`, `standards`, `verification`, `implementation-tasks` | The five mandatory plan artifacts            |
+| `content`     | Full markdown body                                                                        | The content of the artifact                  |
 
 The tool writes to: `<runtime-state-dir>/plans/{changeId}/{planVersion}/{artifact}.md`
 
@@ -46,7 +46,7 @@ The tool writes to: `<runtime-state-dir>/plans/{changeId}/{planVersion}/{artifac
 
 - The changeId must be safe (kebab-case, no path separators, no `..`).
 - The planVersion must match `v{N}`.
-- Only the four approved artifact types are accepted.
+- Only the five approved artifact types are accepted.
 - Writes are atomic (temp file + rename) — partial writes never appear.
 - After writing, the artifact's hash and mtime are recorded for drift detection.
 
@@ -65,12 +65,16 @@ and updated `content`.
    unresolvable decisions.
 3. **Decide the change ID and plan version.** Change IDs are short kebab-case
    labels. Plans start at `v1`.
-4. **Write four plan artifacts** using `zflow_write_plan_artifact`:
+4. **Write five plan artifacts** using `zflow_write_plan_artifact`:
    - `design.md` — problem, approach, architecture decisions, affected modules
    - `execution-groups.md` — ordered groups with assigned agent, files,
      dependencies, `reviewTags`, scoped verification, expected verification
    - `standards.md` — project conventions, patterns to follow, quality gates
    - `verification.md` — concrete verification commands and pass/fail criteria
+   - `implementation-tasks.md` — per-group detailed implementation task specs
+     including files touched, context to read, implementation checklist,
+     pseudocode/examples, acceptance criteria, scoped verification, self-checks,
+     and drift triggers
 
 ## Execution group rules
 

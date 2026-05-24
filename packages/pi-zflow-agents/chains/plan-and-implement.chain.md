@@ -25,8 +25,8 @@ reads: context.md
 progress: true
 
 Read the scout's context and any RuneContext change doc. Produce
-the four planning artifacts (design, execution-groups, standards,
-verification) using `zflow_write_plan_artifact`.
+the five planning artifacts (design, execution-groups, standards,
+verification, implementation-tasks) using `zflow_write_plan_artifact`.
 
 Follow artifact-first lifecycle rules:
 
@@ -39,7 +39,7 @@ Follow artifact-first lifecycle rules:
 reads: false
 output: false
 
-Validate planning artifacts. Check all four exist, structural rules
+Validate planning artifacts. Check all five exist, structural rules
 are met, dependencies are consistent, verification is concrete.
 Return PASS / FAIL / CONDITIONAL-PASS.
 

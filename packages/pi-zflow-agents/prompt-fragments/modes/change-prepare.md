@@ -17,6 +17,9 @@ The output of this mode is a structured plan document under `<runtime-state-dir>
 - Scope boundaries (in/out)
 - Dependency analysis and risk assessment
 - Verification strategy
+- Per-group implementation task specs with files, pseudocode, acceptance criteria, self-checks, and drift triggers (`implementation-tasks.md`)
+
+All five artifacts (`design.md`, `execution-groups.md`, `standards.md`, `verification.md`, `implementation-tasks.md`) are required for a completed plan.
 
 ## Transitions
 

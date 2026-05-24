@@ -60,6 +60,7 @@ async function writeValidPlanArtifacts(versionDir: string): Promise<void> {
   await fs.writeFile(path.join(versionDir, "execution-groups.md"), "# Execution Groups\n\nReal execution groups", "utf-8")
   await fs.writeFile(path.join(versionDir, "standards.md"), "# Standards\n\nReal standards content", "utf-8")
   await fs.writeFile(path.join(versionDir, "verification.md"), "# Verification\n\nReal verification plan", "utf-8")
+  await fs.writeFile(path.join(versionDir, "implementation-tasks.md"), "# Implementation Tasks\n\n## Group 1: Test\n\n### Objective\nTest implementation", "utf-8")
 }
 
 // ---------------------------------------------------------------------------
@@ -85,6 +86,7 @@ describe("runChangePrepareWorkflow — enhanced steps", () => {
       assert.ok(result.artifactPaths.executionGroups.endsWith("execution-groups.md"))
       assert.ok(result.artifactPaths.standards.endsWith("standards.md"))
       assert.ok(result.artifactPaths.verification.endsWith("verification.md"))
+      assert.ok(result.artifactPaths.implementationTasks.endsWith("implementation-tasks.md"))
     } finally {
       await removeTestRepo(repoRoot)
     }
@@ -225,6 +227,7 @@ describe("runPlanValidation", () => {
       await fs.writeFile(path.join(versionDir, "execution-groups.md"), "# Execution Groups\nawaiting scout dispatch", "utf-8")
       await fs.writeFile(path.join(versionDir, "standards.md"), "# Standards\nTODO: write standards", "utf-8")
       await fs.writeFile(path.join(versionDir, "verification.md"), "# Verification\nReal verification plan", "utf-8")
+      await fs.writeFile(path.join(versionDir, "implementation-tasks.md"), "# Implementation Tasks\n\nReal tasks", "utf-8")
 
       const validation = await runPlanValidation("test-placeholder-markers", "v1", repoRoot)
       assert.strictEqual(validation.pass, false)
@@ -293,6 +296,7 @@ describe("buildHandoffContext", () => {
       assert.ok(handoff.planArtifactPaths.executionGroups, "executionGroups path should be set")
       assert.ok(handoff.planArtifactPaths.standards, "standards path should be set")
       assert.ok(handoff.planArtifactPaths.verification, "verification path should be set")
+      assert.ok(handoff.planArtifactPaths.implementationTasks, "implementationTasks path should be set")
       assert.ok(handoff.forkedAt, "forkedAt timestamp should be set")
     } finally {
       await removeTestRepo(repoRoot)

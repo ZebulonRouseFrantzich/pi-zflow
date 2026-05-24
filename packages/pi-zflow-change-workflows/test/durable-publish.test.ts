@@ -47,6 +47,7 @@ async function writeRuntimePlanArtifacts(
     "execution-groups.md": "# Execution Groups\n\nTest execution groups.",
     "standards.md": "# Standards\n\nTest standards document.",
     "verification.md": "# Verification\n\nTest verification plan.",
+    "implementation-tasks.md": "# Implementation Tasks\n\n## Group 1: Test\n\n### Objective\nTest implementation",
   }
 
   const artifactPaths: Record<string, string> = {}
@@ -60,6 +61,7 @@ async function writeRuntimePlanArtifacts(
     executionGroups: path.join(versionDir, "execution-groups.md"),
     standards: path.join(versionDir, "standards.md"),
     verification: path.join(versionDir, "verification.md"),
+    implementationTasks: path.join(versionDir, "implementation-tasks.md"),
   }
 
   return { versionDir, artifactPaths: result }
@@ -90,7 +92,7 @@ describe("publishPlanArtifacts", () => {
       assert.equal(result.planVersion, planVersion)
       assert.ok(result.durableDir, "durableDir must be set")
       assert.ok(result.manifestPath, "manifestPath must be set")
-      assert.equal(result.artifactCount, 4, "all four artifacts should publish")
+      assert.equal(result.artifactCount, 5, "all five artifacts should publish")
 
       // Assert durable directory exists
       const dirStat = await fs.stat(result.durableDir)
@@ -134,7 +136,7 @@ describe("publishPlanArtifacts", () => {
 
       assert.ok(result.durableDir.includes(customDir), "durable dir should use custom path")
       assert.ok(result.durableDir.includes(changeId), "durable dir should contain changeId")
-      assert.equal(result.artifactCount, 4)
+      assert.equal(result.artifactCount, 5)
     } finally {
       await fs.rm(repoRoot, { recursive: true, force: true })
     }
@@ -151,7 +153,7 @@ describe("publishPlanArtifacts", () => {
       const versionDir = path.join(runtimeStateDir, "plans", changeId, planVersion)
       await fs.mkdir(versionDir, { recursive: true })
       await fs.writeFile(path.join(versionDir, "design.md"), "# Design", "utf-8")
-      // Do not write the other three
+      // Do not write the other four
 
       const result = await publishPlanArtifacts(changeId, planVersion, {
         cwd: repoRoot,

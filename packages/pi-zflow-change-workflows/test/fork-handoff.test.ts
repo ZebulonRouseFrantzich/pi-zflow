@@ -39,6 +39,7 @@ function makeHandoff(overrides?: Partial<ImplementationHandoff>): Implementation
       executionGroups: "/tmp/test-handoff/plans/test-change/v1/execution-groups.md",
       standards: "/tmp/test-handoff/plans/test-change/v1/standards.md",
       verification: "/tmp/test-handoff/plans/test-change/v1/verification.md",
+      implementationTasks: "/tmp/test-handoff/plans/test-change/v1/implementation-tasks.md",
     },
     overrides?.sourceSessionId,
   )

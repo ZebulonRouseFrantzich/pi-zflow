@@ -52,8 +52,8 @@ reads: context.md, change.md
 progress: true
 
 Read the scout's context handoff and any RuneContext change doc. Then
-produce the four planning artifacts (design, execution-groups, standards,
-verification) using `zflow_write_plan_artifact`.
+produce the five planning artifacts (design, execution-groups, standards,
+verification, implementation-tasks) using `zflow_write_plan_artifact`.
 
 Follow the rules from `change-doc-workflow` skill:
 
@@ -68,9 +68,10 @@ reads: false
 output: false
 
 Validate the planning artifacts for completeness, internal consistency,
-and structural rule adherence. Check that all four artifacts exist,
-groups respect file/phase limits, dependencies are consistent, and
-verification steps are concrete.
+and structural rule adherence. Check that all five artifacts exist,
+groups respect file/phase limits, dependencies are consistent, verification
+steps are concrete, and implementation-tasks.md has a section for each
+group in execution-groups.md.
 
 Return a structured validation report (PASS / FAIL / CONDITIONAL-PASS).
 If FAIL, stop and return the report for replanning.

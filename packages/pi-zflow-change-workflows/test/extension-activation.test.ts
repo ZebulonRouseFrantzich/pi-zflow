@@ -100,23 +100,9 @@ describe("zflow-change-workflows extension activation", () => {
     })
   })
 
-  it("allows prepare to fork implementation sessions when plan mode is inactive", () => {
-    assert.equal(shouldForkImplementationSessionAfterPrepare(), true)
-  })
-
-  it("does not fork implementation sessions from active /zflow-plan mode", () => {
-    const registry = getZflowRegistry()
-    registry.claim({
-      capability: "plan-mode",
-      version: "0.1.0",
-      provider: "test-plan-mode",
-      sourcePath: import.meta.url,
-      compatibilityMode: "compatible",
-    })
-    registry.provide("plan-mode", {
-      isPlanModeActive: () => true,
-    })
-
+  it("never forks implementation sessions from prepare — always manual", () => {
+    // shouldForkImplementationSessionAfterPrepare now always returns false
+    // because /zflow-change-prepare should never start implementation automatically.
     assert.equal(shouldForkImplementationSessionAfterPrepare(), false)
   })
 

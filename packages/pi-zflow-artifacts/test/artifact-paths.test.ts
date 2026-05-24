@@ -89,6 +89,12 @@ describe("artifact-paths cwd propagation", () => {
     assert.notEqual(result, otherResult)
   })
 
+  test("resolvePlanArtifactPath resolves implementation-tasks artifact", () => {
+    const result = resolvePlanArtifactPath(changeId, planVersion, "implementation-tasks", testCwd)
+    const expected = path.join(runtimeDir, "plans", changeId, "v3", "implementation-tasks.md")
+    assert.equal(result, expected)
+  })
+
   test("resolvePlanStatePath uses cwd parameter", () => {
     const result = resolvePlanStatePath(changeId, testCwd)
     const expected = path.join(runtimeDir, "plans", changeId, "plan-state.json")

@@ -24,15 +24,16 @@ use the `runecontext-workflow` skill instead.
 
 ## Planning Artifact Structure
 
-Each planning artifact has four required parts, written as separate markdown
+Each planning artifact has five required parts, written as separate markdown
 files under `<runtime-state-dir>/plans/{changeId}/{planVersion}/`:
 
-| Artifact              | Purpose                                                                                                                                                                              |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `design.md`           | Problem statement, solution approach, architecture decisions, affected modules, open questions resolved during planning                                                              |
-| `execution-groups.md` | Ordered groups of file operations, each with: owner agent, task description, files touched, dependencies, `reviewTags`, scoped verification steps, and expected verification outcome |
-| `standards.md`        | Project conventions, patterns to follow/examples to match, linting/testing expectations, and any non-negotiable quality gates                                                        |
-| `verification.md`     | How each group is verified: commands to run, manual checks, expected output, failure criteria                                                                                        |
+| Artifact                  | Purpose                                                                                                                                                                                                       |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `design.md`               | Problem statement, solution approach, architecture decisions, affected modules, open questions resolved during planning                                                                                       |
+| `execution-groups.md`     | Ordered groups of file operations, each with: owner agent, task description, files touched, dependencies, `reviewTags`, scoped verification steps, and expected verification outcome                          |
+| `standards.md`            | Project conventions, patterns to follow/examples to match, linting/testing expectations, and any non-negotiable quality gates                                                                                 |
+| `verification.md`         | How each group is verified: commands to run, manual checks, expected output, failure criteria                                                                                                                 |
+| `implementation-tasks.md` | Per-group detailed implementation task specs: likely files touched, context to read, implementation checklist, pseudocode/examples, acceptance criteria, scoped verification, self-checks, and drift triggers |
 
 ### Grouping Rules
 

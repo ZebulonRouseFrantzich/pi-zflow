@@ -13,7 +13,7 @@
  * |--------------|--------|--------------------------------------------------|--------------------------------------------------|
  * | `changeId`   | string | `assertSafeChangeId()` — kebab-case + hyphens    | Identifies the change uniquely                   |
  * | `planVersion`| string | Must match `/^v\d+$/` (e.g. "v1", "v2")          | Version label; replanning increments              |
- * | `artifact`   | string | One of: "design", "execution-groups", "standards", "verification" | The four mandatory plan artifact types |
+ * | `artifact`   | string | One of: "design", "execution-groups", "standards", "verification", "implementation-tasks" | The five mandatory plan artifact types |
  * | `content`    | string | Markdown body                                    | Full content of the artifact                     |
  *
  * ### Destination path
@@ -29,8 +29,8 @@
  *    `<runtime-state-dir>/plans/{changeId}/{planVersion}/`. Path separators
  *    in `changeId`, `..` traversal, and arbitrary directory names in `artifact`
  *    are rejected.
- * 2. **Artifact type allowlist** — Only the four approved artifact kinds
- *    (`design`, `execution-groups`, `standards`, `verification`) are accepted.
+ * 2. **Artifact type allowlist** — Only the five approved artifact kinds
+ *    (`design`, `execution-groups`, `standards`, `verification`, `implementation-tasks`) are accepted.
  *    Any other value is rejected with a clear error.
  * 3. **Atomic write (temp file + rename)** — Content is written to a `.tmp`
  *    file first, then renamed to the target path. This prevents partial/corrupt
@@ -51,7 +51,7 @@
  * function writePlanArtifact({ changeId, planVersion, artifact, content }) {
  *   assertSafeChangeId(changeId)                          // kebab-case only
  *   assert(/^v\d+$/.test(planVersion))                     // v1, v2, ...
- *   assert(["design", "execution-groups", "standards", "verification"].includes(artifact))
+ *   assert(["design", "execution-groups", "standards", "verification", "implementation-tasks"].includes(artifact))
  *   const target = resolvePlanArtifactPath(changeId, planVersion, artifact)
  *   atomicWrite(target, content)                           // write .tmp → rename
  *   recordArtifactMetadata(changeId, planVersion, artifact, hash(content))
@@ -154,11 +154,11 @@ export async function writePlanArtifact(
     }
   }
 
-  // 3. Validate artifact type (must be one of the four approved kinds)
-  let validatedArtifact: "design" | "execution-groups" | "standards" | "verification"
+  // 3. Validate artifact type (must be one of the five approved kinds)
+  let validatedArtifact: "design" | "execution-groups" | "standards" | "verification" | "implementation-tasks"
   try {
     assertValidArtifactType(artifact)
-    validatedArtifact = artifact as "design" | "execution-groups" | "standards" | "verification"
+    validatedArtifact = artifact as "design" | "execution-groups" | "standards" | "verification" | "implementation-tasks"
   } catch (err: unknown) {
     return {
       ok: false,

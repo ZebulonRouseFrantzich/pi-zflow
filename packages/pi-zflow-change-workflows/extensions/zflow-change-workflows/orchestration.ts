@@ -973,6 +973,25 @@ export function buildWorkerTask(
         ([key, val]) => `- ${key}: \`${val}\``,
       ),
     )
+
+    // Point the worker to their group's detailed task spec
+    const implTasksPath = planArtifactPaths["implementationTasks"]
+    if (implTasksPath) {
+      lines.push(
+        "",
+        "## Implementation task spec",
+        `Your group \`${group.id}\` has a corresponding section in \`implementation-tasks.md\``,
+        `that contains detailed context, pseudocode, acceptance criteria, and self-checks.`,
+        "Read it before starting implementation:",
+        "",
+        `1. Open \`${implTasksPath}\``,
+        `2. Find the section matching \`${group.id}\` or \`## Group ${group.id.replace("group-", "")}:\``,
+        `3. Review the objective, scope, likely files, checklist, pseudocode, and self-checks`,
+        "",
+        "If the implementation-tasks.md file is missing or lacks a section for your group,",
+        "STOP and report a plan-quality gap: the plan is missing a task spec for this group.",
+      )
+    }
   }
 
   lines.push(
@@ -2856,6 +2875,7 @@ export async function runPlanValidation(
     "execution-groups.md": resolvePlanArtifactPath(changeId, planVersion, "execution-groups", cwd),
     "standards.md": resolvePlanArtifactPath(changeId, planVersion, "standards", cwd),
     "verification.md": resolvePlanArtifactPath(changeId, planVersion, "verification", cwd),
+    "implementation-tasks.md": resolvePlanArtifactPath(changeId, planVersion, "implementation-tasks", cwd),
   }
 
   const issues: string[] = []
@@ -2918,6 +2938,7 @@ export async function runPlanReview(
         executionGroups: resolvePlanArtifactPath(changeId, planVersion, "execution-groups", cwd),
         standards: resolvePlanArtifactPath(changeId, planVersion, "standards", cwd),
         verification: resolvePlanArtifactPath(changeId, planVersion, "verification", cwd),
+        implementationTasks: resolvePlanArtifactPath(changeId, planVersion, "implementation-tasks", cwd),
       }
 
       const result = await (reviewService.runPlanReview as Function)({
@@ -3038,6 +3059,7 @@ export async function buildHandoffContext(
     executionGroups: resolvePlanArtifactPath(changeId, approvedVersion, "execution-groups", cwd),
     standards: resolvePlanArtifactPath(changeId, approvedVersion, "standards", cwd),
     verification: resolvePlanArtifactPath(changeId, approvedVersion, "verification", cwd),
+    implementationTasks: resolvePlanArtifactPath(changeId, approvedVersion, "implementation-tasks", cwd),
   }
 
   return {
@@ -3797,6 +3819,7 @@ export async function runPrepareAgentsIfAvailable(
     executionGroups: pathModule.join(versionDir, "execution-groups.md"),
     standards: pathModule.join(versionDir, "standards.md"),
     verification: pathModule.join(versionDir, "verification.md"),
+    implementationTasks: pathModule.join(versionDir, "implementation-tasks.md"),
   }
 
   const collectOutputs = async (): Promise<string[]> => {
@@ -3836,13 +3859,14 @@ export async function runPrepareAgentsIfAvailable(
         changePath ? `Change input path: ${changePath}` : "No change input path was provided.",
         prepareNotes ? `Additional user notes: ${prepareNotes}` : "",
         "Treat non-RuneContext idea/change documents as requirements input, then inspect the repository before planning.",
-        "Ask clarifying questions in your final output if decisions are genuinely blocked; otherwise write all four required plan artifacts.",
+        "Ask clarifying questions in your final output if decisions are genuinely blocked; otherwise write all five required plan artifacts.",
         "Use ONLY zflow_write_plan_artifact for artifact writes.",
         "Required artifact writes:",
         `- design -> ${artifactPaths.design}`,
         `- execution-groups -> ${artifactPaths.executionGroups}`,
         `- standards -> ${artifactPaths.standards}`,
         `- verification -> ${artifactPaths.verification}`,
+        `- implementation-tasks -> ${artifactPaths.implementationTasks}`,
         `Repository map path: ${artifactPaths.repoMap}`,
         `Reconnaissance path: ${artifactPaths.reconnaissance}`,
       ].filter(Boolean).join("\n")
@@ -4149,6 +4173,7 @@ export async function runChangePrepareWorkflow(
     executionGroups: path.join(versionDir, "execution-groups.md"),
     standards: path.join(versionDir, "standards.md"),
     verification: path.join(versionDir, "verification.md"),
+    implementationTasks: path.join(versionDir, "implementation-tasks.md"),
   }
 
   // 6. Add state-index entry
@@ -4302,6 +4327,37 @@ export async function runChangePrepareWorkflow(
                         ].join("\n")
                         await fs.writeFile(artifactPaths.executionGroups, basic, "utf-8")
                         console.info("[zflow] Wrote basic execution-groups.md from RuneContext docs")
+                      }
+
+                      // Write placeholder implementation-tasks.md
+                      const implTasks = [
+                        `# Implementation Tasks`,
+                        ``,
+                        `> Derived from RuneContext canonical docs.`,
+                        `> Detailed task specs should be filled by the planner before implementation.`,
+                        ``,
+                        `## Group 1: RuneContext implementation`,
+                        ``,
+                        `### Objective`,
+                        `See execution-groups.md for group description.`,
+                        ``,
+                        `### Likely files touched`,
+                        `TBD`,
+                        ``,
+                        `### Implementation checklist`,
+                        `1. Review the design, standards, and verification artifacts.`,
+                        `2. Implement the changes described in the execution group.`,
+                        `3. Run scoped verification commands.`,
+                        ``,
+                        `### Acceptance criteria`,
+                        `- All verification steps pass.`,
+                        `- No regressions in existing behavior.`,
+                      ].join("\n")
+                      try {
+                        await fs.writeFile(artifactPaths.implementationTasks, implTasks, "utf-8")
+                        console.info("[zflow] Wrote placeholder implementation-tasks.md from RuneContext docs")
+                      } catch {
+                        console.warn("[zflow] Could not write placeholder implementation-tasks.md")
                       }
                     } catch {
                       console.warn("[zflow] Could not populate artifacts from RuneContext docs")
@@ -6160,6 +6216,7 @@ const PUBLISH_ARTIFACT_FILES: Record<string, string> = {
   executionGroups: "execution-groups.md",
   standards: "standards.md",
   verification: "verification.md",
+  implementationTasks: "implementation-tasks.md",
 }
 
 /**

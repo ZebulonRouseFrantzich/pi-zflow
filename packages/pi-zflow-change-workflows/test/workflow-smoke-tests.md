@@ -111,25 +111,27 @@ derived execution groups.
 
 ---
 
-## Scenario 4: Approve and fork implementation session
+## Scenario 4: Approve plan and prepare for manual implementation
 
-**Goal:** Verify the default handoff creates a new Pi session file.
+**Goal:** Verify plan approval shows artifact paths and manual `/zflow-change-implement` instruction.
 
 1. Complete Scenario 2 (approved plan exists for `feature-x`).
-2. On the approval gate, select "Fork implementation session."
+2. Approve the plan when prompted.
    **Expected:**
-   - A new Pi session file is created (forked from current session)
-   - The session metadata includes `changeId`, `approvedVersion`,
-     `runtimeStateDir`, and `sourceSession`
-   - The original planning session remains available for inspection/resume
+   - Plan state transitions to `approved`
+   - A notification is shown listing all five artifact paths:
+     - `design.md`
+     - `execution-groups.md`
+     - `standards.md`
+     - `verification.md`
+     - `implementation-tasks.md`
+   - The notification includes the instruction to run `/zflow-change-implement feature-x`
+     manually when ready
+   - No session fork occurs
    - No git branches are created
 
-3. In the forked session, verify the handoff context:
-   - The model should start with `/zflow-change-implement` mode active
-   - The `approved-plan-loaded` reminder should include artifact paths
-
-**Pass criteria:** Forked handoff is the default and clearly separate
-from git branching.
+**Pass criteria:** Plan approval is complete after showing artifact paths
+and manual-implement instruction. No automatic session fork.
 
 ---
 

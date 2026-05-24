@@ -1318,7 +1318,7 @@ function formatPlanInspectionPaths(input: {
 
   sections.push(`📌 Runtime plan artifacts for "${input.changeId}" ${input.planVersion}:`)
   if (input.planStatePath) sections.push(`  - plan state: ${input.planStatePath}`)
-  for (const key of ["design", "executionGroups", "standards", "verification"] as const) {
+  for (const key of ["design", "executionGroups", "standards", "verification", "implementationTasks"] as const) {
     if (input.artifactPaths[key]) sections.push(`  - ${key}: ${input.artifactPaths[key]}`)
   }
   if (input.reviewFindingsPath) sections.push(`  - review findings: ${input.reviewFindingsPath}`)
@@ -1427,9 +1427,14 @@ export function isAdHocPlanModeActive(): boolean {
 /**
  * Decide whether `/zflow-change-prepare` should create an implementation
  * handoff/session fork after plan approval.
+ *
+ * Always returns false — implementation is only started when the user
+ * manually triggers `/zflow-change-implement`. The prepare workflow
+ * creates and publishes plan artifacts, runs validation + review + approval,
+ * but never launches implementation.
  */
 export function shouldForkImplementationSessionAfterPrepare(): boolean {
-  return !isAdHocPlanModeActive()
+  return false
 }
 
 /** Parsed arguments for `/zflow-change-prepare`. */
@@ -3592,20 +3597,21 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           },
         )
 
-        if (publishResult.artifactCount < 4) {
+        if (publishResult.artifactCount < 5) {
           const missing = Object.keys(publishResult.publishedArtifacts).length
           ctx.ui.notify(
-            `⚠️  Durable publish completed with errors: ${missing}/4 artifacts published.\n` +
+            `⚠️  Durable publish completed with errors: ${missing}/5 artifacts published.\n` +
             publishResult.errors.map((e) => `  - ${e}`).join("\n"),
             "warning",
           )
           ctx.ui.notify(
-            `Cannot proceed to approval — not all four required plan artifacts were published.\n` +
+            `Cannot proceed to approval — not all five required plan artifacts were published.\n` +
             `Check planner output and runtime artifact paths:\n` +
             `  - design: ${result.artifactPaths.design}\n` +
             `  - execution-groups: ${result.artifactPaths.executionGroups}\n` +
             `  - standards: ${result.artifactPaths.standards}\n` +
-            `  - verification: ${result.artifactPaths.verification}`,
+            `  - verification: ${result.artifactPaths.verification}\n` +
+            `  - implementation-tasks: ${result.artifactPaths.implementationTasks}`,
             "warning",
           )
           if (publishResult.errors.length > 0) {
@@ -3660,7 +3666,8 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
               `  - design: ${result.artifactPaths.design}\n` +
               `  - execution-groups: ${result.artifactPaths.executionGroups}\n` +
               `  - standards: ${result.artifactPaths.standards}\n` +
-              `  - verification: ${result.artifactPaths.verification}\n\n` +
+              `  - verification: ${result.artifactPaths.verification}\n` +
+              `  - implementation-tasks: ${result.artifactPaths.implementationTasks}\n\n` +
               `Use /zflow-change-audit ${result.changeId} to inspect.`,
               "info",
             )
@@ -3682,75 +3689,16 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
               "info",
             )
 
-            if (!shouldForkImplementationSessionAfterPrepare()) {
-              ctx.ui.notify(
-                `📌 Plan mode is active, so no implementation session was forked.\n` +
-                `  Plan artifacts are ready for change "${result.changeId}" v${result.planVersion}:\n` +
-                `    - design: ${result.artifactPaths.design}\n` +
-                `    - execution-groups: ${result.artifactPaths.executionGroups}\n` +
-                `    - standards: ${result.artifactPaths.standards}\n` +
-                `    - verification: ${result.artifactPaths.verification}\n\n` +
-                `  When you are ready to implement, run:\n` +
-                `    /zflow-plan exit\n` +
-                `    /zflow-change-implement ${result.changeId}`,
-                "info",
-              )
-              break
-            }
-
-            // Build implementation handoff and attempt session fork
-            const handoff = buildImplementationHandoff(
-              result.changeId,
-              result.planVersion,
-              resolveRuntimeStateDir(ctx.cwd),
-              result.artifactPaths,
-            )
-
-            const forkResult = await forkImplementationSessionIfAvailable(
-              ctx as unknown as Record<string, unknown>,
-              handoff,
-            )
-
-            if (forkResult.forked && forkResult.sessionFile) {
-              // Successfully forked into a new implementation session
-              ctx.ui.notify(
-                `🚀 Forked implementation session.\n` +
-                `  Session file: ${forkResult.sessionFile}\n` +
-                `  Change: ${handoff.changeId} v${handoff.approvedVersion}\n` +
-                `  No git branches were created.\n` +
-                `  The planning session remains available via session tree/resume.\n` +
-                `  Run \`/zflow-change-implement ${handoff.changeId}\` in the new session to begin.`,
-                "info",
-              )
-            } else if (forkResult.handoffArtifactPath) {
-              // Fallback: handoff artifact written
-              ctx.ui.notify(
-                `📋 Handoff artifact written to: ${forkResult.handoffArtifactPath}\n` +
-                `  Change: ${handoff.changeId} v${handoff.approvedVersion}\n` +
-                `  No session fork API was available — handoff data persisted for next session.\n` +
-                `  Use \`/zflow-change-implement ${handoff.changeId}\` to load the handoff.\n` +
-                `  No git branches were created.`,
-                "info",
-              )
-            } else {
-              // No fork and no artifact — show inline handoff data
-              ctx.ui.notify(
-                `📋 Handoff data prepared for change "${handoff.changeId}" v${handoff.approvedVersion}.\n` +
-                `  Pass \`/zflow-change-implement ${handoff.changeId}\` to begin implementation.`,
-                "info",
-              )
-            }
-
-            // Present handoff summary and next steps
+            // Implementation is never forked from prepare — always manual.
             ctx.ui.notify(
-              `\n📋 Implementation handoff summary:\n` +
-              `  • Plan: ${handoff.changeId} v${handoff.approvedVersion}\n` +
-              `  • Handoff mode: ${forkResult.forked ? "session-fork" : forkResult.handoffArtifactPath ? "artifact-file" : "inline"}\n` +
-              `  • Artifacts:\n` +
-              `    - design: ${handoff.planArtifactPaths.design ?? "N/A"}\n` +
-              `    - execution-groups: ${handoff.planArtifactPaths.executionGroups ?? "N/A"}\n` +
-              `    - verification: ${handoff.planArtifactPaths.verification ?? "N/A"}\n` +
-              `  • Next: Run \`/zflow-change-implement ${handoff.changeId}\``,
+              `📌 Plan artifacts are ready for change "${result.changeId}" v${result.planVersion}:\n` +
+              `    - design: ${result.artifactPaths.design}\n` +
+              `    - execution-groups: ${result.artifactPaths.executionGroups}\n` +
+              `    - standards: ${result.artifactPaths.standards}\n` +
+              `    - verification: ${result.artifactPaths.verification}\n` +
+              `    - implementation-tasks: ${result.artifactPaths.implementationTasks}\n\n` +
+              `  When you are ready to implement, run:\n` +
+              `    /zflow-change-implement ${result.changeId}`,
               "info",
             )
             break

@@ -32,19 +32,24 @@ planning artifacts for completeness, consistency, and structural correctness
 Check each of the following against the plan artifacts under
 `<runtime-state-dir>/plans/{changeId}/{planVersion}/`:
 
-1. **All four artifacts exist:** `design.md`, `execution-groups.md`,
-   `standards.md`, `verification.md`.
-2. **Execution-group structural rules:**
+1. **All five artifacts exist:** `design.md`, `execution-groups.md`,
+   `standards.md`, `verification.md`, `implementation-tasks.md`.
+2. **Implementation-task completeness:** Each group in `execution-groups.md`
+   must have a corresponding task spec section in `implementation-tasks.md`
+   (matching by group number or name). Each task spec should cover likely files,
+   context to read, implementation checklist, pseudocode/examples, acceptance
+   criteria, scoped verification steps, self-checks, and drift triggers.
+3. **Execution-group structural rules:**
    - Every group touches ≤7 files.
    - The plan has ≤3 phases (milestones).
    - Dependencies are consistent (no missing or circular deps).
    - Every group assigns an agent.
    - Every group lists concrete scoped verification steps.
-3. **Decision-completeness:** The design resolves the what, why, how, and
+4. **Decision-completeness:** The design resolves the what, why, how, and
    verification approach. Unresolved questions are flagged.
-4. **Standards coverage:** The `standards.md` lists at least the conventions
+5. **Standards coverage:** The `standards.md` lists at least the conventions
    and quality gates relevant to the change.
-5. **Verification concreteness:** Verification steps are specific commands with
+6. **Verification concreteness:** Verification steps are specific commands with
    expected outcomes, not vague statements like "run tests".
 
 ## Report format
@@ -64,6 +69,7 @@ Output a structured report:
 - execution-groups.md: ✅ found
 - standards.md: ✅ found
 - verification.md: ✅ found
+- implementation-tasks.md: ✅ found
 
 ## Structural rules
 
