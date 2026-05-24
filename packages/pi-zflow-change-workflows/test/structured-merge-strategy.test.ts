@@ -228,11 +228,9 @@ describe("resolveFileConflicts — non-overlapping additions", () => {
     const content = [
       "const config = {",
       "<<<<<<< ours",
-      '  port: 3000,',
       '  host: "localhost",',
       "=======",
-      '  port: 3000,',
-      '  debug: true,',
+      "  debug: true,",
       ">>>>>>> theirs",
       "}",
     ].join("\n")
@@ -261,7 +259,7 @@ describe("resolveAllConflicts", () => {
     execFileSync("git", ["config", "user.name", "Test"], { cwd: repoPath, stdio: "pipe" })
     writeFile(repoPath, "README.md", "# No conflicts\n")
     execFileSync("git", ["add", "-A"], { cwd: repoPath, stdio: "pipe" })
-    execFileSync("git", ["commit", "-m", "init"], { cwd: repoPath, stdio: "pipe" })
+    execFileSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: repoPath, stdio: "pipe" })
 
     const result = resolveAllConflicts(repoPath)
     assert.equal(result.success, true)

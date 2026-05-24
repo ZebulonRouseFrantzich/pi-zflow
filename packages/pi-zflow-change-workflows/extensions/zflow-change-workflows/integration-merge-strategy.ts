@@ -284,8 +284,14 @@ function createSyntheticCommit(
   })
 
   // Commit with a message that identifies the group
-  const branchRef = `refs/heads/${branchName}`
   execFileSync("git", ["commit", "--allow-empty", "-m", `zflow: ${groupId} synthetic commit`], {
+    cwd: worktreePath,
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 30_000,
+  })
+
+  // Point the group branch at this commit so it can be merged later
+  execFileSync("git", ["branch", "-f", branchName, "HEAD"], {
     cwd: worktreePath,
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 30_000,
@@ -327,11 +333,15 @@ function mergeGroupIntoIntegration(
   }
 
   // Merge failed — abort and try cherry-pick
-  execFileSync("git", ["merge", "--abort"], {
-    cwd: worktreePath,
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: 30_000,
-  })
+  try {
+    execFileSync("git", ["merge", "--abort"], {
+      cwd: worktreePath,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30_000,
+    })
+  } catch {
+    // merge --abort fails when there's no merge in progress — that's OK
+  }
 
   // Get the list of commits to cherry-pick
   const integrationHead = git(worktreePath, "rev-parse", "HEAD")
@@ -355,11 +365,15 @@ function mergeGroupIntoIntegration(
   }
 
   // Cherry-pick also failed — abort and collect conflict info
-  execFileSync("git", ["cherry-pick", "--abort"], {
-    cwd: worktreePath,
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: 30_000,
-  })
+  try {
+    execFileSync("git", ["cherry-pick", "--abort"], {
+      cwd: worktreePath,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30_000,
+    })
+  } catch {
+    // cherry-pick --abort fails when there's no cherry-pick in progress — that's OK
+  }
 
   // Collect conflicted files
   const conflictResult = gitSafe(worktreePath, "diff", "--name-only", "--diff-filter=U")

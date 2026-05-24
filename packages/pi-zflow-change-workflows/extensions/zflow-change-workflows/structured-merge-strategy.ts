@@ -448,16 +448,23 @@ export function resolveFileConflicts(filePath: string): StructuredMergeResult {
  * @returns Overall structured merge result.
  */
 export function resolveAllConflicts(repoRoot: string): StructuredMergeResult {
-  // Find all files with conflict markers
-  const grepResult = execFileSync(
-    "git", ["grep", "-l", "^<<<<<<< \\|^=======$\\|^>>>>>>> ", "--", "."],
-    {
-      cwd: repoRoot,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 30_000,
-    },
-  )
+  // Find all files with conflict markers. git grep exits 1 when no matches found.
+  let grepResult = ""
+  try {
+    grepResult = execFileSync(
+      "git", ["grep", "-l", "^<<<<<<< \\|^=======$\\|^>>>>>>> ", "--", "."],
+      {
+        cwd: repoRoot,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 30_000,
+      },
+    )
+  } catch (err: unknown) {
+    // git grep exits 1 when no matches — that's expected, not an error
+    const e = err as { status?: number }
+    if (e.status !== 1) throw err
+  }
 
   const conflictedFiles = grepResult.trim()
     ? grepResult.split("\n").filter(Boolean)

@@ -37,18 +37,26 @@ function writeFile(repoRoot: string, filePath: string, content: string): void {
 
 function gitAddCommit(repoRoot: string, message: string): string {
   execFileSync("git", ["add", "-A"], { cwd: repoRoot, stdio: "pipe" })
-  execFileSync("git", ["commit", "-m", message], { cwd: repoRoot, stdio: "pipe" })
+  execFileSync("git", ["commit", "--allow-empty", "-m", message], { cwd: repoRoot, stdio: "pipe" })
   return execFileSync("git", ["rev-parse", "HEAD"], {
     cwd: repoRoot, encoding: "utf-8",
   }).trim()
 }
 
-function createPatch(repoRoot: string, baseCommit: string, patchPath: string): void {
+/**
+ * Create a patch from baseCommit to HEAD and write it to a temp dir
+ * outside the repo. Returns the absolute path to the patch file.
+ * Patches are written outside the repo to prevent `git add -A` from
+ * accidentally committing patch text that fools the coverage verifier.
+ */
+function createPatchOutsideRepo(repoRoot: string, baseCommit: string): string {
   const diff = execFileSync("git", ["diff", baseCommit, "HEAD"], {
     cwd: repoRoot, encoding: "utf-8",
   })
-  fsSync.mkdirSync(path.dirname(patchPath), { recursive: true })
+  const tmpDir = fsSync.mkdtempSync(path.join(os.tmpdir(), "pi-zflow-patch-"))
+  const patchPath = path.join(tmpDir, "patch.diff")
   fsSync.writeFileSync(patchPath, diff, "utf-8")
+  return patchPath
 }
 
 // ---------------------------------------------------------------------------
@@ -172,8 +180,7 @@ describe("verifyGroupCoverage", () => {
     // Make a change and create a patch
     writeFile(repo, "src/lib.ts", 'export const VERSION = "1.0"\n')
     gitAddCommit(repo, "add lib")
-    const patchPath = path.join(repo, "group.patch")
-    createPatch(repo, baseCommit, patchPath)
+    const patchPath = createPatchOutsideRepo(repo, baseCommit)
 
     // Reset to base
     execFileSync("git", ["reset", "--hard", baseCommit], { cwd: repo, stdio: "pipe" })
@@ -198,8 +205,7 @@ describe("verifyGroupCoverage", () => {
     // Create a patch
     writeFile(repo, "src/extra.ts", 'export const EXTRA = "yes"\n')
     gitAddCommit(repo, "add extra")
-    const patchPath = path.join(repo, "group.patch")
-    createPatch(repo, baseCommit, patchPath)
+    const patchPath = createPatchOutsideRepo(repo, baseCommit)
 
     // Reset and DON'T apply the change
     execFileSync("git", ["reset", "--hard", baseCommit], { cwd: repo, stdio: "pipe" })
@@ -233,8 +239,7 @@ describe("verifyGroupCoverage", () => {
       "export default config",
     ].join("\n"))
     gitAddCommit(repo, "group adds host")
-    const patchPath = path.join(repo, "group.patch")
-    createPatch(repo, baseCommit, patchPath)
+    const patchPath = createPatchOutsideRepo(repo, baseCommit)
 
     // Merge result has a different structure (e.g. host on same line)
     execFileSync("git", ["reset", "--hard", baseCommit], { cwd: repo, stdio: "pipe" })
@@ -253,20 +258,26 @@ describe("verifyGroupCoverage", () => {
     await fs.rm(repo, { recursive: true, force: true })
   })
 
-  test("preserves unchanged patch correctly", async () => {
+  test("preserves unchanged patch correctly when all hunks match", async () => {
     const repo = await createTempRepo()
     writeFile(repo, "README.md", "# Original\n")
-    gitAddCommit(repo, "initial")
+    const baseCommit = gitAddCommit(repo, "initial")
 
-    // Create a patch that was already applied
+    // Make a change and capture the patch
     writeFile(repo, "README.md", "# Original\n\n## Section 2\n")
     gitAddCommit(repo, "add section")
-    const patchPath = path.join(repo, "group.patch")
-    createPatch(repo, gitAddCommit(repo, "pre-base"), patchPath)
-    // Hmm, need to adjust — let's do it properly
+    const patchPath = createPatchOutsideRepo(repo, baseCommit)
 
-    // Actually let's use the same base as the merged result
-    // Cleaner test below
+    // Reset and re-apply exactly the same change (simulate preserved merge)
+    execFileSync("git", ["reset", "--hard", baseCommit], { cwd: repo, stdio: "pipe" })
+    writeFile(repo, "README.md", "# Original\n\n## Section 2\n")
+    gitAddCommit(repo, "merged same")
+
+    const coverage = await verifyGroupCoverage("same-group", patchPath, repo, baseCommit)
+    assert.equal(coverage.covered, true)
+    assert.equal(coverage.missingHunks.length, 0)
+    assert.equal(coverage.preservedHunks.length, coverage.originalHunks.length)
+
     await fs.rm(repo, { recursive: true, force: true })
   })
 
@@ -278,8 +289,7 @@ describe("verifyGroupCoverage", () => {
     // Delete the file
     fsSync.unlinkSync(path.join(repo, "src/old.ts"))
     gitAddCommit(repo, "delete old")
-    const patchPath = path.join(repo, "group.patch")
-    createPatch(repo, baseCommit, patchPath)
+    const patchPath = createPatchOutsideRepo(repo, baseCommit)
 
     // Reset and re-delete (simulating merged result)
     execFileSync("git", ["reset", "--hard", baseCommit], { cwd: repo, stdio: "pipe" })
@@ -334,14 +344,12 @@ describe("generateCoverageReport", () => {
     // Group A: add lib-a
     writeFile(repo, "src/lib-a.ts", 'export const A = 1\n')
     gitAddCommit(repo, "add lib-a")
-    const patchA = path.join(repo, "patch-a.patch")
-    createPatch(repo, baseCommit, patchA)
+    const patchA = createPatchOutsideRepo(repo, baseCommit)
 
     // Group B: add lib-b
     writeFile(repo, "src/lib-b.ts", 'export const B = 2\n')
     gitAddCommit(repo, "add lib-b")
-    const patchB = path.join(repo, "patch-b.patch")
-    createPatch(repo, baseCommit, patchB)
+    const patchB = createPatchOutsideRepo(repo, baseCommit)
 
     // Reset to base and apply both changes (simulate successful merge)
     execFileSync("git", ["reset", "--hard", baseCommit], { cwd: repo, stdio: "pipe" })
@@ -373,14 +381,12 @@ describe("generateCoverageReport", () => {
     // Group A: will be applied
     writeFile(repo, "src/lib-a.ts", 'export const A = 1\n')
     gitAddCommit(repo, "add lib-a")
-    const patchA = path.join(repo, "patch-a.patch")
-    createPatch(repo, baseCommit, patchA)
+    const patchA = createPatchOutsideRepo(repo, baseCommit)
 
     // Group B: will NOT be applied
     writeFile(repo, "src/lib-b.ts", 'export const B = 2\n')
     gitAddCommit(repo, "add lib-b")
-    const patchB = path.join(repo, "patch-b.patch")
-    createPatch(repo, baseCommit, patchB)
+    const patchB = createPatchOutsideRepo(repo, baseCommit)
 
     // Reset and only apply group A
     execFileSync("git", ["reset", "--hard", baseCommit], { cwd: repo, stdio: "pipe" })
@@ -412,8 +418,7 @@ describe("generateCoverageReport", () => {
     // One patch applied
     writeFile(repo, "src/feature.ts", 'export const FEATURE = true\n')
     gitAddCommit(repo, "add feature")
-    const patchPath = path.join(repo, "feature.patch")
-    createPatch(repo, baseCommit, patchPath)
+    const patchPath = createPatchOutsideRepo(repo, baseCommit)
 
     execFileSync("git", ["reset", "--hard", baseCommit], { cwd: repo, stdio: "pipe" })
     writeFile(repo, "src/feature.ts", 'export const FEATURE = true\n')

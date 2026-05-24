@@ -16,7 +16,7 @@ import {
   recoverFromApplyBack,
 } from "../extensions/zflow-change-workflows/apply-back.js"
 
-import type { ApplyBackOptions, RecoveryOptions, CascadeApplyBackOptions, CascadeApplyBackResult } from "../extensions/zflow-change-workflows/apply-back.js"
+import type { RecoveryOptions, CascadeApplyBackOptions, CascadeApplyBackResult } from "../extensions/zflow-change-workflows/apply-back.js"
 
 import { createRun, createRecoveryRef, readRun, updateRun } from "pi-zflow-artifacts/run-state"
 import type { PreApplySnapshot } from "pi-zflow-artifacts/run-state"
@@ -165,12 +165,13 @@ describe("executeApplyBack", () => {
       makeGroup("group-2", ["README.md"], ["group-1"]),
     ]
 
-    const options: ApplyBackOptions = {
+    const options: CascadeApplyBackOptions = {
       runId,
       repoRoot,
       snapshot,
       groups,
       cwd: repoRoot,
+      useCascade: false,
     }
 
     const result = await executeApplyBack(options)
@@ -221,12 +222,13 @@ describe("executeApplyBack", () => {
       makeGroup("group-2", ["README.md"], ["group-1"]),
     ]
 
-    const options: ApplyBackOptions = {
+    const options: CascadeApplyBackOptions = {
       runId,
       repoRoot,
       snapshot,
       groups,
       cwd: repoRoot,
+      useCascade: false,
     }
 
     const result = await executeApplyBack(options)
