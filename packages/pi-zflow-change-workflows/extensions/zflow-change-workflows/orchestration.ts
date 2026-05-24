@@ -2448,6 +2448,94 @@ export async function finalizeWorktreeImplementationRun(
  * const final = await finalizeWorktreeImplementationRun(plan.runId, results, ...)
  */
 
+// ── Patch apply from ledger (for resume / --apply-successful) ───
+
+/**
+ * Apply patches from a run's group ledger using the smart apply-back cascade.
+ *
+ * This is the unified entry point for all patch application paths:
+ * fresh finalization, resume, and --apply-successful.
+ *
+ * Reads the run.json, builds execution groups from the stored group metadata,
+ * and delegates to `executeApplyBack()` with full strategy cascade.
+ *
+ * Does NOT require GroupResult[] — patches are resolved from
+ * `patches/<groupId>.patch` in the run directory by `executeApplyBack`.
+ *
+ * @param runId - Unique run identifier.
+ * @param cwd - Working directory for runtime state dir resolution.
+ * @param options - Optional settings.
+ * @returns The cascade apply-back result.
+ */
+export async function applyPatchesWithLedger(
+  runId: string,
+  cwd?: string,
+  options?: {
+    /** When true, skip eligibility checks and try to apply all groups (default: true). */
+    applyAll?: boolean
+    /** Callback for progress messages. */
+    onProgress?: (message: string) => void
+  },
+): Promise<CascadeApplyBackResult> {
+  // Read the run to get stored group metadata and repo root
+  const run = await readRun(runId, cwd).catch(() => {
+    throw new Error(`Run "${runId}" not found. Cannot apply patches.`)
+  })
+
+  const repoRoot = run.repoRoot
+
+  // Build ExecutionGroup[] from the stored group metadata in run.json
+  const applyBackGroups: ExecutionGroup[] = run.groups.map((g) => ({
+    id: g.groupId,
+    files: g.changedFiles,
+    dependencies: run.groups
+      .filter((other) => other.groupId !== g.groupId)
+      .map((other) => other.groupId),
+    parallelizable: true,
+  }))
+
+  const applyAll = options?.applyAll ?? true
+
+  if (applyAll) {
+    options?.onProgress?.(`Applying ${applyBackGroups.length} group(s) via smart apply-back cascade.`)
+  }
+
+  // Ensure we have a pre-apply snapshot and recovery ref.
+  // If the run already has one, use it. If not (legacy run), create one.
+  const snapshot = run.preApplySnapshot ?? await (async () => {
+    const { execFile } = await import("node:child_process")
+    const { promisify } = await import("node:util")
+    const execFileAsync = promisify(execFile)
+    const { stdout: headSha } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repoRoot })
+    const recoveryRef = `refs/zflow/recovery/${runId}`
+    const snap = {
+      head: headSha.trim(),
+      indexState: "clean",
+      recoveryRef,
+    }
+    await updateRun(runId, { preApplySnapshot: snap }, cwd)
+    return snap
+  })()
+
+  // Delegate to the smart cascade
+  const result = await executeApplyBack({
+    runId,
+    repoRoot,
+    snapshot,
+    groups: applyBackGroups,
+    cwd,
+    useCascade: true,
+  })
+
+  options?.onProgress?.(
+    result.success
+      ? `Apply-back completed: ${result.groupsApplied} group(s) applied via "${result.successfulStrategy ?? "patch-replay"}" strategy.`
+      : `Apply-back incomplete: ${result.groupsApplied}/${result.totalGroups} group(s) applied. ${result.error ?? "Unknown error"}`,
+  )
+
+  return result
+}
+
 // ── Subagent resolution for apply-back conflicts ────────────────
 
 /**

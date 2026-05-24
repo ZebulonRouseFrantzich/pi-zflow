@@ -1978,9 +1978,7 @@ async function applySuccessfulGroupPatches(
   onProgress?: (message: string) => void,
 ): Promise<{ applied: string[]; errors: string[]; summaryPath: string }> {
   const { default: fs } = await import("node:fs/promises")
-  const { execFile } = await import("node:child_process")
-  const { promisify } = await import("node:util")
-  const execFileAsync = promisify(execFile)
+  const { applyPatchesWithLedger } = await import("./orchestration.js")
 
   const ledger = await getGroupLedger(runId, cwd)
   const entries = Object.values(ledger)
@@ -1989,15 +1987,10 @@ async function applySuccessfulGroupPatches(
   const applied: string[] = []
   const errors: string[] = []
 
-  // Determine repo root
-  const { resolveRunDir } = await import("pi-zflow-artifacts/artifact-paths")
-  const runDir = resolveRunDir(runId, cwd)
-  const { stdout: repoRootRaw } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd: cwd ?? process.cwd() })
-  const repoRoot = repoRootRaw.trim()
-
+  // Use existing eligibility checks to build the list of groups to apply
+  const eligibleGroups: string[] = []
   for (const entry of entries) {
     if (entry.appliedToPrimary) {
-      // If already marked applied, verify the patch file still exists
       if (entry.patchPath) {
         try {
           await fs.access(entry.patchPath)
@@ -2014,46 +2007,76 @@ async function applySuccessfulGroupPatches(
       continue
     }
 
-    const patchPath = entry.patchPath!
-    onProgress?.(`Applying group "${entry.groupId}" patch: ${patchPath}`)
+    eligibleGroups.push(entry.groupId)
+  }
 
-    try {
-      await execFileAsync("git", ["apply", "--3way", "--index", "--binary", patchPath], {
-        cwd: repoRoot,
-        timeout: 30_000,
-      })
-      applied.push(entry.groupId)
-      ledger[entry.groupId] = {
-        ...entry,
-        status: "applied",
-        appliedToPrimary: true,
-        updatedAt: new Date().toISOString(),
-      }
-      await updateGroupLedger(runId, entry.groupId, {
+  if (eligibleGroups.length === 0) {
+    onProgress?.("No groups eligible for apply-back.")
+    const { readRun, updateRun } = await import("pi-zflow-artifacts")
+    const run = await readRun(runId, cwd)
+    await updateRun(runId, {
+      phase: "partial",
+      metadata: {
+        ...(run.metadata ?? {}),
+        applySuccessfulResult: {
+          applied: 0,
+          errors: errors.length,
+        },
+      },
+    } as any, cwd)
+    const summaryPath = await writeGroupStatusSummary(runId, changeId, cwd).catch(() => "")
+    return { applied, errors, summaryPath }
+  }
+
+  // Delegate to the smart apply-back cascade
+  onProgress?.(`${eligibleGroups.length} group(s) eligible. Running smart apply-back cascade...`)
+
+  const cascadeResult = await applyPatchesWithLedger(runId, cwd, {
+    applyAll: true,
+    onProgress,
+  })
+
+  // Map cascade result back to the old return format
+  if (cascadeResult.success) {
+    // All eligible groups were applied
+    for (const gid of eligibleGroups) {
+      applied.push(gid)
+      await updateGroupLedger(runId, gid, {
         status: "applied",
         appliedToPrimary: true,
       }, cwd)
-    } catch (applyErr: unknown) {
-      const msg = applyErr instanceof Error ? applyErr.message : String(applyErr)
-      errors.push(`Group "${entry.groupId}" git apply failed: ${msg}`)
+    }
+  } else {
+    // Cascade failed — determine which groups failed
+    const ledgerAfter = await getGroupLedger(runId, cwd)
+    for (const gid of eligibleGroups) {
+      const entry = ledgerAfter[gid]
+      if (entry?.appliedToPrimary) {
+        applied.push(gid)
+      } else {
+        errors.push(`Group "${gid}" apply-back failed via cascade: ${cascadeResult.error ?? "Unknown error"}`)
+      }
     }
   }
 
   const { readRun, updateRun } = await import("pi-zflow-artifacts")
   const run = await readRun(runId, cwd)
   await updateRun(runId, {
-    phase: "partial",
+    phase: cascadeResult.success ? "completed" : "partial",
     metadata: {
       ...(run.metadata ?? {}),
       applySuccessfulResult: {
         applied: applied.length,
         errors: errors.length,
       },
+      strategiesAttempted: cascadeResult.strategiesAttempted,
+      successfulStrategy: cascadeResult.successfulStrategy,
+      subagentAvailable: cascadeResult.subagentAvailable,
     },
   } as any, cwd)
 
   const summaryPath = await writeGroupStatusSummary(runId, changeId, cwd).catch(() => "")
-  onProgress?.(`Applied ${applied.length} group(s). ${errors.length} error(s).`)
+  onProgress?.(`Applied ${applied.length} group(s). ${errors.length} error(s). Cascade strategy: ${cascadeResult.successfulStrategy ?? "none"}.`)
 
   return { applied, errors, summaryPath }
 }
