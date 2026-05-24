@@ -123,7 +123,7 @@ The installable GitHub package pins that fork to an exact commit SHA.
 
 | Fork package          | Package dependency                                                                                                    | Upstream                             | Pinning strategy              |
 | --------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------ | ----------------------------- |
-| `pi-subagents` (fork) | `https://github.com/ZebulonRouseFrantzich/pi-subagents-zflow/archive/7d8463d6c1c62d9e732246cb62fa54b8d68644be.tar.gz` | `github.com/nicobailon/pi-subagents` | Exact commit tarball required |
+| `pi-subagents` (fork) | `file:../../vendor/pi-subagents-zflow` in local development; publish/installable packages must pin the pushed fork commit containing `5b6e889a7b925f563b750fd975a224f096f5167f` | `github.com/nicobailon/pi-subagents` | Local vendor ref until the fork commits are pushed, then exact commit tarball required |
 
 **Submodule checkout**: the `vendor/pi-subagents-zflow` submodule remains available for fork development. Use `git submodule update --init --recursive` after cloning pi-zflow when you need to edit the fork locally.
 
@@ -144,6 +144,7 @@ The installable GitHub package pins that fork to an exact commit SHA.
 | Date | Package | Old pin | New pin | Reason           |
 | ---- | ------- | ------- | ------- | ---------------- |
 | 2026-05-22 | `pi-rtk-optimizer` | `0.7.1` | `0.8.0` | `0.7.1` peers on deprecated `@mariozechner/*` Pi packages and fails npm reify under current Pi `0.75.4`; `0.8.0` peers on `@earendil-works/*`. |
+| 2026-05-23 | `pi-subagents` fork | `7d8463d6c1c62d9e732246cb62fa54b8d68644be` | local `vendor/pi-subagents-zflow` at `5b6e889a7b925f563b750fd975a224f096f5167f` | zflow bridge needs module-scope `findAgent` and worktree/plain dispatch `onUpdate` forwarding so workflow progress does not remain stale while child workers run; switch back to an exact tarball after pushing the fork commit. |
 
 ---
 

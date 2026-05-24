@@ -2133,7 +2133,7 @@ async function resumeWorktreeDispatch(
   const tasks = runPlan.tasks.map((t) => ({
     agent: t.agent,
     task: t.task,
-    model: implementModel.model,
+    model: implementModel.dispatchModel,
     output: path.join(worktreeResultsDir, `${t.groupId}-resume-result.md`),
     outputMode: "file-only" as const,
     onUpdate: (progress: AgentDispatchProgress) => {
@@ -2541,7 +2541,7 @@ async function runWorktreeDispatchAndFinalize(
   const tasks = runPlan.tasks.map((t, taskIdx) => ({
     agent: t.agent,
     task: t.task,
-    model: implementModel.model,
+    model: implementModel.dispatchModel,
     output: path.join(worktreeResultsDir, `${t.groupId}-result.md`),
     outputMode: "file-only" as const,
     onUpdate: (progress: AgentDispatchProgress) => {
@@ -2687,7 +2687,7 @@ async function runWorktreeDispatchAndFinalize(
         return {
           agent: task.agent,
           task: task.task,
-          model: implementModel.model,
+          model: implementModel.dispatchModel,
           output: path.join(worktreeResultsDir, `${task.groupId}-retry-result.md`),
           outputMode: "file-only" as const,
           onUpdate: (progress: AgentDispatchProgress) => {
@@ -3132,14 +3132,26 @@ async function ensureProfileResolved(ctx: InterviewableContext): Promise<boolean
   return false
 }
 
-async function resolveWorkflowModel(agentName: string): Promise<{ model?: string; thinking?: string }> {
+const THINKING_SUFFIX_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"])
+
+function applyProfileThinkingSuffix(model: string | undefined, thinking: string | undefined): string | undefined {
+  if (!model || !thinking || thinking === "off") return model
+  const colonIdx = model.lastIndexOf(":")
+  if (colonIdx !== -1 && THINKING_SUFFIX_LEVELS.has(model.slice(colonIdx + 1))) return model
+  return `${model}:${thinking}`
+}
+
+async function resolveWorkflowModel(agentName: string): Promise<{ model?: string; thinking?: string; dispatchModel?: string }> {
   try {
     const { getResolvedAgentBinding, getResolvedLane } = await import("pi-zflow-profiles")
     const binding = await getResolvedAgentBinding(agentName)
     const lane = binding?.lane ? await getResolvedLane(binding.lane) : null
+    const model = binding?.resolvedModel ?? undefined
+    const thinking = lane?.thinking ?? undefined
     return {
-      model: binding?.resolvedModel ?? undefined,
-      thinking: lane?.thinking ?? undefined,
+      model,
+      thinking,
+      dispatchModel: applyProfileThinkingSuffix(model, thinking),
     }
   } catch {
     return {}
