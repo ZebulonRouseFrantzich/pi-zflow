@@ -71,11 +71,11 @@ describe("checkThinkingCompatibility", () => {
     assert.equal(result.reason, "")
   })
 
-  it("compatible when model exceeds requested (clamp up)", () => {
+  it("compatible when model exceeds requested but preserves requested level", () => {
     const result = checkThinkingCompatibility("high", "low", false, "m1")
     assert.equal(result.compatible, true)
-    assert.equal(result.effectiveLevel, "high")
-    assert.ok(result.reason.includes("overprovisioning"))
+    assert.equal(result.effectiveLevel, "low")
+    assert.ok(result.reason.includes("requesting configured lane level \"low\""))
   })
 
   it("incompatible when model below requested and conservative", () => {

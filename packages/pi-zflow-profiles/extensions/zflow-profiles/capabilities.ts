@@ -129,15 +129,18 @@ export function checkThinkingCompatibility(
   const requestedScore = scoreThinking(requestedLevel)
   const modelScore = scoreThinking(modelThinking)
 
-  // Model meets or exceeds requested level → compatible (clamp up is fine)
+  // Model meets or exceeds requested level. The model's advertised thinking is
+  // its maximum capability, not the level we should request. Preserve the
+  // lane's requested level so cheap/medium lanes do not get silently promoted
+  // to xhigh just because a model supports it.
   if (modelScore >= requestedScore) {
     const reason =
       modelScore > requestedScore
-        ? `Model "${modelId}" provides "${modelThinking}" thinking (exceeds requested "${requestedLevel}") — acceptable overprovisioning.`
+        ? `Model "${modelId}" supports "${modelThinking}" thinking; requesting configured lane level "${requestedLevel}".`
         : ""
     return {
       compatible: true,
-      effectiveLevel: modelThinking,
+      effectiveLevel: requestedLevel,
       reason,
     }
   }

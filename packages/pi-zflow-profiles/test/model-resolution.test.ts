@@ -186,11 +186,11 @@ describe("resolveLane", () => {
 })
 
 describe("resolveLane — thinking compatibility", () => {
-  it("accepts model with higher thinking than requested (clamp up)", () => {
+  it("accepts model with higher thinking capability while preserving requested level", () => {
     const reg = makeRegistry([model("m1", { thinkingCapability: "high" })])
     const result = resolveLane("scout-cheap", lane(["m1"], { thinking: "low" }), reg)
     assert.equal(result.status, "resolved")
-    assert.equal(result.thinking, "high")
+    assert.equal(result.thinking, "low")
   })
 
   it("rejects thinking downgrade for conservative lane", () => {
@@ -550,13 +550,13 @@ describe("isModelThinkingCompatible", () => {
     assert.equal(result.effectiveLevel, "medium")
   })
 
-  it("compatible when model exceeds requested level (clamp up)", () => {
+  it("compatible when model exceeds requested level but preserves requested level", () => {
     const result = isModelThinkingCompatible(
       model("m1", { thinkingCapability: "high" }),
       "low",
     )
     assert.equal(result.compatible, true)
-    assert.equal(result.effectiveLevel, "high")
+    assert.equal(result.effectiveLevel, "low")
   })
 
   it("incompatible when model below requested and conservative", () => {
