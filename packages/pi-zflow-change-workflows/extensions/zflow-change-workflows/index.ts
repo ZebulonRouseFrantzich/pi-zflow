@@ -808,8 +808,9 @@ function toPhaseCardModel(card: WorkflowPhaseCardSnapshot): ZflowCardViewModel {
 }
 
 function toReviewerCardModel(reviewer: WorkflowReviewerSnapshot): ZflowCardViewModel {
-  const model = reviewer.model ?? "unavailable"
-  const thinking = reviewer.thinking ?? "unavailable"
+  const modelWithThinking = reviewer.model?.match(/^(.*?)\s+·\s+thinking:\s*(\S+)\s*$/i)
+  const model = modelWithThinking?.[1]?.trim() || reviewer.model || "unavailable"
+  const thinking = reviewer.thinking ?? modelWithThinking?.[2] ?? "unavailable"
   const status = reviewer.status
   const icon = status === "completed" ? "✅" : status === "failed" ? "❌" : status === "queued" ? "⏳" : "▶️"
   return {
@@ -819,7 +820,8 @@ function toReviewerCardModel(reviewer: WorkflowReviewerSnapshot): ZflowCardViewM
     statusLine: status,
     metaLines: [
       `${reviewer.agentName}`,
-      `model: ${model} · thinking: ${thinking}`,
+      `model: ${model}`,
+      `thinking: ${thinking}`,
     ],
     bodyLines: [`last: ${reviewer.lastCommand ?? reviewer.currentTool ?? "starting"}`],
     thinking: reviewer.thinking,
@@ -939,6 +941,30 @@ function renderWorkflowCards(
   }
 
   return rendered
+}
+
+function buildWorkflowFinalNextStepsLine(
+  postResult: { status: string; phase: string; nextSteps: string[]; reviewFindingsPath?: string },
+  changeInput: string,
+): string {
+  if (postResult.status === "completed") return "No further steps — workflow is complete."
+
+  if (postResult.phase === "review-failed") {
+    const findings = postResult.reviewFindingsPath
+      ? ` Findings: ${postResult.reviewFindingsPath}.`
+      : ""
+    return `Next: fix review findings, then run /zflow-change-implement ${changeInput} --resume.${findings}`
+  }
+
+  if (postResult.phase === "verification-failed") {
+    return `Next: fix verification failures, then run /zflow-change-implement ${changeInput} --resume.`
+  }
+
+  if (postResult.nextSteps.length > 0) {
+    return `Next steps: ${postResult.nextSteps.map((s) => s.replace(/^\d+\.\s*/, "")).join("; ")}`
+  }
+
+  return `Next: inspect the run, then run /zflow-change-implement ${changeInput} --resume when ready.`
 }
 
 /**
@@ -5344,10 +5370,11 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
                 }
 
                 // ── Step 3: Post-start sequence (verification, review) ──
+                const postStartModel = await resolveWorkflowModel("zflow.implement-routine")
                 const implProgress = createWorkflowProgressIndicator(pi, ctx, changeInput, {
                   command: "zflow-change-implement",
-                  model: "resolved",
-                  thinking: "unavailable",
+                  model: postStartModel.model ?? "unavailable",
+                  thinking: postStartModel.thinking ?? "unavailable",
                   initialMessage: "Continuing to final verification and review",
                   statusId: "zflow-implement",
                   widgetId: "zflow-implement-progress",
@@ -5407,6 +5434,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
                 const finalCardStatus = postResult.status === "completed" ? "completed" : "failed"
                 const finalCardTitle = postResult.status === "completed" ? "Workflow Complete" : "Workflow Needs Attention"
                 implProgress.updatePhaseCard("workflow-complete", finalCardTitle, `Phase: ${postResult.phase}, status: ${postResult.status}`, finalCardStatus)
+                implProgress.updatePhaseCard("workflow-complete", finalCardTitle, buildWorkflowFinalNextStepsLine(postResult, changeInput), finalCardStatus)
                 implProgress.stop(finalCardTitle)
               } else {
                 // Apply-back failed — offer subagent resolution
@@ -5468,10 +5496,11 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
               }
             } else if (reconciliation.verificationNeeded) {
               // All groups applied — just continue to verification/review
+              const postStartModel = await resolveWorkflowModel("zflow.implement-routine")
               const implProgress = createWorkflowProgressIndicator(pi, ctx, changeInput, {
                 command: "zflow-change-implement",
-                model: "resolved",
-                thinking: "unavailable",
+                model: postStartModel.model ?? "unavailable",
+                thinking: postStartModel.thinking ?? "unavailable",
                 initialMessage: "Continuing to verification and review",
                 statusId: "zflow-implement",
                 widgetId: "zflow-implement-progress",
@@ -5524,6 +5553,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
               const finalCardStatus = postResult.status === "completed" ? "completed" : "failed"
               const finalCardTitle = postResult.status === "completed" ? "Workflow Complete" : "Workflow Needs Attention"
               implProgress.updatePhaseCard("workflow-complete", finalCardTitle, `Phase: ${postResult.phase}, status: ${postResult.status}`, finalCardStatus)
+              implProgress.updatePhaseCard("workflow-complete", finalCardTitle, buildWorkflowFinalNextStepsLine(postResult, changeInput), finalCardStatus)
               implProgress.stop(finalCardTitle)
             }
 
@@ -5749,9 +5779,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             ? "failed"
             : "running"
         const finalCardTitle = postResult.status === "completed" ? "Workflow Complete" : "Workflow Needs Attention"
-        const nextStepsLine = postResult.nextSteps.length > 0
-          ? `Next steps: ${postResult.nextSteps.map((s) => s.replace(/^\d+\.\s*/, "")).join("; ")}`
-          : "No further steps — workflow is complete."
+        const nextStepsLine = buildWorkflowFinalNextStepsLine(postResult, changeInput)
 
         // Update the Workflow Complete / Workflow Needs Attention card with both lines
         implProgress.updatePhaseCard(
