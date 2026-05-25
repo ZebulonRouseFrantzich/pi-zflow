@@ -3370,6 +3370,7 @@ async function startResolverWorktreeObserver(
   const logs: string[] = []
   let stopped = false
   let prevHead = ""
+  let prevUnmergedSignature = ""
   let prevStatusSignature = ""
   let prevConflictCounts = ""
   let lastActivityAt = Date.now()
@@ -3446,10 +3447,18 @@ async function startResolverWorktreeObserver(
       }
 
       // Unmerged file changes
-      if (unmergedFiles.length > 0) {
-        const unmergedStr = unmergedFiles.join(", ")
-        const truncated = unmergedStr.length > 120 ? unmergedStr.slice(0, 117) + "..." : unmergedStr
-        events.push(`unmerged: ${truncated}`)
+      const unmergedSignature = unmergedOut || ""
+      if (unmergedSignature !== prevUnmergedSignature) {
+        if (unmergedFiles.length > 0) {
+          const unmergedStr = unmergedFiles.join(", ")
+          const truncated = unmergedStr.length > 120 ? unmergedStr.slice(0, 117) + "..." : unmergedStr
+          events.push(`unmerged: ${truncated}`)
+          lastActivityAt = Date.now()
+        } else if (prevUnmergedSignature) {
+          events.push("all unmerged files resolved")
+          lastActivityAt = Date.now()
+        }
+        prevUnmergedSignature = unmergedSignature
       }
 
       // Conflict marker count changes
@@ -3475,10 +3484,7 @@ async function startResolverWorktreeObserver(
       if (statusSignature && statusSignature !== prevStatusSignature) {
         const modifiedFiles = statusOut.split("\n")
           .filter((l: string) => l.trim())
-          .map((l: string) => {
-            const m = l.match(/^\s*[MARCUD]\s+(.+)$/)
-            return m ? m[1] : null
-          })
+          .map((l: string) => l.slice(3).trim())
           .filter(Boolean)
         if (modifiedFiles.length > 0) {
           const fileList = modifiedFiles.slice(0, 5).join(", ")
