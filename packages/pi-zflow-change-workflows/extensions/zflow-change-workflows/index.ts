@@ -3541,6 +3541,81 @@ async function startResolverWorktreeObserver(
   return observer
 }
 
+// ── Coverage repair helpers ─────────────────────────────────────────
+
+async function autoRestoreSimpleAdditions(
+  missingFiles: string[],
+  groups: Array<{ groupId: string }>,
+  patchesDir: string,
+  integrationWorktreePath: string,
+): Promise<number> {
+  const { execFileSync } = await import("node:child_process")
+  const fs = await import("node:fs")
+  const path = await import("node:path")
+
+  let restored = 0
+  for (const file of missingFiles) {
+    for (const group of groups) {
+      const patchPath = path.join(patchesDir, `${group.groupId}.patch`)
+      if (!fs.existsSync(patchPath)) continue
+
+      const content = fs.readFileSync(patchPath, "utf-8")
+      if (!content.includes(`diff --git a/${file} `)) continue
+
+      // Extract single-file patch
+      const lines = content.split("\n")
+      const start = lines.findIndex((l: string) => l.startsWith(`diff --git a/${file} `))
+      if (start < 0) continue
+      let end = start + 1
+      for (; end < lines.length; end++) {
+        if (lines[end].startsWith("diff --git ") && end > start + 1) break
+      }
+
+      const tmpPatch = path.join(patchesDir, `_repair-${path.basename(file)}.patch`)
+      fs.writeFileSync(tmpPatch, lines.slice(start, end).join("\n") + "\n", "utf-8")
+
+      try {
+        execFileSync("git", ["apply", "--3way", tmpPatch], {
+          cwd: integrationWorktreePath,
+          stdio: ["ignore", "pipe", "pipe"],
+          timeout: 15_000,
+        })
+        restored++
+        try { fs.unlinkSync(tmpPatch) } catch { /* ok */ }
+        break
+      } catch {
+        try { fs.unlinkSync(tmpPatch) } catch { /* ok */ }
+      }
+    }
+  }
+  return restored
+}
+
+async function buildCoverageRepairPrompt(
+  failedGroups: Array<{ groupId: string; summary: string; missingHunks: Array<{ file: string; kind: string }> }>,
+): Promise<string> {
+  const parts: string[] = [
+    "Repair coverage gaps in the integration worktree.",
+    "",
+    "The following groups have missing changes:",
+    "",
+  ]
+  for (const g of failedGroups) {
+    parts.push(`### ${g.groupId}`)
+    parts.push(g.summary)
+    parts.push("")
+  }
+  parts.push(
+    "Instructions:",
+    "- For each missing file, add the missing content from the original intent.",
+    "- Preserve existing changes; do NOT remove any code.",
+    "- For add-type hunks, create the file with its intended content.",
+    "- For modify-type hunks, ensure the changes exist in the target files.",
+    "- After completing, run: git add -A && git commit -m \"zflow: coverage repair\"",
+  )
+  return parts.join("\n")
+}
+
 // ── Integration continuation helpers ────────────────────────────────
 
 interface RemainingGroupBranch {
@@ -3981,42 +4056,76 @@ async function resolveApplyBackWithSubagent(
   const coverageInputs = run.groups
     .map((g) => ({ groupId: g.groupId, patchPath: path.join(runDir, "patches", `${g.groupId}.patch`) }))
   progress?.onPhase?.("verify", "Verify Resolution", "Running no-lost-code coverage verification", "running")
-  const coverageReport = await generateCoverageReport(coverageInputs, integrationWorktreePath, baseCommit)
+  let coverageReport = await generateCoverageReport(coverageInputs, integrationWorktreePath, baseCommit)
   await fs.writeFile(
     path.join(runDir, "subagent-resolution-coverage.json"),
     JSON.stringify(coverageReport, null, 2),
     "utf-8",
   )
   if (!coverageReport.allCovered) {
-    const failedGroups = coverageReport.groups
+    // ── Auto-restore simple missing additions ────────────────
+    const allMissingFiles = coverageReport.groups
       .filter((g) => !g.covered)
-      .map((g) => g.groupId)
-    const missingFiles = coverageReport.groups
       .flatMap((g) => g.missingHunks.map((h) => h.file))
-    await updateRun(runId, {
-      metadata: {
-        ...(run.metadata ?? {}),
-        subagentResolutionAttempted: true,
-        subagentResolutionError: "coverage verification failed",
-        subagentResolutionCoverageFailed: true,
-        subagentResolutionCoverageSummary: coverageReport.summary,
-        subagentResolutionRepairable: true,
-        subagentResolutionMissingGroups: failedGroups.join(", "),
-        subagentResolutionMissingFiles: missingFiles.join(", "),
-        subagentResolutionConflictResolutions: conflictResolutionCount,
-        subagentResolutionGroupsMerged: groupsMerged,
-        subagentResolutionGroupsTotal: totalGroups,
-        subagentResolvedPatchPath: resolvedPatchPath,
-      },
-    } as any, cwd)
-    progress?.onPhase?.("verify", "Verify Resolution",
-      `Coverage incomplete: ${failedGroups.length} groups need repair`, "failed")
-    throw new Error(
-      `Coverage repair needed after integration: ${failedGroups.length}/${totalGroups} groups incomplete.\n` +
-      `Missing groups: ${failedGroups.join(", ")}.\n` +
-      `Resolved patch preserved at ${resolvedPatchPath}.\n` +
-      `Run /zflow-resolve-apply-back ${runId} again to continue coverage repair.`
-    )
+    if (allMissingFiles.length > 0) {
+      progress?.onPhase?.("repair", "Coverage Repair",
+        `Auto-restoring simple missing files`, "running")
+      const patchesDir = path.join(runDir, "patches")
+      const groupsInput = run.groups.map((g) => ({ groupId: g.groupId }))
+      const restored = await autoRestoreSimpleAdditions(allMissingFiles, groupsInput, patchesDir, integrationWorktreePath)
+      if (restored > 0) {
+        await execFileAsync("git", ["add", "-A"], { cwd: integrationWorktreePath })
+        await execFileAsync("git", ["commit", "--allow-empty",
+          "-m", `zflow: auto-restored ${restored} missing file(s)`],
+          { cwd: integrationWorktreePath })
+        const repairCoverage = await generateCoverageReport(coverageInputs, integrationWorktreePath, baseCommit)
+        Object.assign(coverageReport, repairCoverage)
+        await fs.writeFile(
+          path.join(runDir, "subagent-resolution-coverage.json"),
+          JSON.stringify(coverageReport, null, 2),
+          "utf-8",
+        )
+        if (coverageReport.allCovered) {
+          progress?.onPhase?.("repair", "Coverage Repair",
+            `Auto-restored ${restored} file(s); coverage now complete`, "completed")
+        } else {
+          progress?.onPhase?.("repair", "Coverage Repair",
+            `Auto-restored ${restored} file(s); ${coverageReport.groups.filter((g) => !g.covered).length} group(s) still incomplete`, "running")
+        }
+      }
+    }
+    // If auto-restore fully repaired coverage, skip the failure path
+    if (!coverageReport.allCovered) {
+      const failedGroups = coverageReport.groups
+        .filter((g) => !g.covered)
+        .map((g) => g.groupId)
+      const missingFiles = coverageReport.groups
+        .flatMap((g) => g.missingHunks.map((h) => h.file))
+      await updateRun(runId, {
+        metadata: {
+          ...(run.metadata ?? {}),
+          subagentResolutionAttempted: true,
+          subagentResolutionError: "coverage verification failed",
+          subagentResolutionCoverageFailed: true,
+          subagentResolutionCoverageSummary: coverageReport.summary,
+          subagentResolutionRepairable: true,
+          subagentResolutionMissingGroups: failedGroups.join(", "),
+          subagentResolutionMissingFiles: missingFiles.join(", "),
+          subagentResolutionConflictResolutions: conflictResolutionCount,
+          subagentResolutionGroupsMerged: groupsMerged,
+          subagentResolutionGroupsTotal: totalGroups,
+          subagentResolvedPatchPath: resolvedPatchPath,
+        },
+      } as any, cwd)
+      progress?.onPhase?.("verify", "Verify Resolution",
+        `Coverage incomplete: ${failedGroups.length} groups need repair`, "failed")
+      throw new Error(
+        `Coverage repair needed after integration: ${failedGroups.length}/${totalGroups} groups incomplete.\n` +
+        `Missing groups: ${failedGroups.join(", ")}.\n` +
+        `Resolved patch preserved at ${resolvedPatchPath}.\n` +
+        `Run /zflow-resolve-apply-back ${runId} again to continue coverage repair.`
+      )
+    }
   }
   progress?.onPhase?.("verify", "Verify Resolution", "Coverage verified; all group changes preserved", "completed")
 
