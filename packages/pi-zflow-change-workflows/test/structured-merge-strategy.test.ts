@@ -203,8 +203,10 @@ describe("resolveFileConflicts — package.json conflicts", () => {
       "}",
     ].join("\n")
 
-    // For package.json, we need the file name to be package.json
-    const filePath = path.join(os.tmpdir(), "package.json")
+    // For package.json, we need the file name to be package.json.
+    // Use a unique temp directory per test for isolation.
+    const tmpDir = fsSync.mkdtempSync(path.join(os.tmpdir(), "pi-zflow-pkg-"))
+    const filePath = path.join(tmpDir, "package.json")
     fsSync.writeFileSync(filePath, content, "utf-8")
 
     const result = resolveFileConflicts(filePath)
@@ -215,7 +217,7 @@ describe("resolveFileConflicts — package.json conflicts", () => {
     assert.ok(resolvedContent.includes("axios"), "should keep axios")
     assert.equal(hasUnresolvedMarkers(filePath), false)
 
-    fsSync.unlinkSync(filePath)
+    fsSync.rmSync(tmpDir, { recursive: true, force: true })
   })
 })
 
@@ -235,14 +237,15 @@ describe("resolveFileConflicts — non-overlapping additions", () => {
       "}",
     ].join("\n")
 
-    const filePath = path.join(os.tmpdir(), "non-overlap.ts")
+    const tmpDir = fsSync.mkdtempSync(path.join(os.tmpdir(), "pi-zflow-nonoverlap-"))
+    const filePath = path.join(tmpDir, "non-overlap.ts")
     fsSync.writeFileSync(filePath, content, "utf-8")
 
     const result = resolveFileConflicts(filePath)
     // At least one resolver should work
     assert.ok(result.resolved > 0 || result.success, "should attempt resolution")
 
-    fsSync.unlinkSync(filePath)
+    fsSync.rmSync(tmpDir, { recursive: true, force: true })
   })
 })
 
@@ -252,7 +255,7 @@ describe("resolveFileConflicts — non-overlapping additions", () => {
 
 describe("resolveAllConflicts", () => {
   test("returns success when no conflicts exist", () => {
-    const repoPath = path.join(os.tmpdir(), "no-conflict-repo")
+    const repoPath = fsSync.mkdtempSync(path.join(os.tmpdir(), "pi-zflow-no-conflict-"))
     fsSync.mkdirSync(repoPath, { recursive: true })
     execFileSync("git", ["init"], { cwd: repoPath, stdio: "pipe" })
     execFileSync("git", ["config", "user.email", "test@test"], { cwd: repoPath, stdio: "pipe" })
@@ -266,7 +269,7 @@ describe("resolveAllConflicts", () => {
     assert.equal(result.resolved, 0)
     assert.equal(result.unresolved, 0)
 
-    execFileSync("rm", ["-rf", repoPath], { stdio: "pipe" })
+    fsSync.rmSync(repoPath, { recursive: true, force: true })
   })
 })
 
@@ -276,12 +279,13 @@ describe("resolveAllConflicts", () => {
 
 describe("isConflictSafeForAutoResolution", () => {
   test("returns true for clean files", () => {
-    const filePath = path.join(os.tmpdir(), "safe-clean.txt")
+    const tmpDir = fsSync.mkdtempSync(path.join(os.tmpdir(), "pi-zflow-safe-"))
+    const filePath = path.join(tmpDir, "safe-clean.txt")
     fsSync.writeFileSync(filePath, "clean file\n", "utf-8")
 
     assert.equal(isConflictSafeForAutoResolution(filePath), true)
 
-    fsSync.unlinkSync(filePath)
+    fsSync.rmSync(tmpDir, { recursive: true, force: true })
   })
 
   test("returns true for import-only conflicts", () => {
@@ -296,12 +300,13 @@ describe("isConflictSafeForAutoResolution", () => {
       "export const x = 1",
     ].join("\n")
 
-    const filePath = path.join(os.tmpdir(), "safe-import.txt")
+    const tmpDir = fsSync.mkdtempSync(path.join(os.tmpdir(), "pi-zflow-safe-"))
+    const filePath = path.join(tmpDir, "safe-import.txt")
     fsSync.writeFileSync(filePath, content, "utf-8")
 
     // Using import resolution, this should be safe
     assert.equal(isConflictSafeForAutoResolution(filePath), true)
 
-    fsSync.unlinkSync(filePath)
+    fsSync.rmSync(tmpDir, { recursive: true, force: true })
   })
 })

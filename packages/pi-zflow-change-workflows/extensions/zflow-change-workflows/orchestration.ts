@@ -2397,7 +2397,7 @@ export async function finalizeWorktreeImplementationRun(
             "with full context about each group's original task.",
             "",
             "To request subagent resolution, run:",
-            `/zflow-change-implement ${changeId} --resolve-with-subagent`,
+            `  /zflow-resolve-apply-back ${runId}`,
             "",
             "To resolve manually:",
             "1. Inspect the integration worktree or patches in the run directory.",

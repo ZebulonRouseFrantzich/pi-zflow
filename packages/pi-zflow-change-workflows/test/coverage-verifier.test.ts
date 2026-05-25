@@ -48,12 +48,22 @@ function gitAddCommit(repoRoot: string, message: string): string {
  * outside the repo. Returns the absolute path to the patch file.
  * Patches are written outside the repo to prevent `git add -A` from
  * accidentally committing patch text that fools the coverage verifier.
+ * Cleans up temp dir via a registered after() callback.
  */
+const tempDirsForCleanup: string[] = []
+
+after(async () => {
+  for (const dir of tempDirsForCleanup) {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
+  }
+})
+
 function createPatchOutsideRepo(repoRoot: string, baseCommit: string): string {
   const diff = execFileSync("git", ["diff", baseCommit, "HEAD"], {
     cwd: repoRoot, encoding: "utf-8",
   })
   const tmpDir = fsSync.mkdtempSync(path.join(os.tmpdir(), "pi-zflow-patch-"))
+  tempDirsForCleanup.push(tmpDir)
   const patchPath = path.join(tmpDir, "patch.diff")
   fsSync.writeFileSync(patchPath, diff, "utf-8")
   return patchPath

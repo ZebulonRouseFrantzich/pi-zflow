@@ -275,64 +275,6 @@ function resolveConfigConflict(region: ConflictRegion, filePath: string): string
 }
 
 /**
- * Try to resolve a package.json dependency conflict.
- *
- * Pattern: both sides added different packages to "dependencies" or
- * "devDependencies".
- *
- * @param lines - The merged lines so far.
- * @returns Whether resolution was attempted.
- */
-function resolvePackageJsonConflict(filePath: string): boolean {
-  if (path.basename(filePath) !== "package.json") return false
-
-  let content: string
-  try {
-    content = fs.readFileSync(filePath, "utf-8")
-  } catch {
-    return false
-  }
-
-  const regions = detectConflictRegions(filePath)
-  if (regions.length === 0) return false
-
-  const resolved: string[] = []
-  let hasChanges = false
-
-  for (const region of regions) {
-    // Try JSON key merge for the whole region content
-    const result = resolveConfigConflict(
-      { ...region, file: filePath },
-      filePath,
-    )
-    if (result) {
-      resolved.push(...result)
-      hasChanges = true
-    } else {
-      // Keep conflict markers
-      resolved.push(
-        `<<<<<<< ${region.file}`,
-        ...region.ours,
-        "=======",
-        ...region.theirs,
-        `>>>>>>> ${region.file}`,
-      )
-    }
-  }
-
-  if (hasChanges) {
-    // Write resolved content back
-    const contentLines = content.split("\n")
-    // This is a simplified approach — for real implementation we'd
-    // need to replace regions in the original content
-    writeResolvedContent(filePath, content, regions)
-    return true
-  }
-
-  return false
-}
-
-/**
  * Write resolved content back to a file, replacing conflict regions
  * with resolved content.
  */

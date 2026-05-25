@@ -351,13 +351,16 @@ describe("recoverFromApplyBack", () => {
 
 describe("ConsolidatedPatchStrategy", () => {
   let repoRoot: string
+  let patchDir: string
 
   before(async () => {
     repoRoot = await createTempRepo()
+    patchDir = fsSync.mkdtempSync(path.join(os.tmpdir(), "pi-zflow-consolidated-"))
   })
 
   after(async () => {
     await fs.rm(repoRoot, { recursive: true, force: true })
+    await fs.rm(patchDir, { recursive: true, force: true }).catch(() => {})
   })
 
   test("applies consolidated patch successfully", async () => {
@@ -375,8 +378,8 @@ describe("ConsolidatedPatchStrategy", () => {
     // Reset to original
     execFileSync("git", ["reset", "--hard", headSha], { cwd: repoRoot, stdio: "pipe" })
 
-    // Write consolidated patch
-    const patchPath = path.join(os.tmpdir(), "consolidated-test.patch")
+    // Write consolidated patch in unique temp dir
+    const patchPath = path.join(patchDir, "consolidated-test.patch")
     fsSync.writeFileSync(patchPath, diff, "utf-8")
 
     const strategy = new ConsolidatedPatchStrategy(patchPath)
@@ -388,7 +391,7 @@ describe("ConsolidatedPatchStrategy", () => {
   })
 
   test("throws on invalid consolidated patch", async () => {
-    const patchPath = path.join(os.tmpdir(), "bad-consolidated.patch")
+    const patchPath = path.join(patchDir, "bad-consolidated.patch")
     fsSync.writeFileSync(patchPath, "not a valid patch", "utf-8")
 
     const strategy = new ConsolidatedPatchStrategy(patchPath)

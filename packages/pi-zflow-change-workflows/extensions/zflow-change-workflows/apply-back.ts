@@ -442,6 +442,7 @@ async function executePatchReplayApplyBack(
 async function markApplyBackCompleted(runId: string, cwd?: string): Promise<void> {
   const currentRun = await readRun(runId, cwd).catch(() => null)
   const existingStartedAt = currentRun?.applyBack?.startedAt
+  const repoRoot = currentRun?.repoRoot ?? cwd ?? process.cwd()
 
   await updateRun(runId, {
     phase: "completed",
@@ -452,6 +453,14 @@ async function markApplyBackCompleted(runId: string, cwd?: string): Promise<void
     },
     preApplySnapshot: undefined,
   }, cwd)
+
+  // Also remove the Git recovery ref so stale refs don't accumulate
+  try {
+    const { removeRecoveryRef } = await import("pi-zflow-artifacts")
+    removeRecoveryRef(runId, repoRoot)
+  } catch {
+    // best-effort — ref cleanup is non-critical
+  }
 }
 
 /**
