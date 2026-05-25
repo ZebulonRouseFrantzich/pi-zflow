@@ -1198,7 +1198,7 @@ function createWorkflowProgressIndicator(
     },
     updatePhaseCard(cardId: string, title: string, message: string, status: "running" | "completed" | "failed" = "running") {
       const current = workflowProgressSnapshots.get(id)
-      const normalizedMessage = visualTruncate(message.replace(/\s+/g, " ").trim(), 120)
+      const normalizedMessage = visualTruncate(message.replace(/\s+/g, " ").trim(), 200)
       if (current) {
         const currentPhaseCards = current.phaseCards ?? []
         const existing = currentPhaseCards.find((card) => card.id === cardId)
