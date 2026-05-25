@@ -3634,6 +3634,58 @@ async function buildCoverageRepairPrompt(
   return parts.join("\n")
 }
 
+// ── Marker-free unmerged finalization ────────────────────────────────
+
+interface FinalizeResult {
+  recovered: boolean
+  committed: boolean
+  unmergedFiles: string[]
+  markerDetails: string
+}
+
+export async function finalizeMarkerFreeResolution(
+  integrationWorktreePath: string,
+  groupId: string,
+  commitMessage?: string,
+): Promise<FinalizeResult> {
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const execFileAsync = promisify(execFile)
+
+  const markerCheck = await execFileAsync("git", [
+    "grep", "-n", "-E", "^(<<<<<<<|=======|>>>>>>>)", "--", ".",
+  ], { cwd: integrationWorktreePath })
+    .then((r) => r.stdout.trim())
+    .catch((err) => {
+      const e = err as { code?: number }
+      if (e.code === 1) return ""
+      throw err
+    })
+
+  const unmergedOut = await execFileAsync("git", ["diff", "--name-only", "--diff-filter=U"], {
+    cwd: integrationWorktreePath,
+  }).then((r) => r.stdout.trim())
+  const unmergedFiles = unmergedOut ? unmergedOut.split("\n").filter(Boolean) : []
+
+  if (markerCheck) {
+    return { recovered: false, committed: false, unmergedFiles, markerDetails: markerCheck }
+  }
+
+  if (unmergedFiles.length === 0) {
+    return { recovered: true, committed: false, unmergedFiles: [], markerDetails: "" }
+  }
+
+  // Markers resolved but index still unmerged — stage and commit
+  await execFileAsync("git", ["add", "-A"], { cwd: integrationWorktreePath, timeout: 30_000 })
+  const msg = commitMessage ?? `zflow: integrate group ${groupId} with resolution`
+  await execFileAsync("git", ["commit", "--allow-empty", "-m", msg], {
+    cwd: integrationWorktreePath,
+    timeout: 30_000,
+  })
+
+  return { recovered: true, committed: true, unmergedFiles, markerDetails: "" }
+}
+
 // ── Integration continuation helpers ────────────────────────────────
 
 interface RemainingGroupBranch {
@@ -4028,14 +4080,28 @@ async function resolveApplyBackWithSubagent(
           dispatchResult = { ok: false, rawOutput: "", error: String(dispatchErr) }
         }
 
-        // Check transport error
+        // Check transport error — resolver may have resolved markers before the
+        // transport died.  If markers are gone, stage/commit the unmerged files.
         if (!dispatchResult.ok && isTransportDispatchError(dispatchResult.error)) {
-          const wtState = await inspectResolverWorktreeState(integrationWorktreePath).catch(() => undefined)
-          if (wtState && wtState.unmergedFiles.length === 0 && !wtState.hasConflictMarkers) {
-            // Transport error but worktree resolved — continue
+          const finalizeResult = await finalizeMarkerFreeResolution(
+            integrationWorktreePath,
+            branch.groupId,
+            `zflow: integrate group ${branch.groupId} with resolution`,
+          ).catch(() => ({ recovered: false, committed: false, unmergedFiles: [], markerDetails: "inspection failed" }) as FinalizeResult)
+
+          if (finalizeResult.recovered) {
             groupsMerged++
             progress?.onPhase?.("continue", "Continue Integration",
-              `Transport error but group ${branch.groupId} resolved (${groupsMerged}/${totalGroups})`, "running")
+              `Transport error but markers resolved for group ${branch.groupId}; staged/committed (${groupsMerged}/${totalGroups})`, "running")
+            progress?.onSubagent?.("apply-back-resolver", {
+              agent: "zflow.implement-hard",
+              title: "Apply-back resolver",
+              model: model.model,
+              thinking: model.thinking,
+              status: "completed",
+              lastCommand: `recovered marker-free state for group ${branch.groupId}`,
+              finishedAt: Date.now(),
+            })
             continue
           }
         }
@@ -4048,13 +4114,16 @@ async function resolveApplyBackWithSubagent(
           )
         }
 
-        // Verify no conflict markers remain
-        const markerCheck = await execFileAsync("git", [
-          "grep", "-E", "^(<<<<<<<|=======|>>>>>>>)", "--", ".",
-        ], { cwd: integrationWorktreePath }).then((r) => r.stdout.trim()).catch(() => "")
-
-        if (markerCheck) {
-          throw new Error(`Conflict markers remain after resolver for group ${branch.groupId}`)
+        // Finalize: stage/commit if markers are gone but index is unmerged
+        const finalizeResult = await finalizeMarkerFreeResolution(
+          integrationWorktreePath,
+          branch.groupId,
+          `zflow: integrate group ${branch.groupId} with resolution`,
+        )
+        if (finalizeResult.markerDetails) {
+          throw new Error(
+            `Conflict markers remain after resolver for group ${branch.groupId}:\n${finalizeResult.markerDetails}`
+          )
         }
 
         groupsMerged++
