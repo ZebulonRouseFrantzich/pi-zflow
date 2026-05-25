@@ -2644,9 +2644,24 @@ async function runWorktreeDispatchAndFinalize(
   const groups = parseExecutionGroupsMd(executionGroupsMd)
 
   if (groups.length === 0) {
+    const preview = executionGroupsMd.slice(0, 500).trim()
+    const previewHint = preview.length > 0
+      ? `\n\nFile content preview (first 500 chars):\n\`\`\`markdown\n${preview}${executionGroupsMd.length > 500 ? "\n…(truncated)" : ""}\n\`\`\``
+      : "\n\n(File is empty)"
+    const formatHint =
+      `\n\nExpected format — each group must start with a heading like:\n` +
+      `  ## Group 1: descriptive name\n` +
+      `  ## G1 — descriptive name\n` +
+      `  ## Execution Group 1: descriptive name\n\n` +
+      `Followed by:\n` +
+      `  **Files:** path/to/file.ts, another/file.ts\n` +
+      `  **Agent:** zflow.implement-routine\n` +
+      `  **Scoped verification:** the verification command for this group`
     throw new Error(
       `No execution groups found in ${executionGroupsArtifactPath}. ` +
-      "The approved plan must contain at least one implementation group.",
+      "The approved plan must contain at least one implementation group." +
+      previewHint +
+      formatHint,
     )
   }
 

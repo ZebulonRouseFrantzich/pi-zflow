@@ -93,14 +93,23 @@ import type { VerificationResult, FixLoopResult, FixLoopOptions } from "./verifi
 /**
  * Parse execution-groups.md content into ExecutionGroup objects.
  *
- * Expects the format:
+ * Accepts several heading formats to be resilient to LLM output variance:
  *
  * ```markdown
- * ## Group {n}: {descriptive name}
+ * ## Group 1: descriptive name
+ * ## G1 — descriptive name
+ * ## Execution Group 1: descriptive name
+ * # Group 1: descriptive name          (h1 also accepted)
+ * ```
  *
+ * Field keys are matched with or without leading `- ` bullet and with or
+ * without the "Scoped" prefix on verification:
+ *
+ * ```markdown
+ * **Files:** path/to/file.ts, another/file.ts
  * - **Files:** path/to/file.ts, another/file.ts
- * - **Agent:** zflow.implement-routine
- * - **Verification:** optional scoped verification text
+ * **Verification:** optional scoped verification text
+ * - **Scoped verification:** optional scoped verification text
  * ```
  */
 export function parseExecutionGroupsMd(mdContent: string): import("./ownership-validator.js").ExecutionGroup[] {
@@ -198,8 +207,11 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
   }
 
   for (const line of lines) {
-    const groupMatch = line.match(/^#{2,4}\s+Group\s+(\d+[A-Za-z]?)\s*(?::|[—-])\s+(.+)$/i) ??
-      line.match(/^#{2,4}\s+G(\d+[A-Za-z]?)\s+[—-]\s+(.+)$/i)
+    // Accept h1-h4 headings: ## Group 1: Name, # Group 1: Name,
+    // ## G1 — Name, ## Execution Group 1: Name
+    const groupMatch = line.match(/^#{1,4}\s+Group\s+(\d+[A-Za-z]?)\s*(?::|[—-])\s+(.+)$/i) ??
+      line.match(/^#{1,4}\s+G(\d+[A-Za-z]?)\s+[—-]\s+(.+)$/i) ??
+      line.match(/^#{1,4}\s+Execution\s+Group\s+(\d+[A-Za-z]?)\s*(?::|[—-])\s+(.+)$/i)
     if (groupMatch) {
       pushCurrentGroup()
       currentGroup = {
@@ -227,6 +239,7 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
     }
 
     const filesHeaderMatch = line.match(/-\s+\*\*Files?(?:\/paths)?:\*\*\s*$/i) ??
+      line.match(/^\*\*Files?(?:\/paths)?:\*\*\s*$/i) ??
       line.match(/^Files?(?:\s+touched)?(?:\/paths)?(?:\s*\([^)]*\))?:\s*$/i)
     if (filesHeaderMatch) {
       collectingFiles = true
@@ -236,6 +249,7 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
     }
 
     const filesMatch = line.match(/-\s+\*\*Files?(?:\/paths)?:\*\*\s+(.+)/i) ??
+      line.match(/^\*\*Files?(?:\/paths)?:\*\*\s+(.+)/i) ??
       line.match(/^Files?(?:\s+touched)?(?:\/paths)?(?:\s*\([^)]*\))?:\s+(.+)$/i)
     if (filesMatch) {
       currentGroup.files = filesMatch[1].split(",").map((f: string) => f.trim()).filter(Boolean)
@@ -249,30 +263,34 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
         currentGroup.files = [...(currentGroup.files ?? []), fileItemMatch[1].trim()]
         continue
       }
-      if (line.trim().startsWith("- **") || /^[A-Z][A-Za-z\s]+:/.test(line.trim())) collectingFiles = false
+      if (line.trim().startsWith("- **") || line.trim().startsWith("**") || /^[A-Z][A-Za-z\s]+:/.test(line.trim())) collectingFiles = false
     }
 
     const agentMatch = line.match(/-\s+\*\*Agent:\*\*\s+(.+)/i) ??
+      line.match(/^\*\*Agent:\*\*\s+(.+)/i) ??
       line.match(/^Owner agent:\s+`?([^`\n]+)`?/i)
     if (agentMatch) {
       currentGroup.agent = agentMatch[1].trim()
       continue
     }
 
-    const ownerMatch = line.match(/-\s+\*\*Owner:\*\*\s+`?([^`\n]+)`?/i)
+    const ownerMatch = line.match(/-\s+\*\*Owner:\*\*\s+`?([^`\n]+)`?/i) ??
+      line.match(/^\*\*Owner:\*\*\s+`?([^`\n]+)`?/i)
     if (ownerMatch) {
       currentGroup.agent = ownerMatch[1].trim()
       continue
     }
 
     const taskMatch = line.match(/-\s+\*\*Task:\*\*\s+(.+)/i) ??
+      line.match(/^\*\*Task:\*\*\s+(.+)/i) ??
       line.match(/^Task description:\s+(.+)/i)
     if (taskMatch) {
       currentGroup.taskPrompt = taskMatch[1].trim()
       continue
     }
 
-    const depMatch = line.match(/-\s+\*\*Dependencies:\*\*\s+(.+)/i)
+    const depMatch = line.match(/-\s+\*\*Dependencies:\*\*\s+(.+)/i) ??
+      line.match(/^\*\*Dependencies:\*\*\s+(.+)/i)
     if (depMatch) {
       const explicitDependencies = depMatch[1]
         .replace(/^`|`$/g, "")
@@ -302,8 +320,9 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
       if (/^[A-Z][A-Za-z\s]+:/.test(line.trim())) collectingDependencies = false
     }
 
-    const verifHeaderMatch = line.match(/-\s+\*\*Scoped verification:\*\*\s*$/i) ??
-      line.match(/^Scoped verification:\s*$/i)
+    const verifHeaderMatch = line.match(/-\s+\*\*(?:Scoped\s+)?[Vv]erification:\*\*\s*$/i) ??
+      line.match(/^\*\*(?:Scoped\s+)?[Vv]erification:\*\*\s*$/i) ??
+      line.match(/^(?:Scoped\s+)?[Vv]erification:\s*$/i)
     if (verifHeaderMatch) {
       collectingVerification = true
       collectingFiles = false
@@ -312,7 +331,9 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
       continue
     }
 
-    const verifMatch = line.match(/-\s+\*\*(?:Verification|Scoped verification):\*\*\s+(.+)/i)
+    const verifMatch = line.match(/-\s+\*\*(?:Scoped\s+)?[Vv]erification:\*\*\s+(.+)/i) ??
+      line.match(/^\*\*(?:Scoped\s+)?[Vv]erification:\*\*\s+(.+)/i) ??
+      line.match(/^(?:Scoped\s+)?[Vv]erification:\s+(.+)/i)
     if (verifMatch) {
       currentGroup.scopedVerification = verifMatch[1].trim()
       collectingVerification = false
@@ -340,6 +361,7 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
     }
 
     const parallelMatch = line.match(/-\s+\*\*Parallelizable:\*\*\s+(.+)/i) ??
+      line.match(/^\*\*Parallelizable:\*\*\s+(.+)/i) ??
       line.match(/^Parallelizable:\s+(.+)/i)
     if (parallelMatch) {
       currentGroup.parallelizable = parallelMatch[1].trim().toLowerCase() === "yes" ||
@@ -4521,6 +4543,31 @@ export async function runPrepareAgentsIfAvailable(
         `- implementation-tasks -> ${artifactPaths.implementationTasks}`,
         `Repository map path: ${artifactPaths.repoMap}`,
         `Reconnaissance path: ${artifactPaths.reconnaissance}`,
+        "",
+        "## Critical: execution-groups.md format",
+        "",
+        "Each group MUST use this exact heading and field format so the implementation",
+        "workflow can parse it:",
+        "",
+        "```markdown",
+        "## Group 1: Short descriptive name for this group",
+        "",
+        "Brief paragraph describing what this group implements.",
+        "",
+        "**Files:** src/path/file.ts, src/other/file.ts",
+        "**Agent:** zflow.implement-routine",
+        "**Dependencies:** none",
+        "**Scoped verification:** npm test -- --testPathPattern=src/path",
+        "**Parallelizable:** true",
+        "```",
+        "",
+        "Rules:",
+        "- Start each group with `## Group N: Name` (h2 heading).",
+        "- Use `**Key:** value` format (no leading dash) for Files, Agent, Dependencies, Scoped verification, and Parallelizable.",
+        "- Every group MUST have a concrete `**Scoped verification:**` command (not TBD or placeholder).",
+        "- `**Files:**` lists comma-separated paths of files this group touches.",
+        "- `**Dependencies:**` lists group IDs this group depends on (e.g. `Group 1A, Group 1B`), or `none`.",
+        "- `**Parallelizable:**` should be `true` unless this group shares files with another group.",
       ].filter(Boolean).join("\n")
 
       let sawChildProgress = false
@@ -5828,11 +5875,37 @@ export async function runChangeImplementWorkflow(
     verification: resolvePlanArtifactPath(options.changeId, planVersion, "verification", cwd),
   }
 
-  // 6. Verify canonical artifacts exist (warn if missing)
+  // 6. Verify canonical artifacts exist and execution-groups.md is parseable
+  let executionGroupsContent = ""
   for (const [key, ap] of Object.entries(artifactPaths)) {
     try {
       await fs.access(ap)
-    } catch {
+      if (key === "executionGroups") {
+        executionGroupsContent = await fs.readFile(ap, "utf-8")
+        const parsed = parseExecutionGroupsMd(executionGroupsContent)
+        if (parsed.length === 0) {
+          const preview = executionGroupsContent.slice(0, 500).trim()
+          throw new Error(
+            `No execution groups found in ${ap}. ` +
+            "The approved plan must contain at least one implementation group.\n\n" +
+            "The execution-groups.md file exists but contains no parseable groups.\n" +
+            `File content preview (first 500 chars):\n\`\`\`\n${preview}${executionGroupsContent.length > 500 ? "\n…(truncated)" : ""}\n\`\`\`\n\n` +
+            "Expected format — each group must start with a heading like:\n" +
+            "  ## Group 1: descriptive name\n" +
+            "  ## G1 — descriptive name\n" +
+            "  ## Execution Group 1: descriptive name\n\n" +
+            "Followed by:\n" +
+            "  **Files:** path/to/file.ts, another/file.ts\n" +
+            "  **Agent:** zflow.implement-routine\n" +
+            "  **Scoped verification:** the verification command for this group\n\n" +
+            "Run /zflow-change-prepare to recreate the plan with valid execution groups.",
+          )
+        }
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("No execution groups found")) {
+        throw err
+      }
       console.warn(`[zflow] Plan artifact "${key}" not found at: ${ap}`)
     }
   }
