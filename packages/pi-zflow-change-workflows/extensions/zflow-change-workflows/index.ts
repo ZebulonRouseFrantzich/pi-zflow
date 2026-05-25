@@ -3772,10 +3772,38 @@ async function resolveApplyBackWithSubagent(
   await execFileAsync("git", ["cherry-pick", "--abort"], { cwd: integrationWorktreePath }).catch(() => {})
   await execFileAsync("git", ["rebase", "--abort"], { cwd: integrationWorktreePath }).catch(() => {})
 
-  // If conflict markers remain from a prior failed run, resolve them first
-  const preMarkerCheck = await execFileAsync("git", [
+  const findConflictMarkers = async (): Promise<string> => execFileAsync("git", [
     "grep", "-E", "^(<<<<<<<|=======|>>>>>>>)", "--", ".",
   ], { cwd: integrationWorktreePath }).then((r) => r.stdout.trim()).catch(() => "")
+
+  // If a previous zflow-generated repair committed literal conflict markers,
+  // roll it back deterministically before involving a model.  This is safe only
+  // for clean worktrees and known machine-generated commits.
+  let rolledBackMarkerCommits = 0
+  for (let i = 0; i < 5; i++) {
+    const markerCheck = await findConflictMarkers()
+    if (!markerCheck) break
+    const status = await execFileAsync("git", ["status", "--porcelain"], {
+      cwd: integrationWorktreePath,
+    }).then((r) => r.stdout.trim()).catch(() => "")
+    if (status) break
+    const headSubject = await execFileAsync("git", ["log", "-1", "--format=%s"], {
+      cwd: integrationWorktreePath,
+    }).then((r) => r.stdout.trim()).catch(() => "")
+    const rollbackable = /^zflow: (auto-restored .*missing file|snapshot pre-continuation|coverage repair)/.test(headSubject)
+    if (!rollbackable) break
+    progress?.onPhase?.("prepare", "Prepare Resolution",
+      `Rolling back zflow-generated marker commit: ${headSubject}`, "running")
+    await execFileAsync("git", ["reset", "--hard", "HEAD~1"], { cwd: integrationWorktreePath })
+    rolledBackMarkerCommits++
+  }
+  if (rolledBackMarkerCommits > 0) {
+    progress?.onPhase?.("prepare", "Prepare Resolution",
+      `Rolled back ${rolledBackMarkerCommits} zflow-generated marker commit(s)`, "running")
+  }
+
+  // If conflict markers remain from a prior failed run, resolve them first
+  const preMarkerCheck = await findConflictMarkers()
   if (preMarkerCheck) {
     progress?.onPhase?.("prepare", "Prepare Resolution",
       "Conflict markers found from prior run; dispatching cleanup resolver", "running")
@@ -3805,6 +3833,12 @@ async function resolveApplyBackWithSubagent(
         progress?.onPhase?.("prepare", "Prepare Resolution",
           "Cleanup resolver failed; worktree has unresolved conflict markers", "failed")
         throw new Error(`Could not resolve stale conflict markers: ${cleanupResult.error ?? "unknown error"}`)
+      }
+      const remainingMarkers = await findConflictMarkers()
+      if (remainingMarkers) {
+        progress?.onPhase?.("prepare", "Prepare Resolution",
+          "Cleanup resolver returned but conflict markers remain", "failed")
+        throw new Error(`Cleanup resolver left conflict markers:\n${remainingMarkers}`)
       }
       progress?.onPhase?.("prepare", "Prepare Resolution",
         "Stale conflict markers resolved", "completed")
