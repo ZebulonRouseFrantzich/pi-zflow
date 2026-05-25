@@ -466,6 +466,7 @@ interface WorkflowSubagentSnapshot {
   startedAt: number
   finishedAt?: number
   lastCommand?: string
+  logs?: string[]
   lastActivityAt?: number
 }
 
@@ -723,6 +724,12 @@ function toSubagentCardModel(subagent: WorkflowSubagentSnapshot): ZflowCardViewM
   const model = subagent.model ?? "unavailable"
   const thinking = subagent.thinking ?? "unavailable"
   const status = mapSubagentStatus(subagent.status)
+  const bodyLines: string[] = [`last: ${subagent.lastCommand ?? "starting"}`]
+  if (subagent.logs && subagent.logs.length > 0) {
+    for (const log of subagent.logs.slice(-5)) {
+      bodyLines.push(`• ${log}`)
+    }
+  }
   return {
     id: subagent.id,
     title: `${subagentStatusIcon(subagent.status)} ${subagent.title ?? "untitled group"}`,
@@ -732,7 +739,7 @@ function toSubagentCardModel(subagent: WorkflowSubagentSnapshot): ZflowCardViewM
       subagent.id,
       `${subagent.agent} · ${model} · ${thinking}`,
     ],
-    bodyLines: [`last: ${subagent.lastCommand ?? "starting"}`],
+    bodyLines,
     thinking: subagent.thinking,
   }
 }
@@ -1146,6 +1153,12 @@ function createWorkflowProgressIndicator(
         const statusChanged = update.status !== undefined && update.status !== existing?.status
         const lastCommandChanged = update.lastCommand !== undefined && update.lastCommand !== existing?.lastCommand
         const startedAtChanged = update.startedAt !== undefined && update.startedAt !== existing?.startedAt
+        // Logs: if caller provides logs, append them to existing logs, bounded at 6
+        const existingLogs = existing?.logs ?? []
+        const newLogs = update.logs
+        const mergedLogs = newLogs !== undefined
+          ? [...existingLogs, ...newLogs].slice(-6)
+          : existingLogs
         const nextSubagent: WorkflowSubagentSnapshot = {
           id: subagentId,
           agent: update.agent ?? existing?.agent ?? subagentId,
@@ -1156,6 +1169,7 @@ function createWorkflowProgressIndicator(
           startedAt: update.startedAt ?? existing?.startedAt ?? Date.now(),
           finishedAt: update.finishedAt ?? existing?.finishedAt ?? (isFinishedSubagentStatus(nextStatus) ? Date.now() : undefined),
           lastCommand: update.lastCommand ?? existing?.lastCommand,
+          logs: mergedLogs,
           lastActivityAt: Date.now(),
         }
         const existingIdx = current.subagents.findIndex((subagent) => subagent.id === subagentId)
@@ -1169,7 +1183,7 @@ function createWorkflowProgressIndicator(
           ...current,
           subagents: updatedSubagents,
         })
-        shouldSendMessage = statusChanged || lastCommandChanged || startedAtChanged
+        shouldSendMessage = statusChanged || lastCommandChanged || startedAtChanged || (newLogs !== undefined && newLogs.length > 0)
       }
       render()
       if (shouldSendMessage) {
@@ -3239,6 +3253,199 @@ async function resolveWorkflowModel(agentName: string): Promise<{ model?: string
   }
 }
 
+// ── Resolver worktree observer ─────────────────────────────────────
+
+interface ResolverWorktreeObserver {
+  stop: () => void
+  /** Currently accumulated log lines (shared reference for heartbeat). */
+  readonly currentLogs: string[]
+  /** Most recently sampled status string (for heartbeat messages). */
+  lastStatusSummary: string
+  /** Timestamp of last filesystem activity observed. */
+  lastActivityAt: number
+}
+
+async function startResolverWorktreeObserver(
+  integrationWorktreePath: string,
+  runDir: string,
+  progress: {
+    onSubagent?: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id">>) => void
+    onPhase?: (id: string, title: string, message: string, status?: "running" | "completed" | "failed") => void
+  },
+  subagentId: string,
+  intervalMs: number = 15_000,
+): Promise<ResolverWorktreeObserver> {
+  const { execFileSync } = await import("node:child_process")
+  const path = await import("node:path")
+  const fs = await import("node:fs")
+  const logs: string[] = []
+  let stopped = false
+  let prevHead = ""
+  let prevStatusSignature = ""
+  let prevConflictCounts = ""
+  let lastActivityAt = Date.now()
+  let lastStatusSummary = "observer starting"
+  const liveLogPath = path.join(runDir, "subagent-resolution-live.log")
+
+  const gitOutput = (args: string[], allowExitCodeOne = false): string => {
+    try {
+      return execFileSync("git", args, {
+        cwd: integrationWorktreePath,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 15_000,
+        encoding: "utf-8",
+      }).trim()
+    } catch (err) {
+      const maybeCode = (err as { status?: unknown; code?: unknown }).status ?? (err as { code?: unknown }).code
+      if (allowExitCodeOne && maybeCode === 1) return ""
+      throw err
+    }
+  }
+
+  const writeLog = (msg: string): void => {
+    const ts = new Date().toISOString()
+    const line = `[${ts}] ${msg}`
+    logs.push(msg)
+    if (logs.length > 20) logs.splice(0, logs.length - 20)
+    try {
+      fs.appendFileSync(liveLogPath, line + "\n", "utf-8")
+    } catch {
+      // best-effort
+    }
+  }
+
+  const flushProgress = (events: string[]): void => {
+    if (events.length > 0) {
+      progress.onSubagent?.(subagentId, { logs: events })
+    }
+  }
+
+  const tick = (): void => {
+    if (stopped) return
+    try {
+      const gitDir = path.join(integrationWorktreePath, ".git")
+      if (!fs.existsSync(gitDir)) {
+        // worktree may have been cleaned up
+        return
+      }
+
+      // --- Sample worktree state ---
+      const statusOut = gitOutput(["status", "--porcelain"])
+
+      const headOut = gitOutput(["rev-parse", "--short", "HEAD"])
+
+      const headShort = headOut
+
+      const unmergedOut = gitOutput(["diff", "--name-only", "--diff-filter=U"])
+
+      const unmergedFiles = unmergedOut ? unmergedOut.split("\n").filter(Boolean) : []
+
+      // Conflict markers in modified files
+      const conflictGrep = gitOutput(["grep", "-c", "-E", "^(<<<<<<<|=======|>>>>>>>)", "--", "."], true)
+
+      const statusSignature = statusOut ? statusOut.split("\n").sort().join("\n") : ""
+
+      // --- Detect changes ---
+      const events: string[] = []
+
+      // HEAD change
+      if (headShort && headShort !== prevHead) {
+        const logLine = gitOutput(["log", "-1", "--oneline"])
+        events.push(`new commit: ${logLine}`)
+        prevHead = headShort
+        lastActivityAt = Date.now()
+      }
+
+      // Unmerged file changes
+      if (unmergedFiles.length > 0) {
+        const unmergedStr = unmergedFiles.join(", ")
+        const truncated = unmergedStr.length > 120 ? unmergedStr.slice(0, 117) + "..." : unmergedStr
+        events.push(`unmerged: ${truncated}`)
+      }
+
+      // Conflict marker count changes
+      const conflictCounts = conflictGrep
+      if (conflictCounts && conflictCounts !== prevConflictCounts) {
+        const markerFiles = conflictCounts.split("\n").filter(Boolean)
+        const markerFileNames = markerFiles.map((l: string) => l.split(":")[0]).filter(Boolean)
+        if (markerFileNames.length > 0) {
+          events.push(`conflict markers in: ${markerFileNames.join(", ")}`)
+          lastActivityAt = Date.now()
+        } else {
+          events.push("conflict markers removed from tracked files")
+          lastActivityAt = Date.now()
+        }
+        prevConflictCounts = conflictCounts
+      } else if (!conflictCounts && prevConflictCounts) {
+        events.push("conflict markers removed from tracked files")
+        prevConflictCounts = ""
+        lastActivityAt = Date.now()
+      }
+
+      // Status changes (modified files)
+      if (statusSignature && statusSignature !== prevStatusSignature) {
+        const modifiedFiles = statusOut.split("\n")
+          .filter((l: string) => l.trim())
+          .map((l: string) => {
+            const m = l.match(/^\s*[MARCUD]\s+(.+)$/)
+            return m ? m[1] : null
+          })
+          .filter(Boolean)
+        if (modifiedFiles.length > 0) {
+          const fileList = modifiedFiles.slice(0, 5).join(", ")
+          events.push(`modified: ${fileList}${modifiedFiles.length > 5 ? ` +${modifiedFiles.length - 5} more` : ""}`)
+          lastActivityAt = Date.now()
+        }
+        prevStatusSignature = statusSignature
+      }
+
+      // Update lastStatusSummary for heartbeat
+      if (events.length > 0) {
+        lastStatusSummary = events[events.length - 1]
+      } else {
+        const idleSeconds = Math.floor((Date.now() - lastActivityAt) / 1000)
+        if (idleSeconds > 30) {
+          lastStatusSummary = `idle ${idleSeconds}s; no filesystem changes`
+        } else {
+          lastStatusSummary = `no new changes since last check`
+        }
+      }
+
+      // Emit log events
+      for (const event of events) {
+        writeLog(event)
+      }
+      if (events.length > 0) {
+        flushProgress(events)
+      }
+    } catch {
+      // git command may fail if worktree is in conflict state or cleaned up
+    }
+  }
+
+  // Initial sample
+  tick()
+
+  const interval = setInterval(tick, intervalMs)
+
+  const observer: ResolverWorktreeObserver = {
+    stop: () => {
+      stopped = true
+      clearInterval(interval)
+    },
+    get currentLogs(): string[] {
+      return logs
+    },
+    get lastStatusSummary(): string {
+      return lastStatusSummary
+    },
+    get lastActivityAt(): number {
+      return lastActivityAt
+    },
+  }
+  return observer
+}
+
 async function resolveApplyBackWithSubagent(
   runId: string,
   ctx: InterviewableContext,
@@ -3319,9 +3526,31 @@ async function resolveApplyBackWithSubagent(
     lastCommand: "dispatching resolver subagent",
   })
   const resolverStartedAt = Date.now()
+  // Start the worktree observer for live progress visibility
+  let observer: ResolverWorktreeObserver | undefined
+  try {
+    observer = await startResolverWorktreeObserver(
+      integrationWorktreePath,
+      runDir,
+      {
+        onSubagent: progress?.onSubagent,
+        onPhase: progress?.onPhase,
+      },
+      "apply-back-resolver",
+      15_000,
+    )
+  } catch {
+    // observer is best-effort; non-fatal if it fails to start
+  }
   const heartbeat = setInterval(() => {
     const elapsed = formatElapsed(Date.now() - resolverStartedAt)
-    const message = `Resolver subagent still running (${elapsed}); waiting for dispatch backend output.`
+    let lastCommand: string
+    if (observer && observer.lastStatusSummary) {
+      lastCommand = observer.lastStatusSummary
+    } else {
+      lastCommand = "still running; backend may not stream tool-level progress"
+    }
+    const message = `Resolver subagent still running (${elapsed}); ${lastCommand}`
     progress?.onPhase?.("resolver", "Resolver Subagent", message, "running")
     progress?.onSubagent?.("apply-back-resolver", {
       agent: "zflow.implement-hard",
@@ -3329,7 +3558,7 @@ async function resolveApplyBackWithSubagent(
       model: model.model,
       thinking: model.thinking,
       status: "running",
-      lastCommand: "still running; backend may not stream tool-level progress",
+      lastCommand,
     })
   }, 30_000)
 
@@ -3359,6 +3588,7 @@ async function resolveApplyBackWithSubagent(
     })
   } finally {
     clearInterval(heartbeat)
+    observer?.stop()
   }
 
   if (!dispatchResult.ok) {
