@@ -363,16 +363,9 @@ function mergeGroupIntoIntegration(
     return { success: true, commitSha: sha }
   }
 
-  // Cherry-pick also failed — abort and collect conflict info
-  try {
-    execFileSync("git", ["cherry-pick", "--abort"], {
-      cwd: worktreePath,
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 30_000,
-    })
-  } catch {
-    // cherry-pick --abort fails when there's no cherry-pick in progress — that's OK
-  }
+  // Cherry-pick also failed. Preserve the conflicted worktree for subagent
+  // resolution instead of aborting; otherwise the resolver has no conflict
+  // markers or index state to inspect.
 
   // Collect conflicted files
   const conflictResult = gitSafe(worktreePath, "diff", "--name-only", "--diff-filter=U")
