@@ -124,8 +124,12 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
   const normalizeDependency = (dependency: string): string => {
     const trimmed = dependency.trim().replace(/^`|`$/g, "").replace(/^\[|\]$/g, "").trim()
     if (!trimmed) return ""
-    const gMatch = trimmed.match(/^(?:G|Groups?\s+)(\d+[A-Za-z]?)$/i)
+    // With explicit G/Group prefix: "Group 1A", "G 2"
+    const gMatch = trimmed.match(/^(?:G|Groups?\s+)([A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)$/i)
     if (gMatch) return `group-${gMatch[1].toLowerCase()}`
+    // Bare alphanumeric group ID: "1A", "A1", "2", "b3"
+    const bareMatch = trimmed.match(/^([A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)$/i)
+    if (bareMatch) return `group-${bareMatch[1].toLowerCase()}`
     return trimmed
   }
 
@@ -153,7 +157,7 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
       }
     }
 
-    const groupRefPattern = /\b(?:G|Groups?)\s*(\d+[A-Za-z]?)\b/gi
+    const groupRefPattern = /\b(?:G|Groups?)\s*([A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)\b/gi
     let match: RegExpExecArray | null
     while ((match = groupRefPattern.exec(value)) !== null) {
       dependencies.push(`group-${match[1]!.toLowerCase()}`)
@@ -166,9 +170,11 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
     // when directly prefixed by Group/G to avoid confusing prose numbers with
     // group IDs.
     if (/\bGroups?\b/i.test(value)) {
-      const alphanumericRefs = value.match(/\b\d+[A-Za-z]\b/g) ?? []
+      const alphanumericRefs = value.match(/\b[A-Za-z]?\d+[A-Za-z]?\b/g) ?? []
       for (const ref of alphanumericRefs) {
-        dependencies.push(`group-${ref.toLowerCase()}`)
+        if (/^[A-Za-z]?\d+[A-Za-z]?$/.test(ref)) {
+          dependencies.push(`group-${ref.toLowerCase()}`)
+        }
       }
     }
 
@@ -190,7 +196,7 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
   }
 
   const isNextGroupSubsection = (value: string): boolean => {
-    return /^(Expected outcome|Expected outcome \/ acceptance criteria|Acceptance criteria|Self-checks|Drift trigger|reviewTags|Manual checks|Implementation task spec):/i.test(value.trim())
+    return /^(Expected outcome|Expected verification outcome|Expected outcome \/ acceptance criteria|Acceptance criteria|Self-checks|Drift trigger|reviewTags|Manual checks|Implementation task spec|Implementation notes):/i.test(value.trim())
   }
 
   const pushCurrentGroup = (): void => {
@@ -208,10 +214,11 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
 
   for (const line of lines) {
     // Accept h1-h4 headings: ## Group 1: Name, # Group 1: Name,
-    // ## G1 — Name, ## Execution Group 1: Name
-    const groupMatch = line.match(/^#{1,4}\s+Group\s+(\d+[A-Za-z]?)\s*(?::|[—-])\s+(.+)$/i) ??
-      line.match(/^#{1,4}\s+G(\d+[A-Za-z]?)\s+[—-]\s+(.+)$/i) ??
-      line.match(/^#{1,4}\s+Execution\s+Group\s+(\d+[A-Za-z]?)\s*(?::|[—-])\s+(.+)$/i)
+    // ## G1 — Name, ## Execution Group 1: Name.
+    // Group IDs may be digit-first (1, 1A) or letter-first (A1, B2, C3a).
+    const groupMatch = line.match(/^#{1,4}\s+Group\s+([A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)\s*(?::|[—-])\s+(.+)$/i) ??
+      line.match(/^#{1,4}\s+G([A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)\s+[—-]\s+(.+)$/i) ??
+      line.match(/^#{1,4}\s+Execution\s+Group\s+([A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)\s*(?::|[—-])\s+(.+)$/i)
     if (groupMatch) {
       pushCurrentGroup()
       currentGroup = {
@@ -240,7 +247,8 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
 
     const filesHeaderMatch = line.match(/-\s+\*\*Files?(?:\/paths)?:\*\*\s*$/i) ??
       line.match(/^\*\*Files?(?:\/paths)?:\*\*\s*$/i) ??
-      line.match(/^Files?(?:\s+touched)?(?:\/paths)?(?:\s*\([^)]*\))?:\s*$/i)
+      line.match(/^Files?(?:\s+touched)?(?:\/paths)?(?:\s*\([^)]*\))?:\s*$/i) ??
+      line.match(/^\*\*Primary\s+files?(?:\/paths)?\s+touched:\*\*\s*$/i)
     if (filesHeaderMatch) {
       collectingFiles = true
       collectingDependencies = false
@@ -250,6 +258,7 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
 
     const filesMatch = line.match(/-\s+\*\*Files?(?:\/paths)?:\*\*\s+(.+)/i) ??
       line.match(/^\*\*Files?(?:\/paths)?:\*\*\s+(.+)/i) ??
+      line.match(/^\*\*Primary\s+files?(?:\/paths)?\s+touched:\*\*\s+(.+)/i) ??
       line.match(/^Files?(?:\s+touched)?(?:\/paths)?(?:\s*\([^)]*\))?:\s+(.+)$/i)
     if (filesMatch) {
       currentGroup.files = filesMatch[1].split(",").map((f: string) => f.trim()).filter(Boolean)
@@ -268,16 +277,18 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
 
     const agentMatch = line.match(/-\s+\*\*Agent:\*\*\s+(.+)/i) ??
       line.match(/^\*\*Agent:\*\*\s+(.+)/i) ??
+      line.match(/-\s+\*\*Owner\s+agent:\*\*\s+(.+)/i) ??
+      line.match(/^\*\*Owner\s+agent:\*\*\s+(.+)/i) ??
       line.match(/^Owner agent:\s+`?([^`\n]+)`?/i)
     if (agentMatch) {
-      currentGroup.agent = agentMatch[1].trim()
+      currentGroup.agent = agentMatch[1].trim().replace(/^`|`$/g, "").trim()
       continue
     }
 
     const ownerMatch = line.match(/-\s+\*\*Owner:\*\*\s+`?([^`\n]+)`?/i) ??
       line.match(/^\*\*Owner:\*\*\s+`?([^`\n]+)`?/i)
     if (ownerMatch) {
-      currentGroup.agent = ownerMatch[1].trim()
+      currentGroup.agent = ownerMatch[1].trim().replace(/^`|`$/g, "").trim()
       continue
     }
 
@@ -355,7 +366,11 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
       }
       const verificationItemMatch = line.match(/^\s+-\s+(.+)$/)
       if (verificationItemMatch && !verificationItemMatch[1].startsWith("**")) {
-        currentGroup.scopedVerification = [currentGroup.scopedVerification, verificationItemMatch[1].trim()].filter(Boolean).join("; ")
+        // Strip all backticks from the captured text and join with newlines
+        const cleaned = verificationItemMatch[1].trim().replace(/`/g, "").trim()
+        if (cleaned) {
+          currentGroup.scopedVerification = [currentGroup.scopedVerification, cleaned].filter(Boolean).join("\n")
+        }
         continue
       }
     }
@@ -4546,11 +4561,11 @@ export async function runPrepareAgentsIfAvailable(
         "",
         "## Critical: execution-groups.md format",
         "",
-        "Each group MUST use this exact heading and field format so the implementation",
-        "workflow can parse it:",
+        "Each group MUST use this heading and field format so the implementation",
+        "workflow can parse it. Group IDs may be digit-first (1, 1A) or letter-first (A1, B2).",
         "",
         "```markdown",
-        "## Group 1: Short descriptive name for this group",
+        "### Group A1: Short descriptive name for this group",
         "",
         "Brief paragraph describing what this group implements.",
         "",
@@ -4561,12 +4576,25 @@ export async function runPrepareAgentsIfAvailable(
         "**Parallelizable:** true",
         "```",
         "",
+        "Alternative: files may be listed as a numbered bullet list:",
+        "",
+        "```markdown",
+        "**Primary files/paths touched:**",
+        "  1. apps/api/package.json",
+        "  2. apps/api/tsconfig.json",
+        "```",
+        "",
+        "Alternative: agent may be written as `**Owner agent:**`.",
+        "Alternative: dependencies use comma-separated IDs: `Group A1, Group B1` or bare `A1, B1`.",
+        "Alternative: scoped verification may be a bullet list of commands.",
+        "",
         "Rules:",
-        "- Start each group with `## Group N: Name` (h2 heading).",
-        "- Use `**Key:** value` format (no leading dash) for Files, Agent, Dependencies, Scoped verification, and Parallelizable.",
+        "- Start each group with `## Group N: Name` or `### Group X1: Name` (h2-h4 heading).",
+        "- Use `**Key:** value` format (or `- **Key:** value` with leading dash) for all fields.",
+        "- Group IDs may be numeric (1, 2), digit-letter (1A, 2B), or letter-digit (A1, B2).",
         "- Every group MUST have a concrete `**Scoped verification:**` command (not TBD or placeholder).",
-        "- `**Files:**` lists comma-separated paths of files this group touches.",
-        "- `**Dependencies:**` lists group IDs this group depends on (e.g. `Group 1A, Group 1B`), or `none`.",
+        "- `**Files:**` (or `**Primary files/paths touched:**`) lists paths this group touches.",
+        "- `**Dependencies:**` lists group IDs this group depends on (e.g. `A1, B1`), or `none`/`[]`.",
         "- `**Parallelizable:**` should be `true` unless this group shares files with another group.",
       ].filter(Boolean).join("\n")
 
