@@ -684,8 +684,9 @@ function buildCardLines(model: ZflowCardViewModel, theme: any, width: number): s
 
   const lines: string[] = []
 
-  // Top padding — empty background-filled line for vertical breathing room
-  lines.push(bgFn(" ".repeat(safeWidth)))
+  // Half-width top/bottom edge — visible separator without heavy bar
+  const edgePad = Math.max(4, Math.floor(safeWidth / 2))
+  lines.push(bgFn(" ".repeat(edgePad)))
 
   // Title — word-wrapped, colored by status
   for (const l of cardLineWrapped(model.title, (s) => statusTextColor(model.status, theme, s))) {
@@ -711,8 +712,8 @@ function buildCardLines(model: ZflowCardViewModel, theme: any, width: number): s
     }
   }
 
-  // Bottom padding
-  lines.push(bgFn(" ".repeat(safeWidth)))
+  // Bottom edge (half-width)
+  lines.push(bgFn(" ".repeat(edgePad)))
 
   return lines
 }
@@ -829,8 +830,11 @@ class ZflowCard {
 function renderReviewerCards(reviewers: WorkflowReviewerSnapshot[], width: number, theme: any): string[] {
   const available = Math.max(32, width - 2)
   const columns = available >= 120 ? 3 : available >= 76 ? 2 : 1
-  const gap = 2
-  const cardWidth = Math.max(32, Math.floor((available - (columns - 1) * gap) / columns))
+  const gap = 4
+  const cardWidth = Math.min(
+    Math.max(32, Math.floor((available - (columns - 1) * gap) / columns)),
+    90,  // match buildCardLines cap
+  )
   const ordered = [...reviewers].sort((a, b) => a.reviewerName.localeCompare(b.reviewerName))
   const rendered: string[] = []
 
