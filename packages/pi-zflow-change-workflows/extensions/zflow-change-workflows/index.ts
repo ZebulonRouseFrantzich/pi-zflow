@@ -4064,13 +4064,17 @@ async function resolveApplyBackWithSubagent(
           })
         }
 
+        // Per-group result artifact path so each focused run writes independently.
+        const focusedResultPath = path.join(runDir,
+          `subagent-resolution-result-group-${branch.groupId}.md`)
+
         try {
           dispatchResult = await dispatchService.runAgent({
             agent: "zflow.implement-hard",
             task: focusedTask,
             cwd: integrationWorktreePath,
             model: model.dispatchModel,
-            output: resultPath,
+            output: focusedResultPath,
             outputMode: "file-only",
             context: "fresh",
             maxOutput: { lines: 5000, bytes: 500_000 },
@@ -4091,15 +4095,19 @@ async function resolveApplyBackWithSubagent(
 
           if (finalizeResult.recovered) {
             groupsMerged++
-            progress?.onPhase?.("continue", "Continue Integration",
-              `Transport error but markers resolved for group ${branch.groupId}; staged/committed (${groupsMerged}/${totalGroups})`, "running")
+            const statusMsg = finalizeResult.committed
+              ? `Transport error but staged and committed marker-free resolution for group ${branch.groupId} (${groupsMerged}/${totalGroups})`
+              : `Transport error but marker-free resolution already finalized for group ${branch.groupId} (${groupsMerged}/${totalGroups})`
+            progress?.onPhase?.("continue", "Continue Integration", statusMsg, "running")
             progress?.onSubagent?.("apply-back-resolver", {
               agent: "zflow.implement-hard",
               title: "Apply-back resolver",
               model: model.model,
               thinking: model.thinking,
               status: "completed",
-              lastCommand: `recovered marker-free state for group ${branch.groupId}`,
+              lastCommand: finalizeResult.committed
+                ? `staged and committed marker-free resolution for group ${branch.groupId}`
+                : `marker-free resolution already finalized for group ${branch.groupId}`,
               finishedAt: Date.now(),
             })
             continue
@@ -4127,8 +4135,10 @@ async function resolveApplyBackWithSubagent(
         }
 
         groupsMerged++
-        progress?.onPhase?.("continue", "Continue Integration",
-          `Resolved and merged group ${branch.groupId} (${groupsMerged}/${totalGroups})`, "running")
+        const statusMsg = finalizeResult.committed
+          ? `Staged and committed marker-free resolution for group ${branch.groupId} (${groupsMerged}/${totalGroups})`
+          : `Resolved and merged group ${branch.groupId} (${groupsMerged}/${totalGroups})`
+        progress?.onPhase?.("continue", "Continue Integration", statusMsg, "running")
       }
 
       // After processing all remaining, re-check if more appeared
