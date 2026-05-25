@@ -506,6 +506,25 @@ function visualWidth(text: string): number {
   return w
 }
 
+function ansiAwareVisualWidth(text: string): number {
+  let w = 0
+  let index = 0
+  while (index < text.length) {
+    const ansi = text.slice(index).match(/^\x1b\[[0-9;]*m/)
+    if (ansi) {
+      index += ansi[0].length
+      continue
+    }
+
+    const codePoint = text.codePointAt(index)
+    if (codePoint === undefined) break
+    const ch = String.fromCodePoint(codePoint)
+    w += visualCharWidth(ch)
+    index += ch.length
+  }
+  return w
+}
+
 function visualTruncate(value: string, maxVisualWidth: number): string {
   if (maxVisualWidth <= 0) return ""
 
@@ -540,6 +559,12 @@ function visualTruncate(value: string, maxVisualWidth: number): string {
 
 function visualPadEnd(value: string, targetVisualWidth: number): string {
   const currentWidth = visualWidth(value)
+  if (currentWidth >= targetVisualWidth) return value
+  return value + " ".repeat(targetVisualWidth - currentWidth)
+}
+
+function ansiAwarePadEnd(value: string, targetVisualWidth: number): string {
+  const currentWidth = ansiAwareVisualWidth(value)
   if (currentWidth >= targetVisualWidth) return value
   return value + " ".repeat(targetVisualWidth - currentWidth)
 }
@@ -699,8 +724,15 @@ function buildCardLines(model: ZflowCardViewModel, theme: any, width: number): s
     const contentWidth = Math.max(1, safeWidth - visualWidth(indent))
     const wrapped = wordWrap(text, contentWidth)
     return wrapped.map((fragment) => {
-      const line = visualPadEnd(indent + fragment, safeWidth)
-      return colorize(line)
+      const plainLine = indent + fragment
+      const clippedLine = visualTruncate(plainLine, safeWidth)
+      const styledLine = colorize(clippedLine)
+      // Do not pass padding through theme.fg()/theme.bg(); some theme
+      // functions trim or reset trailing whitespace, which collapses reviewer
+      // grid columns and lets text from one card run into the next. Pad after
+      // styling with ANSI-aware width accounting so every card line occupies
+      // exactly safeWidth cells before the inter-column gap is appended.
+      return ansiAwarePadEnd(visualTruncate(styledLine, safeWidth), safeWidth)
     })
   }
 
