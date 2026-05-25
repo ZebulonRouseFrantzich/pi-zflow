@@ -3541,6 +3541,108 @@ async function startResolverWorktreeObserver(
   return observer
 }
 
+// ── Integration continuation helpers ────────────────────────────────
+
+interface RemainingGroupBranch {
+  groupId: string
+  branchName: string
+}
+
+const GROUP_BRANCH_PREFIX = "zflow/run/"
+
+async function findRemainingGroupBranches(
+  integrationWorktreePath: string,
+  groups: Array<{ groupId: string }>,
+  runId: string,
+): Promise<RemainingGroupBranch[]> {
+  const { execFileSync } = await import("node:child_process")
+
+  const gitOutput = (args: string[], allowExitCodeOne = false): string => {
+    try {
+      return execFileSync("git", args, {
+        cwd: integrationWorktreePath,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 10_000,
+        encoding: "utf-8",
+      }).trim()
+    } catch (err) {
+      const e = err as { status?: unknown; code?: unknown }
+      const code = e.status ?? e.code
+      if (allowExitCodeOne && (code === 1 || code === 128)) return ""
+      throw err
+    }
+  }
+
+  const branchList = gitOutput(["branch", "--list", `${GROUP_BRANCH_PREFIX}${runId}/group-*`])
+  if (!branchList) return []
+
+  const allGroupBranches = branchList.split("\n")
+    .map((b) => b.replace(/^\*?\s+/, "").trim())
+    .filter(Boolean)
+
+  const remaining: RemainingGroupBranch[] = []
+  for (const group of groups) {
+    const branchSuffix = `/group-${group.groupId}`
+    const branchName = allGroupBranches.find((b) => b.endsWith(branchSuffix))
+    if (!branchName) continue
+
+    try {
+      execFileSync("git", ["merge-base", "--is-ancestor", branchName, "HEAD"], {
+        cwd: integrationWorktreePath,
+        stdio: "ignore",
+        timeout: 10_000,
+      })
+    } catch {
+      remaining.push({ groupId: group.groupId, branchName })
+    }
+  }
+  return remaining
+}
+
+async function buildFocusedResolutionPrompt(
+  groupId: string,
+  unmergedFiles: string[],
+  integrationWorktreePath: string,
+): Promise<string> {
+  const { execFileSync } = await import("node:child_process")
+
+  const conflictDiff = (() => {
+    try {
+      return execFileSync("git", ["diff"], {
+        cwd: integrationWorktreePath,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 10_000,
+        encoding: "utf-8",
+      }).trim()
+    } catch {
+      return ""
+    }
+  })()
+
+  const shortDiff = conflictDiff.length > 12_000
+    ? conflictDiff.slice(0, 12_000) + "\n\n[...diff truncated...]"
+    : conflictDiff
+
+  return [
+    `Resolve the merge conflict for group "${groupId}".`,
+    "",
+    `Conflicted files:`,
+    ...unmergedFiles.map((f) => `  - ${f}`),
+    "",
+    "Conflict diff:",
+    "```",
+    shortDiff,
+    "```",
+    "",
+    "Instructions:",
+    "- Resolve EVERY conflict marker in the conflicted files.",
+    "- Preserve both sides' intended changes.",
+    `- After resolving, run: git add -A && git commit -m "zflow: integrate group ${groupId} with resolution"`,
+    "- Do NOT apply changes to the primary worktree.",
+    "- The parent will continue merging remaining groups.",
+  ].join("\n")
+}
+
 async function resolveApplyBackWithSubagent(
   runId: string,
   ctx: InterviewableContext,
@@ -3577,24 +3679,10 @@ async function resolveApplyBackWithSubagent(
   })
 
   const groups = run.groups.map((g) => ({
-    id: g.groupId,
+    groupId: g.groupId,
     files: g.changedFiles ?? [],
     taskPrompt: undefined,
   }))
-  const prompt = await buildSubagentResolutionPrompt(runId, run.changeId, groups, cwd)
-  const task = [
-    prompt,
-    "",
-    "## Command-specific instructions",
-    "",
-    `You are running in the integration worktree: ${integrationWorktreePath}`,
-    "Resolve the merge/integration result in this worktree only.",
-    "Do not apply changes to the primary worktree.",
-    "When done, leave the worktree with no conflict markers and commit the resolved result.",
-    "If you cannot safely preserve every group change, stop and explain exactly why.",
-  ].join("\n")
-  await fs.writeFile(promptPath, task, "utf-8")
-  progress?.onPhase?.("prepare", "Prepare Resolution", `Resolution prompt written: ${promptPath}`, "completed")
 
   const dispatchService = await tryGetDispatchServiceViaRegistry()
   if (!dispatchService) {
@@ -3611,16 +3699,16 @@ async function resolveApplyBackWithSubagent(
     )
   }
   ctx.ui?.notify?.(`🤖 Dispatching apply-back resolver subagent for run ${runId}...`, "info")
-  progress?.onPhase?.("resolver", "Resolver Subagent", "Dispatching resolver subagent", "running")
+  progress?.onPhase?.("resolver", "Resolver Subagent", "Continuing integration merge", "running")
   progress?.onSubagent?.("apply-back-resolver", {
     agent: "zflow.implement-hard",
     title: "Apply-back resolver",
     model: model.model,
     thinking: model.thinking,
     status: "running",
-    lastCommand: "dispatching resolver subagent",
+    lastCommand: "continuing integration merge",
   })
-  const resolverStartedAt = Date.now()
+
   // Start the worktree observer for live progress visibility
   let observer: ResolverWorktreeObserver | undefined
   try {
@@ -3637,6 +3725,8 @@ async function resolveApplyBackWithSubagent(
   } catch {
     // observer is best-effort; non-fatal if it fails to start
   }
+
+  const resolverStartedAt = Date.now()
   const heartbeat = setInterval(() => {
     const elapsed = formatElapsed(Date.now() - resolverStartedAt)
     let lastCommand: string
@@ -3657,162 +3747,194 @@ async function resolveApplyBackWithSubagent(
     })
   }, 30_000)
 
+  // ── Integration continuation loop ─────────────────────────────
   let dispatchResult: Awaited<ReturnType<DispatchService["runAgent"]>>
-  try {
-    dispatchResult = await dispatchService.runAgent({
-      agent: "zflow.implement-hard",
-      task,
+  let finalDispatchOk = true
+  let conflictResolutionCount = 0
+  const MAX_CONFLICT_RESOLUTIONS = 3
+  let groupsMerged = 0
+  const totalGroups = groups.length
+
+  // Commit any uncommitted changes already in the integration worktree
+  const preStatus = await execFileAsync("git", ["status", "--porcelain"], {
+    cwd: integrationWorktreePath,
+  }).then((r) => r.stdout.trim()).catch(() => "")
+  if (preStatus) {
+    await execFileAsync("git", ["add", "-A"], { cwd: integrationWorktreePath }).catch(() => {})
+    await execFileAsync("git", ["commit", "--allow-empty", "-m", `zflow: snapshot pre-continuation for run ${runId}`], {
       cwd: integrationWorktreePath,
-      model: model.dispatchModel,
-      output: resultPath,
-      outputMode: "file-only",
-      context: "fresh",
-      maxOutput: { lines: 5000, bytes: 500_000 },
-      onUpdate: (agentProgress) => {
-        progress?.onSubagent?.("apply-back-resolver", {
-          agent: agentProgress.agent,
-          title: "Apply-back resolver",
-          model: model.model,
-          thinking: model.thinking,
-          status: agentProgress.status ?? "running",
-          lastCommand: agentProgress.currentTool
-            ? `${agentProgress.currentTool}${agentProgress.currentToolArgs ? ` ${agentProgress.currentToolArgs}` : ""}`
-            : agentProgress.recentOutput?.[agentProgress.recentOutput.length - 1] ?? "resolver running...",
-        })
-      },
-    })
+    }).catch(() => {})
+  }
+
+  try {
+    while (true) {
+      // Find remaining group branches
+      const remaining = await findRemainingGroupBranches(integrationWorktreePath, groups, runId)
+      if (remaining.length === 0) break
+
+      const plannedTotal = groupsMerged + remaining.length
+      progress?.onPhase?.("continue", "Continue Integration",
+        `Merging ${remaining.length} remaining group branch(es); ${groupsMerged}/${totalGroups} already merged`, "running")
+
+      for (const branch of remaining) {
+        // Try to merge the group branch into integration
+        let mergeOk = false
+        try {
+          await execFileAsync("git", ["merge", "--no-edit", branch.branchName], {
+            cwd: integrationWorktreePath,
+            timeout: 60_000,
+          })
+          mergeOk = true
+        } catch {
+          mergeOk = false
+        }
+
+        // Check for unmerged files (conflict)
+        const unmergedOut = await execFileAsync("git", ["diff", "--name-only", "--diff-filter=U"], {
+          cwd: integrationWorktreePath,
+        }).then((r) => r.stdout.trim()).catch(() => "")
+
+        if (mergeOk && !unmergedOut) {
+          groupsMerged++
+          progress?.onPhase?.("continue", "Continue Integration",
+            `Merged group ${branch.groupId} automatically (${groupsMerged}/${totalGroups})`, "running")
+          continue
+        }
+
+        // Merge failed. Abort if not a real conflict.
+        if (!unmergedOut) {
+          try { await execFileAsync("git", ["merge", "--abort"], { cwd: integrationWorktreePath }) } catch { /* ok */ }
+          throw new Error(`Failed to merge group ${branch.groupId}: non-conflict merge failure.`)
+        }
+
+        const unmergedFiles = unmergedOut.split("\n").filter(Boolean)
+
+        // ── Dispatch focused resolver for this conflict ──────
+        conflictResolutionCount++
+        if (conflictResolutionCount > MAX_CONFLICT_RESOLUTIONS) {
+          throw new Error(
+            `Max conflict resolution attempts reached (${MAX_CONFLICT_RESOLUTIONS}). ` +
+            `Remaining: ${remaining.map((r) => r.groupId).join(", ")}. ` +
+            "Run the command again to continue."
+          )
+        }
+
+        progress?.onPhase?.("continue", "Continue Integration",
+          `Resolving conflict for group ${branch.groupId} (attempt ${conflictResolutionCount}/${MAX_CONFLICT_RESOLUTIONS})`, "running")
+
+        const focusedTask = await buildFocusedResolutionPrompt(branch.groupId, unmergedFiles, integrationWorktreePath)
+        const focusedPromptPath = path.join(runDir,
+          `subagent-resolution-prompt-group-${branch.groupId}.md`)
+        await fs.writeFile(focusedPromptPath, focusedTask, "utf-8")
+
+        const onUpdate = (agentProgress: AgentDispatchProgress) => {
+          progress?.onSubagent?.("apply-back-resolver", {
+            agent: agentProgress.agent,
+            title: "Apply-back resolver",
+            model: model.model,
+            thinking: model.thinking,
+            status: agentProgress.status ?? "running",
+            lastCommand: agentProgress.currentTool
+              ? `${agentProgress.currentTool}${agentProgress.currentToolArgs ? ` ${agentProgress.currentToolArgs}` : ""}`
+              : agentProgress.recentOutput?.[agentProgress.recentOutput.length - 1]
+              ?? `resolving ${branch.groupId} conflict...`,
+          })
+        }
+
+        try {
+          dispatchResult = await dispatchService.runAgent({
+            agent: "zflow.implement-hard",
+            task: focusedTask,
+            cwd: integrationWorktreePath,
+            model: model.dispatchModel,
+            output: resultPath,
+            outputMode: "file-only",
+            context: "fresh",
+            maxOutput: { lines: 5000, bytes: 500_000 },
+            onUpdate,
+          })
+        } catch (dispatchErr) {
+          dispatchResult = { ok: false, rawOutput: "", error: String(dispatchErr) }
+        }
+
+        // Check transport error
+        if (!dispatchResult.ok && isTransportDispatchError(dispatchResult.error)) {
+          const wtState = await inspectResolverWorktreeState(integrationWorktreePath).catch(() => undefined)
+          if (wtState && wtState.unmergedFiles.length === 0 && !wtState.hasConflictMarkers) {
+            // Transport error but worktree resolved — continue
+            groupsMerged++
+            progress?.onPhase?.("continue", "Continue Integration",
+              `Transport error but group ${branch.groupId} resolved (${groupsMerged}/${totalGroups})`, "running")
+            continue
+          }
+        }
+
+        // Verify resolver result
+        if (!dispatchResult.ok) {
+          finalDispatchOk = false
+          throw new Error(
+            `Resolver failed for group ${branch.groupId}: ${dispatchResult.error ?? "unknown error"}`
+          )
+        }
+
+        // Verify no conflict markers remain
+        const markerCheck = await execFileAsync("git", [
+          "grep", "-E", "^(<<<<<<<|=======|>>>>>>>)", "--", ".",
+        ], { cwd: integrationWorktreePath }).then((r) => r.stdout.trim()).catch(() => "")
+
+        if (markerCheck) {
+          throw new Error(`Conflict markers remain after resolver for group ${branch.groupId}`)
+        }
+
+        groupsMerged++
+        progress?.onPhase?.("continue", "Continue Integration",
+          `Resolved and merged group ${branch.groupId} (${groupsMerged}/${totalGroups})`, "running")
+      }
+
+      // After processing all remaining, re-check if more appeared
+      if (groupsMerged >= totalGroups) break
+    }
   } finally {
     clearInterval(heartbeat)
     observer?.stop()
   }
 
-  if (!dispatchResult.ok) {
-    const transportError = isTransportDispatchError(dispatchResult.error)
-    let recoveredFromTransport = false
+  // ── Commit any remaining changes and capture the resolved patch ──
+  progress?.onPhase?.("continue", "Continue Integration",
+    `Integration complete: ${groupsMerged}/${totalGroups} groups merged`, "completed")
 
-    if (transportError) {
-      // Transport/backend failure (e.g. WebSocket error) — the resolver may
-      // have completed its work before the transport died. Inspect the
-      // preserved integration worktree to find out.
-      progress?.onPhase?.("resolver", "Resolver Subagent",
-        "Transport error; inspecting preserved worktree for possible recovery", "running")
-
-      let wtState: ResolverWorktreeSnapshot | undefined
-      let coverageSummary: string | undefined
-      try {
-        wtState = await inspectResolverWorktreeState(integrationWorktreePath)
-      } catch {
-        // inspection failed — fall through to normal error path
-      }
-
-      if (wtState && wtState.unmergedFiles.length === 0 && !wtState.hasConflictMarkers) {
-        // Worktree appears structurally resolved. Confirm via coverage.
-        progress?.onPhase?.("verify", "Verify Resolution",
-          "Worktree structurally resolved after transport error; verifying coverage", "running")
-        const coverageInputs = run.groups.map((g) => ({
-          groupId: g.groupId,
-          patchPath: path.join(runDir, "patches", `${g.groupId}.patch`),
-        }))
-        try {
-          const coverageReport = await generateCoverageReport(
-            coverageInputs, integrationWorktreePath, baseCommit,
-          )
-          coverageSummary = coverageReport.summary
-          if (coverageReport.allCovered) {
-            recoveredFromTransport = true
-            // Override dispatchResult so verification/apply proceeds normally
-            dispatchResult = { ok: true, rawOutput: "", error: undefined }
-            progress?.onPhase?.("resolver", "Resolver Subagent",
-              "Transport error recovered; worktree fully resolved and coverage verified", "completed")
-            progress?.onSubagent?.("apply-back-resolver", {
-              agent: "zflow.implement-hard",
-              title: "Apply-back resolver",
-              model: model.model,
-              thinking: model.thinking,
-              status: "completed",
-              lastCommand: "recovered from transport error; full coverage verified",
-              finishedAt: Date.now(),
-            })
-          } else {
-            progress?.onPhase?.("verify", "Verify Resolution",
-              "Coverage incomplete after transport error", "failed")
-          }
-        } catch {
-          // coverage generation failed — treat as unrecoverable transport error
-        }
-      }
-
-      if (!recoveredFromTransport) {
-        // Transport error with incomplete/unresolved worktree — preserve as resumable
-        const errorMsg = dispatchResult.error ?? "transport error"
-        const diagnostics: Record<string, unknown> = {
-          subagentResolutionAttempted: true,
-          subagentResolutionError: errorMsg,
-          subagentResolutionResumable: true,
-          subagentResolutionPartialWorkPreserved: true,
-          subagentResolutionSummary: wtState?.summary ?? "worktree inspection unavailable",
-          subagentResolutionCoverageSummary: coverageSummary,
-          subagentResolutionUnmergedFiles: wtState?.unmergedFiles?.length
-            ? wtState.unmergedFiles.join(", ") : undefined,
-          subagentResolutionConflictMarkers: wtState?.hasConflictMarkers ?? false,
-        }
-        await updateRun(runId, {
-          metadata: { ...(run.metadata ?? {}), ...diagnostics },
-        } as any, cwd)
-
-        const phaseMsg = wtState
-          ? `Transport error; worktree preserved. ${wtState.summary}`
-          : "Transport error; worktree inspection failed"
-        progress?.onPhase?.("resolver", "Resolver Subagent", phaseMsg, "failed")
-        progress?.onSubagent?.("apply-back-resolver", {
-          agent: "zflow.implement-hard",
-          status: "failed",
-          finishedAt: Date.now(),
-          lastCommand: `transport error; ${wtState?.summary ?? "worktree preserved"}`,
-        })
-        const recoverMsg = [
-          `Apply-back resolution failed due to a transport error: ${errorMsg}`,
-          wtState ? `Worktree state: ${wtState.summary}` : "Worktree inspection was not available.",
-          coverageSummary ? `Coverage: ${coverageSummary}` : undefined,
-          "",
-          "Partial resolver work is preserved and will be reused on retry.",
-          `Run the command again to continue: /zflow-resolve-apply-back ${runId}`,
-        ].filter((line): line is string => line !== undefined).join("\n")
-        throw new Error(recoverMsg)
-      }
-    }
-
-    if (!dispatchResult.ok) {
-      // Non-transport failure (or transport failure that was unrecoverable)
-      progress?.onPhase?.("resolver", "Resolver Subagent", dispatchResult.error ?? "Resolver subagent failed", "failed")
-      progress?.onSubagent?.("apply-back-resolver", {
-        agent: "zflow.implement-hard",
-        status: "failed",
-        finishedAt: Date.now(),
-        lastCommand: dispatchResult.error ?? "resolver subagent failed",
-      })
-      await updateRun(runId, {
-        metadata: {
-          ...(run.metadata ?? {}),
-          subagentResolutionAttempted: true,
-          subagentResolutionError: dispatchResult.error ?? "resolver subagent failed",
-        },
-      } as any, cwd)
-      throw new Error(dispatchResult.error ?? "Resolver subagent failed")
-    }
-
-    // recoveredFromTransport === true: fall through to verification/apply path
-  }
-
-  if (dispatchResult.ok) {
-    progress?.onPhase?.("resolver", "Resolver Subagent", "Resolver subagent completed", "completed")
+  if (!finalDispatchOk) {
+    progress?.onPhase?.("resolver", "Resolver Subagent", dispatchResult?.error ?? "Resolver subagent failed", "failed")
     progress?.onSubagent?.("apply-back-resolver", {
-      agent: dispatchResult.agent ?? "zflow.implement-hard",
-      status: "completed",
+      agent: "zflow.implement-hard",
+      status: "failed",
       finishedAt: Date.now(),
-      lastCommand: "resolver complete; validating result",
+      lastCommand: dispatchResult?.error ?? "resolver subagent failed",
     })
+    await updateRun(runId, {
+      metadata: {
+        ...(run.metadata ?? {}),
+        subagentResolutionAttempted: true,
+        subagentResolutionError: dispatchResult?.error ?? "resolver subagent failed",
+        subagentResolutionConflictResolutions: conflictResolutionCount,
+        subagentResolutionGroupsMerged: groupsMerged,
+        subagentResolutionGroupsTotal: totalGroups,
+      },
+    } as any, cwd)
+    throw new Error(dispatchResult?.error ?? "Resolver subagent failed")
   }
+
+  progress?.onPhase?.("resolver", "Resolver Subagent",
+    `Integration complete; ${groupsMerged}/${totalGroups} groups merged, ${conflictResolutionCount} conflicts resolved`, "completed")
+  progress?.onSubagent?.("apply-back-resolver", {
+    agent: "zflow.implement-hard",
+    title: "Apply-back resolver",
+    model: model.model,
+    thinking: model.thinking,
+    status: "completed",
+    finishedAt: Date.now(),
+    lastCommand: `integration complete; ${groupsMerged}/${totalGroups} groups merged`,
+  })
 
   progress?.onPhase?.("verify", "Verify Resolution", "Checking for conflict markers", "running")
   const grepResult = await execFileAsync("git", ["grep", "-n", "^<<<<<<< \\|^=======\\|^>>>>>>> ", "--", "."], {
@@ -3866,17 +3988,35 @@ async function resolveApplyBackWithSubagent(
     "utf-8",
   )
   if (!coverageReport.allCovered) {
+    const failedGroups = coverageReport.groups
+      .filter((g) => !g.covered)
+      .map((g) => g.groupId)
+    const missingFiles = coverageReport.groups
+      .flatMap((g) => g.missingHunks.map((h) => h.file))
     await updateRun(runId, {
       metadata: {
         ...(run.metadata ?? {}),
         subagentResolutionAttempted: true,
+        subagentResolutionError: "coverage verification failed",
         subagentResolutionCoverageFailed: true,
         subagentResolutionCoverageSummary: coverageReport.summary,
+        subagentResolutionRepairable: true,
+        subagentResolutionMissingGroups: failedGroups.join(", "),
+        subagentResolutionMissingFiles: missingFiles.join(", "),
+        subagentResolutionConflictResolutions: conflictResolutionCount,
+        subagentResolutionGroupsMerged: groupsMerged,
+        subagentResolutionGroupsTotal: totalGroups,
         subagentResolvedPatchPath: resolvedPatchPath,
       },
     } as any, cwd)
-    progress?.onPhase?.("verify", "Verify Resolution", "Coverage verification failed", "failed")
-    throw new Error(`Coverage verification failed after subagent resolution:\n${coverageReport.summary}`)
+    progress?.onPhase?.("verify", "Verify Resolution",
+      `Coverage incomplete: ${failedGroups.length} groups need repair`, "failed")
+    throw new Error(
+      `Coverage repair needed after integration: ${failedGroups.length}/${totalGroups} groups incomplete.\n` +
+      `Missing groups: ${failedGroups.join(", ")}.\n` +
+      `Resolved patch preserved at ${resolvedPatchPath}.\n` +
+      `Run /zflow-resolve-apply-back ${runId} again to continue coverage repair.`
+    )
   }
   progress?.onPhase?.("verify", "Verify Resolution", "Coverage verified; all group changes preserved", "completed")
 
