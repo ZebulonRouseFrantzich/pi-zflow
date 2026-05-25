@@ -3680,7 +3680,7 @@ async function findRemainingGroupBranches(
   // without incorporating all their content.
   const remaining: RemainingGroupBranch[] = []
   for (const group of groups) {
-    const branchSuffix = `/group-${group.groupId}`
+    const branchSuffix = `/${group.groupId}`
     const branchName = allGroupBranches.find((b) => b.endsWith(branchSuffix))
     if (!branchName) continue
     remaining.push({ groupId: group.groupId, branchName })
