@@ -150,3 +150,123 @@ describe("inspectResolverWorktreeState", () => {
     fs.rmSync(repo, { recursive: true, force: true })
   })
 })
+
+// ---------------------------------------------------------------------------
+// finalizeMarkerFreeResolution (integration-style with temp git repo)
+// ---------------------------------------------------------------------------
+
+describe("finalizeMarkerFreeResolution", () => {
+  test("commits marker-free file with unmerged index", async () => {
+    const repo = await createTempRepo()
+
+    // Create base commit
+    fs.writeFileSync(path.join(repo, "file.txt"), "base content\n", "utf-8")
+    await git(repo, "add", "file.txt")
+    await git(repo, "commit", "-m", "initial")
+
+    // Create two conflicting branches
+    fs.writeFileSync(path.join(repo, "file.txt"), "branch-a content\n", "utf-8")
+    await git(repo, "add", "file.txt")
+    await git(repo, "commit", "-m", "branch-a")
+    const branchACommit = await git(repo, "rev-parse", "HEAD")
+
+    await git(repo, "checkout", "HEAD~1", "-b", "branch-b")
+    fs.writeFileSync(path.join(repo, "file.txt"), "branch-b content\n", "utf-8")
+    await git(repo, "add", "file.txt")
+    await git(repo, "commit", "-m", "branch-b")
+
+    // Merge — expected conflict
+    try {
+      execFileSync("git", ["merge", branchACommit], {
+        cwd: repo, stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8", timeout: 10_000,
+      })
+    } catch {
+      // expected
+    }
+
+    // Overwrite conflicted file with clean resolved content (no markers)
+    fs.writeFileSync(path.join(repo, "file.txt"), "resolved content\n", "utf-8")
+    // Leave index unmerged — do NOT git add
+
+    const { finalizeMarkerFreeResolution } = await import(
+      "../extensions/zflow-change-workflows/index.js"
+    )
+    const result = await finalizeMarkerFreeResolution(repo, "group-test", "zflow: test marker-free recovery")
+
+    assert.equal(result.recovered, true, "should recover marker-free state")
+    assert.equal(result.committed, true, "should commit the resolution")
+    assert.ok(result.unmergedFiles.length > 0, "should report unmerged files")
+    assert.ok(result.unmergedFiles.includes("file.txt"), "should list file.txt as unmerged")
+
+    // After finalization: no unmerged files
+    const unmergedAfter = await git(repo, "diff", "--name-only", "--diff-filter=U")
+    assert.equal(unmergedAfter, "", "no unmerged files after finalization")
+
+    // Commit message matches
+    const headSubject = await git(repo, "log", "-1", "--format=%s")
+    assert.equal(headSubject, "zflow: test marker-free recovery", "commit message should match")
+
+    // File content is the resolved version
+    const content = fs.readFileSync(path.join(repo, "file.txt"), "utf-8")
+    assert.equal(content, "resolved content\n", "file content should be the resolved version")
+
+    fs.rmSync(repo, { recursive: true, force: true })
+  })
+
+  test("does not commit when conflict markers remain", async () => {
+    const repo = await createTempRepo()
+
+    fs.writeFileSync(path.join(repo, "file.txt"), "base content\n", "utf-8")
+    await git(repo, "add", "file.txt")
+    await git(repo, "commit", "-m", "initial")
+
+    // Create two branches with conflicting changes
+    fs.writeFileSync(path.join(repo, "file.txt"), "branch-a content\n", "utf-8")
+    await git(repo, "add", "file.txt")
+    await git(repo, "commit", "-m", "branch-a")
+    const branchACommit = await git(repo, "rev-parse", "HEAD")
+
+    await git(repo, "checkout", "HEAD~1", "-b", "branch-b")
+    fs.writeFileSync(path.join(repo, "file.txt"), "branch-b content\n", "utf-8")
+    await git(repo, "add", "file.txt")
+    await git(repo, "commit", "-m", "branch-b")
+
+    // Merge — expected conflict
+    try {
+      execFileSync("git", ["merge", branchACommit], {
+        cwd: repo, stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8", timeout: 10_000,
+      })
+    } catch {
+      // expected
+    }
+
+    // Leave conflict markers intact — do NOT edit the file
+
+    const { finalizeMarkerFreeResolution } = await import(
+      "../extensions/zflow-change-workflows/index.js"
+    )
+    const result = await finalizeMarkerFreeResolution(repo, "group-test", "zflow: test marker-free recovery")
+
+    assert.equal(result.recovered, false, "should NOT recover when markers remain")
+    assert.equal(result.committed, false, "should NOT commit when markers remain")
+
+    fs.rmSync(repo, { recursive: true, force: true })
+  })
+
+  test("recovered true when no markers and no unmerged (clean state)", async () => {
+    const repo = await createTempRepo()
+    fs.writeFileSync(path.join(repo, "file.txt"), "content\n", "utf-8")
+    await git(repo, "add", "file.txt")
+    await git(repo, "commit", "-m", "initial")
+
+    const { finalizeMarkerFreeResolution } = await import(
+      "../extensions/zflow-change-workflows/index.js"
+    )
+    const result = await finalizeMarkerFreeResolution(repo, "group-test", "zflow: test marker-free recovery")
+
+    assert.equal(result.recovered, true, "clean repo should be recovered")
+    assert.equal(result.committed, false, "no commit needed for clean repo")
+
+    fs.rmSync(repo, { recursive: true, force: true })
+  })
+})
