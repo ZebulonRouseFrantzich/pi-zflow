@@ -3253,6 +3253,95 @@ async function resolveWorkflowModel(agentName: string): Promise<{ model?: string
   }
 }
 
+// ── Transport error classification ──────────────────────────────────
+
+const TRANSPORT_ERROR_PATTERNS: RegExp[] = [
+  /WebSocket error/i,
+  /ECONNRESET/i,
+  /connection (closed|reset|refused)/i,
+  /transport/i,
+  /timeout/i,
+  /network/i,
+  /socket/i,
+  /tls/i,
+  /ETIMEDOUT/i,
+  /ENOTFOUND/i,
+  /EPIPE/i,
+  /ECONNREFUSED/i,
+  /keepalive/i,
+]
+
+export function isTransportDispatchError(error: string | undefined): boolean {
+  if (!error) return false
+  return TRANSPORT_ERROR_PATTERNS.some((pattern) => pattern.test(error))
+}
+
+// ── Resolver worktree inspection ──────────────────────────────────
+
+interface ResolverWorktreeSnapshot {
+  unmergedFiles: string[]
+  hasConflictMarkers: boolean
+  conflictDetails: string
+  hasUncommittedChanges: boolean
+  summary: string
+}
+
+export async function inspectResolverWorktreeState(
+  wtPath: string,
+): Promise<ResolverWorktreeSnapshot> {
+  const { execFileSync } = await import("node:child_process")
+
+  const gitCmd = (args: string[], allowExitCodeOne = false): string => {
+    try {
+      return execFileSync("git", args, {
+        cwd: wtPath,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 15_000,
+        encoding: "utf-8",
+      }).trim()
+    } catch (err) {
+      const e = err as { status?: unknown; code?: unknown }
+      const exitCode = e.status ?? e.code
+      if (allowExitCodeOne && (exitCode === 1 || exitCode === 128)) return ""
+      throw err
+    }
+  }
+
+  const unmergedOut = gitCmd(["diff", "--name-only", "--diff-filter=U"])
+  const unmergedFiles = unmergedOut ? unmergedOut.split("\n").filter(Boolean) : []
+
+  const conflictGrep = gitCmd(
+    ["grep", "-n", "-E", "^(<<<<<<<|=======|>>>>>>>)", "--", "."],
+    true,
+  )
+  const hasConflictMarkers = conflictGrep.length > 0
+
+  const statusOut = gitCmd(["status", "--porcelain"])
+  const hasUncommittedChanges = statusOut.length > 0
+
+  const parts: string[] = []
+  if (unmergedFiles.length > 0) {
+    const list = unmergedFiles.slice(0, 5).join(", ")
+    parts.push(`${unmergedFiles.length} unmerged: ${list}${unmergedFiles.length > 5 ? ` +${unmergedFiles.length - 5}` : ""}`)
+  } else {
+    parts.push("no unmerged files")
+  }
+  if (hasConflictMarkers) {
+    const count = conflictGrep.split("\n").length
+    parts.push(`${count} conflict markers`)
+  } else {
+    parts.push("no conflict markers")
+  }
+  if (hasUncommittedChanges) {
+    const count = statusOut.split("\n").filter(Boolean).length
+    parts.push(`${count} uncommitted changes`)
+  } else {
+    parts.push("no uncommitted changes")
+  }
+
+  return { unmergedFiles, hasConflictMarkers, conflictDetails: conflictGrep, hasUncommittedChanges, summary: parts.join("; ") }
+}
+
 // ── Resolver worktree observer ─────────────────────────────────────
 
 interface ResolverWorktreeObserver {
@@ -3592,29 +3681,132 @@ async function resolveApplyBackWithSubagent(
   }
 
   if (!dispatchResult.ok) {
-    progress?.onPhase?.("resolver", "Resolver Subagent", dispatchResult.error ?? "Resolver subagent failed", "failed")
-    progress?.onSubagent?.("apply-back-resolver", {
-      agent: "zflow.implement-hard",
-      status: "failed",
-      finishedAt: Date.now(),
-      lastCommand: dispatchResult.error ?? "resolver subagent failed",
-    })
-    await updateRun(runId, {
-      metadata: {
-        ...(run.metadata ?? {}),
-        subagentResolutionAttempted: true,
-        subagentResolutionError: dispatchResult.error ?? "resolver subagent failed",
-      },
-    } as any, cwd)
-    throw new Error(dispatchResult.error ?? "Resolver subagent failed")
+    const transportError = isTransportDispatchError(dispatchResult.error)
+    let recoveredFromTransport = false
+
+    if (transportError) {
+      // Transport/backend failure (e.g. WebSocket error) — the resolver may
+      // have completed its work before the transport died. Inspect the
+      // preserved integration worktree to find out.
+      progress?.onPhase?.("resolver", "Resolver Subagent",
+        "Transport error; inspecting preserved worktree for possible recovery", "running")
+
+      let wtState: ResolverWorktreeSnapshot | undefined
+      let coverageSummary: string | undefined
+      try {
+        wtState = await inspectResolverWorktreeState(integrationWorktreePath)
+      } catch {
+        // inspection failed — fall through to normal error path
+      }
+
+      if (wtState && wtState.unmergedFiles.length === 0 && !wtState.hasConflictMarkers) {
+        // Worktree appears structurally resolved. Confirm via coverage.
+        progress?.onPhase?.("verify", "Verify Resolution",
+          "Worktree structurally resolved after transport error; verifying coverage", "running")
+        const coverageInputs = run.groups.map((g) => ({
+          groupId: g.groupId,
+          patchPath: path.join(runDir, "patches", `${g.groupId}.patch`),
+        }))
+        try {
+          const coverageReport = await generateCoverageReport(
+            coverageInputs, integrationWorktreePath, baseCommit,
+          )
+          coverageSummary = coverageReport.summary
+          if (coverageReport.allCovered) {
+            recoveredFromTransport = true
+            // Override dispatchResult so verification/apply proceeds normally
+            dispatchResult = { ok: true, rawOutput: "", error: undefined }
+            progress?.onPhase?.("resolver", "Resolver Subagent",
+              "Transport error recovered; worktree fully resolved and coverage verified", "completed")
+            progress?.onSubagent?.("apply-back-resolver", {
+              agent: "zflow.implement-hard",
+              title: "Apply-back resolver",
+              model: model.model,
+              thinking: model.thinking,
+              status: "completed",
+              lastCommand: "recovered from transport error; full coverage verified",
+              finishedAt: Date.now(),
+            })
+          } else {
+            progress?.onPhase?.("verify", "Verify Resolution",
+              "Coverage incomplete after transport error", "failed")
+          }
+        } catch {
+          // coverage generation failed — treat as unrecoverable transport error
+        }
+      }
+
+      if (!recoveredFromTransport) {
+        // Transport error with incomplete/unresolved worktree — preserve as resumable
+        const errorMsg = dispatchResult.error ?? "transport error"
+        const diagnostics: Record<string, unknown> = {
+          subagentResolutionAttempted: true,
+          subagentResolutionError: errorMsg,
+          subagentResolutionResumable: true,
+          subagentResolutionPartialWorkPreserved: true,
+          subagentResolutionSummary: wtState?.summary ?? "worktree inspection unavailable",
+          subagentResolutionCoverageSummary: coverageSummary,
+          subagentResolutionUnmergedFiles: wtState?.unmergedFiles?.length
+            ? wtState.unmergedFiles.join(", ") : undefined,
+          subagentResolutionConflictMarkers: wtState?.hasConflictMarkers ?? false,
+        }
+        await updateRun(runId, {
+          metadata: { ...(run.metadata ?? {}), ...diagnostics },
+        } as any, cwd)
+
+        const phaseMsg = wtState
+          ? `Transport error; worktree preserved. ${wtState.summary}`
+          : "Transport error; worktree inspection failed"
+        progress?.onPhase?.("resolver", "Resolver Subagent", phaseMsg, "failed")
+        progress?.onSubagent?.("apply-back-resolver", {
+          agent: "zflow.implement-hard",
+          status: "failed",
+          finishedAt: Date.now(),
+          lastCommand: `transport error; ${wtState?.summary ?? "worktree preserved"}`,
+        })
+        const recoverMsg = [
+          `Apply-back resolution failed due to a transport error: ${errorMsg}`,
+          wtState ? `Worktree state: ${wtState.summary}` : "Worktree inspection was not available.",
+          coverageSummary ? `Coverage: ${coverageSummary}` : undefined,
+          "",
+          "Partial resolver work is preserved and will be reused on retry.",
+          `Run the command again to continue: /zflow-resolve-apply-back ${runId}`,
+        ].filter((line): line is string => line !== undefined).join("\n")
+        throw new Error(recoverMsg)
+      }
+    }
+
+    if (!dispatchResult.ok) {
+      // Non-transport failure (or transport failure that was unrecoverable)
+      progress?.onPhase?.("resolver", "Resolver Subagent", dispatchResult.error ?? "Resolver subagent failed", "failed")
+      progress?.onSubagent?.("apply-back-resolver", {
+        agent: "zflow.implement-hard",
+        status: "failed",
+        finishedAt: Date.now(),
+        lastCommand: dispatchResult.error ?? "resolver subagent failed",
+      })
+      await updateRun(runId, {
+        metadata: {
+          ...(run.metadata ?? {}),
+          subagentResolutionAttempted: true,
+          subagentResolutionError: dispatchResult.error ?? "resolver subagent failed",
+        },
+      } as any, cwd)
+      throw new Error(dispatchResult.error ?? "Resolver subagent failed")
+    }
+
+    // recoveredFromTransport === true: fall through to verification/apply path
   }
-  progress?.onPhase?.("resolver", "Resolver Subagent", "Resolver subagent completed", "completed")
-  progress?.onSubagent?.("apply-back-resolver", {
-    agent: dispatchResult.agent ?? "zflow.implement-hard",
-    status: "completed",
-    finishedAt: Date.now(),
-    lastCommand: "resolver complete; validating result",
-  })
+
+  if (dispatchResult.ok) {
+    progress?.onPhase?.("resolver", "Resolver Subagent", "Resolver subagent completed", "completed")
+    progress?.onSubagent?.("apply-back-resolver", {
+      agent: dispatchResult.agent ?? "zflow.implement-hard",
+      status: "completed",
+      finishedAt: Date.now(),
+      lastCommand: "resolver complete; validating result",
+    })
+  }
 
   progress?.onPhase?.("verify", "Verify Resolution", "Checking for conflict markers", "running")
   const grepResult = await execFileAsync("git", ["grep", "-n", "^<<<<<<< \\|^=======\\|^>>>>>>> ", "--", "."], {
