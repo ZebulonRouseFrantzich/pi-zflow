@@ -5999,9 +5999,9 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             if (dispatchResult.ok) {
               fixProgress.update("Fix worker completed successfully")
               fixProgress.update(
-                `After fixes, re-verify with: /zflow-change-implement ${changeInput} --resume`,
+                `👉 Re-verify: /zflow-change-implement ${changeInput} --resume`,
               )
-              fixProgress.stop("Fix worker done. Re-verify to confirm.")
+              fixProgress.stop("Fix worker completed")
             } else {
               fixProgress.update(
                 `Fix worker reported an issue: ${dispatchResult.error ?? "unknown"}`,
@@ -6076,15 +6076,16 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           }
         }
 
-        // Offer next steps
+        // Offer next steps — actionable command as a prominent bullet
         if (result.verificationCommand) {
           fixProgress.update(
             `After fixes, run: ${result.verificationCommand}`,
           )
         }
-        fixProgress.stop(
-          `Ready to apply fixes: /zflow-change-fix ${changeInput} --apply`,
+        fixProgress.update(
+          `👉 Ready: /zflow-change-fix ${changeInput} --apply`,
         )
+        fixProgress.stop("Fix plan ready")
       } catch (err: unknown) {
         fixProgress.stop(
           `Fix workflow failed: ${err instanceof Error ? err.message : String(err)}`,
