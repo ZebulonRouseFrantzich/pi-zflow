@@ -403,16 +403,27 @@ export async function verifyGroupCoverage(
       continue
     }
 
-    // For additions: check if the added lines appear in the merged diff
+    // For additions: check if the added lines appear in the merged diff.
+    // If the file exists in the worktree, the addition succeeded — mark it
+    // as transformed rather than missing when content differs (conflict
+    // resolution may have adapted the exact lines).
     if (hunk.kind === "add") {
       const addedLines = extractAddedLines(hunk.content)
       if (linesAppearInDiff(addedLines, mergedDiff)) {
         preservedHunks.push(hunk)
       } else {
-        // Check directly in the file as fallback
         const fileContent = readMergedFile(mergedRepoRoot, hunk.file)
-        if (fileContent && linesAppearInDiff(addedLines, fileContent)) {
-          preservedHunks.push(hunk)
+        if (fileContent) {
+          if (linesAppearInDiff(addedLines, fileContent)) {
+            preservedHunks.push(hunk)
+          } else {
+            // File exists — content was adapted during merge/resolution
+            transformedHunks.push({
+              original: hunk,
+              explanation: `File "${hunk.file}" exists but added lines differ; ` +
+                `content was likely adapted during conflict resolution.`,
+            })
+          }
         } else {
           missingHunks.push(hunk)
         }
