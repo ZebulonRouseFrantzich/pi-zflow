@@ -174,8 +174,19 @@ import {
   publishPlanArtifacts,
   deriveSemanticChangeId,
   resolveChangeImplementTarget,
+  applyPatchesWithLedger,
+  buildSubagentResolutionPrompt,
   type PublishPlanArtifactsResult,
 } from "./orchestration.js"
+
+import {
+  reconcileResumeState,
+  findBestResumeRun,
+} from "./resume-reconciler.js"
+import type {
+  ResumeReconciliation,
+  GroupResumeStatus,
+} from "./resume-reconciler.js"
 
 import {
   loadFragment,
@@ -455,6 +466,7 @@ interface WorkflowSubagentSnapshot {
   startedAt: number
   finishedAt?: number
   lastCommand?: string
+  logs?: string[]
   lastActivityAt?: number
 }
 
@@ -656,7 +668,8 @@ function colorizeMetaLine(rawMeta: string, theme: any): string {
  * to one or more additional lines.
  */
 function buildCardLines(model: ZflowCardViewModel, theme: any, width: number): string[] {
-  const safeWidth = Math.max(8, width)
+  const MAX_CARD_WIDTH = 90
+  const safeWidth = Math.max(8, Math.min(width, MAX_CARD_WIDTH))
   const bgFn = cardBgFn(model.status, theme)
 
   function cardLineWrapped(text: string, colorize: (s: string) => string): string[] {
@@ -671,8 +684,9 @@ function buildCardLines(model: ZflowCardViewModel, theme: any, width: number): s
 
   const lines: string[] = []
 
-  // Top padding — empty background-filled line for vertical breathing room
-  lines.push(bgFn(" ".repeat(safeWidth)))
+  // Half-width top/bottom edge — visible separator without heavy bar
+  const edgePad = Math.max(4, Math.floor(safeWidth / 2))
+  lines.push(bgFn(" ".repeat(edgePad)))
 
   // Title — word-wrapped, colored by status
   for (const l of cardLineWrapped(model.title, (s) => statusTextColor(model.status, theme, s))) {
@@ -698,8 +712,8 @@ function buildCardLines(model: ZflowCardViewModel, theme: any, width: number): s
     }
   }
 
-  // Bottom padding
-  lines.push(bgFn(" ".repeat(safeWidth)))
+  // Bottom edge (half-width)
+  lines.push(bgFn(" ".repeat(edgePad)))
 
   return lines
 }
@@ -712,6 +726,12 @@ function toSubagentCardModel(subagent: WorkflowSubagentSnapshot): ZflowCardViewM
   const model = subagent.model ?? "unavailable"
   const thinking = subagent.thinking ?? "unavailable"
   const status = mapSubagentStatus(subagent.status)
+  const bodyLines: string[] = [`last: ${subagent.lastCommand ?? "starting"}`]
+  if (subagent.logs && subagent.logs.length > 0) {
+    for (const log of subagent.logs.slice(-5)) {
+      bodyLines.push(`• ${log}`)
+    }
+  }
   return {
     id: subagent.id,
     title: `${subagentStatusIcon(subagent.status)} ${subagent.title ?? "untitled group"}`,
@@ -721,7 +741,7 @@ function toSubagentCardModel(subagent: WorkflowSubagentSnapshot): ZflowCardViewM
       subagent.id,
       `${subagent.agent} · ${model} · ${thinking}`,
     ],
-    bodyLines: [`last: ${subagent.lastCommand ?? "starting"}`],
+    bodyLines,
     thinking: subagent.thinking,
   }
 }
@@ -810,8 +830,11 @@ class ZflowCard {
 function renderReviewerCards(reviewers: WorkflowReviewerSnapshot[], width: number, theme: any): string[] {
   const available = Math.max(32, width - 2)
   const columns = available >= 120 ? 3 : available >= 76 ? 2 : 1
-  const gap = 2
-  const cardWidth = Math.max(32, Math.floor((available - (columns - 1) * gap) / columns))
+  const gap = 4
+  const cardWidth = Math.min(
+    Math.max(32, Math.floor((available - (columns - 1) * gap) / columns)),
+    90,  // match buildCardLines cap
+  )
   const ordered = [...reviewers].sort((a, b) => a.reviewerName.localeCompare(b.reviewerName))
   const rendered: string[] = []
 
@@ -971,7 +994,8 @@ function makeWorkflowProgressComponent(details: WorkflowProgressMessageDetails, 
         lines.push(`  ${theme.fg("dim", "reviewers:")}`)
         lines.push(...renderReviewerCards(reviewers, available, theme))
       }
-      return lines
+      // Safety: enforce terminal width on every line to prevent TUI crashes
+      return lines.map((line) => visualTruncate(line, width))
     },
   }
 }
@@ -1085,7 +1109,7 @@ function createWorkflowProgressIndicator(
   return {
     update(message: string) {
       const current = workflowProgressSnapshots.get(id)
-      const normalizedMessage = message.replace(/\s+/g, " ").trim()
+      const normalizedMessage = visualTruncate(message.replace(/\s+/g, " ").trim(), 140)
       if (current) {
         workflowProgressSnapshots.set(id, {
           ...current,
@@ -1099,7 +1123,7 @@ function createWorkflowProgressIndicator(
     },
     updatePhaseCard(cardId: string, title: string, message: string, status: "running" | "completed" | "failed" = "running") {
       const current = workflowProgressSnapshots.get(id)
-      const normalizedMessage = message.replace(/\s+/g, " ").trim()
+      const normalizedMessage = visualTruncate(message.replace(/\s+/g, " ").trim(), 120)
       if (current) {
         const currentPhaseCards = current.phaseCards ?? []
         const existing = currentPhaseCards.find((card) => card.id === cardId)
@@ -1135,6 +1159,12 @@ function createWorkflowProgressIndicator(
         const statusChanged = update.status !== undefined && update.status !== existing?.status
         const lastCommandChanged = update.lastCommand !== undefined && update.lastCommand !== existing?.lastCommand
         const startedAtChanged = update.startedAt !== undefined && update.startedAt !== existing?.startedAt
+        // Logs: if caller provides logs, append them to existing logs, bounded at 6
+        const existingLogs = existing?.logs ?? []
+        const newLogs = update.logs
+        const mergedLogs = newLogs !== undefined
+          ? [...existingLogs, ...newLogs].slice(-6)
+          : existingLogs
         const nextSubagent: WorkflowSubagentSnapshot = {
           id: subagentId,
           agent: update.agent ?? existing?.agent ?? subagentId,
@@ -1145,6 +1175,7 @@ function createWorkflowProgressIndicator(
           startedAt: update.startedAt ?? existing?.startedAt ?? Date.now(),
           finishedAt: update.finishedAt ?? existing?.finishedAt ?? (isFinishedSubagentStatus(nextStatus) ? Date.now() : undefined),
           lastCommand: update.lastCommand ?? existing?.lastCommand,
+          logs: mergedLogs,
           lastActivityAt: Date.now(),
         }
         const existingIdx = current.subagents.findIndex((subagent) => subagent.id === subagentId)
@@ -1158,7 +1189,7 @@ function createWorkflowProgressIndicator(
           ...current,
           subagents: updatedSubagents,
         })
-        shouldSendMessage = statusChanged || lastCommandChanged || startedAtChanged
+        shouldSendMessage = statusChanged || lastCommandChanged || startedAtChanged || (newLogs !== undefined && newLogs.length > 0)
       }
       render()
       if (shouldSendMessage) {
@@ -1978,9 +2009,7 @@ async function applySuccessfulGroupPatches(
   onProgress?: (message: string) => void,
 ): Promise<{ applied: string[]; errors: string[]; summaryPath: string }> {
   const { default: fs } = await import("node:fs/promises")
-  const { execFile } = await import("node:child_process")
-  const { promisify } = await import("node:util")
-  const execFileAsync = promisify(execFile)
+  const { applyPatchesWithLedger } = await import("./orchestration.js")
 
   const ledger = await getGroupLedger(runId, cwd)
   const entries = Object.values(ledger)
@@ -1989,15 +2018,10 @@ async function applySuccessfulGroupPatches(
   const applied: string[] = []
   const errors: string[] = []
 
-  // Determine repo root
-  const { resolveRunDir } = await import("pi-zflow-artifacts/artifact-paths")
-  const runDir = resolveRunDir(runId, cwd)
-  const { stdout: repoRootRaw } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd: cwd ?? process.cwd() })
-  const repoRoot = repoRootRaw.trim()
-
+  // Use existing eligibility checks to build the list of groups to apply
+  const eligibleGroups: string[] = []
   for (const entry of entries) {
     if (entry.appliedToPrimary) {
-      // If already marked applied, verify the patch file still exists
       if (entry.patchPath) {
         try {
           await fs.access(entry.patchPath)
@@ -2014,46 +2038,76 @@ async function applySuccessfulGroupPatches(
       continue
     }
 
-    const patchPath = entry.patchPath!
-    onProgress?.(`Applying group "${entry.groupId}" patch: ${patchPath}`)
+    eligibleGroups.push(entry.groupId)
+  }
 
-    try {
-      await execFileAsync("git", ["apply", "--3way", "--index", "--binary", patchPath], {
-        cwd: repoRoot,
-        timeout: 30_000,
-      })
-      applied.push(entry.groupId)
-      ledger[entry.groupId] = {
-        ...entry,
-        status: "applied",
-        appliedToPrimary: true,
-        updatedAt: new Date().toISOString(),
-      }
-      await updateGroupLedger(runId, entry.groupId, {
+  if (eligibleGroups.length === 0) {
+    onProgress?.("No groups eligible for apply-back.")
+    const { readRun, updateRun } = await import("pi-zflow-artifacts")
+    const run = await readRun(runId, cwd)
+    await updateRun(runId, {
+      phase: "partial",
+      metadata: {
+        ...(run.metadata ?? {}),
+        applySuccessfulResult: {
+          applied: 0,
+          errors: errors.length,
+        },
+      },
+    } as any, cwd)
+    const summaryPath = await writeGroupStatusSummary(runId, changeId, cwd).catch(() => "")
+    return { applied, errors, summaryPath }
+  }
+
+  // Delegate to the smart apply-back cascade
+  onProgress?.(`${eligibleGroups.length} group(s) eligible. Running smart apply-back cascade...`)
+
+  const cascadeResult = await applyPatchesWithLedger(runId, cwd, {
+    applyOnly: eligibleGroups,
+    onProgress,
+  })
+
+  // Map cascade result back to the old return format
+  if (cascadeResult.success) {
+    // All eligible groups were applied
+    for (const gid of eligibleGroups) {
+      applied.push(gid)
+      await updateGroupLedger(runId, gid, {
         status: "applied",
         appliedToPrimary: true,
       }, cwd)
-    } catch (applyErr: unknown) {
-      const msg = applyErr instanceof Error ? applyErr.message : String(applyErr)
-      errors.push(`Group "${entry.groupId}" git apply failed: ${msg}`)
+    }
+  } else {
+    // Cascade failed — determine which groups failed
+    const ledgerAfter = await getGroupLedger(runId, cwd)
+    for (const gid of eligibleGroups) {
+      const entry = ledgerAfter[gid]
+      if (entry?.appliedToPrimary) {
+        applied.push(gid)
+      } else {
+        errors.push(`Group "${gid}" apply-back failed via cascade: ${cascadeResult.error ?? "Unknown error"}`)
+      }
     }
   }
 
   const { readRun, updateRun } = await import("pi-zflow-artifacts")
   const run = await readRun(runId, cwd)
   await updateRun(runId, {
-    phase: "partial",
+    phase: cascadeResult.success ? "completed" : "partial",
     metadata: {
       ...(run.metadata ?? {}),
       applySuccessfulResult: {
         applied: applied.length,
         errors: errors.length,
       },
+      strategiesAttempted: cascadeResult.strategiesAttempted,
+      successfulStrategy: cascadeResult.successfulStrategy,
+      subagentAvailable: cascadeResult.subagentAvailable,
     },
   } as any, cwd)
 
   const summaryPath = await writeGroupStatusSummary(runId, changeId, cwd).catch(() => "")
-  onProgress?.(`Applied ${applied.length} group(s). ${errors.length} error(s).`)
+  onProgress?.(`Applied ${applied.length} group(s). ${errors.length} error(s). Cascade strategy: ${cascadeResult.successfulStrategy ?? "none"}.`)
 
   return { applied, errors, summaryPath }
 }
@@ -3168,8 +3222,15 @@ async function ensureProfileResolved(ctx: InterviewableContext): Promise<boolean
 
 const THINKING_SUFFIX_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"])
 
+function isUsableWorkflowModel(model: string | null | undefined): model is string {
+  if (!model) return false
+  const normalized = model.trim().toLowerCase()
+  if (!normalized) return false
+  return normalized !== "placeholder" && !normalized.startsWith("placeholder:")
+}
+
 function applyProfileThinkingSuffix(model: string | undefined, thinking: string | undefined): string | undefined {
-  if (!model || !thinking || thinking === "off") return model
+  if (!isUsableWorkflowModel(model) || !thinking || thinking === "off") return model
   const colonIdx = model.lastIndexOf(":")
   if (colonIdx !== -1 && THINKING_SUFFIX_LEVELS.has(model.slice(colonIdx + 1))) return model
   return `${model}:${thinking}`
@@ -3180,7 +3241,13 @@ async function resolveWorkflowModel(agentName: string): Promise<{ model?: string
     const { getResolvedAgentBinding, getResolvedLane } = await import("pi-zflow-profiles")
     const binding = await getResolvedAgentBinding(agentName)
     const lane = binding?.lane ? await getResolvedLane(binding.lane) : null
-    const model = binding?.resolvedModel ?? undefined
+    const bindingModel = binding?.resolvedModel ?? undefined
+    const laneModel = lane?.model ?? undefined
+    const model = isUsableWorkflowModel(bindingModel)
+      ? bindingModel
+      : isUsableWorkflowModel(laneModel)
+        ? laneModel
+        : undefined
     const thinking = lane?.thinking ?? undefined
     return {
       model,
@@ -3190,6 +3257,1115 @@ async function resolveWorkflowModel(agentName: string): Promise<{ model?: string
   } catch {
     return {}
   }
+}
+
+// ── Transport error classification ──────────────────────────────────
+
+const TRANSPORT_ERROR_PATTERNS: RegExp[] = [
+  /WebSocket error/i,
+  /ECONNRESET/i,
+  /connection (closed|reset|refused)/i,
+  /transport/i,
+  /timeout/i,
+  /network/i,
+  /socket/i,
+  /tls/i,
+  /ETIMEDOUT/i,
+  /ENOTFOUND/i,
+  /EPIPE/i,
+  /ECONNREFUSED/i,
+  /keepalive/i,
+]
+
+export function isTransportDispatchError(error: string | undefined): boolean {
+  if (!error) return false
+  return TRANSPORT_ERROR_PATTERNS.some((pattern) => pattern.test(error))
+}
+
+// ── Resolver worktree inspection ──────────────────────────────────
+
+interface ResolverWorktreeSnapshot {
+  unmergedFiles: string[]
+  hasConflictMarkers: boolean
+  conflictDetails: string
+  hasUncommittedChanges: boolean
+  summary: string
+}
+
+export async function inspectResolverWorktreeState(
+  wtPath: string,
+): Promise<ResolverWorktreeSnapshot> {
+  const { execFileSync } = await import("node:child_process")
+
+  const gitCmd = (args: string[], allowExitCodeOne = false): string => {
+    try {
+      return execFileSync("git", args, {
+        cwd: wtPath,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 15_000,
+        encoding: "utf-8",
+      }).trim()
+    } catch (err) {
+      const e = err as { status?: unknown; code?: unknown }
+      const exitCode = e.status ?? e.code
+      if (allowExitCodeOne && (exitCode === 1 || exitCode === 128)) return ""
+      throw err
+    }
+  }
+
+  const unmergedOut = gitCmd(["diff", "--name-only", "--diff-filter=U"])
+  const unmergedFiles = unmergedOut ? unmergedOut.split("\n").filter(Boolean) : []
+
+  const conflictGrep = gitCmd(
+    ["grep", "-n", "-E", "^(<<<<<<<|=======|>>>>>>>)", "--", "."],
+    true,
+  )
+  const hasConflictMarkers = conflictGrep.length > 0
+
+  const statusOut = gitCmd(["status", "--porcelain"])
+  const hasUncommittedChanges = statusOut.length > 0
+
+  const parts: string[] = []
+  if (unmergedFiles.length > 0) {
+    const list = unmergedFiles.slice(0, 5).join(", ")
+    parts.push(`${unmergedFiles.length} unmerged: ${list}${unmergedFiles.length > 5 ? ` +${unmergedFiles.length - 5}` : ""}`)
+  } else {
+    parts.push("no unmerged files")
+  }
+  if (hasConflictMarkers) {
+    const count = conflictGrep.split("\n").length
+    parts.push(`${count} conflict markers`)
+  } else {
+    parts.push("no conflict markers")
+  }
+  if (hasUncommittedChanges) {
+    const count = statusOut.split("\n").filter(Boolean).length
+    parts.push(`${count} uncommitted changes`)
+  } else {
+    parts.push("no uncommitted changes")
+  }
+
+  return { unmergedFiles, hasConflictMarkers, conflictDetails: conflictGrep, hasUncommittedChanges, summary: parts.join("; ") }
+}
+
+// ── Resolver worktree observer ─────────────────────────────────────
+
+interface ResolverWorktreeObserver {
+  stop: () => void
+  /** Currently accumulated log lines (shared reference for heartbeat). */
+  readonly currentLogs: string[]
+  /** Most recently sampled status string (for heartbeat messages). */
+  lastStatusSummary: string
+  /** Timestamp of last filesystem activity observed. */
+  lastActivityAt: number
+}
+
+async function startResolverWorktreeObserver(
+  integrationWorktreePath: string,
+  runDir: string,
+  progress: {
+    onSubagent?: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id">>) => void
+    onPhase?: (id: string, title: string, message: string, status?: "running" | "completed" | "failed") => void
+  },
+  subagentId: string,
+  intervalMs: number = 15_000,
+): Promise<ResolverWorktreeObserver> {
+  const { execFileSync } = await import("node:child_process")
+  const path = await import("node:path")
+  const fs = await import("node:fs")
+  const logs: string[] = []
+  let stopped = false
+  let prevHead = ""
+  let prevUnmergedSignature = ""
+  let prevStatusSignature = ""
+  let prevConflictCounts = ""
+  let lastActivityAt = Date.now()
+  let lastStatusSummary = "observer starting"
+  const liveLogPath = path.join(runDir, "subagent-resolution-live.log")
+
+  const gitOutput = (args: string[], allowExitCodeOne = false): string => {
+    try {
+      return execFileSync("git", args, {
+        cwd: integrationWorktreePath,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 15_000,
+        encoding: "utf-8",
+      }).trim()
+    } catch (err) {
+      const maybeCode = (err as { status?: unknown; code?: unknown }).status ?? (err as { code?: unknown }).code
+      if (allowExitCodeOne && maybeCode === 1) return ""
+      throw err
+    }
+  }
+
+  const writeLog = (msg: string): void => {
+    const ts = new Date().toISOString()
+    const line = `[${ts}] ${msg}`
+    logs.push(msg)
+    if (logs.length > 20) logs.splice(0, logs.length - 20)
+    try {
+      fs.appendFileSync(liveLogPath, line + "\n", "utf-8")
+    } catch {
+      // best-effort
+    }
+  }
+
+  const flushProgress = (events: string[]): void => {
+    if (events.length > 0) {
+      progress.onSubagent?.(subagentId, { logs: events })
+    }
+  }
+
+  const tick = (): void => {
+    if (stopped) return
+    try {
+      const gitDir = path.join(integrationWorktreePath, ".git")
+      if (!fs.existsSync(gitDir)) {
+        // worktree may have been cleaned up
+        return
+      }
+
+      // --- Sample worktree state ---
+      const statusOut = gitOutput(["status", "--porcelain"])
+
+      const headOut = gitOutput(["rev-parse", "--short", "HEAD"])
+
+      const headShort = headOut
+
+      const unmergedOut = gitOutput(["diff", "--name-only", "--diff-filter=U"])
+
+      const unmergedFiles = unmergedOut ? unmergedOut.split("\n").filter(Boolean) : []
+
+      // Conflict markers in modified files
+      const conflictGrep = gitOutput(["grep", "-c", "-E", "^(<<<<<<<|=======|>>>>>>>)", "--", "."], true)
+
+      const statusSignature = statusOut ? statusOut.split("\n").sort().join("\n") : ""
+
+      // --- Detect changes ---
+      const events: string[] = []
+
+      // HEAD change
+      if (headShort && headShort !== prevHead) {
+        const logLine = gitOutput(["log", "-1", "--oneline"])
+        events.push(`new commit: ${logLine}`)
+        prevHead = headShort
+        lastActivityAt = Date.now()
+      }
+
+      // Unmerged file changes
+      const unmergedSignature = unmergedOut || ""
+      if (unmergedSignature !== prevUnmergedSignature) {
+        if (unmergedFiles.length > 0) {
+          const unmergedStr = unmergedFiles.join(", ")
+          const truncated = unmergedStr.length > 120 ? unmergedStr.slice(0, 117) + "..." : unmergedStr
+          events.push(`unmerged: ${truncated}`)
+          lastActivityAt = Date.now()
+        } else if (prevUnmergedSignature) {
+          events.push("all unmerged files resolved")
+          lastActivityAt = Date.now()
+        }
+        prevUnmergedSignature = unmergedSignature
+      }
+
+      // Conflict marker count changes
+      const conflictCounts = conflictGrep
+      if (conflictCounts && conflictCounts !== prevConflictCounts) {
+        const markerFiles = conflictCounts.split("\n").filter(Boolean)
+        const markerFileNames = markerFiles.map((l: string) => l.split(":")[0]).filter(Boolean)
+        if (markerFileNames.length > 0) {
+          events.push(`conflict markers in: ${markerFileNames.join(", ")}`)
+          lastActivityAt = Date.now()
+        } else {
+          events.push("conflict markers removed from tracked files")
+          lastActivityAt = Date.now()
+        }
+        prevConflictCounts = conflictCounts
+      } else if (!conflictCounts && prevConflictCounts) {
+        events.push("conflict markers removed from tracked files")
+        prevConflictCounts = ""
+        lastActivityAt = Date.now()
+      }
+
+      // Status changes (modified files)
+      if (statusSignature && statusSignature !== prevStatusSignature) {
+        const modifiedFiles = statusOut.split("\n")
+          .filter((l: string) => l.trim())
+          .map((l: string) => l.slice(3).trim())
+          .filter(Boolean)
+        if (modifiedFiles.length > 0) {
+          const fileList = modifiedFiles.slice(0, 5).join(", ")
+          events.push(`modified: ${fileList}${modifiedFiles.length > 5 ? ` +${modifiedFiles.length - 5} more` : ""}`)
+          lastActivityAt = Date.now()
+        }
+        prevStatusSignature = statusSignature
+      }
+
+      // Update lastStatusSummary for heartbeat
+      if (events.length > 0) {
+        lastStatusSummary = events[events.length - 1]
+      } else {
+        const idleSeconds = Math.floor((Date.now() - lastActivityAt) / 1000)
+        if (idleSeconds > 30) {
+          lastStatusSummary = `idle ${idleSeconds}s; no filesystem changes`
+        } else {
+          lastStatusSummary = `no new changes since last check`
+        }
+      }
+
+      // Emit log events
+      for (const event of events) {
+        writeLog(event)
+      }
+      if (events.length > 0) {
+        flushProgress(events)
+      }
+    } catch {
+      // git command may fail if worktree is in conflict state or cleaned up
+    }
+  }
+
+  // Initial sample
+  tick()
+
+  const interval = setInterval(tick, intervalMs)
+
+  const observer: ResolverWorktreeObserver = {
+    stop: () => {
+      stopped = true
+      clearInterval(interval)
+    },
+    get currentLogs(): string[] {
+      return logs
+    },
+    get lastStatusSummary(): string {
+      return lastStatusSummary
+    },
+    get lastActivityAt(): number {
+      return lastActivityAt
+    },
+  }
+  return observer
+}
+
+// ── Coverage repair helpers ─────────────────────────────────────────
+
+async function autoRestoreSimpleAdditions(
+  missingFiles: string[],
+  groups: Array<{ groupId: string }>,
+  patchesDir: string,
+  integrationWorktreePath: string,
+): Promise<number> {
+  const { execFileSync } = await import("node:child_process")
+  const fs = await import("node:fs")
+  const path = await import("node:path")
+
+  let restored = 0
+  for (const file of missingFiles) {
+    // Skip files that already exist — `git apply` on an existing file
+    // can produce conflict markers instead of a clean restore.
+    const targetPath = path.join(integrationWorktreePath, file)
+    if (fs.existsSync(targetPath)) continue
+
+    for (const group of groups) {
+      const patchPath = path.join(patchesDir, `${group.groupId}.patch`)
+      if (!fs.existsSync(patchPath)) continue
+
+      const content = fs.readFileSync(patchPath, "utf-8")
+      if (!content.includes(`diff --git a/${file} `)) continue
+
+      // Extract single-file patch from the group's patch file
+      const lines = content.split("\n")
+      const start = lines.findIndex((l: string) => l.startsWith(`diff --git a/${file} `))
+      if (start < 0) continue
+      let end = start + 1
+      for (; end < lines.length; end++) {
+        if (lines[end].startsWith("diff --git ") && end > start + 1) break
+      }
+
+      // Reconstruct added file content from the patch hunks.
+      // For brand-new files, only '+' and ' ' (context) lines matter.
+      const patchLines = lines.slice(start, end)
+      const newFileLines: string[] = []
+      let inHunk = false
+      for (const pl of patchLines) {
+        if (pl.startsWith("@@")) { inHunk = true; continue }
+        if (pl.startsWith("diff --git")) continue
+        if (!inHunk) continue
+        if (pl.startsWith("+")) { newFileLines.push(pl.slice(1)) }
+        else if (pl.startsWith(" ")) { newFileLines.push(pl.slice(1)) }
+        // Skip '-' lines — brand-new files have no removals.
+      }
+
+      if (newFileLines.length > 0) {
+        const dir = path.dirname(targetPath)
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+        fs.writeFileSync(targetPath, newFileLines.join("\n") + "\n", "utf-8")
+        try {
+          execFileSync("git", ["add", targetPath], {
+            cwd: integrationWorktreePath,
+            stdio: ["ignore", "pipe", "pipe"],
+            timeout: 10_000,
+          })
+        } catch { /* best-effort staging */ }
+        restored++
+        break
+      }
+    }
+  }
+  return restored
+}
+
+async function buildCoverageRepairPrompt(
+  failedGroups: Array<{ groupId: string; summary: string; missingHunks: Array<{ file: string; kind: string }> }>,
+): Promise<string> {
+  const parts: string[] = [
+    "Repair coverage gaps in the integration worktree.",
+    "",
+    "The following groups have missing changes:",
+    "",
+  ]
+  for (const g of failedGroups) {
+    parts.push(`### ${g.groupId}`)
+    parts.push(g.summary)
+    parts.push("")
+  }
+  parts.push(
+    "Instructions:",
+    "- For each missing file, add the missing content from the original intent.",
+    "- Preserve existing changes; do NOT remove any code.",
+    "- For add-type hunks, create the file with its intended content.",
+    "- For modify-type hunks, ensure the changes exist in the target files.",
+    "- After completing, run: git add -A && git commit -m \"zflow: coverage repair\"",
+  )
+  return parts.join("\n")
+}
+
+// ── Marker-free unmerged finalization ────────────────────────────────
+
+interface FinalizeResult {
+  recovered: boolean
+  committed: boolean
+  unmergedFiles: string[]
+  markerDetails: string
+}
+
+export async function finalizeMarkerFreeResolution(
+  integrationWorktreePath: string,
+  groupId: string,
+  commitMessage?: string,
+): Promise<FinalizeResult> {
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const execFileAsync = promisify(execFile)
+
+  const markerCheck = await execFileAsync("git", [
+    "grep", "-n", "-E", "^(<<<<<<<|=======|>>>>>>>)", "--", ".",
+  ], { cwd: integrationWorktreePath })
+    .then((r) => r.stdout.trim())
+    .catch((err) => {
+      const e = err as { code?: number }
+      if (e.code === 1) return ""
+      throw err
+    })
+
+  const unmergedOut = await execFileAsync("git", ["diff", "--name-only", "--diff-filter=U"], {
+    cwd: integrationWorktreePath,
+  }).then((r) => r.stdout.trim())
+  const unmergedFiles = unmergedOut ? unmergedOut.split("\n").filter(Boolean) : []
+
+  if (markerCheck) {
+    return { recovered: false, committed: false, unmergedFiles, markerDetails: markerCheck }
+  }
+
+  if (unmergedFiles.length === 0) {
+    return { recovered: true, committed: false, unmergedFiles: [], markerDetails: "" }
+  }
+
+  // Markers resolved but index still unmerged — stage and commit
+  await execFileAsync("git", ["add", "-A"], { cwd: integrationWorktreePath, timeout: 30_000 })
+  const msg = commitMessage ?? `zflow: integrate group ${groupId} with resolution`
+  await execFileAsync("git", ["commit", "--allow-empty", "-m", msg], {
+    cwd: integrationWorktreePath,
+    timeout: 30_000,
+  })
+
+  return { recovered: true, committed: true, unmergedFiles, markerDetails: "" }
+}
+
+// ── Integration continuation helpers ────────────────────────────────
+
+interface RemainingGroupBranch {
+  groupId: string
+  branchName: string
+}
+
+const GROUP_BRANCH_PREFIX = "zflow/run/"
+
+async function findRemainingGroupBranches(
+  integrationWorktreePath: string,
+  groups: Array<{ groupId: string }>,
+  runId: string,
+): Promise<RemainingGroupBranch[]> {
+  const { execFileSync } = await import("node:child_process")
+
+  const gitOutput = (args: string[], allowExitCodeOne = false): string => {
+    try {
+      return execFileSync("git", args, {
+        cwd: integrationWorktreePath,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 10_000,
+        encoding: "utf-8",
+      }).trim()
+    } catch (err) {
+      const e = err as { status?: unknown; code?: unknown }
+      const code = e.status ?? e.code
+      if (allowExitCodeOne && (code === 1 || code === 128)) return ""
+      throw err
+    }
+  }
+
+  const branchList = gitOutput(["branch", "--list", `${GROUP_BRANCH_PREFIX}${runId}/group-*`])
+  if (!branchList) return []
+
+  const allGroupBranches = branchList.split("\n")
+    .map((b) => b.replace(/^\*?\s+/, "").trim())
+    .filter(Boolean)
+
+  // Always return ALL group branches in topological order.  Rely on
+  // `git merge` itself to skip already-merged branches (it exits 0 with
+  // "Already up to date").  This avoids false negatives from `merge-base
+  // --is-ancestor` when a prior partial merge made branches ancestors
+  // without incorporating all their content.
+  const remaining: RemainingGroupBranch[] = []
+  for (const group of groups) {
+    const branchSuffix = `/${group.groupId}`
+    const branchName = allGroupBranches.find((b) => b.endsWith(branchSuffix))
+    if (!branchName) continue
+    remaining.push({ groupId: group.groupId, branchName })
+  }
+  return remaining
+}
+
+async function buildFocusedResolutionPrompt(
+  groupId: string,
+  unmergedFiles: string[],
+  integrationWorktreePath: string,
+): Promise<string> {
+  const { execFileSync } = await import("node:child_process")
+
+  const conflictDiff = (() => {
+    try {
+      return execFileSync("git", ["diff"], {
+        cwd: integrationWorktreePath,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 10_000,
+        encoding: "utf-8",
+      }).trim()
+    } catch {
+      return ""
+    }
+  })()
+
+  const shortDiff = conflictDiff.length > 12_000
+    ? conflictDiff.slice(0, 12_000) + "\n\n[...diff truncated...]"
+    : conflictDiff
+
+  return [
+    `Resolve the merge conflict for group "${groupId}".`,
+    "",
+    `Conflicted files:`,
+    ...unmergedFiles.map((f) => `  - ${f}`),
+    "",
+    "Conflict diff:",
+    "```",
+    shortDiff,
+    "```",
+    "",
+    "Instructions:",
+    "- Resolve EVERY conflict marker in the conflicted files.",
+    "- Preserve both sides' intended changes.",
+    `- After resolving, run: git add -A && git commit -m "zflow: integrate group ${groupId} with resolution"`,
+    "- Do NOT apply changes to the primary worktree.",
+    "- The parent will continue merging remaining groups.",
+  ].join("\n")
+}
+
+async function resolveApplyBackWithSubagent(
+  runId: string,
+  ctx: InterviewableContext,
+  progress?: {
+    onProgress?: (message: string) => void
+    onPhase?: (id: string, title: string, message: string, status?: "running" | "completed" | "failed") => void
+    onSubagent?: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) => void
+  },
+): Promise<void> {
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const execFileAsync = promisify(execFile)
+  const { readRun, updateRun } = await import("pi-zflow-artifacts")
+  const { generateCoverageReport } = await import("./coverage-verifier.js")
+
+  const cwd = ctx.cwd ?? process.cwd()
+  const run = await readRun(runId, cwd)
+  const runDir = resolveRunDir(runId, cwd)
+  const integrationWorktreePath = path.join(runDir, "integration-worktree")
+  const promptPath = path.join(runDir, "subagent-resolution-prompt.md")
+  const resultPath = path.join(runDir, "subagent-resolution-result.md")
+  const resolvedPatchPath = path.join(runDir, "patches", "_subagent-resolved.patch")
+  const baseCommit = run.preApplySnapshot?.head ?? run.head
+
+  progress?.onPhase?.("prepare", "Prepare Resolution", "Inspecting preserved apply-back artifacts", "running")
+  await fs.access(integrationWorktreePath).catch(() => {
+    progress?.onPhase?.("prepare", "Prepare Resolution", "Integration worktree is missing", "failed")
+    throw new Error(
+      `Integration worktree not found at ${integrationWorktreePath}. ` +
+      "Run /zflow-change-implement --resume first so the smart cascade can preserve an integration worktree.",
+    )
+  })
+
+  // ── Clean up any stale merge/rebase/cherry-pick state ──────────
+  await execFileAsync("git", ["merge", "--abort"], { cwd: integrationWorktreePath }).catch(() => {})
+  await execFileAsync("git", ["cherry-pick", "--abort"], { cwd: integrationWorktreePath }).catch(() => {})
+  await execFileAsync("git", ["rebase", "--abort"], { cwd: integrationWorktreePath }).catch(() => {})
+
+  const findConflictMarkers = async (): Promise<string> => execFileAsync("git", [
+    "grep", "-E", "^(<<<<<<<|=======|>>>>>>>)", "--", ".",
+  ], { cwd: integrationWorktreePath }).then((r) => r.stdout.trim()).catch(() => "")
+
+  // If a previous zflow-generated repair committed literal conflict markers,
+  // roll it back deterministically before involving a model.  This is safe only
+  // for clean worktrees and known machine-generated commits.
+  let rolledBackMarkerCommits = 0
+  for (let i = 0; i < 5; i++) {
+    const markerCheck = await findConflictMarkers()
+    if (!markerCheck) break
+    const status = await execFileAsync("git", ["status", "--porcelain"], {
+      cwd: integrationWorktreePath,
+    }).then((r) => r.stdout.trim()).catch(() => "")
+    if (status) break
+    const headSubject = await execFileAsync("git", ["log", "-1", "--format=%s"], {
+      cwd: integrationWorktreePath,
+    }).then((r) => r.stdout.trim()).catch(() => "")
+    const rollbackable = /^zflow: (auto-restored .*missing file|snapshot pre-continuation|coverage repair)/.test(headSubject)
+    if (!rollbackable) break
+    progress?.onPhase?.("prepare", "Prepare Resolution",
+      `Rolling back zflow-generated marker commit: ${headSubject}`, "running")
+    await execFileAsync("git", ["reset", "--hard", "HEAD~1"], { cwd: integrationWorktreePath })
+    rolledBackMarkerCommits++
+  }
+  if (rolledBackMarkerCommits > 0) {
+    progress?.onPhase?.("prepare", "Prepare Resolution",
+      `Rolled back ${rolledBackMarkerCommits} zflow-generated marker commit(s)`, "running")
+  }
+
+  // If conflict markers remain from a prior failed run, resolve them first
+  const preMarkerCheck = await findConflictMarkers()
+  if (preMarkerCheck) {
+    progress?.onPhase?.("prepare", "Prepare Resolution",
+      "Conflict markers found from prior run; dispatching cleanup resolver", "running")
+    const cleanupService = await tryGetDispatchServiceViaRegistry()
+    const cleanupModel = await resolveWorkflowModel("zflow.implement-hard")
+    if (cleanupService && cleanupModel.dispatchModel) {
+      const cleanupTask = [
+        "Resolve existing conflict markers in this integration worktree.",
+        "",
+        "The worktree has leftover conflict markers from a previous failed merge.",
+        "Resolve EVERY conflict marker in the conflicted files.",
+        "Preserve both sides' intended changes.",
+        "After resolving, run: git add -A && git commit -m \"zflow: resolve stale conflict markers\"",
+        "Do NOT apply changes to the primary worktree.",
+      ].join("\n")
+      const cleanupResult = await cleanupService.runAgent({
+        agent: "zflow.implement-hard",
+        task: cleanupTask,
+        cwd: integrationWorktreePath,
+        model: cleanupModel.dispatchModel,
+        output: path.join(runDir, "subagent-resolution-cleanup.md"),
+        outputMode: "file-only",
+        context: "fresh",
+        maxOutput: { lines: 5000, bytes: 500_000 },
+      })
+      if (!cleanupResult.ok) {
+        progress?.onPhase?.("prepare", "Prepare Resolution",
+          "Cleanup resolver failed; worktree has unresolved conflict markers", "failed")
+        throw new Error(`Could not resolve stale conflict markers: ${cleanupResult.error ?? "unknown error"}`)
+      }
+      const remainingMarkers = await findConflictMarkers()
+      if (remainingMarkers) {
+        progress?.onPhase?.("prepare", "Prepare Resolution",
+          "Cleanup resolver returned but conflict markers remain", "failed")
+        throw new Error(`Cleanup resolver left conflict markers:\n${remainingMarkers}`)
+      }
+      progress?.onPhase?.("prepare", "Prepare Resolution",
+        "Stale conflict markers resolved", "completed")
+    }
+  }
+
+  const groups = run.groups.map((g) => ({
+    groupId: g.groupId,
+    files: g.changedFiles ?? [],
+    taskPrompt: undefined,
+  }))
+
+  const dispatchService = await tryGetDispatchServiceViaRegistry()
+  if (!dispatchService) {
+    progress?.onPhase?.("resolver", "Resolver Subagent", "No dispatch service available", "failed")
+    throw new Error("No zflow dispatch service is available. Install/enable pi-subagents and retry.")
+  }
+
+  const model = await resolveWorkflowModel("zflow.implement-hard")
+  if (!model.dispatchModel) {
+    progress?.onPhase?.("resolver", "Resolver Subagent", "No usable model resolved for resolver", "failed")
+    throw new Error(
+      "No usable model resolved for zflow.implement-hard. " +
+      "Run /zflow-profile validate or switch to a profile with a non-placeholder implementation model.",
+    )
+  }
+  ctx.ui?.notify?.(`🤖 Dispatching apply-back resolver subagent for run ${runId}...`, "info")
+  progress?.onPhase?.("resolver", "Resolver Subagent", "Continuing integration merge", "running")
+  progress?.onSubagent?.("apply-back-resolver", {
+    agent: "zflow.implement-hard",
+    title: "Apply-back resolver",
+    model: model.model,
+    thinking: model.thinking,
+    status: "running",
+    lastCommand: "continuing integration merge",
+  })
+
+  // Start the worktree observer for live progress visibility
+  let observer: ResolverWorktreeObserver | undefined
+  try {
+    observer = await startResolverWorktreeObserver(
+      integrationWorktreePath,
+      runDir,
+      {
+        onSubagent: progress?.onSubagent,
+        onPhase: progress?.onPhase,
+      },
+      "apply-back-resolver",
+      15_000,
+    )
+  } catch {
+    // observer is best-effort; non-fatal if it fails to start
+  }
+
+  const resolverStartedAt = Date.now()
+  const heartbeat = setInterval(() => {
+    const elapsed = formatElapsed(Date.now() - resolverStartedAt)
+    let lastCommand: string
+    if (observer && observer.lastStatusSummary) {
+      lastCommand = observer.lastStatusSummary
+    } else {
+      lastCommand = "still running; backend may not stream tool-level progress"
+    }
+    const message = `Resolver subagent still running (${elapsed}); ${lastCommand}`
+    progress?.onPhase?.("resolver", "Resolver Subagent", message, "running")
+    progress?.onSubagent?.("apply-back-resolver", {
+      agent: "zflow.implement-hard",
+      title: "Apply-back resolver",
+      model: model.model,
+      thinking: model.thinking,
+      status: "running",
+      lastCommand,
+    })
+  }, 30_000)
+
+  // ── Integration continuation loop ─────────────────────────────
+  let dispatchResult: Awaited<ReturnType<DispatchService["runAgent"]>>
+  let finalDispatchOk = true
+  let conflictResolutionCount = 0
+  const MAX_CONFLICT_RESOLUTIONS = 3
+  let groupsMerged = 0
+  const totalGroups = groups.length
+
+  // Commit any uncommitted changes already in the integration worktree.
+  // Skip if unmerged files exist (cleanup resolver should handle those first).
+  const preStatus = await execFileAsync("git", ["status", "--porcelain"], {
+    cwd: integrationWorktreePath,
+  }).then((r) => r.stdout.trim()).catch(() => "")
+  const preUnmerged = await execFileAsync("git", ["diff", "--name-only", "--diff-filter=U"], {
+    cwd: integrationWorktreePath,
+  }).then((r) => r.stdout.trim()).catch(() => "")
+  if (preStatus && !preUnmerged) {
+    await execFileAsync("git", ["add", "-A"], { cwd: integrationWorktreePath }).catch(() => {})
+    await execFileAsync("git", ["commit", "--allow-empty", "-m", `zflow: snapshot pre-continuation for run ${runId}`], {
+      cwd: integrationWorktreePath,
+    }).catch(() => {})
+  }
+
+  try {
+    while (true) {
+      // Find remaining group branches
+      const remaining = await findRemainingGroupBranches(integrationWorktreePath, groups, runId)
+      if (remaining.length === 0) break
+
+      const plannedTotal = groupsMerged + remaining.length
+      progress?.onPhase?.("continue", "Continue Integration",
+        `Merging ${remaining.length} remaining group branch(es); ${groupsMerged}/${totalGroups} already merged`, "running")
+
+      for (const branch of remaining) {
+        // Try to merge the group branch into integration
+        let mergeOk = false
+        try {
+          await execFileAsync("git", ["merge", "--no-edit", branch.branchName], {
+            cwd: integrationWorktreePath,
+            timeout: 60_000,
+          })
+          mergeOk = true
+        } catch {
+          mergeOk = false
+        }
+
+        // Check for unmerged files (conflict)
+        const unmergedOut = await execFileAsync("git", ["diff", "--name-only", "--diff-filter=U"], {
+          cwd: integrationWorktreePath,
+        }).then((r) => r.stdout.trim()).catch(() => "")
+
+        if (mergeOk && !unmergedOut) {
+          groupsMerged++
+          progress?.onPhase?.("continue", "Continue Integration",
+            `Merged group ${branch.groupId} automatically (${groupsMerged}/${totalGroups})`, "running")
+          continue
+        }
+
+        // Merge failed. Abort if not a real conflict.
+        if (!unmergedOut) {
+          try { await execFileAsync("git", ["merge", "--abort"], { cwd: integrationWorktreePath }) } catch { /* ok */ }
+          throw new Error(`Failed to merge group ${branch.groupId}: non-conflict merge failure.`)
+        }
+
+        const unmergedFiles = unmergedOut.split("\n").filter(Boolean)
+
+        // ── Dispatch focused resolver for this conflict ──────
+        conflictResolutionCount++
+        if (conflictResolutionCount > MAX_CONFLICT_RESOLUTIONS) {
+          throw new Error(
+            `Max conflict resolution attempts reached (${MAX_CONFLICT_RESOLUTIONS}). ` +
+            `Remaining: ${remaining.map((r) => r.groupId).join(", ")}. ` +
+            "Run the command again to continue."
+          )
+        }
+
+        progress?.onPhase?.("continue", "Continue Integration",
+          `Resolving conflict for group ${branch.groupId} (attempt ${conflictResolutionCount}/${MAX_CONFLICT_RESOLUTIONS})`, "running")
+
+        const focusedTask = await buildFocusedResolutionPrompt(branch.groupId, unmergedFiles, integrationWorktreePath)
+        const focusedPromptPath = path.join(runDir,
+          `subagent-resolution-prompt-group-${branch.groupId}.md`)
+        await fs.writeFile(focusedPromptPath, focusedTask, "utf-8")
+
+        const onUpdate = (agentProgress: AgentDispatchProgress) => {
+          progress?.onSubagent?.("apply-back-resolver", {
+            agent: agentProgress.agent,
+            title: "Apply-back resolver",
+            model: model.model,
+            thinking: model.thinking,
+            status: agentProgress.status ?? "running",
+            lastCommand: agentProgress.currentTool
+              ? `${agentProgress.currentTool}${agentProgress.currentToolArgs ? ` ${agentProgress.currentToolArgs}` : ""}`
+              : agentProgress.recentOutput?.[agentProgress.recentOutput.length - 1]
+              ?? `resolving ${branch.groupId} conflict...`,
+          })
+        }
+
+        // Per-group result artifact path so each focused run writes independently.
+        const focusedResultPath = path.join(runDir,
+          `subagent-resolution-result-group-${branch.groupId}.md`)
+
+        try {
+          dispatchResult = await dispatchService.runAgent({
+            agent: "zflow.implement-hard",
+            task: focusedTask,
+            cwd: integrationWorktreePath,
+            model: model.dispatchModel,
+            output: focusedResultPath,
+            outputMode: "file-only",
+            context: "fresh",
+            maxOutput: { lines: 5000, bytes: 500_000 },
+            onUpdate,
+          })
+        } catch (dispatchErr) {
+          dispatchResult = { ok: false, rawOutput: "", error: String(dispatchErr) }
+        }
+
+        // Check transport error — resolver may have resolved markers before the
+        // transport died.  If markers are gone, stage/commit the unmerged files.
+        if (!dispatchResult.ok && isTransportDispatchError(dispatchResult.error)) {
+          const finalizeResult = await finalizeMarkerFreeResolution(
+            integrationWorktreePath,
+            branch.groupId,
+            `zflow: integrate group ${branch.groupId} with resolution`,
+          ).catch(() => ({ recovered: false, committed: false, unmergedFiles: [], markerDetails: "inspection failed" }) as FinalizeResult)
+
+          if (finalizeResult.recovered) {
+            groupsMerged++
+            const statusMsg = finalizeResult.committed
+              ? `Transport error but staged and committed marker-free resolution for group ${branch.groupId} (${groupsMerged}/${totalGroups})`
+              : `Transport error but marker-free resolution already finalized for group ${branch.groupId} (${groupsMerged}/${totalGroups})`
+            progress?.onPhase?.("continue", "Continue Integration", statusMsg, "running")
+            progress?.onSubagent?.("apply-back-resolver", {
+              agent: "zflow.implement-hard",
+              title: "Apply-back resolver",
+              model: model.model,
+              thinking: model.thinking,
+              status: "completed",
+              lastCommand: finalizeResult.committed
+                ? `staged and committed marker-free resolution for group ${branch.groupId}`
+                : `marker-free resolution already finalized for group ${branch.groupId}`,
+              finishedAt: Date.now(),
+            })
+            continue
+          }
+        }
+
+        // Verify resolver result
+        if (!dispatchResult.ok) {
+          finalDispatchOk = false
+          throw new Error(
+            `Resolver failed for group ${branch.groupId}: ${dispatchResult.error ?? "unknown error"}`
+          )
+        }
+
+        // Finalize: stage/commit if markers are gone but index is unmerged
+        const finalizeResult = await finalizeMarkerFreeResolution(
+          integrationWorktreePath,
+          branch.groupId,
+          `zflow: integrate group ${branch.groupId} with resolution`,
+        )
+        if (finalizeResult.markerDetails) {
+          throw new Error(
+            `Conflict markers remain after resolver for group ${branch.groupId}:\n${finalizeResult.markerDetails}`
+          )
+        }
+
+        groupsMerged++
+        const statusMsg = finalizeResult.committed
+          ? `Staged and committed marker-free resolution for group ${branch.groupId} (${groupsMerged}/${totalGroups})`
+          : `Resolved and merged group ${branch.groupId} (${groupsMerged}/${totalGroups})`
+        progress?.onPhase?.("continue", "Continue Integration", statusMsg, "running")
+      }
+
+      // After processing all remaining, re-check if more appeared
+      if (groupsMerged >= totalGroups) break
+    }
+  } finally {
+    clearInterval(heartbeat)
+    observer?.stop()
+  }
+
+  // ── Commit any remaining changes and capture the resolved patch ──
+  progress?.onPhase?.("continue", "Continue Integration",
+    `Integration complete: ${groupsMerged}/${totalGroups} groups merged`, "completed")
+
+  if (!finalDispatchOk) {
+    progress?.onPhase?.("resolver", "Resolver Subagent", dispatchResult?.error ?? "Resolver subagent failed", "failed")
+    progress?.onSubagent?.("apply-back-resolver", {
+      agent: "zflow.implement-hard",
+      status: "failed",
+      finishedAt: Date.now(),
+      lastCommand: dispatchResult?.error ?? "resolver subagent failed",
+    })
+    await updateRun(runId, {
+      metadata: {
+        ...(run.metadata ?? {}),
+        subagentResolutionAttempted: true,
+        subagentResolutionError: dispatchResult?.error ?? "resolver subagent failed",
+        subagentResolutionConflictResolutions: conflictResolutionCount,
+        subagentResolutionGroupsMerged: groupsMerged,
+        subagentResolutionGroupsTotal: totalGroups,
+      },
+    } as any, cwd)
+    throw new Error(dispatchResult?.error ?? "Resolver subagent failed")
+  }
+
+  progress?.onPhase?.("resolver", "Resolver Subagent",
+    `Integration complete; ${groupsMerged}/${totalGroups} groups merged, ${conflictResolutionCount} conflicts resolved`, "completed")
+  progress?.onSubagent?.("apply-back-resolver", {
+    agent: "zflow.implement-hard",
+    title: "Apply-back resolver",
+    model: model.model,
+    thinking: model.thinking,
+    status: "completed",
+    finishedAt: Date.now(),
+    lastCommand: `integration complete; ${groupsMerged}/${totalGroups} groups merged`,
+  })
+
+  progress?.onPhase?.("verify", "Verify Resolution", "Checking for conflict markers", "running")
+  const grepResult = await execFileAsync("git", ["grep", "-n", "^<<<<<<< \\|^=======\\|^>>>>>>> ", "--", "."], {
+    cwd: integrationWorktreePath,
+  }).then((r) => r.stdout.trim()).catch((err: unknown) => {
+    const e = err as { code?: number }
+    if (e.code === 1) return ""
+    throw err
+  })
+  if (grepResult) {
+    await updateRun(runId, {
+      metadata: {
+        ...(run.metadata ?? {}),
+        subagentResolutionAttempted: true,
+        subagentResolutionError: "conflict markers remain",
+        subagentResolutionRemainingConflicts: grepResult,
+      },
+    } as any, cwd)
+    progress?.onPhase?.("verify", "Verify Resolution", "Conflict markers remain", "failed")
+    throw new Error(`Resolver left conflict markers:\n${grepResult}`)
+  }
+
+  const statusBeforeCommit = await execFileAsync("git", ["status", "--porcelain"], {
+    cwd: integrationWorktreePath,
+  }).then((r) => r.stdout.trim())
+  if (statusBeforeCommit) {
+    await execFileAsync("git", ["add", "-A"], { cwd: integrationWorktreePath })
+    await execFileAsync("git", ["commit", "--allow-empty", "-m", `zflow: subagent resolution for run ${runId}`], {
+      cwd: integrationWorktreePath,
+    })
+  }
+
+  const resolvedDiff = await execFileAsync("git", ["diff", "--binary", baseCommit, "HEAD"], {
+    cwd: integrationWorktreePath,
+    maxBuffer: 20 * 1024 * 1024,
+  }).then((r) => r.stdout)
+  if (!resolvedDiff.trim()) {
+    progress?.onPhase?.("verify", "Verify Resolution", "Resolver produced no diff", "failed")
+    throw new Error("Resolver produced no diff from the integration worktree.")
+  }
+  await fs.mkdir(path.dirname(resolvedPatchPath), { recursive: true })
+  await fs.writeFile(resolvedPatchPath, resolvedDiff, "utf-8")
+
+  const coverageInputs = run.groups
+    .map((g) => ({ groupId: g.groupId, patchPath: path.join(runDir, "patches", `${g.groupId}.patch`) }))
+  progress?.onPhase?.("verify", "Verify Resolution", "Running no-lost-code coverage verification", "running")
+  let coverageReport = await generateCoverageReport(coverageInputs, integrationWorktreePath, baseCommit)
+  await fs.writeFile(
+    path.join(runDir, "subagent-resolution-coverage.json"),
+    JSON.stringify(coverageReport, null, 2),
+    "utf-8",
+  )
+  if (!coverageReport.allCovered) {
+    // ── Auto-restore simple missing additions ────────────────
+    const allMissingFiles = coverageReport.groups
+      .filter((g) => !g.covered)
+      .flatMap((g) => g.missingHunks.map((h) => h.file))
+    if (allMissingFiles.length > 0) {
+      progress?.onPhase?.("repair", "Coverage Repair",
+        `Auto-restoring simple missing files`, "running")
+      const patchesDir = path.join(runDir, "patches")
+      const groupsInput = run.groups.map((g) => ({ groupId: g.groupId }))
+      const restored = await autoRestoreSimpleAdditions(allMissingFiles, groupsInput, patchesDir, integrationWorktreePath)
+      if (restored > 0) {
+        await execFileAsync("git", ["add", "-A"], { cwd: integrationWorktreePath })
+        await execFileAsync("git", ["commit", "--allow-empty",
+          "-m", `zflow: auto-restored ${restored} missing file(s)`],
+          { cwd: integrationWorktreePath })
+        const repairCoverage = await generateCoverageReport(coverageInputs, integrationWorktreePath, baseCommit)
+        Object.assign(coverageReport, repairCoverage)
+        await fs.writeFile(
+          path.join(runDir, "subagent-resolution-coverage.json"),
+          JSON.stringify(coverageReport, null, 2),
+          "utf-8",
+        )
+        if (coverageReport.allCovered) {
+          progress?.onPhase?.("repair", "Coverage Repair",
+            `Auto-restored ${restored} file(s); coverage now complete`, "completed")
+        } else {
+          progress?.onPhase?.("repair", "Coverage Repair",
+            `Auto-restored ${restored} file(s); ${coverageReport.groups.filter((g) => !g.covered).length} group(s) still incomplete`, "running")
+        }
+      }
+    }
+    // If auto-restore fully repaired coverage, skip the failure path
+    if (!coverageReport.allCovered) {
+      const failedGroups = coverageReport.groups
+        .filter((g) => !g.covered)
+        .map((g) => g.groupId)
+      const missingFiles = coverageReport.groups
+        .flatMap((g) => g.missingHunks.map((h) => h.file))
+      await updateRun(runId, {
+        metadata: {
+          ...(run.metadata ?? {}),
+          subagentResolutionAttempted: true,
+          subagentResolutionError: "coverage verification failed",
+          subagentResolutionCoverageFailed: true,
+          subagentResolutionCoverageSummary: coverageReport.summary,
+          subagentResolutionRepairable: true,
+          subagentResolutionMissingGroups: failedGroups.join(", "),
+          subagentResolutionMissingFiles: missingFiles.join(", "),
+          subagentResolutionConflictResolutions: conflictResolutionCount,
+          subagentResolutionGroupsMerged: groupsMerged,
+          subagentResolutionGroupsTotal: totalGroups,
+          subagentResolvedPatchPath: resolvedPatchPath,
+        },
+      } as any, cwd)
+      progress?.onPhase?.("verify", "Verify Resolution",
+        `Coverage incomplete: ${failedGroups.length} groups need repair`, "failed")
+      throw new Error(
+        `Coverage repair needed after integration: ${failedGroups.length}/${totalGroups} groups incomplete.\n` +
+        `Missing groups: ${failedGroups.join(", ")}.\n` +
+        `Resolved patch preserved at ${resolvedPatchPath}.\n` +
+        `Run /zflow-resolve-apply-back ${runId} again to continue coverage repair.`
+      )
+    }
+  }
+  progress?.onPhase?.("verify", "Verify Resolution", "Coverage verified; all group changes preserved", "completed")
+
+  progress?.onPhase?.("apply", "Apply Resolved Patch", "Checking primary worktree cleanliness", "running")
+  const primaryStatus = await execFileAsync("git", ["status", "--porcelain"], {
+    cwd: run.repoRoot,
+  }).then((r) => r.stdout.trim())
+  if (primaryStatus) {
+    progress?.onPhase?.("apply", "Apply Resolved Patch", "Primary worktree is not clean", "failed")
+    throw new Error(
+      "Primary worktree is not clean; refusing to apply resolved patch. " +
+      `Resolved patch is preserved at ${resolvedPatchPath}.`,
+    )
+  }
+
+  progress?.onPhase?.("apply", "Apply Resolved Patch", "Applying verified resolved patch", "running")
+  await execFileAsync("git", ["apply", "--3way", "--index", "--binary", resolvedPatchPath], {
+    cwd: run.repoRoot,
+    timeout: 60_000,
+    maxBuffer: 20 * 1024 * 1024,
+  })
+
+  const latestRun = await readRun(runId, cwd)
+  const ledger = { ...((latestRun.metadata?.groupLedger ?? {}) as Record<string, Record<string, unknown>>) }
+  for (const group of run.groups) {
+    ledger[group.groupId] = {
+      ...(ledger[group.groupId] ?? {}),
+      groupId: group.groupId,
+      status: "applied",
+      appliedToPrimary: true,
+      patchPath: path.join(runDir, "patches", `${group.groupId}.patch`),
+      updatedAt: new Date().toISOString(),
+    }
+  }
+
+  await updateRun(runId, {
+    phase: "partial",
+    applyBack: {
+      status: "completed",
+      startedAt: latestRun.applyBack?.startedAt,
+      completedAt: new Date().toISOString(),
+    },
+    metadata: {
+      ...(latestRun.metadata ?? {}),
+      groupLedger: ledger,
+      subagentResolutionAttempted: true,
+      subagentResolutionSucceeded: true,
+      subagentResolvedPatchPath: resolvedPatchPath,
+      subagentResolutionCoverageSummary: coverageReport.summary,
+    },
+  } as any, cwd)
+
+  progress?.onPhase?.("apply", "Apply Resolved Patch", "Verified patch applied to primary worktree", "completed")
+  ctx.ui?.notify?.(
+    `✅ Subagent resolved apply-back and applied the verified patch.\n` +
+    `Resolved patch: ${resolvedPatchPath}\n` +
+    "Next: run /zflow-change-implement <change> --resume to continue final verification and review.",
+    "info",
+  )
 }
 
 // ── Extension activation ────────────────────────────────────────
@@ -3761,6 +4937,53 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
     },
   })
 
+  // ── Command: /zflow-resolve-apply-back ────────────────────────
+
+  pi.registerCommand("zflow-resolve-apply-back", {
+    description: "Resolve a failed apply-back using a subagent and preserved integration worktree",
+    handler: async (args: string, ctx: InterviewableContext): Promise<void> => {
+      const runId = args.trim().split(/\s+/).filter(Boolean)[0]
+      if (!runId) {
+        ctx.ui?.notify?.(
+          "Usage: /zflow-resolve-apply-back <run-id>\n\n" +
+          "Runs a resolver subagent in the preserved integration worktree, verifies coverage, " +
+          "and applies the verified consolidated patch to the primary worktree.",
+          "warning",
+        )
+        return
+      }
+
+      const model = await resolveWorkflowModel("zflow.implement-hard")
+      const progress = createWorkflowProgressIndicator(pi, ctx, runId, {
+        command: "zflow-resolve-apply-back",
+        model: model.model ?? "resolved",
+        thinking: model.thinking ?? "unavailable",
+        initialMessage: "Preparing apply-back resolver",
+        statusId: "zflow-resolve-apply-back",
+        widgetId: "zflow-resolve-apply-back-progress",
+      })
+      progress.updatePhaseCard("prepare", "Prepare Resolution", "Loading run artifacts", "running")
+
+      try {
+        await resolveApplyBackWithSubagent(runId, ctx, {
+          onProgress: (message) => progress.update(message),
+          onPhase: (id, title, message, status = "running") => progress.updatePhaseCard(id, title, message, status),
+          onSubagent: (id, update) => progress.updateSubagent(id, update),
+        })
+        progress.updatePhaseCard("complete", "Resolution Complete", "Apply-back resolution completed", "completed")
+        progress.stop("Apply-back resolution complete", "completed")
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err)
+        progress.updatePhaseCard("complete", "Resolution Needs Attention", message, "failed")
+        progress.stop("Apply-back resolution failed", "failed")
+        ctx.ui?.notify?.(
+          `Apply-back subagent resolution failed: ${message}`,
+          "error",
+        )
+      }
+    },
+  })
+
   // ── Command: /zflow-change-implement ──────────────────────────
 
   pi.registerCommand("zflow-change-implement", {
@@ -3811,10 +5034,10 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         setActiveWorkflowMode("change-implement")
         const cleanupMode = (): void => { resetWorkflowState() }
 
-        const partialRun = await findLatestPartialRun(changeId, ctx.cwd)
-        if (!partialRun) {
+        const partialRunId = await findBestResumeRun(changeId, ctx.cwd)
+        if (!partialRunId) {
           ctx.ui.notify(
-            `No partial or unfinished run found for change "${changeId}". ` +
+            `No unfinished run found for change "${changeId}". ` +
             "Starting a full implementation run.\n" +
             usageText,
             "warning",
@@ -3823,47 +5046,104 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
 
         if (useApplySuccessful) {
           // ── Apply successful groups path ────────────────────────
-          if (!partialRun) {
+          if (!partialRunId) {
             ctx.ui.notify(`No previous run found for "${changeId}". Nothing to apply.`, "error")
             cleanupMode()
             return
           }
 
           ctx.ui.notify(
-            `📋 Applying successful group patches from run "${partialRun.runId}"...`,
+            `📋 Applying successful group patches from run "${partialRunId}"...`,
+            "info",
+          )
+
+          // Read the run to get planVersion for reconciler
+          const { default: runStateFs } = await import("node:fs/promises")
+          const { readRun } = await import("pi-zflow-artifacts")
+          let runData: Record<string, unknown>
+          try {
+            runData = await readRun(partialRunId, ctx.cwd) as unknown as Record<string, unknown>
+          } catch {
+            ctx.ui.notify(`Cannot read run "${partialRunId}".`, "error")
+            cleanupMode()
+            return
+          }
+          const planVersion = (runData.planVersion as string) ?? "v1"
+
+          // Run reconciliation to find which patches are reusable
+          const reconciliation = await reconcileResumeState(partialRunId, changeId, planVersion, ctx.cwd)
+          if (!reconciliation.hasPreviousRun) {
+            ctx.ui.notify(`No previous run data found for "${partialRunId}".`, "error")
+            cleanupMode()
+            return
+          }
+
+          ctx.ui.notify(
+            `📋 Apply-back analysis: ${reconciliation.reusableGroups.length} group(s) reusable, ` +
+            `${reconciliation.groupsNeedingRerun.length} need rerun. Applying via smart cascade...`,
             "info",
           )
 
           try {
-            const applyResult = await applySuccessfulGroupPatches(
-              partialRun.runId,
-              changeId,
-              ctx.cwd,
-              useForceApplySuccessful,
-              (msg) => ctx.ui.notify(msg, "info"),
-            )
+            // Use the smart cascade via applyPatchesWithLedger
+            const cascadeResult = await applyPatchesWithLedger(partialRunId, ctx.cwd, {
+              applyAll: true,
+              onProgress: (msg) => ctx.ui.notify(msg, "info"),
+            })
 
-            const summaryEntry = applyResult.summaryPath
-              ? `\n  Summary: ${applyResult.summaryPath}`
-              : ""
-
-            if (applyResult.errors.length > 0) {
+            if (cascadeResult.success) {
               ctx.ui.notify(
-                `⚠️ Applied ${applyResult.applied.length} group(s) with ${applyResult.errors.length} error(s):\n` +
-                applyResult.errors.map((e) => `  - ${e}`).join("\n") +
-                summaryEntry,
-                "warning",
-              )
-            } else {
-              ctx.ui.notify(
-                `✅ Applied ${applyResult.applied.length} group(s) successfully.` +
-                summaryEntry,
+                `✅ Applied all patches successfully via "${cascadeResult.successfulStrategy ?? "patch-replay"}" strategy.`,
                 "info",
               )
+              // Update ledger for applied groups
+              for (const g of reconciliation.reusableGroups) {
+                await updateGroupLedger(partialRunId, g.groupId, {
+                  status: "applied",
+                  appliedToPrimary: true,
+                }, ctx.cwd).catch(() => {})
+              }
+            } else {
+              ctx.ui.notify(
+                `⚠️ Apply-back incomplete: ${cascadeResult.groupsApplied}/${cascadeResult.totalGroups} applied. ` +
+                (cascadeResult.error ?? ""),
+                "warning",
+              )
+              if (cascadeResult.subagentAvailable) {
+                const runDir = resolveRunDir(partialRunId, ctx.cwd)
+                const resolutionPrompt = await buildSubagentResolutionPrompt(
+                  partialRunId,
+                  changeId,
+                  reconciliation.reusableGroups.map((g) => ({
+                    id: g.groupId,
+                    files: [],
+                    taskPrompt: "",
+                  })),
+                  ctx.cwd,
+                )
+                await import("node:fs/promises").then((fs2) =>
+                  fs2.writeFile(
+                    path.join(runDir, "subagent-resolution-prompt.md"),
+                    resolutionPrompt,
+                    "utf-8",
+                  )
+                )
+                ctx.ui.notify(
+                  `🤖 Apply-back could not be automatically verified.\n` +
+                  `Strategies tried: ${(cascadeResult.strategiesAttempted ?? []).join(", ")}\n\n` +
+                  `No code was lost. All patches preserved.\n\n` +
+                  `Options:\n` +
+                  `  1. Ask a subagent to resolve: subagent-resolution-prompt.md written to ${runDir}\n` +
+                  `  2. Manually resolve using preserved patches\n` +
+                  `  3. Inspect artifacts at: ${runDir}\n` +
+                  `  4. Abandon: /zflow-change-implement ${changeInput} --abandon`,
+                  "warning",
+                )
+              }
             }
 
             // Check if all groups are now applied
-            const updatedLedger = await getGroupLedger(partialRun.runId, ctx.cwd)
+            const updatedLedger = await getGroupLedger(partialRunId, ctx.cwd)
             const allDone = Object.values(updatedLedger).every((e) =>
               e.status === "applied" || e.status === "skipped"
             )
@@ -3876,7 +5156,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             }
           } catch (err: unknown) {
             ctx.ui.notify(
-              `Apply successful groups failed: ${err instanceof Error ? err.message : String(err)}`,
+              `Apply failed: ${err instanceof Error ? err.message : String(err)}`,
               "error",
             )
           }
@@ -3885,131 +5165,322 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           return
         }
 
-        // ── Resume path ──────────────────────────────────────────
-        if (partialRun) {
-          const partialRunId = partialRun.runId
-          const partialRunData = partialRun.run as Record<string, unknown>
-          const planVersion = partialRunData.planVersion as string ?? "v1"
-          const resumeChangeId = partialRunData.changeId as string ?? changeId
-
-          const dispatchService = await tryGetDispatchServiceViaRegistry()
-          if (!dispatchService) {
+        // ── Resume path (smart reconciler) ──────────────────────
+        // partialRunId is already set via findBestResumeRun above
+        if (partialRunId) {
+          // Read the run to get metadata
+          const { readRun } = await import("pi-zflow-artifacts")
+          let runData: Record<string, unknown>
+          try {
+            runData = await readRun(partialRunId, ctx.cwd) as unknown as Record<string, unknown>
+          } catch {
             ctx.ui.notify(
-              "⚠️ No dispatch service available. Cannot resume without worktree isolation.\n" +
-              "Use --apply-successful if patches exist, or install pi-subagents.",
+              `Cannot read run "${partialRunId}". Cannot resume.`,
               "error",
             )
             cleanupMode()
             return
           }
 
-          const implementModel = await resolveWorkflowModel("zflow.implement-routine")
-          const implProgress = createWorkflowProgressIndicator(pi, ctx, changeInput, {
-            command: "zflow-change-implement",
-            model: implementModel.model ?? "unavailable",
-            thinking: implementModel.thinking ?? "unavailable",
-            initialMessage: "Resuming implementation run",
-            statusId: "zflow-implement",
-            widgetId: "zflow-implement-progress",
-          })
+          const planVersion = (runData.planVersion as string) ?? "v1"
+          const resumeChangeId = (runData.changeId as string) ?? changeId
 
-          try {
-            implProgress.update(`Resuming run "${partialRunId}" — dispatching only failed/pending groups`)
+          // Run reconciliation to understand what can be reused
+          const reconciliation = await reconcileResumeState(
+            partialRunId,
+            resumeChangeId,
+            planVersion,
+            ctx.cwd,
+          )
 
-            await resumeWorktreeDispatch(
-              partialRunId,
-              resumeChangeId,
-              planVersion,
-              dispatchService,
-              {
-                cwd: ctx.cwd,
-                force,
-                onSubagentUpdate: (id, update) => implProgress.updateSubagent(id, update),
-              },
+          if (!reconciliation.hasPreviousRun) {
+            ctx.ui.notify(
+              `No previous run data found for "${partialRunId}". Starting fresh.`,
+              "warning",
+            )
+            // Fall through to full dispatch below
+          } else {
+            // Show reconciliation summary
+            ctx.ui.notify(
+              `📋 Resume analysis:\n` +
+              `  - Found previous run: ${partialRunId}\n` +
+              `  - ${reconciliation.reusableGroups.length} group(s) with reusable patches\n` +
+              `  - ${reconciliation.groupsNeedingRerun.length} group(s) need rerun\n` +
+              `  - ${reconciliation.alreadyAppliedGroups.length} group(s) already applied\n` +
+              `  - Apply-back needed: ${reconciliation.applyBackNeeded}\n` +
+              `  - Recommended next step: ${reconciliation.recommendedNextStep}\n` +
+              reconciliation.summary,
+              "info",
             )
 
-            implProgress.update("Resume dispatch complete; all groups now succeeded")
-
-            // ── Post-start sequence ──────────────────────────────
-            const updatePostImplementationCard = (message: string): void => {
-              const normalized = message.toLowerCase()
-
-              // When verification is skipped (gating), mark Post Implementation terminal
-              // and return early — no code review should start in this state.
-              if (normalized.includes("verification skipped") || normalized.includes("skipped —") || normalized.includes("gating")) {
-                implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification skipped — needs review", "failed")
-                implProgress.updatePhaseCard("code-review", "Code Review", "Verification skipped; code review blocked", "failed")
+            // ── Step 1: Rerun groups that need it ────────────────
+            if (reconciliation.groupsNeedingRerun.length > 0) {
+              const dispatchService = await tryGetDispatchServiceViaRegistry().catch(() => null)
+              if (!dispatchService) {
+                ctx.ui.notify(
+                  "⚠️ Groups need rerun but no dispatch service available.\n" +
+                  "Use --apply-successful to apply existing patches only, or install pi-subagents.",
+                  "error",
+                )
+                cleanupMode()
                 return
               }
 
-              if (normalized.includes("running code review")) {
-                // Code review is starting — Post Implementation must already be in a
-                // terminal state (completed or failed). Transition it now in case
-                // earlier messages did not set the final card state.
-                implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification complete", "completed")
-                implProgress.updatePhaseCard("code-review", "Code Review", message, "running")
+              const implementModel = await resolveWorkflowModel("zflow.implement-routine")
+              const implProgress = createWorkflowProgressIndicator(pi, ctx, changeInput, {
+                command: "zflow-change-implement",
+                model: implementModel.model ?? "unavailable",
+                thinking: implementModel.thinking ?? "unavailable",
+                initialMessage: "Resuming with rerun for failed groups",
+                statusId: "zflow-implement",
+                widgetId: "zflow-implement-progress",
+              })
+
+              try {
+                implProgress.update(
+                  `Rerunning ${reconciliation.groupsNeedingRerun.length} failed/pending group(s) in "${partialRunId}"`,
+                )
+
+                await resumeWorktreeDispatch(
+                  partialRunId,
+                  resumeChangeId,
+                  planVersion,
+                  dispatchService,
+                  {
+                    cwd: ctx.cwd,
+                    force,
+                    onSubagentUpdate: (id, update) => implProgress.updateSubagent(id, update),
+                  },
+                )
+
+                implProgress.update("Resume dispatch complete")
+                implProgress.stop("Resume dispatch complete")
+              } catch (err: unknown) {
+                implProgress.stop(
+                  `Resume dispatch failed: ${err instanceof Error ? err.message : String(err)}`,
+                  "failed",
+                )
+                cleanupMode()
                 return
-              }
-              if (normalized.includes("code review passed")) {
-                implProgress.updatePhaseCard("code-review", "Code Review", message, "completed")
-                implProgress.updatePhaseCard("post-code-review", "Post Code Review", "Preparing final workflow completion", "running")
-                return
-              }
-              if (normalized.includes("code review found") || normalized.includes("review failed")) {
-                implProgress.updatePhaseCard("code-review", "Code Review", message, "failed")
-                implProgress.updatePhaseCard("post-code-review", "Post Code Review", "Review failed; preparing next steps", "failed")
-                return
-              }
-              if (normalized.includes("persisting completed") || normalized.includes("workflow completion persisted")) {
-                implProgress.updatePhaseCard("post-code-review", "Post Code Review", message, normalized.includes("persisted") ? "completed" : "running")
-                return
-              }
-              const postStatus = normalized.includes("final verification passed") ? "completed" : "running"
-              implProgress.updatePhaseCard("post-implementation", "Post Implementation", message, postStatus)
-              if (normalized.includes("final verification passed")) {
-                implProgress.updatePhaseCard("code-review", "Code Review", "Waiting for code review to start", "running")
               }
             }
 
-            updatePostImplementationCard("Starting post-dispatch sequence: final verification, review, and completion")
-            const onReviewerUpdate = (reviewerUpdate: {
-              reviewerName: string
-              agentName: string
-              status: "queued" | "running" | "completed" | "failed"
-              model?: string
-              thinking?: string
-              currentTool?: string
-              lastCommand?: string
-            }): void => {
-              implProgress.updateReviewer(reviewerUpdate.reviewerName, reviewerUpdate)
+            // ── Step 2: Apply patches via smart cascade ──────────
+            if (reconciliation.applyBackNeeded) {
+              ctx.ui.notify(
+                "📋 Running smart apply-back cascade...",
+                "info",
+              )
+
+              const cascadeResult = await applyPatchesWithLedger(partialRunId, ctx.cwd, {
+                applyAll: true,
+                onProgress: (msg) => ctx.ui.notify(msg, "info"),
+              })
+
+              if (cascadeResult.success) {
+                ctx.ui.notify(
+                  `✅ Apply-back completed: ${cascadeResult.groupsApplied} group(s) applied ` +
+                  `via "${cascadeResult.successfulStrategy ?? "patch-replay"}" strategy.`,
+                  "info",
+                )
+
+                // Mark reusable+applied groups
+                for (const g of reconciliation.reusableGroups) {
+                  if (!g.alreadyApplied) {
+                    await updateGroupLedger(partialRunId, g.groupId, {
+                      status: "applied",
+                      appliedToPrimary: true,
+                    }, ctx.cwd).catch(() => {})
+                  }
+                }
+
+                // ── Step 3: Post-start sequence (verification, review) ──
+                const implProgress = createWorkflowProgressIndicator(pi, ctx, changeInput, {
+                  command: "zflow-change-implement",
+                  model: "resolved",
+                  thinking: "unavailable",
+                  initialMessage: "Continuing to final verification and review",
+                  statusId: "zflow-implement",
+                  widgetId: "zflow-implement-progress",
+                })
+
+                const updatePostImplementationCard = (message: string): void => {
+                  const normalized = message.toLowerCase()
+                  if (normalized.includes("verification skipped") || normalized.includes("skipped —") || normalized.includes("gating")) {
+                    implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification skipped — needs review", "failed")
+                    implProgress.updatePhaseCard("code-review", "Code Review", "Verification skipped; code review blocked", "failed")
+                    return
+                  }
+                  if (normalized.includes("running code review")) {
+                    implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification complete", "completed")
+                    implProgress.updatePhaseCard("code-review", "Code Review", message, "running")
+                    return
+                  }
+                  if (normalized.includes("code review passed")) {
+                    implProgress.updatePhaseCard("code-review", "Code Review", message, "completed")
+                    implProgress.updatePhaseCard("post-code-review", "Post Code Review", "Preparing final workflow completion", "running")
+                    return
+                  }
+                  if (normalized.includes("code review found") || normalized.includes("review failed")) {
+                    implProgress.updatePhaseCard("code-review", "Code Review", message, "failed")
+                    implProgress.updatePhaseCard("post-code-review", "Post Code Review", "Review failed; preparing next steps", "failed")
+                    return
+                  }
+                  if (normalized.includes("persisting completed") || normalized.includes("workflow completion persisted")) {
+                    implProgress.updatePhaseCard("post-code-review", "Post Code Review", message, normalized.includes("persisted") ? "completed" : "running")
+                    return
+                  }
+                  const postStatus = normalized.includes("final verification passed") ? "completed" : "running"
+                  implProgress.updatePhaseCard("post-implementation", "Post Implementation", message, postStatus)
+                  if (normalized.includes("final verification passed")) {
+                    implProgress.updatePhaseCard("code-review", "Code Review", "Waiting for code review to start", "running")
+                  }
+                }
+
+                updatePostImplementationCard("Starting final verification, review, and completion")
+                const onReviewerUpdate = (reviewerUpdate: {
+                  reviewerName: string; agentName: string
+                  status: "queued" | "running" | "completed" | "failed"
+                  model?: string; thinking?: string
+                  currentTool?: string; lastCommand?: string
+                }): void => {
+                  implProgress.updateReviewer(reviewerUpdate.reviewerName, reviewerUpdate)
+                }
+                const postResult = await runImplementationPostStartSequence(
+                  partialRunId,
+                  {
+                    skipDispatchWait: false,
+                    onProgress: updatePostImplementationCard,
+                    onReviewerUpdate,
+                  },
+                )
+
+                const finalCardStatus = postResult.status === "completed" ? "completed" : "failed"
+                const finalCardTitle = postResult.status === "completed" ? "Workflow Complete" : "Workflow Needs Attention"
+                implProgress.updatePhaseCard("workflow-complete", finalCardTitle, `Phase: ${postResult.phase}, status: ${postResult.status}`, finalCardStatus)
+                implProgress.stop(finalCardTitle)
+              } else {
+                // Apply-back failed — offer subagent resolution
+                ctx.ui.notify(
+                  `⚠️ Apply-back could not be automatically verified.\n` +
+                  `Strategies tried: ${(cascadeResult.strategiesAttempted ?? []).join(", ")}\n\n` +
+                  `No code was lost. All patches and integration worktree are preserved.\n\n` +
+                  `Options:\n` +
+                  `  1. Ask a subagent to resolve: /zflow-resolve-apply-back ${partialRunId}\n` +
+                  `  2. Manually resolve and then run:\n` +
+                  `     /zflow-change-implement ${changeInput} --force-apply-successful\n` +
+                  `  3. Inspect artifacts at: ${resolveRunDir(partialRunId, ctx.cwd)}\n` +
+                  `  4. Abandon: /zflow-change-implement ${changeInput} --abandon`,
+                  "warning",
+                )
+
+                // Write subagent resolution prompt
+                try {
+                  const runDir = resolveRunDir(partialRunId, ctx.cwd)
+                  const resolutionPrompt = await buildSubagentResolutionPrompt(
+                    partialRunId,
+                    resumeChangeId,
+                    [...reconciliation.reusableGroups, ...reconciliation.groupsNeedingRerun].map((g) => ({
+                      id: g.groupId,
+                      files: [],
+                      taskPrompt: "",
+                    })),
+                    ctx.cwd,
+                  )
+                  const { default: fs3 } = await import("node:fs/promises")
+                  await fs3.writeFile(
+                    path.join(runDir, "subagent-resolution-prompt.md"),
+                    resolutionPrompt,
+                    "utf-8",
+                  )
+                  ctx.ui.notify(
+                    `🤖 Subagent resolution prompt written to: ${path.join(runDir, "subagent-resolution-prompt.md")}`,
+                    "info",
+                  )
+                } catch {
+                  // Best-effort
+                }
+
+                // Update run metadata
+                try {
+                  const curRun = await readRun(partialRunId, ctx.cwd)
+                  await import("pi-zflow-artifacts").then(({ updateRun }) =>
+                    updateRun(partialRunId, {
+                      metadata: {
+                        ...(curRun.metadata ?? {}),
+                        subagentResolutionAvailable: true,
+                        resolutionPromptPath: path.join(resolveRunDir(partialRunId, ctx.cwd), "subagent-resolution-prompt.md"),
+                      },
+                    } as any, ctx.cwd)
+                  )
+                } catch {
+                  // Best-effort
+                }
+              }
+            } else if (reconciliation.verificationNeeded) {
+              // All groups applied — just continue to verification/review
+              const implProgress = createWorkflowProgressIndicator(pi, ctx, changeInput, {
+                command: "zflow-change-implement",
+                model: "resolved",
+                thinking: "unavailable",
+                initialMessage: "Continuing to verification and review",
+                statusId: "zflow-implement",
+                widgetId: "zflow-implement-progress",
+              })
+              const updatePostImplementationCard = (message: string): void => {
+                const normalized = message.toLowerCase()
+                if (normalized.includes("verification skipped") || normalized.includes("skipped —") || normalized.includes("gating")) {
+                  implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification skipped — needs review", "failed")
+                  implProgress.updatePhaseCard("code-review", "Code Review", "Verification skipped; code review blocked", "failed")
+                  return
+                }
+                if (normalized.includes("running code review")) {
+                  implProgress.updatePhaseCard("post-implementation", "Post Implementation", "Verification complete", "completed")
+                  implProgress.updatePhaseCard("code-review", "Code Review", message, "running")
+                  return
+                }
+                if (normalized.includes("code review passed")) {
+                  implProgress.updatePhaseCard("code-review", "Code Review", message, "completed")
+                  implProgress.updatePhaseCard("post-code-review", "Post Code Review", "Preparing final workflow completion", "running")
+                  return
+                }
+                if (normalized.includes("code review found") || normalized.includes("review failed")) {
+                  implProgress.updatePhaseCard("code-review", "Code Review", message, "failed")
+                  implProgress.updatePhaseCard("post-code-review", "Post Code Review", "Review failed; preparing next steps", "failed")
+                  return
+                }
+                if (normalized.includes("persisting completed") || normalized.includes("workflow completion persisted")) {
+                  implProgress.updatePhaseCard("post-code-review", "Post Code Review", message, normalized.includes("persisted") ? "completed" : "running")
+                  return
+                }
+                const postStatus = normalized.includes("final verification passed") ? "completed" : "running"
+                implProgress.updatePhaseCard("post-implementation", "Post Implementation", message, postStatus)
+                if (normalized.includes("final verification passed")) {
+                  implProgress.updatePhaseCard("code-review", "Code Review", "Waiting for code review to start", "running")
+                }
+              }
+              updatePostImplementationCard("Starting final verification, review, and completion")
+              const onReviewerUpdate = (reviewerUpdate: {
+                reviewerName: string; agentName: string
+                status: "queued" | "running" | "completed" | "failed"
+                model?: string; thinking?: string
+                currentTool?: string; lastCommand?: string
+              }): void => {
+                implProgress.updateReviewer(reviewerUpdate.reviewerName, reviewerUpdate)
+              }
+              const postResult = await runImplementationPostStartSequence(
+                partialRunId,
+                { skipDispatchWait: false, onProgress: updatePostImplementationCard, onReviewerUpdate },
+              )
+              const finalCardStatus = postResult.status === "completed" ? "completed" : "failed"
+              const finalCardTitle = postResult.status === "completed" ? "Workflow Complete" : "Workflow Needs Attention"
+              implProgress.updatePhaseCard("workflow-complete", finalCardTitle, `Phase: ${postResult.phase}, status: ${postResult.status}`, finalCardStatus)
+              implProgress.stop(finalCardTitle)
             }
-            const postResult = await runImplementationPostStartSequence(
-              partialRunId,
-              {
-                skipDispatchWait: false,
-                onProgress: updatePostImplementationCard,
-                onReviewerUpdate,
-              },
-            )
 
-            const finalCardStatus = postResult.status === "completed" ? "completed" : "failed"
-            const finalCardTitle = postResult.status === "completed" ? "Workflow Complete" : "Workflow Needs Attention"
-            const nextStepsLine = postResult.nextSteps.length > 0
-              ? `Next steps: ${postResult.nextSteps.map((s) => s.replace(/^\d+\.\s*/, "")).join("; ")}`
-              : "No further steps — workflow is complete."
-
-            implProgress.updatePhaseCard("workflow-complete", finalCardTitle, `Phase: ${postResult.phase}, status: ${postResult.status}`, finalCardStatus)
-            implProgress.updatePhaseCard("workflow-complete", finalCardTitle, nextStepsLine, finalCardStatus)
-            implProgress.stop(finalCardTitle)
-          } catch (err: unknown) {
-            implProgress.stop(
-              `Resume failed: ${err instanceof Error ? err.message : String(err)}`,
-              "failed",
-            )
+            cleanupMode()
+            return
           }
-
-          cleanupMode()
-          return
         }
 
         // No partial run found — fall through to full dispatch

@@ -63,6 +63,14 @@ export const CHANGE_HELP_TOPIC: ZflowHelpTopic = {
         "Apply fixes identified during audit or review for a change.",
     },
     {
+      name: "zflow-resolve-apply-back",
+      usage: "/zflow-resolve-apply-back <run-id>",
+      description:
+        "Ask a resolver subagent to complete a failed smart apply-back " +
+        "using the preserved integration worktree, verify that all group " +
+        "patches are covered, and apply the verified consolidated patch.",
+    },
+    {
       name: "zflow-clean",
       usage: "/zflow-clean",
       description:

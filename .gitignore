@@ -1,3 +1,5 @@
+.zflow/
+
 node_modules/
 dist/
 .cache/
