@@ -953,7 +953,7 @@ function buildWorkflowFinalNextStepsLine(
     const findings = postResult.reviewFindingsPath
       ? ` Findings: ${postResult.reviewFindingsPath}.`
       : ""
-    return `Next: fix review findings, then run /zflow-change-implement ${changeInput} --resume.${findings}`
+    return `Next: /zflow-change-fix ${changeInput} to review findings, then /zflow-change-implement ${changeInput} --resume to re-verify.${findings}`
   }
 
   if (postResult.phase === "verification-failed") {
@@ -5892,25 +5892,133 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
   // ── Command: /zflow-change-fix ────────────────────────────────
 
   pi.registerCommand("zflow-change-fix", {
-    description: "Iterate on verification/code-review failures for an approved change",
+    description: "Iterate on verification/code-review failures for an approved change. Use --apply to dispatch workers.",
     handler: async (args: string, ctx: InterviewableContext): Promise<void> => {
-      const changeId = args.trim()
-      if (!changeId) {
-        ctx.ui.notify("Usage: /zflow-change-fix <change-id>", "warning")
+      const parts = args.trim().split(/\s+/)
+      const applyMode = parts.includes("--apply")
+      const changeInput = parts.filter(p => !p.startsWith("--")).join(" ")
+
+      if (!changeInput) {
+        ctx.ui.notify(
+          "Usage: /zflow-change-fix <change-id> [--apply]\n\n" +
+          "  /zflow-change-fix <id>         Review findings and build fix plan.\n" +
+          "  /zflow-change-fix <id> --apply  Dispatch workers to apply fixes.",
+          "warning",
+        )
         return
       }
 
       const fixModel = await resolveWorkflowModel("zflow.implement-routine")
-      const fixProgress = createWorkflowProgressIndicator(pi, ctx, changeId, {
+      const fixProgress = createWorkflowProgressIndicator(pi, ctx, changeInput, {
         command: "zflow-change-fix",
         model: fixModel.model ?? "unavailable",
         thinking: fixModel.thinking ?? "unavailable",
-        initialMessage: "Running fix workflow",
+        initialMessage: applyMode ? "Applying fix plan" : "Running fix workflow",
         statusId: "zflow-fix",
         widgetId: "zflow-fix-progress",
       })
 
       try {
+        // Resolve the durable change path for plan access
+        const implementTarget = await resolveChangeImplementTarget(changeInput)
+        const changeId = implementTarget.changeId
+
+        if (applyMode) {
+          // ── Apply mode: dispatch workers to implement the fix plan ──
+          // Build a fresh fix plan (re-reads latest findings)
+          fixProgress.update("Building fix plan from latest review findings")
+          const planResult = await runChangeFixWorkflow({ changeId })
+
+          const dispatchService = await tryGetDispatchServiceViaRegistry().catch(() => null)
+          if (!dispatchService) {
+            ctx.ui.notify(
+              "⚠️ Cannot apply fixes: no dispatch service available.\n" +
+              "Install pi-subagents or register a dispatch bridge, then retry.",
+              "error",
+            )
+            fixProgress.stop("Cannot apply: no dispatch service", "failed")
+            return
+          }
+
+          // Build a worker prompt that includes the fix plan and a note
+          // to review conversation context for any user alterations.
+          const workerTask = [
+            "# Fix Plan — Code Review Findings",
+            "",
+            `Change: ${changeId}`,
+            "",
+            "## Instructions",
+            "",
+            "1. Read the fix plan below. Review the conversation above (the",
+            "   chat history before this command was invoked) for any user",
+            "   alterations, comments, or additional context.",
+            "2. Implement the fixes by editing the target files directly.",
+            "3. After making changes, verify by running the verification",
+            "   command if one is available, or check that the modified",
+            "   files are syntactically correct.",
+            "4. Do NOT edit files outside the set listed below unless",
+            "   necessary for the fix.",
+            "",
+            "## Fix Plan",
+            "",
+            planResult.fixPlan,
+            "",
+            planResult.filesToModify.length > 0
+              ? [
+                  "## Target Files",
+                  "",
+                  ...planResult.filesToModify.map((f) => `- ${f}`),
+                  "",
+                ].join("\n")
+              : "",
+            planResult.verificationCommand
+              ? [
+                  "## Verification",
+                  "",
+                  `After fixes, run: \`${planResult.verificationCommand}\``,
+                  "",
+                ].join("\n")
+              : "",
+            "",
+            "After implementing all fixes, report:",
+            "- Which files were modified",
+            "- A brief summary of each fix",
+            "- Whether verification passed",
+          ].join("\n")
+
+          fixProgress.update(`Dispatching fix worker for ${changeId} via ${dispatchService.name}`)
+          try {
+            const dispatchResult = await dispatchService.runAgent({
+              agent: "zflow.implement-routine",
+              task: workerTask,
+              cwd: ctx.cwd,
+              ...(fixModel.model ? { model: fixModel.model } : {}),
+              ...(fixModel.thinking ? { thinking: fixModel.thinking } : {}),
+            })
+
+            if (dispatchResult.ok) {
+              fixProgress.update("Fix worker completed successfully")
+              fixProgress.update(
+                `After fixes, re-verify with: /zflow-change-implement ${changeInput} --resume`,
+              )
+              fixProgress.stop("Fix worker done. Re-verify to confirm.")
+            } else {
+              fixProgress.update(
+                `Fix worker reported an issue: ${dispatchResult.error ?? "unknown"}`,
+              )
+              fixProgress.stop("Fix worker issue — inspect output", "failed")
+            }
+          } catch (dispatchErr: unknown) {
+            fixProgress.update(
+              `Fix dispatch failed: ${dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr)}`,
+            )
+            fixProgress.stop("Fix dispatch failed", "failed")
+          }
+
+          return
+        }
+
+        // ── Plan mode: review findings and build fix plan ──────
         fixProgress.update("Resolving review findings and building fix plan")
         const result = await runChangeFixWorkflow({
           changeId,
@@ -5921,6 +6029,18 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           fixProgress.update(
             `Files to modify: ${result.filesToModify.map(f => `\`${f}\``).join(", ")}`,
           )
+        }
+
+        // Persist the fix plan for --apply to pick up
+        try {
+          const { default: fs3 } = await import("node:fs/promises")
+          const fixPlanDir = resolveChangeDir(changeId, ctx.cwd)
+          await fs3.mkdir(fixPlanDir, { recursive: true })
+          const fixPlanPath = `${fixPlanDir}/fix-plan-latest.md`
+          await fs3.writeFile(fixPlanPath, result.fixPlan, "utf-8")
+          fixProgress.update(`Fix plan persisted to ${fixPlanPath}`)
+        } catch {
+          // Best effort — --apply can regenerate
         }
 
         // Structured gate presenting review-finding fix options
@@ -5963,7 +6083,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           )
         }
         fixProgress.stop(
-          `Tip: Update plan lifecycle and re-run /zflow-review-code ${changeId} to re-verify.`,
+          `Ready to apply fixes: /zflow-change-fix ${changeInput} --apply`,
         )
       } catch (err: unknown) {
         fixProgress.stop(
