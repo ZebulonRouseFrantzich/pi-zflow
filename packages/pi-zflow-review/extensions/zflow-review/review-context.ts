@@ -134,6 +134,110 @@ export function getVerificationStatusReminder(
   return text
 }
 
+// ── Findings format instruction ───────────────────────────────
+
+/**
+ * Detailed findings format instruction.
+ *
+ * Tells reviewers to produce structured findings with file paths,
+ * severity, recommendations with reasoning, and pseudocode. This
+ * ensures review artifacts carry the same level of actionable detail
+ * as implementation tasks.
+ */
+const FINDINGS_FORMAT_INSTRUCTION =
+  "## Required findings format\n\n" +
+  "Produce findings in this format. Every finding MUST include every " +
+  "field below. Do not omit fields or collapse multiple issues into a " +
+  "single finding.\n\n" +
+  "### <severity>: <one-line summary>\n\n" +
+  "- **File**: relative path to the file containing the issue\n" +
+  "- **Lines**: line range or specific line(s) where the issue occurs\n" +
+  "- **Role**: your reviewer role (e.g. correctness, security)\n" +
+  "- **Observation**: what the code currently does; be specific about " +
+  "the behaviour, value, or state you observed in the diff\n" +
+  "- **Impact**: concrete example of what goes wrong — who is affected, " +
+  "under what conditions, and how severe the consequence is\n" +
+  "- **Recommendation**: detailed explanation of the fix, including " +
+  "your reasoning and professional opinion on the best approach\n" +
+  "- **Pseudocode**: a code snippet illustrating the recommended " +
+  "change. Use the actual types, function names, and patterns from " +
+  "the codebase. Keep it concise but specific enough that a developer " +
+  "can implement the fix without ambiguity\n" +
+  "- **Plan adherence**: whether this issue represents a deviation " +
+  "from the approved plan, and if so which specific plan section or " +
+  "group it deviates from. Cite the plan document and section.\n\n" +
+  "Example:\n\n" +
+  "### major: Token verifier accepts missing sub claim\n\n" +
+  "- **File**: src/adapters/zitadel/token_verifier.ts\n" +
+  "- **Lines**: 193-194\n" +
+  "- **Role**: correctness\n" +
+  "- **Observation**: `verifyToken` returns `subject: payload.sub ?? ''` " +
+  "instead of rejecting tokens that lack a `sub` claim.\n" +
+  "- **Impact**: Two validly-signed tokens from the same issuer with " +
+  "missing `sub` both resolve to the same identity key (`issuer + ''`), " +
+  "causing user A's data to be served to user B.\n" +
+  "- **Recommendation**: Reject tokens with missing or empty `sub` before " +
+  "returning `VerifiedToken`. This is a hard identity invariant — the " +
+  "subject claim is mandatory per OIDC Core 1.0 §2.\n" +
+  "- **Pseudocode**:\n" +
+  "  ```ts\n" +
+  "  if (!payload.sub || payload.sub.trim().length === 0) {\n" +
+  "    throw new TokenValidationError(\n" +
+  "      'TOKEN_MALFORMED',\n" +
+  "      'Token missing subject',\n" +
+  "    )\n" +
+  "  }\n" +
+  "  ```\n" +
+  "- **Plan adherence**: Deviates from plan §Group 1B — identity " +
+  "resolution requires issuer+subject as a stable unique key.\n"
+
+/**
+ * Findings format instruction for external PR review (no plan adherence).
+ *
+ * External reviewers evaluate diff-only. Plan adherence is omitted because
+ * no planning documents are provided.
+ */
+const PR_FINDINGS_FORMAT_INSTRUCTION =
+  "## Required findings format\n\n" +
+  "Produce findings in this format. Every finding MUST include every " +
+  "field below. Do not omit fields or collapse multiple issues into a " +
+  "single finding.\n\n" +
+  "### <severity>: <one-line summary>\n\n" +
+  "- **File**: relative path to the file containing the issue\n" +
+  "- **Lines**: line range or specific line(s) where the issue occurs\n" +
+  "- **Role**: your reviewer role (e.g. correctness, security)\n" +
+  "- **Observation**: what the code currently does; be specific about " +
+  "the behaviour, value, or state you observed in the diff\n" +
+  "- **Impact**: concrete example of what goes wrong — who is affected, " +
+  "under what conditions, and how severe the consequence is\n" +
+  "- **Recommendation**: detailed explanation of the fix, including " +
+  "your reasoning and professional opinion on the best approach\n" +
+  "- **Pseudocode**: a code snippet illustrating the recommended " +
+  "change. Use the actual types, function names, and patterns from " +
+  "the codebase. Keep it concise but specific enough that a developer " +
+  "can implement the fix without ambiguity\n\n" +
+  "Example:\n\n" +
+  "### major: Race condition in cache invalidation\n\n" +
+  "- **File**: src/cache/memory_cache.ts\n" +
+  "- **Lines**: 87-95\n" +
+  "- **Role**: correctness\n" +
+  "- **Observation**: `invalidate()` deletes the entry without holding " +
+  "the read lock, so a concurrent `get()` can observe a partially-cleared map.\n" +
+  "- **Impact**: Under concurrent access, a cache miss is returned " +
+  "instead of a stale-but-valid entry, causing unnecessary fetches.\n" +
+  "- **Recommendation**: Acquire the write lock before modifying the " +
+  "internal map. The existing `_rwLock` can be upgraded via `writeLock()` " +
+  "which is already available on the class.\n" +
+  "- **Pseudocode**:\n" +
+  "  ```ts\n" +
+  "  invalidate(key: string): void {\n" +
+  "    this._rwLock.writeLock(() => {\n" +
+  "      this._store.delete(key)\n" +
+  "      this._lru.delete(key)\n" +
+  "    })\n" +
+  "  }\n" +
+  "  ```\n"
+
 // ── Plan-adherence instruction ─────────────────────────────────
 
 /**
@@ -225,6 +329,9 @@ export async function buildInternalReviewPrompt(
   parts.push(getPlanAdherenceInstruction())
   parts.push("")
 
+  // ── Findings format instruction ─────────────────────────────
+  parts.push(FINDINGS_FORMAT_INSTRUCTION)
+
   // ── Verification-status reminder ────────────────────────────
   parts.push("## Verification status")
   parts.push("")
@@ -310,6 +417,10 @@ export function buildExternalReviewPrompt(
 
   // ── Diff-only instruction ───────────────────────────────────
   parts.push(context.diffOnlyInstructions || DEFAULT_DIFF_ONLY_INSTRUCTION)
+  parts.push("")
+
+  // ── Findings format (PR-specific, no plan adherence) ─────
+  parts.push(PR_FINDINGS_FORMAT_INSTRUCTION)
   parts.push("")
 
   // ── PR/MR metadata ─────────────────────────────────────────

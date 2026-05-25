@@ -168,7 +168,13 @@ function parseReviewerOutput(rawOutput: string): ReviewerOutput {
       if (inEvidence) evidenceLines.push(line.trim())
     }
     const evidence = evidenceLines.filter(Boolean).join(" ").slice(0, 500) || undefined
-    findings.push({ severity, title, description: evidence ?? title, evidence })
+    // Extract structured fields from the new detailed findings format
+    const fileMatch = block.match(/\*\*File\*\*:\s*(.+)/im)
+    const linesMatch = block.match(/\*\*Lines\*\*:\s*(.+)/im)
+    const file = fileMatch ? fileMatch[1].trim() : undefined
+    const lineStr = linesMatch ? linesMatch[1].trim() : undefined
+    const line = lineStr ? parseInt(lineStr.replace(/[^0-9].*$/, ""), 10) || undefined : undefined
+    findings.push({ severity, title, description: evidence ?? title, evidence, file, line })
   }
 
   // Last resort: each non-empty line could be a finding if other extraction failed
