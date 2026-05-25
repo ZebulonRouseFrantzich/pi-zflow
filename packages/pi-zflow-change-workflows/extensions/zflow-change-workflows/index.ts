@@ -668,7 +668,8 @@ function colorizeMetaLine(rawMeta: string, theme: any): string {
  * to one or more additional lines.
  */
 function buildCardLines(model: ZflowCardViewModel, theme: any, width: number): string[] {
-  const safeWidth = Math.max(8, width)
+  const MAX_CARD_WIDTH = 90
+  const safeWidth = Math.max(8, Math.min(width, MAX_CARD_WIDTH))
   const bgFn = cardBgFn(model.status, theme)
 
   function cardLineWrapped(text: string, colorize: (s: string) => string): string[] {
