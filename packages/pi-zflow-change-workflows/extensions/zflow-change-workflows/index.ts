@@ -3555,6 +3555,11 @@ async function autoRestoreSimpleAdditions(
 
   let restored = 0
   for (const file of missingFiles) {
+    // Skip files that already exist — `git apply` on an existing file
+    // can produce conflict markers instead of a clean restore.
+    const targetPath = path.join(integrationWorktreePath, file)
+    if (fs.existsSync(targetPath)) continue
+
     for (const group of groups) {
       const patchPath = path.join(patchesDir, `${group.groupId}.patch`)
       if (!fs.existsSync(patchPath)) continue
@@ -3562,7 +3567,7 @@ async function autoRestoreSimpleAdditions(
       const content = fs.readFileSync(patchPath, "utf-8")
       if (!content.includes(`diff --git a/${file} `)) continue
 
-      // Extract single-file patch
+      // Extract single-file patch from the group's patch file
       const lines = content.split("\n")
       const start = lines.findIndex((l: string) => l.startsWith(`diff --git a/${file} `))
       if (start < 0) continue
@@ -3571,20 +3576,33 @@ async function autoRestoreSimpleAdditions(
         if (lines[end].startsWith("diff --git ") && end > start + 1) break
       }
 
-      const tmpPatch = path.join(patchesDir, `_repair-${path.basename(file)}.patch`)
-      fs.writeFileSync(tmpPatch, lines.slice(start, end).join("\n") + "\n", "utf-8")
+      // Reconstruct added file content from the patch hunks.
+      // For brand-new files, only '+' and ' ' (context) lines matter.
+      const patchLines = lines.slice(start, end)
+      const newFileLines: string[] = []
+      let inHunk = false
+      for (const pl of patchLines) {
+        if (pl.startsWith("@@")) { inHunk = true; continue }
+        if (pl.startsWith("diff --git")) continue
+        if (!inHunk) continue
+        if (pl.startsWith("+")) { newFileLines.push(pl.slice(1)) }
+        else if (pl.startsWith(" ")) { newFileLines.push(pl.slice(1)) }
+        // Skip '-' lines — brand-new files have no removals.
+      }
 
-      try {
-        execFileSync("git", ["apply", "--3way", tmpPatch], {
-          cwd: integrationWorktreePath,
-          stdio: ["ignore", "pipe", "pipe"],
-          timeout: 15_000,
-        })
+      if (newFileLines.length > 0) {
+        const dir = path.dirname(targetPath)
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+        fs.writeFileSync(targetPath, newFileLines.join("\n") + "\n", "utf-8")
+        try {
+          execFileSync("git", ["add", targetPath], {
+            cwd: integrationWorktreePath,
+            stdio: ["ignore", "pipe", "pipe"],
+            timeout: 10_000,
+          })
+        } catch { /* best-effort staging */ }
         restored++
-        try { fs.unlinkSync(tmpPatch) } catch { /* ok */ }
         break
-      } catch {
-        try { fs.unlinkSync(tmpPatch) } catch { /* ok */ }
       }
     }
   }
@@ -3655,21 +3673,17 @@ async function findRemainingGroupBranches(
     .map((b) => b.replace(/^\*?\s+/, "").trim())
     .filter(Boolean)
 
+  // Always return ALL group branches in topological order.  Rely on
+  // `git merge` itself to skip already-merged branches (it exits 0 with
+  // "Already up to date").  This avoids false negatives from `merge-base
+  // --is-ancestor` when a prior partial merge made branches ancestors
+  // without incorporating all their content.
   const remaining: RemainingGroupBranch[] = []
   for (const group of groups) {
     const branchSuffix = `/group-${group.groupId}`
     const branchName = allGroupBranches.find((b) => b.endsWith(branchSuffix))
     if (!branchName) continue
-
-    try {
-      execFileSync("git", ["merge-base", "--is-ancestor", branchName, "HEAD"], {
-        cwd: integrationWorktreePath,
-        stdio: "ignore",
-        timeout: 10_000,
-      })
-    } catch {
-      remaining.push({ groupId: group.groupId, branchName })
-    }
+    remaining.push({ groupId: group.groupId, branchName })
   }
   return remaining
 }
