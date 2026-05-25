@@ -507,15 +507,35 @@ function visualWidth(text: string): number {
 }
 
 function visualTruncate(value: string, maxVisualWidth: number): string {
+  if (maxVisualWidth <= 0) return ""
+
+  // ANSI-aware truncation. Workflow progress lines often contain theme SGR
+  // sequences; slicing by raw string length can cut an escape sequence or drop
+  // the reset emitted by theme.bg()/theme.fg(), which leaves terminal
+  // background color bleeding into later transcript lines. This follows the
+  // same principle as pi-subagents' TUI renderer: count only visible cells and
+  // copy escape sequences through untouched.
   let w = 0
-  let idx = 0
-  for (const ch of value) {
+  let result = ""
+  let index = 0
+  while (index < value.length) {
+    const ansi = value.slice(index).match(/^\x1b\[[0-9;]*m/)
+    if (ansi) {
+      result += ansi[0]
+      index += ansi[0].length
+      continue
+    }
+
+    const codePoint = value.codePointAt(index)
+    if (codePoint === undefined) break
+    const ch = String.fromCodePoint(codePoint)
     const cw = visualCharWidth(ch)
     if (w + cw > maxVisualWidth) break
+    result += ch
     w += cw
-    idx++
+    index += ch.length
   }
-  return value.slice(0, idx)
+  return result
 }
 
 function visualPadEnd(value: string, targetVisualWidth: number): string {
@@ -638,10 +658,14 @@ function statusTextColor(status: ZflowCardViewModel["status"], theme: any, text:
  * Returns a function that wraps text in the appropriate theme background color.
  */
 function cardBgFn(status: ZflowCardViewModel["status"], theme: any): (s: string) => string {
-  if (status === "completed") return (s) => theme.bg("toolSuccessBg", s)
-  if (status === "failed") return (s) => theme.bg("toolErrorBg", s)
-  if (status === "running") return (s) => theme.bg("toolPendingBg", s)
-  return (s) => theme.bg("customMessageBg", s)
+  // Keep for row-fill compatibility in the grid renderers, but do not paint
+  // each card line. The earlier filled-background card style could bleed into
+  // surrounding transcript text when Pi clipped styled lines, producing the
+  // large rectangular artifacts shown in the TUI. pi-subagents avoids this by
+  // rendering compact foreground-only rows inside one outer result box.
+  void status
+  void theme
+  return (s) => s
 }
 
 function colorizeMetaLine(rawMeta: string, theme: any): string {
@@ -670,50 +694,43 @@ function colorizeMetaLine(rawMeta: string, theme: any): string {
 function buildCardLines(model: ZflowCardViewModel, theme: any, width: number): string[] {
   const MAX_CARD_WIDTH = 90
   const safeWidth = Math.max(8, Math.min(width, MAX_CARD_WIDTH))
-  const bgFn = cardBgFn(model.status, theme)
 
-  function cardLineWrapped(text: string, colorize: (s: string) => string): string[] {
-    const contentWidth = Math.max(1, safeWidth - 2)
+  function cardLineWrapped(text: string, indent: string, colorize: (s: string) => string): string[] {
+    const contentWidth = Math.max(1, safeWidth - visualWidth(indent))
     const wrapped = wordWrap(text, contentWidth)
     return wrapped.map((fragment) => {
-      const indented = "  " + fragment
-      const padded = visualPadEnd(indented, safeWidth)
-      return bgFn(colorize(padded))
+      const line = visualPadEnd(indent + fragment, safeWidth)
+      return colorize(line)
     })
   }
 
   const lines: string[] = []
 
-  // Half-width top/bottom edge — visible separator without heavy bar
-  const edgePad = Math.max(4, Math.floor(safeWidth / 2))
-  lines.push(bgFn(" ".repeat(edgePad)))
-
-  // Title — word-wrapped, colored by status
-  for (const l of cardLineWrapped(model.title, (s) => statusTextColor(model.status, theme, s))) {
+  // Foreground-only compact card, inspired by pi-subagents' result rows. Avoid
+  // per-card backgrounds; the outer Pi tool/message renderer already provides
+  // the visual grouping.
+  for (const l of cardLineWrapped(model.title, "  ", (s) => statusTextColor(model.status, theme, s))) {
     lines.push(l)
   }
 
   // Status + elapsed line — dimmed metadata
-  for (const l of cardLineWrapped(model.statusLine, (s) => theme.fg("dim", s))) {
+  for (const l of cardLineWrapped(`⎿  ${model.statusLine}`, "  ", (s) => theme.fg("dim", s))) {
     lines.push(l)
   }
 
   // Meta lines — dimmed, with thinking level highlighted
   for (const meta of model.metaLines) {
-    for (const l of cardLineWrapped(meta, (s) => colorizeMetaLine(s, theme))) {
+    for (const l of cardLineWrapped(meta, "     ", (s) => colorizeMetaLine(s, theme))) {
       lines.push(l)
     }
   }
 
   // Body lines — dimmed bullet items
   for (const body of model.bodyLines) {
-    for (const l of cardLineWrapped(body, (s) => theme.fg("dim", s))) {
+    for (const l of cardLineWrapped(body, "     ", (s) => theme.fg("dim", s))) {
       lines.push(l)
     }
   }
-
-  // Bottom edge (half-width)
-  lines.push(bgFn(" ".repeat(edgePad)))
 
   return lines
 }
