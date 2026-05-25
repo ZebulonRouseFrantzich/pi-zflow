@@ -130,7 +130,7 @@ function parseReviewerOutput(rawOutput: string): ReviewerOutput {
   // Fallback: extract markdown finding sections.
   // Look for `## Finding:` or `### ` or `**Severity:**` patterns.
   const findings: ReviewerOutput["findings"] = []
-  const findingBlocks = trimmed.split(/(?=^#{1,3}\s+(?:Finding|Review|Issue)\b)/m)
+  const findingBlocks = trimmed.split(/(?=^#{1,3}\s+(?:(?:Finding|Review|Issue)\b|(?:critical|major|minor|nit)\s*:))/m)
   for (const block of findingBlocks) {
     if (!block.trim()) continue
     const severityMatch = block.match(/(?:Severity|sev)[:\s]+(\w+)/i)
@@ -141,8 +141,18 @@ function parseReviewerOutput(rawOutput: string): ReviewerOutput {
         severity = s
       }
     }
+    // Also extract severity from heading like "### critical: ..."
+    const headingSeverityMatch = block.match(/^#{1,3}\s+(critical|major|minor|nit)\s*:/im)
+    if (headingSeverityMatch) {
+      severity = headingSeverityMatch[1].toLowerCase() as typeof severity
+    }
     const titleMatch = block.match(/^#{1,3}\s+(?:Finding|Review|Issue)[:\s]+(.+)$/m)
-    const title = titleMatch ? titleMatch[1].trim() : (block.split("\n")[0] ?? "").replace(/^#+\s*/, "").trim()
+    const severityTitleMatch = block.match(/^#{1,3}\s+(?:critical|major|minor|nit)\s*:\s*(.+)$/im)
+    const title = titleMatch
+      ? titleMatch[1].trim()
+      : severityTitleMatch
+        ? severityTitleMatch[1].trim()
+        : (block.split("\n")[0] ?? "").replace(/^#+\s*/, "").trim()
     if (!title) continue
     const evidenceLines: string[] = []
     let inEvidence = false
