@@ -3767,6 +3767,50 @@ async function resolveApplyBackWithSubagent(
     )
   })
 
+  // ── Clean up any stale merge/rebase/cherry-pick state ──────────
+  await execFileAsync("git", ["merge", "--abort"], { cwd: integrationWorktreePath }).catch(() => {})
+  await execFileAsync("git", ["cherry-pick", "--abort"], { cwd: integrationWorktreePath }).catch(() => {})
+  await execFileAsync("git", ["rebase", "--abort"], { cwd: integrationWorktreePath }).catch(() => {})
+
+  // If conflict markers remain from a prior failed run, resolve them first
+  const preMarkerCheck = await execFileAsync("git", [
+    "grep", "-E", "^(<<<<<<<|=======|>>>>>>>)", "--", ".",
+  ], { cwd: integrationWorktreePath }).then((r) => r.stdout.trim()).catch(() => "")
+  if (preMarkerCheck) {
+    progress?.onPhase?.("prepare", "Prepare Resolution",
+      "Conflict markers found from prior run; dispatching cleanup resolver", "running")
+    const cleanupService = await tryGetDispatchServiceViaRegistry()
+    const cleanupModel = await resolveWorkflowModel("zflow.implement-hard")
+    if (cleanupService && cleanupModel.dispatchModel) {
+      const cleanupTask = [
+        "Resolve existing conflict markers in this integration worktree.",
+        "",
+        "The worktree has leftover conflict markers from a previous failed merge.",
+        "Resolve EVERY conflict marker in the conflicted files.",
+        "Preserve both sides' intended changes.",
+        "After resolving, run: git add -A && git commit -m \"zflow: resolve stale conflict markers\"",
+        "Do NOT apply changes to the primary worktree.",
+      ].join("\n")
+      const cleanupResult = await cleanupService.runAgent({
+        agent: "zflow.implement-hard",
+        task: cleanupTask,
+        cwd: integrationWorktreePath,
+        model: cleanupModel.dispatchModel,
+        output: path.join(runDir, "subagent-resolution-cleanup.md"),
+        outputMode: "file-only",
+        context: "fresh",
+        maxOutput: { lines: 5000, bytes: 500_000 },
+      })
+      if (!cleanupResult.ok) {
+        progress?.onPhase?.("prepare", "Prepare Resolution",
+          "Cleanup resolver failed; worktree has unresolved conflict markers", "failed")
+        throw new Error(`Could not resolve stale conflict markers: ${cleanupResult.error ?? "unknown error"}`)
+      }
+      progress?.onPhase?.("prepare", "Prepare Resolution",
+        "Stale conflict markers resolved", "completed")
+    }
+  }
+
   const groups = run.groups.map((g) => ({
     groupId: g.groupId,
     files: g.changedFiles ?? [],
@@ -3844,11 +3888,15 @@ async function resolveApplyBackWithSubagent(
   let groupsMerged = 0
   const totalGroups = groups.length
 
-  // Commit any uncommitted changes already in the integration worktree
+  // Commit any uncommitted changes already in the integration worktree.
+  // Skip if unmerged files exist (cleanup resolver should handle those first).
   const preStatus = await execFileAsync("git", ["status", "--porcelain"], {
     cwd: integrationWorktreePath,
   }).then((r) => r.stdout.trim()).catch(() => "")
-  if (preStatus) {
+  const preUnmerged = await execFileAsync("git", ["diff", "--name-only", "--diff-filter=U"], {
+    cwd: integrationWorktreePath,
+  }).then((r) => r.stdout.trim()).catch(() => "")
+  if (preStatus && !preUnmerged) {
     await execFileAsync("git", ["add", "-A"], { cwd: integrationWorktreePath }).catch(() => {})
     await execFileAsync("git", ["commit", "--allow-empty", "-m", `zflow: snapshot pre-continuation for run ${runId}`], {
       cwd: integrationWorktreePath,
