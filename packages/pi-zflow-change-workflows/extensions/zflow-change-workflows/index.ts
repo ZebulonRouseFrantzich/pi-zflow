@@ -989,7 +989,8 @@ function makeWorkflowProgressComponent(details: WorkflowProgressMessageDetails, 
         lines.push(`  ${theme.fg("dim", "reviewers:")}`)
         lines.push(...renderReviewerCards(reviewers, available, theme))
       }
-      return lines
+      // Safety: enforce terminal width on every line to prevent TUI crashes
+      return lines.map((line) => visualTruncate(line, width))
     },
   }
 }
@@ -1103,7 +1104,7 @@ function createWorkflowProgressIndicator(
   return {
     update(message: string) {
       const current = workflowProgressSnapshots.get(id)
-      const normalizedMessage = message.replace(/\s+/g, " ").trim()
+      const normalizedMessage = visualTruncate(message.replace(/\s+/g, " ").trim(), 140)
       if (current) {
         workflowProgressSnapshots.set(id, {
           ...current,
@@ -1117,7 +1118,7 @@ function createWorkflowProgressIndicator(
     },
     updatePhaseCard(cardId: string, title: string, message: string, status: "running" | "completed" | "failed" = "running") {
       const current = workflowProgressSnapshots.get(id)
-      const normalizedMessage = message.replace(/\s+/g, " ").trim()
+      const normalizedMessage = visualTruncate(message.replace(/\s+/g, " ").trim(), 120)
       if (current) {
         const currentPhaseCards = current.phaseCards ?? []
         const existing = currentPhaseCards.find((card) => card.id === cardId)
