@@ -147,6 +147,9 @@ import {
   parseInterviewResponse,
   runChangeAuditWorkflow,
   runChangeFixWorkflow,
+  parseReviewFindings,
+  buildFixSelectionQuestions,
+  buildFixPlan,
   runCleanWorkflow,
   detectResumeContext,
   resumeWorkflow,
@@ -176,8 +179,21 @@ import {
   resolveChangeImplementTarget,
   applyPatchesWithLedger,
   buildSubagentResolutionPrompt,
+  formatApplyBackFailureMessage,
+  buildFixOrchestratorTaskPrompt,
+  resolveFixOrchestratorConfig,
   type PublishPlanArtifactsResult,
 } from "./orchestration.js"
+
+import {
+  validateAllPlanArtifacts,
+} from "./plan-artifact-validator.js"
+
+import type {
+  ArtifactValidationResult,
+  AllArtifactsValidationResult,
+  ArtifactRepairResult,
+} from "./plan-artifact-validator.js"
 
 import {
   reconcileResumeState,
@@ -213,6 +229,9 @@ import type {
   AuditWorkflowResult,
   FixWorkflowOptions,
   FixWorkflowResult,
+  ParsedFinding,
+  ParsedFinding,
+  FixOrchestratorConfig,
   CleanWorkflowOptions,
   CleanWorkflowResult,
   ResumeContext,
@@ -319,6 +338,10 @@ export {
   publishPlanArtifacts,
   deriveSemanticChangeId,
   resolveChangeImplementTarget,
+  // Plan artifact validator
+  validateAllPlanArtifacts,
+  validateSingleArtifact,
+  runArtifactRepair,
 }
 
 export type {
@@ -349,6 +372,9 @@ export type {
   GuardResult,
   GuardIntent,
   GuardOptions,
+  ArtifactValidationResult,
+  AllArtifactsValidationResult,
+  ArtifactRepairResult,
 }
 
 // ── Structured interview helper ─────────────────────────────────
@@ -3958,7 +3984,12 @@ async function resolveApplyBackWithSubagent(
     const cleanupService = await tryGetDispatchServiceViaRegistry()
     const cleanupModel = await resolveWorkflowModel("zflow.implement-hard")
     if (cleanupService && cleanupModel.dispatchModel) {
+      const { ensureScratchScriptsDir, buildEphemeralScriptRule } = await import("./orchestration.js")
+      const scratchScriptsDir = await ensureScratchScriptsDir(runId, cwd)
+      const scriptRule = buildEphemeralScriptRule(scratchScriptsDir)
       const cleanupTask = [
+        scriptRule,
+        "",
         "Resolve existing conflict markers in this integration worktree.",
         "",
         "The worktree has leftover conflict markers from a previous failed merge.",
@@ -4141,7 +4172,10 @@ async function resolveApplyBackWithSubagent(
         progress?.onPhase?.("continue", "Continue Integration",
           `Resolving conflict for group ${branch.groupId} (attempt ${conflictResolutionCount}/${MAX_CONFLICT_RESOLUTIONS})`, "running")
 
-        const focusedTask = await buildFocusedResolutionPrompt(branch.groupId, unmergedFiles, integrationWorktreePath)
+        const { ensureScratchScriptsDir, buildEphemeralScriptRule } = await import("./orchestration.js")
+        const scratchScriptsDir = await ensureScratchScriptsDir(runId, cwd)
+        const scriptRule = buildEphemeralScriptRule(scratchScriptsDir)
+        const focusedTask = `${scriptRule}\n\n${await buildFocusedResolutionPrompt(branch.groupId, unmergedFiles, integrationWorktreePath)}`
         const focusedPromptPath = path.join(runDir,
           `subagent-resolution-prompt-group-${branch.groupId}.md`)
         await fs.writeFile(focusedPromptPath, focusedTask, "utf-8")
@@ -4815,7 +4849,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           )
         }
 
-        // Step 2: Validate plan artifacts
+        // Step 2a: Validate plan artifacts (format contract check)
         ctx.ui.notify(`🔍 Validating plan artifacts for "${result.changeId}" ${result.planVersion}...`, "info")
         const validation = await runPlanValidation(result.changeId, result.planVersion, ctx.cwd)
         if (validation.pass) {
@@ -4839,6 +4873,25 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           )
           return
         }
+
+        // Step 2b: Run detailed artifact format validation
+        ctx.ui.notify(`🔍 Checking artifact format contracts for "${result.changeId}"...`, "info")
+        const formatValidation = await validateAllPlanArtifacts(result.changeId, result.planVersion, ctx.cwd)
+        if (!formatValidation.valid) {
+          const details = formatValidation.results
+            .filter((r) => !r.valid)
+            .map((r) => `  - **${r.artifact}**: ${r.issues.join("; ")}`)
+            .join("\n")
+          ctx.ui.notify(
+            `⚠️ Format validation failed for "${result.changeId}":\n${details}\n\n` +
+            `Plan approval requires all artifacts to pass format validation. ` +
+            `The planner attempted repair during preparation. Review the errors above ` +
+            `and either rerun /zflow-change-prepare or manually fix the artifacts.`,
+            "warning",
+          )
+          return
+        }
+        ctx.ui.notify(`✅ All format contracts pass for "${result.changeId}".`, "info")
 
         // Step 3: Run plan review
         ctx.ui.notify(`📋 Running plan review for "${result.changeId}" ${result.planVersion}...`, "info")
@@ -5194,11 +5247,18 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
                 }, ctx.cwd).catch(() => {})
               }
             } else {
-              ctx.ui.notify(
-                `⚠️ Apply-back incomplete: ${cascadeResult.groupsApplied}/${cascadeResult.totalGroups} applied. ` +
-                (cascadeResult.error ?? ""),
-                "warning",
+              const failureMsg = await formatApplyBackFailureMessage(
+                partialRunId,
+                changeInput,
+                cascadeResult.error ?? "Apply-back could not be automatically verified",
+                ctx.cwd,
+                {
+                  patchesDir: path.join(resolveRunDir(partialRunId, ctx.cwd), "patches"),
+                  integrationWorktreePath: cascadeResult.integrationWorktreePath,
+                  strategiesAttempted: cascadeResult.strategiesAttempted,
+                },
               )
+              ctx.ui.notify(failureMsg, "warning")
               if (cascadeResult.subagentAvailable) {
                 const runDir = resolveRunDir(partialRunId, ctx.cwd)
                 const resolutionPrompt = await buildSubagentResolutionPrompt(
@@ -5219,15 +5279,9 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
                   )
                 )
                 ctx.ui.notify(
-                  `🤖 Apply-back could not be automatically verified.\n` +
-                  `Strategies tried: ${(cascadeResult.strategiesAttempted ?? []).join(", ")}\n\n` +
-                  `No code was lost. All patches preserved.\n\n` +
-                  `Options:\n` +
-                  `  1. Ask a subagent to resolve: subagent-resolution-prompt.md written to ${runDir}\n` +
-                  `  2. Manually resolve using preserved patches\n` +
-                  `  3. Inspect artifacts at: ${runDir}\n` +
-                  `  4. Abandon: /zflow-change-implement ${changeInput} --abandon`,
-                  "warning",
+                  `🤖 Subagent resolution prompt written to: ${path.join(runDir, "subagent-resolution-prompt.md")}\n` +
+                  `  Then run: /zflow-resolve-apply-back ${partialRunId}`,
+                  "info",
                 )
               }
             }
@@ -5452,19 +5506,19 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
                 implProgress.updatePhaseCard("workflow-complete", finalCardTitle, buildWorkflowFinalNextStepsLine(postResult, changeInput), finalCardStatus)
                 implProgress.stop(finalCardTitle)
               } else {
-                // Apply-back failed — offer subagent resolution
-                ctx.ui.notify(
-                  `⚠️ Apply-back could not be automatically verified.\n` +
-                  `Strategies tried: ${(cascadeResult.strategiesAttempted ?? []).join(", ")}\n\n` +
-                  `No code was lost. All patches and integration worktree are preserved.\n\n` +
-                  `Options:\n` +
-                  `  1. Ask a subagent to resolve: /zflow-resolve-apply-back ${partialRunId}\n` +
-                  `  2. Manually resolve and then run:\n` +
-                  `     /zflow-change-implement ${changeInput} --force-apply-successful\n` +
-                  `  3. Inspect artifacts at: ${resolveRunDir(partialRunId, ctx.cwd)}\n` +
-                  `  4. Abandon: /zflow-change-implement ${changeInput} --abandon`,
-                  "warning",
+                // Apply-back failed — use centralized formatter
+                const failureMsg = await formatApplyBackFailureMessage(
+                  partialRunId,
+                  changeInput,
+                  cascadeResult.error ?? "Apply-back could not be automatically verified",
+                  ctx.cwd,
+                  {
+                    patchesDir: path.join(resolveRunDir(partialRunId, ctx.cwd), "patches"),
+                    integrationWorktreePath: cascadeResult.integrationWorktreePath,
+                    strategiesAttempted: cascadeResult.strategiesAttempted,
+                  },
                 )
+                ctx.ui.notify(failureMsg, "warning")
 
                 // Write subagent resolution prompt
                 try {
@@ -5752,12 +5806,26 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           //     or failed, stop the workflow here — do not proceed to verification,
           //     review, or completion. Patches are preserved in the run directory.
           const { readRun } = await import("pi-zflow-artifacts")
+          const { default: pathModule } = await import("node:path")
           const dispatchRun = await readRun(result.runId, ctx.cwd)
           if (dispatchRun.applyBack.status === "conflicted" || dispatchRun.applyBack.status === "rolled-back" || dispatchRun.applyBack.status === "failed") {
-            const errorMsg = `Apply-back ${dispatchRun.applyBack.status}. Implementation patches are preserved but not applied. Resolve manually, then run --resume.`
-            implProgress.updatePhaseCard("post-implementation", "Post Implementation", errorMsg, "failed")
-            implProgress.updatePhaseCard("workflow-complete", "Workflow Needs Attention", errorMsg, "failed")
-            implProgress.stop("Apply-back failed. See patches/ in the run directory.")
+            const runDir = resolveRunDir(result.runId, ctx.cwd)
+            const errorMsg = `Apply-back ${dispatchRun.applyBack.status}: ${dispatchRun.applyBack.error ?? "unknown error"}`
+            const failureMsg = await formatApplyBackFailureMessage(
+              result.runId,
+              changeInput,
+              errorMsg,
+              ctx.cwd,
+              {
+                patchesDir: pathModule.join(runDir, "patches"),
+                integrationWorktreePath: dispatchRun.applyBack.integrationWorktreePath as string | undefined,
+                strategiesAttempted: (dispatchRun.metadata as any)?.strategiesAttempted ?? undefined,
+              },
+            )
+            implProgress.updatePhaseCard("post-implementation", "Post Implementation", `Apply-back ${dispatchRun.applyBack.status}`, "failed")
+            implProgress.updatePhaseCard("workflow-complete", "Workflow Needs Attention", failureMsg, "failed")
+            implProgress.stop("Apply-back failed.")
+            ctx.ui.notify(failureMsg, "error")
             return
           }
         }
@@ -5907,21 +5975,24 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
   // ── Command: /zflow-change-fix ────────────────────────────────
 
   pi.registerCommand("zflow-change-fix", {
-    description: "Iterate on verification/code-review failures for an approved change. Use --apply to dispatch workers.",
+    description: "Apply fixes for code-review or verification failures. Loads findings, selects fixes, applies them, and verifies.",
     handler: async (args: string, ctx: InterviewableContext): Promise<void> => {
       const parts = args.trim().split(/\s+/)
       const applyMode = parts.includes("--apply")
+      const planOnly = parts.includes("--plan-only")
       const changeInput = parts.filter(p => !p.startsWith("--")).join(" ")
 
       if (!changeInput) {
         ctx.ui.notify(
-          "Usage: /zflow-change-fix <change-id> [--apply]\n\n" +
-          "  /zflow-change-fix <id>         Review findings and build fix plan.\n" +
-          "  /zflow-change-fix <id> --apply  Dispatch workers to apply fixes.",
+          "Usage: /zflow-change-fix <change-id>\n\n" +
+          "  Loads review findings, presents fix options, applies fixes, and verifies.",
           "warning",
         )
         return
       }
+
+      const implementTarget = await resolveChangeImplementTarget(changeInput)
+      const changeId = implementTarget.changeId
 
       const fixModel = await resolveWorkflowModel("zflow.implement-routine")
       const fixProgress = createWorkflowProgressIndicator(pi, ctx, changeInput, {
@@ -5934,173 +6005,209 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       })
 
       try {
-        // Resolve the durable change path for plan access
-        const implementTarget = await resolveChangeImplementTarget(changeInput)
-        const changeId = implementTarget.changeId
+        // ═══ Phase 1: Load findings ═══════════════════════════════
+        fixProgress.updatePhaseCard("review-findings", "Review Findings",
+          "Loading review findings and plan state...", "running")
 
-        if (applyMode) {
-          // ── Apply mode: dispatch workers to implement the fix plan ──
-          // Build a fresh fix plan (re-reads latest findings)
-          fixProgress.update("Building fix plan from latest review findings")
-          const planResult = await runChangeFixWorkflow({ changeId })
+        const { parseReviewFindings, buildFixSelectionQuestions, buildFixPlan } =
+          await import("./orchestration.js")
+        const { findings, rawPath } = await parseReviewFindings(ctx.cwd)
 
-          const dispatchService = await tryGetDispatchServiceViaRegistry().catch(() => null)
-          if (!dispatchService) {
-            ctx.ui.notify(
-              "⚠️ Cannot apply fixes: no dispatch service available.\n" +
-              "Install pi-subagents or register a dispatch bridge, then retry.",
-              "error",
-            )
-            fixProgress.stop("Cannot apply: no dispatch service", "failed")
-            return
-          }
-
-          // Build a worker prompt that includes the fix plan and a note
-          // to review conversation context for any user alterations.
-          const workerTask = [
-            "# Fix Plan — Code Review Findings",
-            "",
-            `Change: ${changeId}`,
-            "",
-            "## Instructions",
-            "",
-            "1. Read the fix plan below. Review the conversation above (the",
-            "   chat history before this command was invoked) for any user",
-            "   alterations, comments, or additional context.",
-            "2. Implement the fixes by editing the target files directly.",
-            "3. After making changes, verify by running the verification",
-            "   command if one is available, or check that the modified",
-            "   files are syntactically correct.",
-            "4. Do NOT edit files outside the set listed below unless",
-            "   necessary for the fix.",
-            "",
-            "## Fix Plan",
-            "",
-            planResult.fixPlan,
-            "",
-            planResult.filesToModify.length > 0
-              ? [
-                  "## Target Files",
-                  "",
-                  ...planResult.filesToModify.map((f) => `- ${f}`),
-                  "",
-                ].join("\n")
-              : "",
-            planResult.verificationCommand
-              ? [
-                  "## Verification",
-                  "",
-                  `After fixes, run: \`${planResult.verificationCommand}\``,
-                  "",
-                ].join("\n")
-              : "",
-            "",
-            "After implementing all fixes, report:",
-            "- Which files were modified",
-            "- A brief summary of each fix",
-            "- Whether verification passed",
-          ].join("\n")
-
-          fixProgress.update(`Dispatching fix worker for ${changeId} via ${dispatchService.name}`)
-          try {
-            const dispatchResult = await dispatchService.runAgent({
-              agent: "zflow.implement-routine",
-              task: workerTask,
-              cwd: ctx.cwd,
-              ...(fixModel.model ? { model: fixModel.model } : {}),
-              ...(fixModel.thinking ? { thinking: fixModel.thinking } : {}),
-            })
-
-            if (dispatchResult.ok) {
-              fixProgress.update("Fix worker completed successfully")
-              fixProgress.update(
-                `👉 Re-verify: /zflow-change-implement ${changeInput} --resume`,
-              )
-              fixProgress.stop("Fix worker completed")
-            } else {
-              fixProgress.update(
-                `Fix worker reported an issue: ${dispatchResult.error ?? "unknown"}`,
-              )
-              fixProgress.stop("Fix worker issue — inspect output", "failed")
-            }
-          } catch (dispatchErr: unknown) {
-            fixProgress.update(
-              `Fix dispatch failed: ${dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr)}`,
-            )
-            fixProgress.stop("Fix dispatch failed", "failed")
-          }
-
+        if (findings.length === 0) {
+          fixProgress.updatePhaseCard("review-findings", "Review Findings",
+            "No review findings found. Run /zflow-review-code first.", "failed")
+          fixProgress.stop("No findings to fix", "failed")
           return
         }
 
-        // ── Plan mode: review findings and build fix plan ──────
-        fixProgress.update("Resolving review findings and building fix plan")
-        const result = await runChangeFixWorkflow({
-          changeId,
-        })
+        const crit = findings.filter(f => f.severity === "critical").length
+        const maj = findings.filter(f => f.severity === "major").length
+        const min = findings.filter(f => f.severity === "minor").length
+        const nits = findings.filter(f => f.severity === "nit").length
 
-        fixProgress.update(result.fixPlan)
-        if (result.filesToModify.length > 0) {
-          fixProgress.update(
-            `Files to modify: ${result.filesToModify.map(f => `\`${f}\``).join(", ")}`,
+        fixProgress.updatePhaseCard("review-findings", "Review Findings",
+          `Found ${findings.length} finding(s) — ${crit} critical, ${maj} major, ${min} minor, ${nits} nits.`, "completed")
+
+        // ═══ Phase 2: Fix Selection Interview ═════════════════════
+        fixProgress.updatePhaseCard("fix-selection", "Fix Selection",
+          "Awaiting fix selection...", "running")
+
+        if (planOnly) {
+          // Legacy plan-only
+          const planResult = await runChangeFixWorkflow({ changeId })
+          fixProgress.update(planResult.fixPlan)
+          fixProgress.stop("Fix plan ready (plan-only)", "completed")
+          return
+        }
+
+        if (!applyMode) {
+          const questionsJson = buildFixSelectionQuestions(changeId, findings)
+          const gateResult = await runStructuredInterview(
+            ctx, questionsJson,
+            `Found ${findings.length} finding(s) for "${changeId}". Choose how to proceed.`,
           )
-        }
 
-        // Persist the fix plan for --apply to pick up
-        try {
-          const { default: fs3 } = await import("node:fs/promises")
-          const fixPlanDir = resolveChangeDir(changeId, ctx.cwd)
-          await fs3.mkdir(fixPlanDir, { recursive: true })
-          const fixPlanPath = `${fixPlanDir}/fix-plan-latest.md`
-          await fs3.writeFile(fixPlanPath, result.fixPlan, "utf-8")
-          fixProgress.update(`Fix plan persisted to ${fixPlanPath}`)
-        } catch {
-          // Best effort — --apply can regenerate
-        }
-
-        // Structured gate presenting review-finding fix options
-        const gateQuestions = buildImplementationGateQuestions(
-          changeId,
-          "review-findings",
-          `Fix plan for "${changeId}":\n${result.fixPlan}\n` +
-          (result.filesToModify.length > 0
-            ? `Target files: ${result.filesToModify.join(", ")}`
-            : "No specific files identified."),
-        )
-
-        const gateResult = await runStructuredInterview(
-          ctx,
-          gateQuestions,
-          `Fix plan ready for "${changeId}". Choose approach: fix all, critical/major only, or dismiss findings.`,
-        )
-
-        if (gateResult) {
-          switch (gateResult.decision) {
-            case "continue": {
-              fixProgress.update("Applying all fixes.")
-              break
-            }
-            case "approve": {
-              fixProgress.update("Applying critical/major fixes.")
-              break
-            }
-            default: {
-              fixProgress.update("Findings dismissed. Proceeding without fixes.")
-              break
-            }
+          if (!gateResult || gateResult.decision === "cancel") {
+            fixProgress.updatePhaseCard("fix-selection", "Fix Selection",
+              "Cancelled by user.", "failed")
+            fixProgress.stop("Fix cancelled", "completed")
+            return
           }
+
+          let selectedFindings: ParsedFinding[]
+          if (gateResult.decision === "continue" || gateResult.decision === "approve" ||
+              gateResult.decision === "Fix All") {
+            selectedFindings = findings
+          } else {
+            selectedFindings = findings
+          }
+
+          if (selectedFindings.length === 0) {
+            fixProgress.updatePhaseCard("fix-selection", "Fix Selection",
+              "No findings selected. Exiting.", "failed")
+            fixProgress.stop("No fixes selected", "completed")
+            return
+          }
+
+          const fixPlan = await buildFixPlan(changeId, selectedFindings, ctx.cwd)
+          try {
+            const { default: fs3 } = await import("node:fs/promises")
+            const fixPlanDir = resolveChangeDir(changeId, ctx.cwd)
+            await fs3.mkdir(fixPlanDir, { recursive: true })
+            await fs3.writeFile(`${fixPlanDir}/fix-plan-latest.md`, fixPlan, "utf-8")
+          } catch { /* best effort */ }
+
+          fixProgress.updatePhaseCard("fix-selection", "Fix Selection",
+            `Selected ${selectedFindings.length} finding(s). Proceeding to apply...`, "completed")
         }
 
-        // Offer next steps — actionable command as a prominent bullet
-        if (result.verificationCommand) {
-          fixProgress.update(
-            `After fixes, run: ${result.verificationCommand}`,
-          )
+        // ═══ Phase 3: Fix dispatch ════════════════════════════════
+        fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestrator",
+          `Model: ${fixModel.model ?? "unavailable"}. Planning...`, "running")
+
+        const fixRunId = `fix-${changeId}-${Date.now().toString(36)}`
+        const planResult = await runChangeFixWorkflow({ changeId })
+        const dispatchService = await tryGetDispatchServiceViaRegistry().catch(() => null)
+
+        if (!dispatchService) {
+          ctx.ui.notify("⚠️ No dispatch service available to apply fixes.", "error")
+          fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestrator",
+            "No dispatch service.", "failed")
+          fixProgress.stop("Cannot apply fixes", "failed")
+          return
         }
-        fixProgress.update(
-          `👉 Ready: /zflow-change-fix ${changeInput} --apply`,
-        )
-        fixProgress.stop("Fix plan ready")
+
+        fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestrator",
+          `Dispatching via ${dispatchService.name}.`, "running")
+
+        const { ensureScratchScriptsDir, buildEphemeralScriptRule } =
+          await import("./orchestration.js")
+        const scratchDir = await ensureScratchScriptsDir(fixRunId, ctx.cwd)
+        const scriptRule = buildEphemeralScriptRule(scratchDir)
+
+        const targetFiles = [...new Set(planResult.filesToModify)]
+        const workerTask = [
+          "# Fix Plan — Code Review Findings",
+          "",
+          `Change: ${changeId}`,
+          `Fix Run ID: ${fixRunId}`,
+          "",
+          "## Instructions",
+          "",
+          "1. Read the fix plan below. Each finding describes a specific issue to fix.",
+          "2. For each finding, read the evidence and recommendation carefully.",
+          "3. Implement the fixes by editing the target files directly.",
+          "4. After making changes, verify the fix addresses the finding evidence.",
+          "5. Do NOT edit files outside the target files listed below.",
+          "6. Report which findings were fixed and any that could not be addressed.",
+          "",
+          scriptRule,
+          "",
+          "## Fix Plan",
+          "",
+          planResult.fixPlan,
+          "",
+          targetFiles.length > 0
+            ? ["## Target Files", "", ...targetFiles.map(f => `- ${f}`), ""].join("\n")
+            : "",
+          planResult.verificationCommand
+            ? ["## Verification", "", "```", planResult.verificationCommand, "```", ""].join("\n")
+            : "",
+          "",
+          "## Report",
+          "",
+          "After all fixes: which files were modified, which findings were fixed,",
+          "and whether verification passed.",
+        ].join("\n")
+
+        // ═══ Phase 4: Subagent fix worker ═══════════════════════════
+        const workerId = `fix-${Date.now().toString(36)}`
+        fixProgress.updateSubagent(workerId, {
+          agent: "zflow.implement-routine",
+          title: "Fix Worker",
+          model: fixModel.model ?? "unavailable",
+          thinking: fixModel.thinking ?? "unavailable",
+          status: "running",
+          startedAt: Date.now(),
+          lastCommand: "Starting fix implementation...",
+        })
+        fixProgress.updatePhaseCard("fix-workers", "Fix Workers",
+          `Worker dispatched with ${planResult.parsedFindings.length} finding(s).`, "running")
+
+        try {
+          const dResult = await dispatchService.runAgent({
+            agent: "zflow.implement-routine",
+            task: workerTask,
+            cwd: ctx.cwd,
+            ...(fixModel.model ? { model: fixModel.model } : {}),
+            ...(fixModel.thinking ? { thinking: fixModel.thinking } : {}),
+            onUpdate: (progress) => {
+              if (progress.currentTool) {
+                const args = progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""
+                fixProgress.updateSubagent(workerId, { lastCommand: `${progress.currentTool}${args}` })
+              }
+            },
+          })
+
+          if (dResult.ok) {
+            fixProgress.updateSubagent(workerId, {
+              status: "completed",
+              finishedAt: Date.now(),
+              lastCommand: "Fix completed.",
+            })
+            fixProgress.updatePhaseCard("fix-workers", "Fix Workers", "Fix worker completed.", "completed")
+            fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestrator",
+              "Worker done.", "completed")
+            fixProgress.updatePhaseCard("verification", "Verification",
+              planResult.verificationCommand
+                ? `Verify: \`${planResult.verificationCommand}\``
+                : "Re-verify manually.", "completed")
+            fixProgress.updatePhaseCard("workflow-complete", "Workflow Complete",
+              `Fixes applied for ${changeId}.`, "completed")
+            fixProgress.stop("Fix workflow completed")
+          } else {
+            fixProgress.updateSubagent(workerId, {
+              status: "failed",
+              finishedAt: Date.now(),
+              lastCommand: dResult.error ?? "Unknown",
+            })
+            fixProgress.updatePhaseCard("fix-workers", "Fix Workers", "Worker failed.", "failed")
+            fixProgress.updatePhaseCard("workflow-complete", "Workflow Needs Attention",
+              "Fix failed — inspect output.", "failed")
+            fixProgress.stop("Fix worker issue", "failed")
+          }
+        } catch (dispatchErr: unknown) {
+          const msg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr)
+          fixProgress.updateSubagent(workerId, {
+            status: "failed",
+            finishedAt: Date.now(),
+            lastCommand: msg,
+          })
+          fixProgress.updatePhaseCard("fix-workers", "Fix Workers", `Error: ${msg}`, "failed")
+          fixProgress.updatePhaseCard("workflow-complete", "Workflow Needs Attention",
+            `Fix dispatch failed: ${msg}`, "failed")
+          fixProgress.stop("Fix failed", "failed")
+        }
       } catch (err: unknown) {
         fixProgress.stop(
           `Fix workflow failed: ${err instanceof Error ? err.message : String(err)}`,

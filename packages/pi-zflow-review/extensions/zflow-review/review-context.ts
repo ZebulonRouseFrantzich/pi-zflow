@@ -155,8 +155,20 @@ const FINDINGS_FORMAT_INSTRUCTION =
   "- **Role**: your reviewer role (e.g. correctness, security)\n" +
   "- **Observation**: what the code currently does; be specific about " +
   "the behaviour, value, or state you observed in the diff\n" +
+  "- **Expected behavior**: (optional) what the code SHOULD do instead " +
+  "of what it currently does. Useful when the correct behaviour is " +
+  "clear from the plan or project conventions.\n" +
   "- **Impact**: concrete example of what goes wrong — who is affected, " +
   "under what conditions, and how severe the consequence is\n" +
+  "- **Fix requirements**: (optional) concrete things a fix must " +
+  "accomplish. E.g. \"must validate input before passing to SQL query\" " +
+  "or \"must return 404 when resource not found\". Useful for the " +
+  "fix-orchestrator to validate fixes.\n" +
+  "- **Validation**: (optional) how to verify the fix works, e.g. a " +
+  "test command or assertion that should pass after the fix.\n" +
+  "- **Suggested approach**: (optional) optional hint for the fix " +
+  "worker, such as which library function to use or which pattern " +
+  "to follow.\n" +
   "- **Recommendation**: detailed explanation of the fix, including " +
   "your reasoning and professional opinion on the best approach\n" +
   "- **Pseudocode**: a code snippet illustrating the recommended " +
@@ -173,9 +185,19 @@ const FINDINGS_FORMAT_INSTRUCTION =
   "- **Role**: correctness\n" +
   "- **Observation**: `verifyToken` returns `subject: payload.sub ?? ''` " +
   "instead of rejecting tokens that lack a `sub` claim.\n" +
+  "- **Expected behavior**: Tokens with missing or empty `sub` should " +
+  "be rejected before returning `VerifiedToken`. The `sub` claim is " +
+  "mandatory per OIDC Core 1.0 §2.\n" +
   "- **Impact**: Two validly-signed tokens from the same issuer with " +
   "missing `sub` both resolve to the same identity key (`issuer + ''`), " +
   "causing user A's data to be served to user B.\n" +
+  "- **Fix requirements**: Token parsing must throw a " +
+  "`TokenValidationError` when `sub` is missing or empty. No fallback " +
+  "to empty string.\n" +
+  "- **Validation**: After the fix, a unit test that creates a token " +
+  "without `sub` should expect `TokenValidationError` to be thrown.\n" +
+  "- **Suggested approach**: Add an early validation check after " +
+  "signature verification, before extracting claims.\n" +
   "- **Recommendation**: Reject tokens with missing or empty `sub` before " +
   "returning `VerifiedToken`. This is a hard identity invariant — the " +
   "subject claim is mandatory per OIDC Core 1.0 §2.\n" +
@@ -208,8 +230,16 @@ const PR_FINDINGS_FORMAT_INSTRUCTION =
   "- **Role**: your reviewer role (e.g. correctness, security)\n" +
   "- **Observation**: what the code currently does; be specific about " +
   "the behaviour, value, or state you observed in the diff\n" +
+  "- **Expected behavior**: (optional) what the code SHOULD do instead " +
+  "of what it currently does.\n" +
   "- **Impact**: concrete example of what goes wrong — who is affected, " +
   "under what conditions, and how severe the consequence is\n" +
+  "- **Fix requirements**: (optional) concrete things a fix must " +
+  "accomplish. Useful for the fix-orchestrator to validate fixes.\n" +
+  "- **Validation**: (optional) how to verify the fix works, e.g. a " +
+  "test command or assertion.\n" +
+  "- **Suggested approach**: (optional) optional hint for the fix " +
+  "worker.\n" +
   "- **Recommendation**: detailed explanation of the fix, including " +
   "your reasoning and professional opinion on the best approach\n" +
   "- **Pseudocode**: a code snippet illustrating the recommended " +
@@ -223,8 +253,19 @@ const PR_FINDINGS_FORMAT_INSTRUCTION =
   "- **Role**: correctness\n" +
   "- **Observation**: `invalidate()` deletes the entry without holding " +
   "the read lock, so a concurrent `get()` can observe a partially-cleared map.\n" +
+  "- **Expected behavior**: `invalidate()` should acquire the write lock " +
+  "before modifying the internal map to prevent concurrent reads from " +
+  "seeing a partially-cleared state.\n" +
   "- **Impact**: Under concurrent access, a cache miss is returned " +
   "instead of a stale-but-valid entry, causing unnecessary fetches.\n" +
+  "- **Fix requirements**: The fix must use the existing `_rwLock` to " +
+  "acquire write exclusivity during map modifications. Read locks should " +
+  "not be held during writes.\n" +
+  "- **Validation**: A concurrent access test that calls `get()` and " +
+  "`invalidate()` simultaneously should never return a miss for a " +
+  "previously cached key.\n" +
+  "- **Suggested approach**: Wrap `this._store.delete(key)` and " +
+  "`this._lru.delete(key)` in `this._rwLock.writeLock()`.\n" +
   "- **Recommendation**: Acquire the write lock before modifying the " +
   "internal map. The existing `_rwLock` can be upgraded via `writeLock()` " +
   "which is already available on the class.\n" +

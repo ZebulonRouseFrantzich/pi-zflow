@@ -48,10 +48,16 @@ Follow the structured format from the multi-model-code-review skill:
 ```markdown
 ### {severity}: {brief title}
 
+- **Finding ID**: auto-generated hash of file+line+title (stable across runs)
 - **File**: `path/to/file.ts` (line N)
+- **Lines**: exact line range affected, e.g. "12-24" (optional, when available)
 - **Role**: correctness
 - **Observation**: What the code does and why it is a concern.
+- **Expected behavior**: What the code SHOULD do instead (optional, when useful)
 - **Impact**: What could go wrong.
+- **Fix requirements**: Concrete things a fix must accomplish (optional, when known)
+- **Validation**: How to verify the fix works, e.g. a test command (optional)
+- **Suggested approach**: Optional hint for the fix worker (optional)
 - **Suggestion**: How to fix or mitigate.
 - **Plan adherence**: Does this deviate from the approved plan?
 ```

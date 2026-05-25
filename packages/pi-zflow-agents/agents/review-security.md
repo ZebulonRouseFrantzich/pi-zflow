@@ -50,7 +50,25 @@ in the changed code.
 
 Follow the structured format from the multi-model-code-review skill. For
 security findings, include a **CVSS-like impact description** (what an
-attacker could achieve).
+attacker could achieve). Include these optional fields when available for
+fix-orchestrator compatibility:
+
+```markdown
+### {severity}: {brief title}
+
+- **Finding ID**: auto-generated hash of file+line+title (stable across runs)
+- **File**: `path/to/file.ts` (line N)
+- **Lines**: exact line range affected, e.g. "12-24" (optional)
+- **Role**: security
+- **Observation**: What the code does and why it is a concern.
+- **Expected behavior**: What the code SHOULD do instead (optional)
+- **Impact**: What could go wrong (including CVSS-like assessment).
+- **Fix requirements**: Concrete things a fix must accomplish (optional)
+- **Validation**: How to verify the fix works (optional)
+- **Suggested approach**: Optional hint for the fix worker (optional)
+- **Suggestion**: How to fix or mitigate.
+- **Plan adherence**: Does this deviate from the approved plan?
+```
 
 ## Communication
 

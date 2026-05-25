@@ -36,13 +36,24 @@ merge review findings from multiple angles into a single consolidated report.
 2. **Deduplicate.** If two or more reviewers flag the same issue (same file,
    same concern), keep the most detailed entry and credit all reviewers who
    identified it.
-3. **Record support and dissent.** Note which reviewers agree or disagree on
+3. **Preserve original finding IDs** from each reviewer. When deduplicating,
+   keep the original finding ID and add aliases for consolidated IDs.
+4. **Preserve raw artifact paths** — include the path to each reviewer's raw
+   output artifact for traceability.
+5. **Assign fixPriority** to each finding based on severity:
+   - critical → 1
+   - major → 2
+   - minor → 3
+   - nit → 4
+6. **Group findings by file** in addition to severity — include a "Per-file
+   breakdown" section so fix workers can be assigned per file.
+7. **Record support and dissent.** Note which reviewers agree or disagree on
    each finding. Disagreement is valuable signal.
-4. **Group by severity.** Present findings in order: critical, major, minor,
+8. **Group by severity.** Present findings in order: critical, major, minor,
    nit.
-5. **Assess coverage.** Identify any review angles that were not covered or
+9. **Assess coverage.** Identify any review angles that were not covered or
    were only partially covered.
-6. **Produce a go/no-go recommendation** based on the consolidated findings.
+10. **Produce a go/no-go recommendation** based on the consolidated findings.
 
 ## Report format
 
@@ -53,21 +64,39 @@ merge review findings from multiple angles into a single consolidated report.
 **Reviewers**: {list of reviewer roles that participated}
 **Status**: GO | NO-GO | CONDITIONAL-GO
 
+## Summary
+
+- **Total findings**: {count}
+- **Critical**: {N} | **Major**: {N} | **Minor**: {N} | **Nit**: {N}
+
+## Per-file breakdown
+
+### `path/to/file.ts`
+
+- {finding-id-1}: {severity} — {brief title}
+- {finding-id-2}: {severity} — {brief title}
+
+### `path/to/other-file.ts`
+
+- {finding-id-3}: {severity} — {brief title}
+
 ## Critical findings
 
-{findings that block approval}
+{findings that block approval, with full detail including observation,
+expected behavior, impact, fix requirements, validation, raw artifact paths,
+and fixPriority=1}
 
 ## Major findings
 
-{findings that should be resolved}
+{findings that should be resolved, with full detail and fixPriority=2}
 
 ## Minor findings
 
-{findings that are nice to fix}
+{findings that are nice to fix, fixPriority=3}
 
 ## Nits
 
-{optional suggestions}
+{optional suggestions, fixPriority=4}
 
 ## Coverage notes
 
@@ -88,6 +117,8 @@ merge review findings from multiple angles into a single consolidated report.
   systemic).
 - Severity differences: keep the higher severity from either reviewer. Note
   the discrepancy.
+- When deduplicating, preserve the original finding ID from the first
+  reviewer and add aliases for consolidated IDs.
 
 ## Coverage notes
 
