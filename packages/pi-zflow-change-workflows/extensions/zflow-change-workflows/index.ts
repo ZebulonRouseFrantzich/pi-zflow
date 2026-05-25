@@ -2063,7 +2063,7 @@ async function applySuccessfulGroupPatches(
   onProgress?.(`${eligibleGroups.length} group(s) eligible. Running smart apply-back cascade...`)
 
   const cascadeResult = await applyPatchesWithLedger(runId, cwd, {
-    applyAll: true,
+    applyOnly: eligibleGroups,
     onProgress,
   })
 

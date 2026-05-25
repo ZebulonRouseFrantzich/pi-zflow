@@ -2473,6 +2473,8 @@ export async function applyPatchesWithLedger(
   options?: {
     /** When true, skip eligibility checks and try to apply all groups (default: true). */
     applyAll?: boolean
+    /** When set, only apply these group IDs. Takes precedence over applyAll. */
+    applyOnly?: string[]
     /** Callback for progress messages. */
     onProgress?: (message: string) => void
   },
@@ -2489,7 +2491,7 @@ export async function applyPatchesWithLedger(
   // not invent dependencies from all other groups because that creates cycles
   // and prevents resume apply-back from running.
   const ledger = (run.metadata?.groupLedger ?? {}) as Record<string, { dependencies?: string[] }>
-  const applyBackGroups: ExecutionGroup[] = run.groups.map((g) => ({
+  const allGroups: ExecutionGroup[] = run.groups.map((g) => ({
     id: g.groupId,
     files: g.changedFiles,
     dependencies: Array.isArray(ledger[g.groupId]?.dependencies)
@@ -2498,6 +2500,11 @@ export async function applyPatchesWithLedger(
     parallelizable: true,
   }))
 
+  // Filter to only requested groups when applyOnly is set
+  const applyOnly = options?.applyOnly
+  const applyBackGroups = applyOnly
+    ? allGroups.filter((g) => applyOnly.includes(g.id))
+    : allGroups
   const applyAll = options?.applyAll ?? true
 
   if (applyAll) {
@@ -2506,14 +2513,13 @@ export async function applyPatchesWithLedger(
 
   // Ensure we have a pre-apply snapshot and recovery ref.
   // If the run already has one, use it. If not (legacy run), create one.
+  // Prefer the run's recorded head over `git rev-parse HEAD` so coverage
+  // verification operates against the correct base even if the branch has
+  // advanced since the run was created.
   const snapshot = run.preApplySnapshot ?? await (async () => {
-    const { execFile } = await import("node:child_process")
-    const { promisify } = await import("node:util")
-    const execFileAsync = promisify(execFile)
-    const { stdout: headSha } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repoRoot })
     const recoveryRef = `refs/zflow/recovery/${runId}`
     const snap = {
-      head: headSha.trim(),
+      head: run.head,
       indexState: "clean",
       recoveryRef,
     }

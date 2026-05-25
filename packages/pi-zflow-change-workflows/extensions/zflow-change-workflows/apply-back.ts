@@ -41,7 +41,6 @@ import { topoSortGroups } from "./ownership-validator.js"
 import type { ExecutionGroup } from "./ownership-validator.js"
 import type { IntegrationMergeResult } from "./integration-merge-strategy.js"
 import { runIntegrationMerge } from "./integration-merge-strategy.js"
-import type { StructuredMergeResult } from "./structured-merge-strategy.js"
 import { resolveAllConflicts } from "./structured-merge-strategy.js"
 
 // ---------------------------------------------------------------------------
@@ -522,10 +521,7 @@ export async function executeApplyBack(
     applyBack: { status: "in-progress", startedAt: new Date().toISOString() },
   }, cwd)
 
-  // Create recovery ref
-  createRecoveryRef(runId, repoRoot, snapshot.head)
-
-  // Check for cycles
+  // Check for cycles first so we don't create a recovery ref only to abort
   const orderedIds = topoSortGroups(groups)
   if (!orderedIds) {
     const result: CascadeApplyBackResult = {
@@ -547,6 +543,9 @@ export async function executeApplyBack(
     }, cwd)
     return result
   }
+
+  // Create recovery ref only after validation passes
+  createRecoveryRef(runId, repoRoot, snapshot.head)
 
   // Build patch map
   const patchMap = buildPatchMap(runId, groups, cwd)
@@ -586,7 +585,6 @@ export async function executeApplyBack(
   // Try structured auto-resolution of the conflicts on the original patches,
   // then retry patch replay.
   let structuredMergeSuccess = false
-  let structuredMergeResult: ApplyBackResult | null = null
 
   try {
     // Apply patches again — this time they'll conflict in the worktree
