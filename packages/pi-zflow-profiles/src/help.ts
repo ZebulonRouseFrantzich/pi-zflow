@@ -51,6 +51,16 @@ export const PROFILE_HELP_TOPIC: ZflowHelpTopic = {
       description: "Force re-resolution of the profile.",
     },
     {
+      name: "zflow-profile configure",
+      usage: "/zflow-profile configure",
+      description: "Interactive TUI wizard to configure lanes, models, thinking levels, and agent bindings.",
+    },
+    {
+      name: "zflow-profile-configure",
+      usage: "/zflow-profile-configure",
+      description: "Launch the profile configuration wizard directly.",
+    },
+    {
       name: "zflow-profile sync-project",
       usage: "/zflow-profile sync-project",
       description: "Write resolved overrides to .pi/settings.json.",
