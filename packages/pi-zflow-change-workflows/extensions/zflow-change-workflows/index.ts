@@ -6101,109 +6101,126 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestrator",
           `Dispatching via ${dispatchService.name}.`, "running")
 
-        const { ensureScratchScriptsDir, buildEphemeralScriptRule } =
-          await import("./orchestration.js")
-        const scratchDir = await ensureScratchScriptsDir(fixRunId, ctx.cwd)
-        const scriptRule = buildEphemeralScriptRule(scratchDir)
+        // Cleanup old artifacts from prior runs (best-effort)
+        try {
+          const { ensureScratchScriptsDir } = await import("./orchestration.js")
+          await ensureScratchScriptsDir(fixRunId, ctx.cwd)
+        } catch { /* best-effort */ }
 
-        const targetFiles = [...new Set(planResult.filesToModify)]
-        const workerTask = [
-          "# Fix Plan — Code Review Findings",
-          "",
-          `Change: ${changeId}`,
-          `Fix Run ID: ${fixRunId}`,
-          "",
-          "## Instructions",
-          "",
-          "1. Read the fix plan below. Each finding describes a specific issue to fix.",
-          "2. For each finding, read the evidence and recommendation carefully.",
-          "3. Implement the fixes by editing the target files directly.",
-          "4. After making changes, verify the fix addresses the finding evidence.",
-          "5. Do NOT edit files outside the target files listed below.",
-          "6. Report which findings were fixed and any that could not be addressed.",
-          "",
-          scriptRule,
-          "",
-          "## Fix Plan",
-          "",
-          planResult.fixPlan,
-          "",
-          targetFiles.length > 0
-            ? ["## Target Files", "", ...targetFiles.map(f => `- ${f}`), ""].join("\n")
-            : "",
-          planResult.verificationCommand
-            ? ["## Verification", "", "```", planResult.verificationCommand, "```", ""].join("\n")
-            : "",
-          "",
-          "## Report",
-          "",
-          "After all fixes: which files were modified, which findings were fixed,",
-          "and whether verification passed.",
-        ].join("\n")
+        // ═══ Phase 4: Fix orchestrator agent ═══════════════════════
+        // Build the orchestrator task prompt from parsed findings
+        const { resolveCodeReviewFindingsPath, resolveRunDir } =
+          await import("pi-zflow-artifacts/artifact-paths")
+        const findingsPath = resolveCodeReviewFindingsPath(ctx.cwd)
+        const runDir = resolveRunDir(fixRunId, ctx.cwd)
+        const rawReviewerDir = `${runDir}/review-artifacts`
+        const orchTask = await buildFixOrchestratorTaskPrompt(
+          changeId,
+          planResult,
+          findingsPath,
+          rawReviewerDir,
+          ctx.cwd,
+        )
 
-        // ═══ Phase 4: Subagent fix worker ═══════════════════════════
-        const workerId = `fix-${Date.now().toString(36)}`
-        fixProgress.updateSubagent(workerId, {
-          agent: "zflow.implement-routine",
-          title: "Fix Worker",
-          model: fixModel.model ?? "unavailable",
-          thinking: fixModel.thinking ?? "unavailable",
+        const orchModel = await resolveWorkflowModel("zflow.fix-orchestrator")
+        const orchId = `fix-orch-${Date.now().toString(36)}`
+        fixProgress.updateSubagent(orchId, {
+          agent: "zflow.fix-orchestrator",
+          title: "Fix Orchestrator",
+          model: orchModel.model ?? fixModel.model ?? "unavailable",
+          thinking: orchModel.thinking ?? fixModel.thinking ?? "unavailable",
           status: "running",
           startedAt: Date.now(),
-          lastCommand: "Starting fix implementation...",
+          lastCommand: "Analyzing findings and planning fix strategy...",
         })
-        fixProgress.updatePhaseCard("fix-workers", "Fix Workers",
-          `Worker dispatched with ${planResult.parsedFindings.length} finding(s).`, "running")
+        fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestrator",
+          `Orchestrator dispatched with ${planResult.parsedFindings.length} finding(s). Will dispatch per-finding fix workers and validate each.`,
+          "running")
 
         try {
-          const dResult = await dispatchService.runAgent({
-            agent: "zflow.implement-routine",
-            task: workerTask,
+          const orchResult = await dispatchService.runAgent({
+            agent: "zflow.fix-orchestrator",
+            task: orchTask,
             cwd: ctx.cwd,
-            ...(fixModel.model ? { model: fixModel.model } : {}),
-            ...(fixModel.thinking ? { thinking: fixModel.thinking } : {}),
+            ...(orchModel.model ? { model: orchModel.model } : {}),
+            ...(orchModel.thinking ? { thinking: orchModel.thinking } : {}),
             onUpdate: (progress) => {
               if (progress.currentTool) {
                 const args = progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""
-                fixProgress.updateSubagent(workerId, { lastCommand: `${progress.currentTool}${args}` })
+                fixProgress.updateSubagent(orchId, {
+                  lastCommand: `${progress.currentTool}${args}`,
+                })
+              }
+              if (progress.phase) {
+                fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestrator",
+                  `Phase: ${progress.phase}. Tool: ${progress.currentTool ?? "reading"}. ` +
+                  `Findings processed: ${progress.findingsProcessed ?? 0}/${planResult.parsedFindings.length}.`,
+                  "running")
               }
             },
           })
 
-          if (dResult.ok) {
-            fixProgress.updateSubagent(workerId, {
+          if (orchResult.ok) {
+            fixProgress.updateSubagent(orchId, {
               status: "completed",
               finishedAt: Date.now(),
-              lastCommand: "Fix completed.",
+              lastCommand: "Orchestration complete.",
             })
-            fixProgress.updatePhaseCard("fix-workers", "Fix Workers", "Fix worker completed.", "completed")
             fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestrator",
-              "Worker done.", "completed")
+              "Fix orchestration complete. Reading satisfaction report...", "completed")
+
+            // Try to read the satisfaction report for a summary
+            let satisfactionSummary = "See orchestrator output for details."
+            let unresolvedCount = 0
+            try {
+              const { default: fs3 } = await import("node:fs/promises")
+              const { resolvePlanVersionDir } = await import("pi-zflow-artifacts/artifact-paths")
+              const versionDir = resolvePlanVersionDir(changeId, planResult.planVersion, ctx.cwd)
+              const reportPath = `${versionDir}/fix-orchestration-report.md`
+              try {
+                const reportContent = await fs3.readFile(reportPath, "utf-8")
+                const fixedMatch = reportContent.match(/## Fixed\n([\s\S]*?)(?=\n## |$)/)
+                const unresolvedMatch = reportContent.match(/## Unresolved\n([\s\S]*?)(?=\n## |$)/)
+                const fixedCount = fixedMatch ? fixedMatch[1].split("\n").filter(l => l.trim().startsWith("-")).length : 0
+                const unresolvedCount = unresolvedMatch ? unresolvedMatch[1].split("\n").filter(l => l.trim().startsWith("-")).length : 0
+                satisfactionSummary = `Fixed: ${fixedCount}, Unresolved: ${unresolvedCount}. Full report: ${reportPath}`
+              } catch {
+                satisfactionSummary = `Orchestrator output: ${orchResult.outputPath ?? "(inline)"}`
+              }
+            } catch { /* best-effort */ }
+
+            fixProgress.updatePhaseCard("fix-workers", "Fix Workers",
+              satisfactionSummary, unresolvedCount > 0 ? "failed" : "completed")
             fixProgress.updatePhaseCard("verification", "Verification",
               planResult.verificationCommand
                 ? `Verify: \`${planResult.verificationCommand}\``
                 : "Re-verify manually.", "completed")
             fixProgress.updatePhaseCard("workflow-complete", "Workflow Complete",
-              `Fixes applied for ${changeId}.`, "completed")
-            fixProgress.stop("Fix workflow completed")
+              satisfactionSummary, unresolvedCount > 0 ? "failed" : "completed")
+            fixProgress.stop(unresolvedCount > 0 ? "Fix workflow complete — some findings unresolved" : "Fix workflow completed")
           } else {
-            fixProgress.updateSubagent(workerId, {
+            fixProgress.updateSubagent(orchId, {
               status: "failed",
               finishedAt: Date.now(),
-              lastCommand: dResult.error ?? "Unknown",
+              lastCommand: orchResult.error ?? "Unknown",
             })
-            fixProgress.updatePhaseCard("fix-workers", "Fix Workers", "Worker failed.", "failed")
+            fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestrator",
+              `Orchestrator failed: ${orchResult.error ?? "unknown"}`,
+              "failed")
+            fixProgress.updatePhaseCard("fix-workers", "Fix Workers", "Orchestrator failed.", "failed")
             fixProgress.updatePhaseCard("workflow-complete", "Workflow Needs Attention",
-              "Fix failed — inspect output.", "failed")
-            fixProgress.stop("Fix worker issue", "failed")
+              "Fix orchestrator failed — inspect output.", "failed")
+            fixProgress.stop("Fix orchestrator failed", "failed")
           }
         } catch (dispatchErr: unknown) {
           const msg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr)
-          fixProgress.updateSubagent(workerId, {
+          fixProgress.updateSubagent(orchId, {
             status: "failed",
             finishedAt: Date.now(),
             lastCommand: msg,
           })
+          fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestrator",
+            `Error: ${msg}`, "failed")
           fixProgress.updatePhaseCard("fix-workers", "Fix Workers", `Error: ${msg}`, "failed")
           fixProgress.updatePhaseCard("workflow-complete", "Workflow Needs Attention",
             `Fix dispatch failed: ${msg}`, "failed")
