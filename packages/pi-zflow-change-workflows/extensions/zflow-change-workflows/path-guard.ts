@@ -664,6 +664,15 @@ const READ_ONLY_PREFIXES: RegExp[] = [
   // Data format tools — read-only
   /^jq\b/,
   /^yq\b/,
+
+  // Verification/build tools — allowed for scoped verification in
+  // implement/fix workers.  These tools typecheck, test, lint, or
+  // generate code without mutating source-controlled files.
+  /^pnpm\s+(?:--[a-z-]+\s+\S+\s+)*(?:typecheck|test|lint|run\s+(?:typecheck|test|lint|check|ci)(?:\s|$))/,
+  /^just\s+(?:--list|--summary|codegen|smoke\b)/,
+  /^tsc\s/,
+  /^npx\s+tsc\s/,
+  /^nix\s+(?:develop|shell|run)\b/,
 ]
 
 /**
