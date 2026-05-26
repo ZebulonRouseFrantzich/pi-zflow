@@ -153,8 +153,10 @@ const FINDINGS_FORMAT_INSTRUCTION =
   "- **File**: relative path to the file containing the issue\n" +
   "- **Lines**: line range or specific line(s) where the issue occurs\n" +
   "- **Role**: your reviewer role (e.g. correctness, security)\n" +
-  "- **Observation**: what the code currently does; be specific about " +
-  "the behaviour, value, or state you observed in the diff\n" +
+  "- **Observation**: what the code currently does on the filesystem; " +
+  "be specific about the behaviour, value, or state you observed. " +
+  "Include HOW you verified it (e.g. \"ls confirmed file exists\", " +
+  "\"read showed line 42 contains...\")\n" +
   "- **Expected behavior**: (optional) what the code SHOULD do instead " +
   "of what it currently does. Useful when the correct behaviour is " +
   "clear from the plan or project conventions.\n" +
@@ -371,19 +373,26 @@ export async function buildInternalReviewPrompt(
   // run).  Claims about file existence, deletion, or retention MUST be
   // verified against the actual filesystem before being reported.
   parts.push(
-    "## Filesystem verification required\n\n" +
-    "The diff bundle below shows what changed, but it may not reflect the " +
-    "current filesystem state (fixes may have been applied after the diff " +
-    "was captured). **Before reporting any of the following, verify against " +
-    "the actual filesystem using `ls` or `read`:**\n\n" +
-    "- Claims that a file or directory was \"retained\" or \"not deleted\"\n" +
-    "- Claims that a file or directory \"does not exist\" or \"is missing\"\n" +
-    "- Claims about file contents (use `read` to check the current state)\n" +
-    "- Claims about script portability or hardcoded paths (check the file " +
-    "actually exists first)\n\n" +
-    "Do not report a finding based solely on what the diff implies. " +
-    "Check the disk state. If the diff says a file was kept but `ls` shows " +
-    "it's gone, there is no finding to report.\n",
+    "## Filesystem verification REQUIRED — do not skip\n\n" +
+    "The diff bundle below shows what changed in the original implementation, " +
+    "but fixes may have been applied since then. **Every claim about a file's " +
+    "existence, contents, or state must be verified against the actual " +
+    "filesystem before you report it as a finding.**\n\n" +
+    "### Mandatory verification checklist\n\n" +
+    "- **Before reporting a file as \"missing\" or \"non-existent\":** Run " +
+    "`ls <path>` or `read <path>`. If the file exists on disk, do NOT report " +
+    "it as missing.\n" +
+    "- **Before reporting a file/directory as \"retained\" or \"not deleted\":** " +
+    "Run `ls <path>`. If the path does not exist on disk, do NOT report it as " +
+    "retained.\n" +
+    "- **Before reporting file contents as \"contains X\" or \"does Y\":** " +
+    "Run `read <path>` to see the current state. Do not rely on the diff — " +
+    "the file on disk may be different.\n" +
+    "- **Evidence field must cite the verification:** Instead of repeating " +
+    "the claim, say \"Verified via `ls <path>` — file does not exist\" or " +
+    "\"Verified via `read <path>` — line 12 contains...\"\n" +
+    "- **If you cannot verify a claim with `ls` or `read`:** Drop the " +
+    "finding. Do not report unverifiable claims.\n",
   )
 
   // ── Plan-adherence instruction ──────────────────────────────
@@ -428,6 +437,11 @@ export async function buildInternalReviewPrompt(
   // ── Diff bundle ─────────────────────────────────────────────
   parts.push("## Diff bundle")
   parts.push("")
+  parts.push(
+    "This diff shows what the ORIGINAL IMPLEMENTATION changed. Fixes may have " +
+    "been applied since — always verify current state with `ls`/`read`.",
+  )
+  parts.push("")
 
   // The diffBundle field may be a file path or inline content.
   // If it looks like a path to an existing file, read it.
@@ -438,6 +452,22 @@ export async function buildInternalReviewPrompt(
     diffContent = fileContent
   } catch {
     // Not a file path — treat as inline content
+  }
+
+  // Extract a file list from the diff for quick reference
+  const fileList = [...new Set(
+    diffContent
+      .split("\n")
+      .filter(l => l.startsWith("+++ ") || l.startsWith("--- "))
+      .map(l => l.replace(/^[+-]{3} [ab]\//, ""))
+      .filter(f => f !== "/dev/null")
+  )].sort()
+  if (fileList.length > 0) {
+    parts.push("**Files touched by implementation:**")
+    for (const f of fileList) {
+      parts.push(`- \`${f}\``)
+    }
+    parts.push("")
   }
 
   parts.push("```diff")
