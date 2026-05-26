@@ -333,6 +333,9 @@ async function validateSimpleArtifact(
 /**
  * Validate all five canonical plan artifacts for a change.
  *
+ * Also runs ownership validation on execution-groups.md to catch file
+ * overlap issues early (during prepare) rather than at implementation time.
+ *
  * @param changeId - The change identifier.
  * @param planVersion - Plan version (e.g. "v1").
  * @param cwd - Working directory (optional).
@@ -353,6 +356,35 @@ export async function validateAllPlanArtifacts(
     if (artifactId === "execution-groups") continue // already done
     const minLen = MIN_CONTENT_LENGTHS[artifactId] ?? 50
     results.push(await validateSimpleArtifact(changeId, planVersion, artifactId, minLen, cwd))
+  }
+
+  // ── Ownership validation ───────────────────────────────────
+  // Catch file-overlap/dependency issues early so the repair loop
+  // can fix them before plan approval. This runs even if format
+  // validation already flagged execution-groups — the planner
+  // should fix all issues in one repair pass.
+  const execGroupsResult = results.find((r) => r.artifact === "execution-groups")
+  if (execGroupsResult && execGroupsResult.valid) {
+    try {
+      const artifactFile = await readArtifact(changeId, planVersion, "execution-groups", cwd)
+      if (artifactFile) {
+        const { parseExecutionGroupsMd } = await import("./orchestration.js")
+        const { validateOwnershipAndDependencies } = await import("./ownership-validator.js")
+        const groups = parseExecutionGroupsMd(artifactFile.content)
+        const ownershipResult = validateOwnershipAndDependencies(groups)
+        if (!ownershipResult.valid) {
+          results.push({
+            valid: false,
+            artifact: "execution-groups",
+            issues: [ownershipResult.summary],
+            path: execGroupsResult.path,
+          })
+        }
+      }
+    } catch {
+      // Ownership validation is best-effort during prepare;
+      // the implement-time check is the hard gate.
+    }
   }
 
   const valid = results.every((r) => r.valid)
@@ -459,6 +491,11 @@ export async function buildRepairPrompt(
     sections.push("")
   }
 
+  // Detect ownership-specific failures and add targeted guidance
+  const hasOwnershipIssues = failedResults.some(
+    (r) => r.artifact === "execution-groups" && r.issues.some((i) => i.includes("ambiguous file overlaps") || i.includes("ownership")),
+  )
+
   sections.push(
     "## Format contract reminder",
     "",
@@ -472,6 +509,27 @@ export async function buildRepairPrompt(
     "- `**Dependencies:**` — group IDs or 'none'",
     "- `**Parallelizable:**` — true or false",
     "",
+  )
+
+  if (hasOwnershipIssues) {
+    sections.push(
+      "### Fixing ownership conflicts",
+      "",
+      "The groups above share files but lack dependency ordering. To fix:",
+      "",
+      "1. For each pair of conflicting groups (GX, GY) that share a file:",
+      "   - One must declare a dependency on the other (e.g. GY adds `7` to its Dependencies).",
+      "   - Choose the dependency direction based on logical execution order.",
+      "2. Set `Parallelizable: false` on groups that now have cross-group dependencies.",
+      "3. Re-read the full execution-groups.md after editing to verify:",
+      "   - No two groups claim the same file without a dependency edge between them.",
+      "   - Dependency chains are cycle-free.",
+      "4. Use zflow_write_plan_artifact with artifact=execution-groups to write the fix.",
+      "",
+    )
+  }
+
+  sections.push(
     "### Other artifacts",
     "",
     "- Must contain real content, not placeholders or TODOs.",
