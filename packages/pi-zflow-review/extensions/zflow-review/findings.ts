@@ -473,6 +473,7 @@ export function formatSeveritySummary(findings: CodeReviewFinding[]): string {
   let nit = 0
 
   for (const f of findings) {
+    if (isNoiseFinding(f)) continue
     switch (f.severity) {
       case "critical": critical++; break
       case "major":    major++; break
@@ -527,7 +528,49 @@ export function formatCoverageNotes(manifest: ReviewerManifest): string {
 }
 
 /**
+ * Returns true if a finding is a reviewer preamble/scope statement rather
+ * than an actionable finding.  These typically have identical or near-identical
+ * title and evidence, no file paths, no line numbers, no expected behavior,
+ * and no fix requirements — they describe what the reviewer looked at, not
+ * what they found.
+ */
+function isNoiseFinding(f: CodeReviewFinding): boolean {
+  // Must have at least one of: file path, line numbers, expected behavior,
+  // fix requirements, validation, or suggested approach to be actionable.
+  const hasFile = !!(f as any).file
+  const hasLine = !!(f as any).line
+  const hasConcrete = !!(
+    f.expectedBehavior ||
+    f.fixRequirements ||
+    f.validation ||
+    f.suggestedApproach
+  )
+
+  // If it has concrete details, it's a real finding regardless of title/evidence overlap
+  if (hasFile || hasLine || hasConcrete) return false
+
+  // Check for title/evidence near-identity (reviewer scope statements)
+  const t = f.title.toLowerCase().replace(/\s+/g, " ")
+  const e = f.evidence.toLowerCase().replace(/\s+/g, " ")
+  if (t === e) return true
+
+  // Check for common preamble patterns
+  const preamblePatterns = [
+    /^reviewed (the |scope: )/i,
+    /^i reviewed /i,
+    /^security review scope/i,
+  ]
+  const isPreamble = preamblePatterns.some((p) => p.test(f.title))
+  if (isPreamble && !hasFile && !hasLine && !hasConcrete) return true
+
+  return false
+}
+
+/**
  * Group findings by severity and format them as markdown sections.
+ *
+ * Noise findings (reviewer preamble/scope statements with no actionable
+ * content) are filtered out before formatting. See `isNoiseFinding`.
  *
  * Sections appear in order: Critical, Major, Minor, Nits.
  * Each finding is formatted with support, dissent, evidence,
@@ -545,6 +588,7 @@ export function formatFindingsBySeverity(findings: CodeReviewFinding[]): string 
   }
 
   for (const f of findings) {
+    if (isNoiseFinding(f)) continue
     grouped[f.severity].push(f)
   }
 

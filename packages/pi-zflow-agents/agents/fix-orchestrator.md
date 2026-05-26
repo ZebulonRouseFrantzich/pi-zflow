@@ -62,6 +62,33 @@ as UNRESOLVED and move on.
    `<runtime-state-dir>/runs/{runId}/review-artifacts/` for full context. These
    contain detailed evidence, pseudocode, and specific fix strategies that the
    consolidated findings only summarize.
+
+### Phase 1.5: Pre-validate (file existence check)
+
+**Before dispatching any worker, verify every finding against the filesystem.** This catches false positives before they waste a full fix-review cycle.
+
+For each finding that claims a file:
+
+- Is "missing", "non-existent", or "not found": run `ls <path>`. If the file exists, skip the finding — it's a false positive. Note it as `Skipped: file exists on disk`.
+- Is "retained", "not deleted", or "still present": run `ls <path>`. If the file does not exist, skip the finding — it's already been deleted. Note it as `Skipped: file already removed`.
+- Describes specific file contents or behaviour: run a quick `read <path>` on the relevant lines. If the described condition is already resolved, skip the finding. Note it as `Skipped: condition already resolved`.
+
+Findings that survive pre-validation are the ones you dispatch workers for. Pre-validated-skip findings go directly to the Skipped section of your report.
+
+### Phase 1.6: Cross-check against plan documents (scope guard)
+
+**Before dispatching, compare each finding's fix requirements against the source design documents.** This prevents ping-pong fixes where solving one finding creates another.
+
+For each finding:
+
+1. Read the relevant section of `design.md` and `standards.md` that covers the finding's target area.
+2. Check: does the finding's suggested fix conflict with a stated design constraint or Phase 1 scope limit?
+3. If a fix would violate the plan (e.g. adding concrete implementations in a scaffold phase, or removing something the plan says to keep), choose the minimal-scope fix that satisfies both the finding AND the plan.
+
+**Example:** If a finding says "schema file missing" and the plan says "Phase 1 is scaffold-only, no schema tables yet," the correct fix is an `export {}` placeholder, not a Drizzle table definition. Always resolve the tension at Phase 1.6, not after review.
+
+### Phase 1.7: Group and plan
+
 4. Group findings by target file.
 5. Produce a fix orchestration plan listing:
    - Which findings to fix (by finding ID)
@@ -71,7 +98,7 @@ as UNRESOLVED and move on.
 
 ### Phase 2: Dispatch
 
-For each fix work item:
+**Dispatch all independent findings in a single round.** Do not dispatch findings one at a time and wait for the next cycle.
 
 1. Choose worker: `zflow.implement-routine` for straightforward fixes,
    `zflow.implement-hard` for complex/cross-module/high-severity fixes.
@@ -84,9 +111,11 @@ For each fix work item:
    - The exact verification command to run afterward
    - Output requirement: worker must report (a) what files changed,
      (b) what was fixed, (c) how it was verified, (d) whether it aligns with design intent
-3. Dispatch workers in parallel for non-overlapping files, sequentially for
-   shared files. Use `subagent` tool with the worker agent name.
-4. Track each worker's progress and attempts.
+3. **Batch strategy:**
+   - Findings with non-overlapping target files → dispatch all workers in parallel in ONE subagent call.
+   - Findings sharing files → dispatch sequentially within the same round (worker A completes, validate, then worker B starts).
+   - High-severity findings (critical) should be dispatched first within the round.
+4. Track each worker's progress and attempts within the round.
 
 ### Phase 3: Validate
 

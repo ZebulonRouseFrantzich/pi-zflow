@@ -33,27 +33,37 @@ merge review findings from multiple angles into a single consolidated report.
 ## Synthesis workflow
 
 1. **Read all reviewer output.** Gather findings from each reviewer that ran.
-2. **Deduplicate.** If two or more reviewers flag the same issue (same file,
+2. **Filter noise.** Remove reviewer preamble/scope statements that are not
+   actual findings. A finding is noise and must be dropped if:
+   - Its title and evidence are near-identical (within 80% character overlap)
+   - Both fields describe what was reviewed rather than what was found
+     (e.g. "Reviewed the current filesystem state for..." "I reviewed the
+     scaffold integration surface across...", "Security review scope: ...")
+   - It has no concrete file path, no line numbers, no expected behavior,
+     and no fix requirements — it's a scope statement, not a finding.
+   - Drop noise findings entirely. Do not include them in the report. Note
+     count of dropped findings in Coverage Notes.
+3. **Deduplicate.** If two or more reviewers flag the same issue (same file,
    same concern), keep the most detailed entry and credit all reviewers who
    identified it.
-3. **Preserve original finding IDs** from each reviewer. When deduplicating,
+4. **Preserve original finding IDs** from each reviewer. When deduplicating,
    keep the original finding ID and add aliases for consolidated IDs.
-4. **Preserve raw artifact paths** — include the path to each reviewer's raw
+5. **Preserve raw artifact paths** — include the path to each reviewer's raw
    output artifact for traceability.
-5. **Assign fixPriority** to each finding based on severity:
+6. **Assign fixPriority** to each finding based on severity:
    - critical → 1
    - major → 2
    - minor → 3
    - nit → 4
-6. **Group findings by file** in addition to severity — include a "Per-file
+7. **Group findings by file** in addition to severity — include a "Per-file
    breakdown" section so fix workers can be assigned per file.
-7. **Record support and dissent.** Note which reviewers agree or disagree on
+8. **Record support and dissent.** Note which reviewers agree or disagree on
    each finding. Disagreement is valuable signal.
-8. **Group by severity.** Present findings in order: critical, major, minor,
+9. **Group by severity.** Present findings in order: critical, major, minor,
    nit.
-9. **Assess coverage.** Identify any review angles that were not covered or
-   were only partially covered.
-10. **Produce a go/no-go recommendation** based on the consolidated findings.
+10. **Assess coverage.** Identify any review angles that were not covered or
+    were only partially covered.
+11. **Produce a go/no-go recommendation** based on the consolidated findings.
 
 ## Report format
 

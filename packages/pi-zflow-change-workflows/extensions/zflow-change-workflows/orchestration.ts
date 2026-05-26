@@ -2156,6 +2156,18 @@ export async function parseReviewFindings(
     if (/^(Critical|Major|Minor|Nit|None)[\s.:]|^None\.$/i.test(title)) continue
     if (/^(Coverage|Reviewed|Verification|Findings Summary)/i.test(title)) continue
 
+    // Skip noise findings — reviewer preamble/scope statements with no actionable content.
+    // These have identical title and evidence and describe what was reviewed, not what was found.
+    if (/^(Reviewed (the |scope: )|I reviewed |Security review scope)/i.test(title)) {
+      // Quick check: if title and first line of evidence are near-identical, it's noise
+      const firstEvidenceLine = block.split("\n").find(l => /^\*\*Evidence\*\*:/i.test(l))?.replace(/^\*\*Evidence\*\*:\s*/i, "").trim() ?? ""
+      const normalizedTitle = title.toLowerCase().replace(/\s+/g, " ")
+      const normalizedEvidence = firstEvidenceLine.toLowerCase().replace(/\s+/g, " ")
+      if (normalizedTitle === normalizedEvidence || normalizedEvidence.includes(normalizedTitle.substring(0, 30))) {
+        continue
+      }
+    }
+
     findingCounter++
     const findingId = `finding-${findingCounter}`
 
