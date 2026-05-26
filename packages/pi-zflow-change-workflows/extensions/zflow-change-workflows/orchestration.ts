@@ -1027,6 +1027,144 @@ export interface DispatchExecutionGroup {
   dependencies: string[]
   taskPrompt: string
   scopedVerification?: string
+  /** When set, this is a coalesced group that merges multiple original groups. */
+  coalescedFrom?: string[]
+}
+
+/**
+ * Coalesce execution groups that share files or have explicit dependencies.
+ *
+ * Builds a graph where edges connect groups that share at least one file or
+ * have an explicit dependency relationship. Groups in each connected component
+ * are merged into a single coalesced group so they run in the same worktree.
+ *
+ * This prevents the problem where groups with dependencies are dispatched
+ * to independent worktrees from the same base commit and can't see each
+ * other's files.
+ *
+ * @param groups - The dispatch execution groups to coalesce.
+ * @returns A new array of groups with connected components merged.
+ */
+export function coalesceConnectedGroups(
+  groups: DispatchExecutionGroup[],
+): DispatchExecutionGroup[] {
+  if (groups.length <= 1) return groups
+
+  // ── Build adjacency list ────────────────────────────────────
+  // Two groups are connected if they share a file or have an explicit dependency.
+  const groupIds = groups.map(g => g.id)
+  const adjacency = new Map<string, string[]>()
+  for (const g of groups) adjacency.set(g.id, [])
+
+  for (let i = 0; i < groups.length; i++) {
+    for (let j = i + 1; j < groups.length; j++) {
+      const a = groups[i]!
+      const b = groups[j]!
+      const connected =
+        // Share at least one file
+        a.files.some(f => b.files.includes(f)) ||
+        // Explicit dependency in either direction
+        a.dependencies.includes(b.id) ||
+        b.dependencies.includes(a.id)
+
+      if (connected) {
+        adjacency.get(a.id)!.push(b.id)
+        adjacency.get(b.id)!.push(a.id)
+      }
+    }
+  }
+
+  // ── Find connected components ───────────────────────────────
+  const visited = new Set<string>()
+  const components: string[][] = []
+
+  for (const id of groupIds) {
+    if (visited.has(id)) continue
+    const component: string[] = []
+    const stack = [id]
+    while (stack.length > 0) {
+      const nodeId = stack.pop()!
+      if (visited.has(nodeId)) continue
+      visited.add(nodeId)
+      component.push(nodeId)
+      for (const neighbor of adjacency.get(nodeId) ?? []) {
+        if (!visited.has(neighbor)) stack.push(neighbor)
+      }
+    }
+    components.push(component)
+  }
+
+  // ── Merge each component into a single group ────────────────
+  const groupMap = new Map(groups.map(g => [g.id, g]))
+  const result: DispatchExecutionGroup[] = []
+
+  for (const component of components) {
+    if (component.length === 1) {
+      // No coalescing needed for singleton components
+      result.push(groupMap.get(component[0]!)!)
+      continue
+    }
+
+    const members = component.map(id => groupMap.get(id)!).filter(Boolean)
+    const componentSet = new Set(component)
+
+    // Merged files (union, deduplicated, preserving order)
+    const mergedFiles: string[] = []
+    const seenFiles = new Set<string>()
+    for (const m of members) {
+      for (const f of m.files) {
+        if (!seenFiles.has(f)) {
+          seenFiles.add(f)
+          mergedFiles.push(f)
+        }
+      }
+    }
+
+    // Merged dependencies: union of all member dep IDs minus IDs within this component
+    const depsSet = new Set<string>()
+    for (const m of members) {
+      for (const d of m.dependencies) {
+        if (!componentSet.has(d)) depsSet.add(d)
+      }
+    }
+    const mergedDeps = [...depsSet]
+
+    // Merged task prompt: describe each original subgroup
+    const mergedPrompt = members.length === 2
+      ? members.map((m, i) => `Sub-group ${i + 1} — ${m.taskPrompt}`).join("\n")
+      : members.map((m, i) => `Sub-group ${i + 1} (${m.id}): ${m.taskPrompt}`).join("\n")
+
+    // Merged scoped verification: join all verification commands with && so
+    // all must pass. If no member has verification, leave undefined.
+    const verificationCmds = members
+      .map(m => m.scopedVerification)
+      .filter((v): v is string => v !== undefined && v !== "")
+    const mergedVerification = verificationCmds.length > 0
+      ? verificationCmds.join(" && ")
+      : undefined
+
+    // Agent: use the deepest dependency member (one that no other member depends on),
+    // or fall back to the first member's agent.
+    const leafMember = members.find(m => !members.some(other => other.dependencies.includes(m.id)))
+    const mergedAgent = leafMember?.agent ?? members[0]!.agent
+
+    // Merged ID: join original IDs with "~" separator
+    // Sort so IDs are stable (group-1, group-2, etc.)
+    component.sort()
+    const mergedId = component.join("~")
+
+    result.push({
+      id: mergedId,
+      agent: mergedAgent,
+      files: mergedFiles,
+      dependencies: mergedDeps,
+      taskPrompt: mergedPrompt,
+      scopedVerification: mergedVerification,
+      coalescedFrom: [...component],
+    })
+  }
+
+  return result
 }
 
 /**
@@ -1049,11 +1187,37 @@ export function buildWorkerTask(
   config: WorktreeDispatchConfig,
   planArtifactPaths?: Record<string, string>,
 ): string {
-  const lines: string[] = [
-    `# Task: ${group.id}`,
-    "",
-    `Execute the approved plan for group **${group.id}** in this isolated worktree.`,
-    "",
+  const lines: string[] = []
+
+  // Handle coalesced groups (merged from multiple original groups)
+  if (group.coalescedFrom && group.coalescedFrom.length > 1) {
+    lines.push(
+      `# Task: ${group.coalescedFrom.join(" + ")}`,
+      "",
+      `This worktree implements multiple execution groups that share files or have ` +
+      `dependencies. They have been combined so you can implement them together ` +
+      `in dependency order within this single worktree.`,
+      "",
+      `## Coalesced groups`,
+    )
+    for (const origId of group.coalescedFrom) {
+      lines.push(`- ${origId}`)
+    }
+    lines.push("")
+  } else {
+    lines.push(
+      `# Task: ${group.id}`,
+      "",
+      `Execute the approved plan for group **${group.id}** in this isolated worktree.`,
+      "",
+    )
+  }
+
+  const scopeDesc = group.coalescedFrom && group.coalescedFrom.length > 1
+    ? `- Files you may modify across all sub-groups: ${group.files.join(", ") || "(none specified)"}`
+    : `- Files you may modify: ${group.files.join(", ") || "(none specified)"}`
+
+  lines.push(
     `## Run context`,
     `- Run ID: ${config.runId}`,
     `- Change: ${config.changeId}`,
@@ -1061,7 +1225,7 @@ export function buildWorkerTask(
     `- Repo root: ${config.repoRoot}`,
     "",
     `## Scope`,
-    `- Files you may modify: ${group.files.join(", ") || "(none specified)"}`,
+    scopeDesc,
     `- Agent: ${group.agent}`,
     "",
     `## Rules`,
@@ -1079,7 +1243,7 @@ export function buildWorkerTask(
     `Any temporary helper script MUST be written ONLY to:`,
     `\`<runtime-state-dir>/runs/${config.runId}/scratch/scripts/\``,
     `Never write helper scripts to the repo root, scripts/, test/, tests/, src/, or lib/.`,
-  ]
+  )
 
   if (group.dependencies.length > 0) {
     lines.push(
@@ -2818,7 +2982,10 @@ export async function prepareWorktreeImplementationRun(
     taskPrompt: g.taskPrompt,
     scopedVerification: g.scopedVerification,
   }))
-  const tasks = buildWorktreeDispatchPlan(dispatchGroups, dispatchConfig, planArtifactPaths)
+  // Coalesce groups that share files or have explicit dependencies so they
+  // run in the same worktree instead of isolated worktrees from the same base.
+  const coalescedGroups = coalesceConnectedGroups(dispatchGroups)
+  const tasks = buildWorktreeDispatchPlan(coalescedGroups, dispatchConfig, planArtifactPaths)
 
   return {
     runId,
