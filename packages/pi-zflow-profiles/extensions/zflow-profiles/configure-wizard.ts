@@ -158,6 +158,12 @@ class ConfigureWizard {
   handleInput(data: string): void {
     // Delegate to active sub-components first
     if (this.activeSelectList) {
+      // Tab cycles to the next edit mode even while a select list is active
+      if (matchesKey(data, "tab")) {
+        this.activeSelectList = null
+        this.handleTabNavigation()
+        return
+      }
       const prevSelected = this.activeSelectList.getSelectedItem()
       this.activeSelectList.handleInput(data)
       const newSelected = this.activeSelectList.getSelectedItem()
@@ -372,14 +378,17 @@ class ConfigureWizard {
       }
     }
 
-    // Model selected — add to lane's model list
+    // Model selected — make it the primary (first in the list)
     if (this.activeSelectList) {
       const selectedItem = this.activeSelectList.getSelectedItem()
       if (selectedItem) {
-        // Add model to lane's selectedModels (if not already there)
-        if (!lane.selectedModels.includes(selectedItem.value)) {
-          lane.selectedModels.push(selectedItem.value)
+        // Remove from current position if already in the list,
+        // then insert at the front so the selected model is primary
+        const existingIdx = lane.selectedModels.indexOf(selectedItem.value)
+        if (existingIdx >= 0) {
+          lane.selectedModels.splice(existingIdx, 1)
         }
+        lane.selectedModels.unshift(selectedItem.value)
       }
     }
 
@@ -624,12 +633,12 @@ class ConfigureWizard {
         return "enter: next  ·  esc: cancel"
       case "lanes":
         if (this.laneEditingModel || this.laneEditingThinking) {
-          return "↑↓: navigate  ·  enter: select  ·  esc: cancel"
+          return "↑↓: navigate  ·  enter: select  ·  tab: next mode  ·  esc: cancel"
         }
         return "↑↓/←→: change lane  ·  enter: next stage  ·  tab: edit model/thinking  ·  esc: back"
       case "agents":
         if (this.agentEditingLane || this.agentEditingThinking) {
-          return "↑↓: navigate  ·  enter: select  ·  esc: cancel"
+          return "↑↓: navigate  ·  enter: select  ·  tab: next mode  ·  esc: cancel"
         }
         return "↑↓: change agent  ·  enter: next stage  ·  tab: edit lane/thinking  ·  esc: back"
       case "review":
@@ -763,7 +772,7 @@ class ConfigureWizard {
       : "This lane is optional — the profile activates even if no model is available."))
 
     lines.push("")
-    lines.push(pad + theme.fg("dim", "[tab] edit model/thinking  ·  [↑↓/←→] change lane  ·  [enter] next stage"))
+    lines.push(pad + theme.fg("dim", "[tab] edit model  →  tab again: edit thinking  →  tab again: normal  ·  [esc] cancel  ·  [enter] select"))
 
     return lines
   }
