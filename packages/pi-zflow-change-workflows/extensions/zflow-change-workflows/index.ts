@@ -230,7 +230,6 @@ import type {
   FixWorkflowOptions,
   FixWorkflowResult,
   ParsedFinding,
-  ParsedFinding,
   FixOrchestratorConfig,
   CleanWorkflowOptions,
   CleanWorkflowResult,

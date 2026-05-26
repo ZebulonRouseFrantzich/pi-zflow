@@ -1979,7 +1979,7 @@ export async function buildFixOrchestratorTaskPrompt(
     "   original finding requirements.",
     "6. If incomplete, dispatch again with precise gap details.",
     "7. Respect the retry bounds above.",
-    `8. Persist your satisfaction report to `.zflow/plans/${changeId}/fix-orchestration-report.md`,
+    "8. Persist your satisfaction report to " + "`.zflow/plans/" + changeId + "/fix-orchestration-report.md`.",
     "9. Report back with:\n",
     "   - Which findings were FIXED (with attempt count)",
     "   - Which findings are UNRESOLVED (with explanation)",
