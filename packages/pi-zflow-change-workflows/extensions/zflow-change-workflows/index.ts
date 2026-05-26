@@ -187,6 +187,8 @@ import {
 
 import {
   validateAllPlanArtifacts,
+  validateSingleArtifact,
+  runArtifactRepair,
 } from "./plan-artifact-validator.js"
 
 import type {
