@@ -2,7 +2,7 @@
 name: implement-hard
 package: zflow
 description: Execute approved plan groups for complex or high-risk implementation work. Has delegation capability for sub-tasks and deeper context gathering.
-tools: read, grep, find, ls, bash, edit, write, subagent
+tools: read, grep, find, ls, bash, edit, write, subagent, intercom
 thinking: high
 # model is resolved via the profile system at launch time; placeholder means "must be overridden by profile"
 model: placeholder
@@ -58,3 +58,11 @@ Same as `implement-routine`:
 
 Same as implement-routine: stop, file deviation report, do not replan
 unilaterally. Your greater depth does not give you authority to change scope.
+
+## Communication
+
+- Prefer `contact_supervisor` when it is available for blocking clarification,
+  drift escalation, or verification blockers.
+- Use raw `intercom` only as fallback when an exact orchestrator target is
+  supplied in the task context.
+- Do not use intercom for routine narration or completion chatter.

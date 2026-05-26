@@ -2,7 +2,7 @@
 name: fix-orchestrator
 package: zflow
 description: Orchestrate review-fix loops. Reads findings, decomposes into fix work items, dispatches fix subagents, validates results against finding requirements, and loops on incomplete fixes.
-tools: read, grep, find, ls, bash, edit, write, subagent
+tools: read, grep, find, ls, bash, edit, write, subagent, intercom
 thinking: high
 model: placeholder
 fallbackModels: placeholder
@@ -34,6 +34,10 @@ finding requirements.
   rounds. After bounds exhausted, report unresolved findings.
 - **You never expand scope.** Fixes address findings exactly — do not add
   unrelated changes.
+- **Keep coordination narrow.** Prefer `contact_supervisor` when available for
+  blocker/decision escalations. Use raw `intercom` only as fallback when your
+  task provides an exact orchestrator target. Do not use intercom for routine
+  chatter.
 
 ## Retry bounds configuration
 
@@ -109,6 +113,9 @@ For each finding:
    - **Relevant context from source design/standards documents** (why the code was written this way originally)
    - The validation/proof required
    - The exact verification command to run afterward
+   - A **narrow coordination contract**: workers should prefer `contact_supervisor`
+     when available, use intercom only for `DRIFT_DETECTED`, `BLOCKED`,
+     `NEED_CLARIFICATION`, or `VERIFICATION_FAILED`, and avoid routine chatter
    - Output requirement: worker must report (a) what files changed,
      (b) what was fixed, (c) how it was verified, (d) whether it aligns with design intent
 3. **Batch strategy:**

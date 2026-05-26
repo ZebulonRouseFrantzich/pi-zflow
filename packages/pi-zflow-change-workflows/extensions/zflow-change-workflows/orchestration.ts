@@ -1017,6 +1017,8 @@ export interface WorktreeDispatchConfig {
   changeId: string
   /** Plan version (e.g. "v1"). */
   planVersion: string
+  /** Exact intercom target for the supervising orchestrator, when known. */
+  orchestratorTarget?: string
 }
 
 // Type for an execution group used by worktree dispatch
@@ -1186,6 +1188,36 @@ export function coalesceConnectedGroups(
 }
 
 /**
+ * Build the narrow control-plane contract included in worker/orchestrator tasks.
+ */
+function buildLimitedCoordinationLines(
+  label: string,
+  orchestratorTarget?: string,
+): string[] {
+  const lines = [
+    "## Control-plane coordination (use only at the margins)",
+    "- Prefer `contact_supervisor` when available. It is the most reliable way to reach your supervising orchestrator.",
+    "- Use coordination only for: `DRIFT_DETECTED`, `BLOCKED`, `NEED_CLARIFICATION`, or `VERIFICATION_FAILED`.",
+    `- Keep each message terse, with a leading tag and the relevant ID (for example: \`${label}\`).`,
+    "- Write or reference the authoritative artifact first when reporting drift or verification failure.",
+    "- Do NOT use intercom for routine narration, detailed discussion, or completion chatter.",
+  ]
+
+  if (orchestratorTarget) {
+    lines.push(
+      `- Fallback raw intercom target: \`${orchestratorTarget}\`.`,
+      "- If `contact_supervisor` is unavailable but `intercom` is available, use that exact target.",
+    )
+  } else {
+    lines.push(
+      "- If `contact_supervisor` is unavailable and no explicit intercom target is provided, stop and return a clear BLOCKED summary in your task result.",
+    )
+  }
+
+  return lines
+}
+
+/**
  * Build a worker task prompt for a single execution group.
  *
  * Produces a compact, actionable prompt that tells the worker agent:
@@ -1328,6 +1360,8 @@ export function buildWorkerTask(
   }
 
   lines.push(
+    "",
+    ...buildLimitedCoordinationLines(`group ${group.id}`, config.orchestratorTarget),
     "",
     "## Output format",
     "When finished, provide:",
@@ -2094,6 +2128,7 @@ export async function buildFixOrchestratorTaskPrompt(
   findingsPath: string,
   rawReviewerDir?: string,
   cwd?: string,
+  orchestratorTarget?: string,
 ): Promise<string> {
   const config = fixResult.fixOrchestratorConfig
   const planPaths = fixResult.planArtifactPaths
@@ -2204,6 +2239,16 @@ export async function buildFixOrchestratorTaskPrompt(
     lines.push(`\`${findingsPath}\``)
     lines.push("")
   }
+
+  lines.push(
+    ...buildLimitedCoordinationLines(`change ${changeId}`, orchestratorTarget),
+    "- When you dispatch fix workers, pass through the same narrow coordination contract.",
+    "- Fix workers should prefer `contact_supervisor` when available and use raw `intercom` only as fallback plumbing.",
+    ...(orchestratorTarget
+      ? [`- If you must pass a raw intercom fallback to a fix worker, use \`${orchestratorTarget}\`.`]
+      : []),
+    "",
+  )
 
   lines.push(
     "## Instructions",
@@ -2703,17 +2748,22 @@ export async function signalDriftDetected(
   workerName: string,
   deviationPath?: string,
   cwd?: string,
+  orchestratorTarget?: string,
 ): Promise<void> {
   // Always update run phase to drift-pending
   await setRunPhase(runId, "drift-pending", cwd)
 
   // Attempt intercom signaling (optional — graceful fallback)
   let intercomAvailable = false
+  const resolvedTarget = orchestratorTarget?.trim()
+    || process.env.ZFLOW_INTERCOM_ORCHESTRATOR_TARGET?.trim()
+    || process.env.PI_INTERCOM_ORCHESTRATOR_TARGET?.trim()
+
   try {
     // Dynamic import to check for pi-intercom without hard dependency
     // @ts-expect-error - optional dependency, handled via catch
     const intercomModule: { intercom?: Function } | null = await import("pi-intercom").catch(() => null)
-    if (intercomModule && typeof intercomModule.intercom === "function") {
+    if (intercomModule && typeof intercomModule.intercom === "function" && resolvedTarget) {
       intercomAvailable = true
       const msg = [
         `DRIFT DETECTED: Group "${groupId}" (worker: ${workerName})`,
@@ -2726,7 +2776,7 @@ export async function signalDriftDetected(
 
       await intercomModule.intercom({
         action: "send",
-        to: "orchestrator",
+        to: resolvedTarget,
         message: msg,
       })
     }
@@ -2738,8 +2788,11 @@ export async function signalDriftDetected(
     // Fallback: drift is still tracked via run.json phase and deviation report files.
     // Workers independently write deviation reports and mark tasks blocked.
     // No intercom signal was sent, but drift-pending state is recorded.
+    const reason = resolvedTarget
+      ? "pi-intercom not available"
+      : "no intercom target available"
     console.warn(
-      `[pi-zflow] pi-intercom not available. Drift signal suppressed for group "${groupId}". ` +
+      `[pi-zflow] ${reason}. Drift signal suppressed for group "${groupId}". ` +
       `Workers will still write deviation reports. Run marked as drift-pending.`,
     )
   }
@@ -2844,6 +2897,8 @@ export async function prepareWorktreeImplementationRun(
     plannedPaths?: Set<string>
     /** Explicit repo root. Defaults to git rev-parse --show-toplevel from cwd. */
     repoRoot?: string
+    /** Exact intercom target for the supervising orchestrator, when known. */
+    orchestratorTarget?: string
     /**
      * Explicit run ID override. When provided, skips creating a new run.json
      * and state-index entry (the caller already created them). Useful when
@@ -2990,6 +3045,7 @@ export async function prepareWorktreeImplementationRun(
     repoRoot,
     changeId,
     planVersion,
+    orchestratorTarget: options?.orchestratorTarget,
   }
 
   const dispatchGroups: DispatchExecutionGroup[] = groups.map(g => ({

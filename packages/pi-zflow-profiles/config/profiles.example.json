@@ -97,13 +97,13 @@
       },
       "zflow.implement-routine": {
         "lane": "worker-cheap",
-        "tools": "read, grep, find, ls, bash, edit, write",
+        "tools": "read, grep, find, ls, bash, edit, write, intercom",
         "maxOutput": 8000,
         "maxSubagentDepth": 0
       },
       "zflow.implement-hard": {
         "lane": "worker-strong",
-        "tools": "read, grep, find, ls, bash, edit, write",
+        "tools": "read, grep, find, ls, bash, edit, write, intercom",
         "maxOutput": 10000,
         "maxSubagentDepth": 0
       },

@@ -126,6 +126,21 @@ describe("buildWorkerTask", () => {
     assert.ok(task.includes("Summary of changes"))
     assert.ok(task.includes("List of changed files"))
   })
+
+  test("includes narrow coordination contract and fallback intercom target when provided", () => {
+    const group = makeGroup("group-1", ["src/foo.ts"])
+    const config = {
+      ...makeConfig(),
+      orchestratorTarget: "zflow-implement-feat-auth-deadbeef",
+    }
+    const task = buildWorkerTask(group, config)
+
+    assert.ok(task.includes("Control-plane coordination"))
+    assert.ok(task.includes("contact_supervisor"))
+    assert.ok(task.includes("DRIFT_DETECTED"))
+    assert.ok(task.includes("NEED_CLARIFICATION"))
+    assert.ok(task.includes("zflow-implement-feat-auth-deadbeef"))
+  })
 })
 
 // ---------------------------------------------------------------------------

@@ -121,6 +121,41 @@ export function resolveRunPaths(
   }
 }
 
+function sanitizeWorkflowSessionToken(token: string, fallback: string): string {
+  const sanitized = token
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+  return sanitized || fallback
+}
+
+export function buildWorkflowIntercomSessionName(
+  workflow: "implement" | "fix",
+  changeId: string,
+  sessionId: string,
+): string {
+  const safeChangeId = sanitizeWorkflowSessionToken(changeId, "change")
+  const safeSessionId = sanitizeWorkflowSessionToken(sessionId, "session").slice(0, 8) || "session"
+  return `zflow-${workflow}-${safeChangeId}-${safeSessionId}`
+}
+
+export function ensureWorkflowIntercomTarget(
+  pi: Pick<ExtensionAPI, "getSessionName" | "setSessionName">,
+  ctx: { sessionManager?: { getSessionId?: () => string } },
+  workflow: "implement" | "fix",
+  changeId: string,
+): string | undefined {
+  const existing = pi.getSessionName()?.trim()
+  if (existing) return existing
+
+  const sessionId = ctx.sessionManager?.getSessionId?.()
+  if (!sessionId) return undefined
+
+  const generated = buildWorkflowIntercomSessionName(workflow, changeId, sessionId)
+  pi.setSessionName(generated)
+  return generated
+}
+
 // ── State-index lifecycle helpers ─────────────────────────────────
 
 import { loadStateIndex, listStateIndexEntries } from "pi-zflow-artifacts/state-index"
@@ -443,6 +478,7 @@ function formatElapsed(ms: number): string {
 }
 
 const WORKFLOW_PROGRESS_MESSAGE_TYPE = "zflow-workflow-progress" as const
+const WORKFLOW_ATTENTION_PHASE_CARD_ID = "coordination-attention" as const
 
 interface WorkflowProgressSnapshot {
   id: string
@@ -502,6 +538,27 @@ interface WorkflowProgressMessageDetails {
   snapshot: WorkflowProgressSnapshot
 }
 
+export interface SessionMessageLike {
+  role?: string
+  customType?: string
+  content?: unknown
+  timestamp?: number
+}
+
+export interface SessionEntryLike {
+  id?: string
+  type?: string
+  message?: SessionMessageLike
+}
+
+export interface WorkflowAttentionSignalInput {
+  id: string
+  agent: string
+  title?: string
+  lastCommand?: string
+  logs?: string[]
+}
+
 const workflowProgressSnapshots = new Map<string, WorkflowProgressSnapshot>()
 let workflowProgressCounter = 0
 
@@ -514,6 +571,65 @@ function truncateText(value: string, width: number): string {
 function subagentSortKey(id: string): number {
   const match = id.match(/(\d+)$/)
   return match ? Number.parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER
+}
+
+function flattenMessageContentToText(content: unknown): string {
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+  return content
+    .map((part) => {
+      if (!part || typeof part !== "object") return ""
+      const maybeText = part as { type?: unknown; text?: unknown }
+      if (maybeText.type === "text" && typeof maybeText.text === "string") return maybeText.text
+      return ""
+    })
+    .filter(Boolean)
+    .join("\n")
+}
+
+function detectCoordinationKeyword(text: string): string | undefined {
+  const normalized = text.toLowerCase()
+  if (normalized.includes("drift detected")) return "DRIFT_DETECTED"
+  if (normalized.includes("need_clarification") || normalized.includes("need clarification")) return "NEED_CLARIFICATION"
+  if (normalized.includes("verification_failed") || normalized.includes("verification failed")) return "VERIFICATION_FAILED"
+  if (normalized.includes("blocked") || normalized.includes("need_decision") || normalized.includes("need decision")) return "BLOCKED"
+  if (normalized.includes("progress_update") || normalized.includes("progress update")) return "PROGRESS_UPDATE"
+  return undefined
+}
+
+export function detectWorkflowAttentionSignal(subagent: WorkflowAttentionSignalInput): string | undefined {
+  const candidates = [subagent.lastCommand, ...(subagent.logs ?? [])]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+  const matched = candidates.find((value) => /contact_supervisor|intercom/i.test(value))
+  if (!matched) return undefined
+
+  const label = subagent.title?.trim() || subagent.agent || subagent.id
+  const keyword = detectCoordinationKeyword(matched)
+  const tool = /contact_supervisor/i.test(matched) ? "contact_supervisor" : "intercom"
+  const detail = visualTruncate(matched.replace(/\s+/g, " ").trim(), 140)
+  return keyword
+    ? `${label} raised ${keyword} via ${tool}: ${detail}`
+    : `${label} used ${tool}: ${detail}`
+}
+
+export function detectIncomingWorkflowAttention(entry: SessionEntryLike): string | undefined {
+  if (entry.type !== "message" || !entry.message) return undefined
+  const message = entry.message
+  const customType = typeof message.customType === "string" ? message.customType : ""
+  if (customType === WORKFLOW_PROGRESS_MESSAGE_TYPE) return undefined
+
+  const text = flattenMessageContentToText(message.content)
+  const haystack = `${customType}\n${text}`.toLowerCase()
+  const looksLikeIntercom = haystack.includes("intercom") || haystack.includes("contact_supervisor")
+  const keyword = detectCoordinationKeyword(haystack)
+
+  if (!looksLikeIntercom && !keyword) return undefined
+
+  const summary = visualTruncate(text.replace(/\s+/g, " ").trim(), 180) || visualTruncate(customType, 80)
+  if (!summary) return undefined
+  return keyword
+    ? `Incoming ${keyword} signal: ${summary}`
+    : `Incoming coordination signal: ${summary}`
 }
 
 function visualCharWidth(char: string): number {
@@ -1187,6 +1303,73 @@ function createWorkflowProgressIndicator(
   render()
   refreshProgressMessage()
 
+  const activeAttentionSignals = new Map<string, string>()
+  const seenIncomingAttentionKeys = new Set<string>()
+  let lastAttentionNotice = ""
+
+  const upsertAttentionCard = (message: string, status: "running" | "completed" | "failed" = "running"): void => {
+    const current = workflowProgressSnapshots.get(id)
+    const normalizedMessage = visualTruncate(message.replace(/\s+/g, " ").trim(), 200)
+    if (!current || !normalizedMessage) return
+
+    const currentPhaseCards = current.phaseCards ?? []
+    const existing = currentPhaseCards.find((card) => card.id === WORKFLOW_ATTENTION_PHASE_CARD_ID)
+    const nextCard: WorkflowPhaseCardSnapshot = {
+      id: WORKFLOW_ATTENTION_PHASE_CARD_ID,
+      title: "Coordination Attention",
+      status,
+      startedAt: existing?.startedAt ?? Date.now(),
+      finishedAt: status === "running" ? undefined : existing?.finishedAt ?? Date.now(),
+      messages: [...(existing?.messages ?? []), normalizedMessage].slice(-8),
+    }
+    const phaseCards = [...currentPhaseCards]
+    const existingIdx = phaseCards.findIndex((card) => card.id === WORKFLOW_ATTENTION_PHASE_CARD_ID)
+    if (existingIdx >= 0) phaseCards[existingIdx] = nextCard
+    else phaseCards.push(nextCard)
+    workflowProgressSnapshots.set(id, {
+      ...current,
+      lastMessage: normalizedMessage,
+      updateCount: current.updateCount + 1,
+      recentMessages: [...current.recentMessages, normalizedMessage].slice(-5),
+      phaseCards,
+    })
+    if (normalizedMessage !== lastAttentionNotice) {
+      lastAttentionNotice = normalizedMessage
+      ui?.notify?.(normalizedMessage, status === "failed" ? "error" : "warning")
+    }
+    refreshProgressMessage()
+  }
+
+  const reconcileAttentionCard = (): void => {
+    if (activeAttentionSignals.size > 0) {
+      const latest = [...activeAttentionSignals.values()][activeAttentionSignals.size - 1]
+      if (latest) upsertAttentionCard(latest, "running")
+      return
+    }
+
+    const current = workflowProgressSnapshots.get(id)
+    const existing = current?.phaseCards?.find((card) => card.id === WORKFLOW_ATTENTION_PHASE_CARD_ID)
+    if (existing && existing.status === "running") {
+      upsertAttentionCard("No active worker coordination signals.", "completed")
+    }
+  }
+
+  const scanSessionAttention = (): void => {
+    const entries = ctx.sessionManager?.getEntries?.() as SessionEntryLike[] | undefined
+    if (!entries || entries.length === 0) return
+    const recentEntries = entries.slice(-25)
+    for (let index = 0; index < recentEntries.length; index++) {
+      const entry = recentEntries[index]!
+      const attention = detectIncomingWorkflowAttention(entry)
+      if (!attention) continue
+      const timestamp = typeof entry.message?.timestamp === "number" ? entry.message.timestamp : 0
+      const key = `${entry.id ?? `recent-${index}`}:${timestamp}:${attention}`
+      if (seenIncomingAttentionKeys.has(key)) continue
+      seenIncomingAttentionKeys.add(key)
+      upsertAttentionCard(attention, "running")
+    }
+  }
+
   const interval = setInterval(() => {
     const current = workflowProgressSnapshots.get(id)
     if (current) {
@@ -1204,6 +1387,8 @@ function createWorkflowProgressIndicator(
         workflowProgressSnapshots.set(id, { ...current, subagents: updatedSubagents })
       }
     }
+    scanSessionAttention()
+    reconcileAttentionCard()
     render()
     refreshProgressMessage()
   }, 1000)
@@ -1255,6 +1440,7 @@ function createWorkflowProgressIndicator(
     updateSubagent(subagentId: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id">>) {
       const current = workflowProgressSnapshots.get(id)
       let shouldSendMessage = false
+      let nextSubagentSnapshot: WorkflowSubagentSnapshot | undefined
       if (current) {
         const existing = current.subagents.find((subagent) => subagent.id === subagentId)
         const nextStatus = update.status ?? existing?.status ?? "running"
@@ -1280,6 +1466,7 @@ function createWorkflowProgressIndicator(
           logs: mergedLogs,
           lastActivityAt: Date.now(),
         }
+        nextSubagentSnapshot = nextSubagent
         const existingIdx = current.subagents.findIndex((subagent) => subagent.id === subagentId)
         const updatedSubagents = [...current.subagents]
         if (existingIdx >= 0) {
@@ -1293,6 +1480,21 @@ function createWorkflowProgressIndicator(
         })
         shouldSendMessage = statusChanged || lastCommandChanged || startedAtChanged || (newLogs !== undefined && newLogs.length > 0)
       }
+
+      if (nextSubagentSnapshot) {
+        const attentionSignal = detectWorkflowAttentionSignal(nextSubagentSnapshot)
+        const previousAttention = activeAttentionSignals.get(subagentId)
+        if (attentionSignal) {
+          activeAttentionSignals.set(subagentId, attentionSignal)
+          if (attentionSignal !== previousAttention) {
+            upsertAttentionCard(attentionSignal, "running")
+          }
+        } else if (previousAttention) {
+          activeAttentionSignals.delete(subagentId)
+          reconcileAttentionCard()
+        }
+      }
+
       render()
       if (shouldSendMessage) {
         refreshProgressMessage()
@@ -2227,6 +2429,7 @@ async function resumeWorktreeDispatch(
   options?: {
     cwd?: string
     force?: boolean
+    orchestratorTarget?: string
     onSubagentUpdate?: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) => void
   },
 ): Promise<void> {
@@ -2293,6 +2496,7 @@ async function resumeWorktreeDispatch(
       repoRoot,
       runId,
       force: options?.force,
+      orchestratorTarget: options?.orchestratorTarget,
     },
   )
 
@@ -2635,6 +2839,7 @@ async function runWorktreeDispatchAndFinalize(
   options?: {
     cwd?: string
     force?: boolean
+    orchestratorTarget?: string
     onWorkflowUpdate?: (message: string) => void
     onSubagentUpdate?: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) => void
   },
@@ -2714,7 +2919,13 @@ async function runWorktreeDispatchAndFinalize(
     planVersion,
     groups,
     planArtifactPaths,
-    { cwd, repoRoot, runId, force: options?.force },
+    {
+      cwd,
+      repoRoot,
+      runId,
+      force: options?.force,
+      orchestratorTarget: options?.orchestratorTarget,
+    },
   )
 
   // ── Initialize durable group status ledger ────────────────────
@@ -5399,6 +5610,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
                   `Rerunning ${reconciliation.groupsNeedingRerun.length} failed/pending group(s) in "${partialRunId}"`,
                 )
 
+                const workflowIntercomTarget = ensureWorkflowIntercomTarget(pi, ctx, "implement", resumeChangeId)
                 await resumeWorktreeDispatch(
                   partialRunId,
                   resumeChangeId,
@@ -5407,6 +5619,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
                   {
                     cwd: ctx.cwd,
                     force,
+                    orchestratorTarget: workflowIntercomTarget,
                     onSubagentUpdate: (id, update) => implProgress.updateSubagent(id, update),
                   },
                 )
@@ -5791,6 +6004,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
 
       try {
         addReminder("approved-plan-loaded")
+        const workflowIntercomTarget = ensureWorkflowIntercomTarget(pi, ctx, "implement", changeId)
         implProgress.update("Creating run state and parsing execution plan")
 
         // ── Phase 2: Run the create-run workflow ──────────────────
@@ -5812,6 +6026,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           await runWorktreeDispatchAndFinalize(result.runId, result.changeId, result.planVersion, dispatchService!, {
             cwd: undefined,
             force,
+            orchestratorTarget: workflowIntercomTarget,
             onWorkflowUpdate: updatePostImplementationCard,
             onSubagentUpdate: (id, update) => implProgress.updateSubagent(id, update),
           })
@@ -6127,12 +6342,14 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         const findingsPath = resolveCodeReviewFindingsPath(ctx.cwd)
         const runDir = resolveRunDir(fixRunId, ctx.cwd)
         const rawReviewerDir = `${runDir}/review-artifacts`
+        const workflowIntercomTarget = ensureWorkflowIntercomTarget(pi, ctx, "fix", changeId)
         const orchTask = await buildFixOrchestratorTaskPrompt(
           changeId,
           planResult,
           findingsPath,
           rawReviewerDir,
           ctx.cwd,
+          workflowIntercomTarget,
         )
 
         const orchModel = await resolveWorkflowModel("zflow.fix-orchestrator")

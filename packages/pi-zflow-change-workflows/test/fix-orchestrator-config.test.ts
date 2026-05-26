@@ -133,6 +133,41 @@ describe("buildFixOrchestratorTaskPrompt", () => {
     assert.ok(prompt.includes("Finding ID") || prompt.includes("findings"), "prompt should reference findings")
   })
 
+  it("includes the narrow coordination contract when an orchestrator target is provided", async () => {
+    const { buildFixOrchestratorTaskPrompt, resolveFixOrchestratorConfig } = await import(
+      "../extensions/zflow-change-workflows/orchestration.js"
+    )
+    const config = resolveFixOrchestratorConfig()
+
+    const fixResult = {
+      changeId: "test-change",
+      fixPlan: "# Test fix plan",
+      filesToModify: ["src/test.ts"],
+      verificationCommand: "npm test",
+      parsedFindings: [],
+      rawFindingsPath: "/tmp/findings.md",
+      planVersion: "v1",
+      lifecycleState: "executing",
+      fixOrchestratorConfig: config,
+      fixOrchestratorTaskPrompt: undefined,
+    }
+
+    const prompt = await buildFixOrchestratorTaskPrompt(
+      "test-change",
+      fixResult,
+      "/tmp/findings.md",
+      "/tmp/raw-reviewer-artifacts",
+      undefined,
+      "zflow-fix-test-change-deadbeef",
+    )
+
+    assert.ok(prompt.includes("Control-plane coordination"))
+    assert.ok(prompt.includes("contact_supervisor"))
+    assert.ok(prompt.includes("DRIFT_DETECTED"))
+    assert.ok(prompt.includes("zflow-fix-test-change-deadbeef"))
+    assert.ok(prompt.includes("pass through the same narrow coordination contract"))
+  })
+
   it("includes parsed findings when present", async () => {
     const { buildFixOrchestratorTaskPrompt, resolveFixOrchestratorConfig } = await import(
       "../extensions/zflow-change-workflows/orchestration.js"
