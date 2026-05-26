@@ -668,6 +668,9 @@ const READ_ONLY_PREFIXES: RegExp[] = [
   // Verification/build tools — allowed for scoped verification in
   // implement/fix workers.  These tools typecheck, test, lint, or
   // generate code without mutating source-controlled files.
+  /^npm\s+(?:test|run\s+test|run\s+test:core|run\s+test:all)\b/,
+  /^npx\s+tsx\s+(?:--test|--eval)/,
+  /^tsx\s+(?:--test|--eval)/,
   /^pnpm\s+(?:--[a-z-]+\s+\S+\s+)*(?:typecheck|test|lint|run\s+(?:typecheck|test|lint|check|ci)(?:\s|$))/,
   /^just\s+(?:--list|--summary|codegen|smoke\b)/,
   /^tsc\s/,

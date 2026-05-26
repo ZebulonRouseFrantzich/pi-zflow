@@ -1139,13 +1139,16 @@ export function coalesceConnectedGroups(
       ? members.map((m, i) => `Sub-group ${i + 1} — ${m.taskPrompt}`).join("\n")
       : members.map((m, i) => `Sub-group ${i + 1} (${m.id}): ${m.taskPrompt}`).join("\n")
 
-    // Merged scoped verification: join all verification commands with && so
-    // all must pass. If no member has verification, leave undefined.
+    // Merged scoped verification: join with newlines so each command
+    // stays separate. Do NOT shell-chain with `&&` because guarded bash
+    // execution rejects multi-command syntax. Each command is rendered
+    // individually in the worker task prompt so the agent runs them as
+    // separate guarded bash calls.
     const verificationCmds = members
       .map(m => m.scopedVerification)
       .filter((v): v is string => v !== undefined && v !== "")
     const mergedVerification = verificationCmds.length > 0
-      ? verificationCmds.join(" && ")
+      ? verificationCmds.join("\n")
       : undefined
 
     // Agent: use the deepest dependency member (one that no other member depends on),
@@ -1306,19 +1309,49 @@ export function buildWorkerTask(
   }
 
   if (group.scopedVerification) {
-    lines.push(
-      "",
-      "## Scoped verification",
-      "After implementing, run the following command to verify your changes:",
-      "",
-      "```bash",
-      group.scopedVerification,
-      "```",
-      "",
-      "Include the verification result (pass/fail/output) in your summary.",
-      "Do NOT invent or run repo-wide verification commands. Run only the",
-      "scoped verification command specified above.",
-    )
+    const commands = group.scopedVerification.split("\n").filter(Boolean)
+    if (commands.length > 1) {
+      // Multi-command (coalesced groups): render each separately so the
+      // agent runs them as individual guarded bash calls, not shell-chained.
+      lines.push(
+        "",
+        "## Scoped verification",
+        "After implementing, run each of the following verification commands",
+        "separately (do NOT chain them with `&&`, `;`, or `|`):",
+        "",
+      )
+      for (let i = 0; i < commands.length; i++) {
+        lines.push(
+          `### Verification ${i + 1}`,
+          "",
+          "```bash",
+          commands[i]!,
+          "```",
+          "",
+        )
+      }
+      lines.push(
+        "Include the verification result (pass/fail/output) for each command",
+        "in your summary.",
+        "Do NOT invent or run repo-wide verification commands. Run only the",
+        "scoped verification commands specified above.",
+      )
+    } else {
+      // Single command (non-coalesced group)
+      lines.push(
+        "",
+        "## Scoped verification",
+        "After implementing, run the following command to verify your changes:",
+        "",
+        "```bash",
+        commands[0]!,
+        "```",
+        "",
+        "Include the verification result (pass/fail/output) in your summary.",
+        "Do NOT invent or run repo-wide verification commands. Run only the",
+        "scoped verification command specified above.",
+      )
+    }
   } else {
     lines.push(
       "",
@@ -2093,7 +2126,7 @@ export async function runChangeFixWorkflow(
     fixPlan,
     filesToModify,
     verificationCommand,
-    parsedFindings: findings,
+    parsedFindings: selectedFindings,
     rawFindingsPath: rawPath,
     planVersion,
     lifecycleState,
@@ -2426,7 +2459,7 @@ export async function parseReviewFindings(
     const evidenceLineMatch = block.match(/\*\*Evidence\*\*:\s*(.+)$/im)
     const whyLineMatch = block.match(/\*\*Why it matters\*\*:\s*(.+)$/im)
     const recLineMatch = block.match(/\*\*Recommendation\*\*:\s*(.+)$/im)
-    const artifactMatch = block.match(/\*\*Artifact[^:]*:\*\*\s*`?([^`\n]+)`?/i)
+    const artifactMatch = block.match(/\*\*Artifact[^:]*\*\*:\s*`?([^`\n]+)`?/i)
     // Enriched fields from the new finding format (all optional)
     const expectedBehaviorMatch = block.match(/\*\*Expected behavior\*\*:\s*(.+)$/im)
     const fixRequirementsMatch = block.match(/\*\*Fix requirements\*\*:\s*(.+)$/im)
@@ -6281,12 +6314,13 @@ export function buildImplementationGateQuestions(
  */
 export function parseInterviewResponse(
   response: string,
-): { decision: string; revisionNotes?: string } {
+): { decision: string; revisionNotes?: string; selectedFindings?: string[] } {
   try {
     const parsed = JSON.parse(response)
     return {
       decision: parsed.decision ?? parsed.action ?? "cancel",
       revisionNotes: parsed.revisionNotes,
+      ...(parsed.selectedFindings ? { selectedFindings: parsed.selectedFindings } : {}),
     }
   } catch {
     return { decision: "cancel" }

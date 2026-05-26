@@ -27,8 +27,9 @@ function makeGroup(
   agent = "zflow.implement-routine",
   taskPrompt = "",
   scopedVerification?: string,
+  coalescedFrom?: string[],
 ): DispatchExecutionGroup {
-  return { id, agent, files, dependencies: deps, taskPrompt, scopedVerification }
+  return { id, agent, files, dependencies: deps, taskPrompt, scopedVerification, coalescedFrom }
 }
 
 function makeConfig(
@@ -91,6 +92,38 @@ describe("buildWorkerTask", () => {
 
     assert.ok(task.includes("Scoped verification"))
     assert.ok(task.includes("npm test -- src/foo.test.ts"))
+    // Single-command uses "the following command" (singular)
+    assert.ok(task.includes("the following command"))
+  })
+
+  test("renders multi-command verification separately for coalesced groups", () => {
+    const group = makeGroup(
+      "group-1~group-2",
+      ["src/a.ts", "src/b.ts"],
+      [],
+      "zflow.implement-routine",
+      "Multi-group task",
+      "pnpm typecheck\npnpm test\npnpm lint",
+      ["group-1", "group-2"],
+    )
+    const config = makeConfig()
+    const task = buildWorkerTask(group, config)
+
+    // Multi-command uses "each of the following" (plural)
+    assert.ok(task.includes("each of the following"))
+    // Each command rendered in its own code fence
+    assert.ok(task.includes("pnpm typecheck"))
+    assert.ok(task.includes("pnpm test"))
+    assert.ok(task.includes("pnpm lint"))
+    // Has numbering
+    assert.ok(task.includes("Verification 1"))
+    assert.ok(task.includes("Verification 2"))
+    assert.ok(task.includes("Verification 3"))
+    // No shell-chained verification command in code fences
+    const fenceBlocks = task.match(/```bash\n[\s\S]*?\n```/g) || []
+    for (const block of fenceBlocks) {
+      assert.ok(!block.includes("&&"), `Code fence block should not contain &&: ${block.slice(0, 80)}`)
+    }
   })
 
   test("includes plan artifact paths when provided", () => {
@@ -162,7 +195,7 @@ describe("coalesceConnectedGroups", () => {
     assert.deepEqual(coalesced[0].coalescedFrom, ["group-1", "group-2"])
     assert.deepEqual(coalesced[0].files, ["src/app.ts", "src/env.ts", "src/routes.ts"])
     assert.deepEqual(coalesced[0].dependencies, [])
-    assert.equal(coalesced[0].scopedVerification, "pnpm typecheck && pnpm test")
+    assert.equal(coalesced[0].scopedVerification, "pnpm typecheck\npnpm test")
     assert.equal(coalesced[1].id, "group-3")
     assert.deepEqual(coalesced[1].dependencies, ["group-1~group-2"])
   })

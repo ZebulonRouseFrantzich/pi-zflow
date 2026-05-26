@@ -382,7 +382,7 @@ function pickDefaultModel(laneName: string, groups: ProviderGroup[]): string | u
       if (!model.authenticated) continue
       if (!model.supportsTools) continue
 
-      if (isPlanning && model.thinkingCapability === "high" || model.thinkingCapability === "xhigh") {
+      if (isPlanning && (model.thinkingCapability === "high" || model.thinkingCapability === "xhigh")) {
         return model.id
       }
       if (isCheap && (model.thinkingCapability === "low" || model.thinkingCapability === "medium")) {

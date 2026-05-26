@@ -261,6 +261,33 @@ async function validateExecutionGroups(
         )
       }
     }
+
+    // Check Agent field
+    const agentMatch = section.match(AGENT_RE)
+    if (!agentMatch || !agentMatch[1].trim()) {
+      issues.push(
+        `Group "${groupId}" (section ${i + 1}): missing "Agent:" field. ` +
+        "Each group must specify an agent (e.g. zflow.implement-routine).",
+      )
+    }
+
+    // Check Dependencies field
+    const depMatch = section.match(DEPENDENCIES_RE)
+    if (!depMatch || !depMatch[1].trim()) {
+      issues.push(
+        `Group "${groupId}" (section ${i + 1}): missing "Dependencies:" field. ` +
+        "Each group must specify dependencies or \"none\".",
+      )
+    }
+
+    // Check Parallelizable field
+    const parallelMatch = section.match(PARALLELIZABLE_RE)
+    if (!parallelMatch || !parallelMatch[1].trim()) {
+      issues.push(
+        `Group "${groupId}" (section ${i + 1}): missing "Parallelizable:" field. ` +
+        "Each group must specify true or false.",
+      )
+    }
   }
 
   if (issues.length === 0) {

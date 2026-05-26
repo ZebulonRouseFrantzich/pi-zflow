@@ -399,6 +399,12 @@ export interface CodeReviewFinding {
   title: string
   reviewerSupport: string[]
   reviewerDissent?: string[]
+  /** Source file path for this finding (when available from the reviewer). */
+  file?: string
+  /** Starting line number for the finding. */
+  line?: number
+  /** Rendered line/range string (e.g. "42-56"). */
+  lines?: string
   evidence: string
   whyItMatters: string
   failureMode?: string
@@ -619,6 +625,17 @@ export function formatFindingsBySeverity(findings: CodeReviewFinding[]): string 
       lines.push(`**Reviewer support**: ${f.reviewerSupport.join(", ")}`)
       if (f.reviewerDissent && f.reviewerDissent.length > 0) {
         lines.push(`**Reviewer dissent**: ${f.reviewerDissent.join(", ")}`)
+      }
+      if (f.file) {
+        lines.push(`**File**: ${f.file}`)
+      }
+      if (f.lines) {
+        lines.push(`**Lines**: ${f.lines}`)
+      } else if (f.line) {
+        lines.push(`**Lines**: ${f.line}`)
+      }
+      if (f.artifactPath) {
+        lines.push(`**Artifact path**: ${f.artifactPath}`)
       }
       lines.push(`**Evidence**: ${f.evidence}`)
       lines.push(`**Why it matters**: ${f.whyItMatters}`)

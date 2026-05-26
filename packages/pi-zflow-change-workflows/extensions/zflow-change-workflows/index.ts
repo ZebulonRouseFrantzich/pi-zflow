@@ -1697,7 +1697,7 @@ async function runStructuredInterview(
   ctx: InterviewableContext,
   questionsJson: string,
   fallbackMessage: string,
-): Promise<{ decision: string; revisionNotes?: string } | null> {
+): Promise<{ decision: string; revisionNotes?: string; selectedFindings?: string[] } | null> {
   // 1. Try ctx.interview (native Pi interview API)
   if (typeof ctx.interview === "function") {
     const raw = await Promise.resolve(ctx.interview(questionsJson))
@@ -4099,6 +4099,8 @@ async function buildFocusedResolutionPrompt(
     : conflictDiff
 
   return [
+    `Role: apply-back-resolver`,
+    "",
     `Resolve the merge conflict for group "${groupId}".`,
     "",
     `Conflicted files:`,
@@ -4201,6 +4203,8 @@ async function resolveApplyBackWithSubagent(
       const scriptRule = buildEphemeralScriptRule(scratchScriptsDir)
       const cleanupTask = [
         scriptRule,
+        "",
+        "Role: apply-back-resolver",
         "",
         "Resolve existing conflict markers in this integration worktree.",
         "",
@@ -4760,8 +4764,12 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
     : "/home/user"
 
   // Guard intent tracking: updated in before_agent_start by inspecting
-  // the system prompt for known agent roles.  The fix-orchestrator is the
-  // only role that currently receives elevated privileges.
+  // the system prompt for known agent roles.  Each role receives distinct
+  // path guard privileges:
+  //   fix-orchestrator  → elevated (may restructure files per fix plan)
+  //   fix-worker        → restricted (scratch/ only)
+  //   apply-back-resolver → restricted (integration worktree only)
+  //   write             → standard (project root allowlist)
   let currentGuardIntent: GuardIntent = "write"
 
   pi.on("tool_call", async (event, ctx) => {
@@ -4841,8 +4849,14 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
   pi.on("before_agent_start", async (event) => {
     // Track which agent is starting — used by tool_call guards to apply
     // intent-specific rules (e.g. fix-orchestrator gets elevated privileges).
-    if (event.systemPrompt.includes("zflow.fix-orchestrator")) {
+    // Check the full system prompt (agent definition + task) for role markers.
+    const sp = event.systemPrompt
+    if (sp.includes("zflow.fix-orchestrator")) {
       currentGuardIntent = "fix-orchestrator"
+    } else if (sp.includes("fix-worker") || sp.includes("zflow.fix-worker")) {
+      currentGuardIntent = "fix-worker"
+    } else if (sp.includes("apply-back-resolver") || sp.includes("role: apply-back-resolver")) {
+      currentGuardIntent = "apply-back-resolver"
     } else {
       currentGuardIntent = "write"
     }
@@ -5192,7 +5206,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           `Change path: ${changePath}\nReview status: ${reviewResult.pass ? "passed" : "needs attention"}\nValidation: ${validation.pass ? "passed" : "has issues"}\n\nDurable plan docs published to: ${publishResult.durableDir}\n\n${inspectionSummary}`,
         )
 
-        let interviewResult: { decision: string; revisionNotes?: string } | null = null
+        let interviewResult: { decision: string; revisionNotes?: string; selectedFindings?: string[] } | null = null
         while (true) {
           interviewResult = await runStructuredInterview(
             ctx,
@@ -6257,12 +6271,17 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         fixProgress.updatePhaseCard("review-findings", "Review Findings",
           `Found ${findings.length} finding(s) — ${crit} critical, ${maj} major, ${min} minor, ${nits} nits.`, "completed")
 
+        // Hoisted variable for tracking which findings the user selected
+        // (populated in the interview phase below, consumed by dispatch).
+        let selectedFindingIndices: number[] | undefined
+
         // ═══ Phase 2: Fix Selection Interview ═════════════════════
         fixProgress.updatePhaseCard("fix-selection", "Fix Selection",
           "Awaiting fix selection...", "running")
 
         if (planOnly) {
-          // Legacy plan-only
+          // Legacy plan-only — selectedFindingIndices is undefined since
+          // no interview was shown, so all findings are used.
           const planResult = await runChangeFixWorkflow({ changeId })
           fixProgress.update(planResult.fixPlan)
           fixProgress.stop("Fix plan ready (plan-only)", "completed")
@@ -6287,6 +6306,25 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           if (gateResult.decision === "continue" || gateResult.decision === "approve" ||
               gateResult.decision === "Fix All") {
             selectedFindings = findings
+          } else if (gateResult.selectedFindings && gateResult.selectedFindings.length > 0) {
+            // Parse selected finding IDs from the interview response.
+            // The multi-select returns labels like "[CRITICAL] finding-1: title (file.ts)"
+            // Extract the finding-* ID from each entry.
+            const selectedIds = new Set<string>()
+            for (const entry of gateResult.selectedFindings) {
+              const idMatch = entry.match(/finding-\d+/)
+              if (idMatch) {
+                selectedIds.add(idMatch[0])
+              } else {
+                // Fallback: treat the entry itself as a finding ID
+                selectedIds.add(entry)
+              }
+            }
+            selectedFindings = findings.filter(f => selectedIds.has(f.findingId))
+            selectedFindingIndices = findings.reduce<number[]>((acc, f, i) => {
+              if (selectedIds.has(f.findingId)) acc.push(i)
+              return acc
+            }, [])
           } else {
             selectedFindings = findings
           }
@@ -6315,7 +6353,10 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           `Model: ${fixModel.model ?? "unavailable"}. Planning...`, "running")
 
         const fixRunId = `fix-${changeId}-${Date.now().toString(36)}`
-        const planResult = await runChangeFixWorkflow({ changeId })
+        const planResult = await runChangeFixWorkflow({
+          changeId,
+          ...(selectedFindingIndices ? { findingIndices: selectedFindingIndices } : {}),
+        })
         const dispatchService = await tryGetDispatchServiceViaRegistry().catch(() => null)
 
         if (!dispatchService) {
@@ -6413,7 +6454,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
                 const fixedMatch = reportContent.match(/## Fixed\n([\s\S]*?)(?=\n## |$)/)
                 const unresolvedMatch = reportContent.match(/## Unresolved\n([\s\S]*?)(?=\n## |$)/)
                 const fixedCount = fixedMatch ? fixedMatch[1].split("\n").filter(l => l.trim().startsWith("-")).length : 0
-                const unresolvedCount = unresolvedMatch ? unresolvedMatch[1].split("\n").filter(l => l.trim().startsWith("-")).length : 0
+                unresolvedCount = unresolvedMatch ? unresolvedMatch[1].split("\n").filter(l => l.trim().startsWith("-")).length : 0
                 satisfactionSummary = `Fixed: ${fixedCount}, Unresolved: ${unresolvedCount}. Full report: ${reportPath}`
               } catch {
                 satisfactionSummary = `Orchestrator output: ${orchResult.outputPath ?? "(inline)"}`

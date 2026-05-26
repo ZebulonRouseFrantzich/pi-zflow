@@ -318,18 +318,25 @@ describe("agent-discovery", () => {
 
   describe("getInstalledAgents", () => {
     it("should return installed agents with correct runtime names", () => {
-      // getInstalledAgents uses the default ~/.pi/agent/agents/zflow path.
-      // After /zflow-setup-agents runs, the real agent directory has agents.
-      // We verify at least the core agents are present.
-      const agents = getInstalledAgents()
+      // First install agents to a temp target directory
+      installAgents({
+        customPackageRoot: pkgRoot,
+        customAgentsTarget: agentsTarget,
+        silent: true,
+      })
+
+      // Then query using the same custom target (hermetic — no dependency on real ~/.pi)
+      const agents = getInstalledAgents({ customAgentsTarget: agentsTarget })
       const agentNames = agents.map(a => a.name)
 
-      // At minimum, the fix orchestrator and planner should be discoverable
-      assert.ok(agentNames.some(n => n === "zflow.fix-orchestrator"),
-        "fix-orchestrator should be discoverable")
-      assert.ok(agentNames.some(n => n === "zflow.planner-frontier"),
+      // Must have the three agents from the fake package root
+      assert.ok(agentNames.includes("zflow.planner-frontier"),
         "planner-frontier should be discoverable")
-      assert.ok(agents.length >= 15, "Should have at least 15 installed agents")
+      assert.ok(agentNames.includes("zflow.implement-routine"),
+        "implement-routine should be discoverable")
+      assert.ok(agentNames.includes("zflow.review-correctness"),
+        "review-correctness should be discoverable")
+      assert.equal(agents.length, 3, "Should have exactly 3 agents from test package")
     })
   })
 

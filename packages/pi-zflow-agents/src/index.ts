@@ -43,6 +43,8 @@ export type {
   InstalledAgentInfo,
   InstalledChainInfo,
   DiscoveryVerificationResult,
+  GetInstalledAgentsOptions,
+  GetInstalledChainsOptions,
 } from "./agent-discovery.js"
 
 // Output conventions
