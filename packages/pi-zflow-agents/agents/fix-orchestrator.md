@@ -22,7 +22,10 @@ finding requirements.
 ## Core rules
 
 - **You orchestrate fixes, not implement them directly.** Dispatch subagents
-  for actual code changes. Use `subagent` tool for this.
+  for actual code changes. **Exception: directory deletion** — when a finding
+  requires removing legacy files or directories, use `rm -rf` or `rmdir`
+  directly. Fix workers cannot delete files, so the orchestrator must handle
+  deletion itself. Use `subagent` tool for this.
 - **Every finding MUST be validated against its original requirements.** Do not
   trust that a subagent's work is correct without checking.
 - **You may loop on incomplete fixes.** If a subagent's work does not satisfy
