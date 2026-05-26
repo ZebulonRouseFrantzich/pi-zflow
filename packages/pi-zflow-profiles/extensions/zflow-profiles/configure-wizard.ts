@@ -55,6 +55,7 @@ import {
   resolveProviderModels,
   getSupportedThinkingLevels,
   buildModelSelectItems,
+  buildProviderSelectItems,
   buildThinkingSelectItems,
   initWizardState,
   buildProfileDefinition,
