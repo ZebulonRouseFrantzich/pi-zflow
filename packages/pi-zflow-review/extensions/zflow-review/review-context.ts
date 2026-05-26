@@ -366,6 +366,26 @@ export async function buildInternalReviewPrompt(
     "Return findings only. Do not attempt to fix the code yourself.\n",
   )
 
+  // ── Filesystem-verification instruction ─────────────────────
+  // Reviewers receive a git diff that may be stale (e.g. after a fix
+  // run).  Claims about file existence, deletion, or retention MUST be
+  // verified against the actual filesystem before being reported.
+  parts.push(
+    "## Filesystem verification required\n\n" +
+    "The diff bundle below shows what changed, but it may not reflect the " +
+    "current filesystem state (fixes may have been applied after the diff " +
+    "was captured). **Before reporting any of the following, verify against " +
+    "the actual filesystem using `ls` or `read`:**\n\n" +
+    "- Claims that a file or directory was \"retained\" or \"not deleted\"\n" +
+    "- Claims that a file or directory \"does not exist\" or \"is missing\"\n" +
+    "- Claims about file contents (use `read` to check the current state)\n" +
+    "- Claims about script portability or hardcoded paths (check the file " +
+    "actually exists first)\n\n" +
+    "Do not report a finding based solely on what the diff implies. " +
+    "Check the disk state. If the diff says a file was kept but `ls` shows " +
+    "it's gone, there is no finding to report.\n",
+  )
+
   // ── Plan-adherence instruction ──────────────────────────────
   parts.push(getPlanAdherenceInstruction())
   parts.push("")
