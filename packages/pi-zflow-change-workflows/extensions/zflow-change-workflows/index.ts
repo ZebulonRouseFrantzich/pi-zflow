@@ -6123,11 +6123,12 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         )
 
         const orchModel = await resolveWorkflowModel("zflow.fix-orchestrator")
+        const effectiveOrchModel = orchModel.model ?? fixModel.model
         const orchId = `fix-orch-${Date.now().toString(36)}`
         fixProgress.updateSubagent(orchId, {
           agent: "zflow.fix-orchestrator",
           title: "Fix Orchestrator",
-          model: orchModel.model ?? fixModel.model ?? "unavailable",
+          model: effectiveOrchModel ?? "unavailable",
           thinking: orchModel.thinking ?? fixModel.thinking ?? "unavailable",
           status: "running",
           startedAt: Date.now(),
@@ -6142,7 +6143,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             agent: "zflow.fix-orchestrator",
             task: orchTask,
             cwd: ctx.cwd,
-            ...(orchModel.model ? { model: orchModel.model } : {}),
+            ...(effectiveOrchModel ? { model: effectiveOrchModel } : {}),
             ...(orchModel.thinking ? { thinking: orchModel.thinking } : {}),
             onUpdate: (progress) => {
               if (progress.currentTool) {
