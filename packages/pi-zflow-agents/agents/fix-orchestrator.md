@@ -189,3 +189,29 @@ When a fix is incomplete:
 - If findings share files, dispatch sequential workers and validate each
   before starting the next.
 - Group findings by file: one subagent per file per round.
+
+## File restructuring (rm, rmdir, mv, mkdir, touch)
+
+You have elevated privileges to restructure files via bash when a finding
+requires directory deletion, file moves, or new directory creation.
+Use these sparingly and only when directed by a finding.
+
+**Allowed restructuring operations:**
+
+- `rm -rf <path>` — delete legacy directories or files
+- `rmdir <path>` — delete empty directories
+- `mv <src> <dst>` — move/rename files or directories
+- `mkdir -p <path>` — create new directories
+- `touch <path>` — create empty placeholder files
+
+**When deletion is blocked by bash tool restrictions:**
+
+1. **Neutralize the target:** rename the directory to `<name>.removed`, remove
+   deployable metadata (`package.json`, `wrangler.toml`, etc.), clear out
+   source files, and update any cleanup scripts to reference the archived path.
+2. **Write a cleanup manifest** to
+   `<runtime-state-dir>/runs/{runId}/scratch/scripts/cleanup-manifest.json`:
+   ```json
+   { "directories_to_delete": ["path/to/dir1", "path/to/dir2"] }
+   ```
+   The calling workflow will execute these deletions post-orchestration.

@@ -4548,6 +4548,11 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
     ? (process.env.HOME || process.env.USERPROFILE || "/home/user")
     : "/home/user"
 
+  // Guard intent tracking: updated in before_agent_start by inspecting
+  // the system prompt for known agent roles.  The fix-orchestrator is the
+  // only role that currently receives elevated privileges.
+  let currentGuardIntent: GuardIntent = "write"
+
   pi.on("tool_call", async (event, ctx) => {
     const { isToolCallEventType } = await import("@earendil-works/pi-coding-agent")
 
@@ -4581,7 +4586,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         runtimeStateDir: resolveRuntimeStateDir(process.cwd()),
       }
 
-      const result = guardWrite(targetPath, options)
+      const result = guardWrite(targetPath, { ...options, intent: currentGuardIntent })
 
       if (!result.allowed) {
         const reminder = buildToolDeniedReminder(result)
@@ -4611,7 +4616,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         runtimeStateDir: resolveRuntimeStateDir(process.cwd()),
       }
 
-      const result = guardBashCommand(command, options)
+      const result = guardBashCommand(command, { ...options, intent: currentGuardIntent })
 
       if (!result.allowed) {
         const reminder = buildToolDeniedReminder(result)
@@ -4623,6 +4628,14 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
   // ── before_agent_start hook: inject mode fragments and reminders ──
 
   pi.on("before_agent_start", async (event) => {
+    // Track which agent is starting — used by tool_call guards to apply
+    // intent-specific rules (e.g. fix-orchestrator gets elevated privileges).
+    if (event.systemPrompt.includes("zflow.fix-orchestrator")) {
+      currentGuardIntent = "fix-orchestrator"
+    } else {
+      currentGuardIntent = "write"
+    }
+
     const mode = getActiveWorkflowMode()
     const reminders = getActiveReminders()
     if (!mode && reminders.length === 0) {

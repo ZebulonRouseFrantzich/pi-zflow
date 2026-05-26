@@ -2171,19 +2171,33 @@ export async function parseReviewFindings(
       else if (/^nit/i.test(sev)) severity = "nit"
     }
 
-    // Extract fields with regex
+    // Extract fields with regex — use multi-line patterns for enriched evidence
+    // and recommendation fields which may span multiple lines.
     const fileMatch = block.match(/\*\*File\*\*:\s*`?([^`\n]+)`?/i)
     const lineMatch = block.match(/\*\*Lines?\*\*:\s*(\d+)/i)
     const supportMatch = block.match(/\*\*Reviewer support\*\*:\s*(.+)$/im)
-    const evidenceMatch = block.match(/\*\*Evidence\*\*:\s*(.+)$/im)
-    const whyMatch = block.match(/\*\*Why it matters\*\*:\s*(.+)$/im)
-    const recMatch = block.match(/\*\*Recommendation\*\*:\s*(.+)$/im)
+    // Multi-line: capture from **Evidence**: to the next ** field or end of block
+    const evidenceBlockMatch = block.match(/\*\*Evidence\*\*:\s*([\s\S]+?)(?=\n\*\*[^*\n]+\*\*|\n\*\*$|$)/i)
+    const evidenceMulti = evidenceBlockMatch ? evidenceBlockMatch[1].trim() : ""
+    const whyBlockMatch = block.match(/\*\*Why it matters\*\*:\s*([\s\S]+?)(?=\n\*\*[^*\n]+\*\*|\n\*\*$|$)/i)
+    const whyMulti = whyBlockMatch ? whyBlockMatch[1].trim() : ""
+    const recBlockMatch = block.match(/\*\*Recommendation\*\*:\s*([\s\S]+?)(?=\n\*\*[^*\n]+\*\*|\n\*\*$|$)/i)
+    const recMulti = recBlockMatch ? recBlockMatch[1].trim() : ""
+    // Single-line fallbacks for basic reviewers
+    const evidenceLineMatch = block.match(/\*\*Evidence\*\*:\s*(.+)$/im)
+    const whyLineMatch = block.match(/\*\*Why it matters\*\*:\s*(.+)$/im)
+    const recLineMatch = block.match(/\*\*Recommendation\*\*:\s*(.+)$/im)
     const artifactMatch = block.match(/\*\*Artifact[^:]*:\*\*\s*`?([^`\n]+)`?/i)
     // Enriched fields from the new finding format (all optional)
     const expectedBehaviorMatch = block.match(/\*\*Expected behavior\*\*:\s*(.+)$/im)
     const fixRequirementsMatch = block.match(/\*\*Fix requirements\*\*:\s*(.+)$/im)
     const validationMatch = block.match(/\*\*Validation\*\*:\s*(.+)$/im)
     const suggestedApproachMatch = block.match(/\*\*Suggested approach\*\*:\s*(.+)$/im)
+
+    // Prefer multi-line extraction; fall back to single-line
+    const evidence = evidenceMulti || (evidenceLineMatch ? evidenceLineMatch[1].trim() : "")
+    const recommendation = recMulti || (recLineMatch ? recLineMatch[1].trim() : "")
+    const whyItMatters = whyMulti || (whyLineMatch ? whyLineMatch[1].trim() : "")
 
     findings.push({
       findingId,
@@ -2192,10 +2206,10 @@ export async function parseReviewFindings(
       file: fileMatch ? fileMatch[1].trim() : undefined,
       line: lineMatch ? Number.parseInt(lineMatch[1], 10) : undefined,
       reviewerRole: supportMatch ? supportMatch[1].trim() : "reviewer",
-      evidence: evidenceMatch ? evidenceMatch[1].trim() : (block.split("\n").slice(1, 4).join(" ").trim().slice(0, 300) || title),
-      recommendation: recMatch ? recMatch[1].trim() : (whyMatch ? whyMatch[1].trim() : "Review the finding and apply appropriate fix."),
+      evidence: evidence || (block.split("\n").slice(1, 4).join(" ").trim().slice(0, 300) || title),
+      recommendation: recommendation || "Review the finding and apply appropriate fix.",
       artifactPath: artifactMatch ? artifactMatch[1].trim() : undefined,
-      whyItMatters: whyMatch ? whyMatch[1].trim() : undefined,
+      whyItMatters: whyItMatters || undefined,
       expectedBehavior: expectedBehaviorMatch ? expectedBehaviorMatch[1].trim() : undefined,
       fixRequirements: fixRequirementsMatch ? fixRequirementsMatch[1].trim() : undefined,
       validation: validationMatch ? validationMatch[1].trim() : undefined,

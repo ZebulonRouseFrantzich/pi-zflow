@@ -42,6 +42,7 @@ export type GuardIntent =
   | "bash-mutation"   // Bash command with destructive side effects
   | "implement"       // Implementation workflow write
   | "fix-worker"      // Fix worker (may only write to scratch/ or approved plan files)
+  | "fix-orchestrator" // Fix orchestrator (trusted — may restructure files/dirs per fix plan)
   | "apply-back-resolver" // Apply-back resolver (may only write to scratch/ or integration worktree)
 
 /**
@@ -493,7 +494,19 @@ export function guardBashCommand(
   // (the read-only prefix check below is tighter and already safe).
   // For commands that are NOT read-only, check destructive patterns.
   const isReadOnly = READ_ONLY_PREFIXES.some((re) => re.test(normalised))
-  if (!isReadOnly) {
+
+  // Fix orchestrator is trusted to restructure files per the fix plan.
+  // Allow rm, rmdir, mkdir, mv, touch so it can delete legacy dirs and
+  // restructure repositories as directed by review findings.
+  const isOrchFileRestructure = intent === "fix-orchestrator" && (
+    /\brm\s+(?:-[rfv]*\s+)?/.test(normalised) ||
+    /\brmdir\b/.test(normalised) ||
+    /\bmkdir\b/.test(normalised) ||
+    /\btouch\b/.test(normalised) ||
+    /^mv\b/.test(normalised)
+  )
+
+  if (!isReadOnly && !isOrchFileRestructure) {
     for (const pattern of destructivePatterns) {
       if (pattern.test(normalised)) {
         return {
