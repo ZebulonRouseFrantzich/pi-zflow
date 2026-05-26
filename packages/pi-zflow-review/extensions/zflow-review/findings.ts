@@ -407,6 +407,14 @@ export interface CodeReviewFinding {
   artifactPath?: string
   /** Run ID for cross-referencing */
   runId?: string
+  /** Enriched: what the code SHOULD do instead. */
+  expectedBehavior?: string
+  /** Enriched: concrete things a fix must accomplish. */
+  fixRequirements?: string
+  /** Enriched: how to verify the fix works. */
+  validation?: string
+  /** Enriched: optional hint for the fix worker. */
+  suggestedApproach?: string
 }
 
 /**
@@ -572,6 +580,18 @@ export function formatFindingsBySeverity(findings: CodeReviewFinding[]): string 
       lines.push(`**Why it matters**: ${f.whyItMatters}`)
       if (f.failureMode) {
         lines.push(`**Failure mode**: ${f.failureMode}`)
+      }
+      if (f.expectedBehavior) {
+        lines.push(`**Expected behavior**: ${f.expectedBehavior}`)
+      }
+      if (f.fixRequirements) {
+        lines.push(`**Fix requirements**: ${f.fixRequirements}`)
+      }
+      if (f.validation) {
+        lines.push(`**Validation**: ${f.validation}`)
+      }
+      if (f.suggestedApproach) {
+        lines.push(`**Suggested approach**: ${f.suggestedApproach}`)
       }
       lines.push(`**Recommendation**: ${f.recommendation}`)
       lines.push(``)

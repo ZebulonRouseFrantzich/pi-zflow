@@ -1749,6 +1749,8 @@ export interface FixWorkflowResult {
   fixOrchestratorConfig: FixOrchestratorConfig
   /** Task prompt for the fix orchestrator agent. */
   fixOrchestratorTaskPrompt?: string
+  /** Paths to the five canonical plan artifacts for source context. */
+  planArtifactPaths?: Record<string, string>
 }
 
 /**
@@ -1872,6 +1874,13 @@ export async function runChangeFixWorkflow(
     lifecycleState,
     fixOrchestratorConfig,
     fixOrchestratorTaskPrompt: undefined, // caller builds this via buildFixOrchestratorTaskPrompt
+    planArtifactPaths: {
+      design: resolvePlanArtifactPath(changeId, planVersion, "design", cwd),
+      executionGroups: resolvePlanArtifactPath(changeId, planVersion, "execution-groups", cwd),
+      standards: resolvePlanArtifactPath(changeId, planVersion, "standards", cwd),
+      verification: resolvePlanArtifactPath(changeId, planVersion, "verification", cwd),
+      implementationTasks: resolvePlanArtifactPath(changeId, planVersion, "implementation-tasks", cwd),
+    },
   }
 }
 
@@ -1896,19 +1905,47 @@ export async function buildFixOrchestratorTaskPrompt(
   cwd?: string,
 ): Promise<string> {
   const config = fixResult.fixOrchestratorConfig
+  const planPaths = fixResult.planArtifactPaths
   const lines: string[] = [
     `# Fix Orchestration Task — ${changeId}`,
     "",
     "You are the fix orchestrator. Your role is to read the code review",
     "findings below, decompose them into fix work items, dispatch fix",
     "subagents, and validate that their work satisfies the original",
-    "finding requirements.",
+    "finding requirements AND the original change documents.",
     "",
     "## Configuration",
     "",
     `- Max attempts per finding: ${config.maxAttemptsPerFinding}`,
     `- Max global rounds: ${config.maxGlobalRounds}`,
     "",
+    "## Source Change Context (MUST read before dispatching fix workers)",
+    "",
+    "The original change was planned and implemented based on these documents.",
+    "Fix workers must respect the design intent, standards, and verification",
+    "requirements described here. When validating fixes, check that they align",
+    "with these documents, not just the individual finding text.",
+    "",
+  ]
+
+  if (planPaths) {
+    lines.push(
+      "| Document | Path |",
+      "| -------- | ---- |",
+      `| Design | \`${planPaths.design}\` |`,
+      `| Execution Groups | \`${planPaths.executionGroups}\` |`,
+      `| Standards | \`${planPaths.standards}\` |`,
+      `| Verification | \`${planPaths.verification}\` |`,
+      `| Implementation Tasks | \`${planPaths.implementationTasks}\` |`,
+      "",
+      "**Read these documents before dispatching any fix worker.**",
+      "If a fix would contradict the approved design or standards, note it in",
+      "your gap report and escalate rather than silently diverging.",
+      "",
+    )
+  }
+
+  lines.push(
     "## Change context",
     "",
     `- Change ID: ${changeId}`,
@@ -1953,9 +1990,18 @@ export async function buildFixOrchestratorTaskPrompt(
   }
 
   if (rawReviewerDir) {
-    lines.push("## Raw reviewer artifacts")
+    lines.push("## Raw reviewer artifacts (MUST read for each finding)")
     lines.push("")
-    lines.push(`Full raw reviewer output is available at: \`${rawReviewerDir}\``)
+    lines.push("The consolidated findings above are summaries. The raw reviewer")
+    lines.push(`artifacts at \`${rawReviewerDir}\` contain the full analysis,`)
+    lines.push("pseudocode, line-by-line evidence, and specific fix strategies from")
+    lines.push("each reviewer agent. These are ESSENTIAL context for fix workers.")
+    lines.push("")
+    lines.push("**For each finding you dispatch to a fix worker:**")
+    lines.push("1. Read the raw reviewer artifact referenced by the finding's Artifact path.")
+    lines.push("2. Extract the detailed evidence (file snippets, pseudocode, reasoning).")
+    lines.push("3. Include that detail in the fix worker's task prompt.")
+    lines.push("4. Use the raw evidence as the validation baseline when checking the fix.")
     lines.push("")
   }
 
@@ -1969,22 +2015,35 @@ export async function buildFixOrchestratorTaskPrompt(
   lines.push(
     "## Instructions",
     "",
-    "1. Analyze the findings above.",
-    "2. Group findings by target file.",
-    "3. For each finding, choose a fix worker agent:",
-    "   - \`zflow.implement-routine\` for straightforward fixes",
-    "   - \`zflow.implement-hard\` for complex/cross-module/high-severity",
-    "4. Dispatch workers using \`subagent\` tool.",
-    "5. After each worker completes, validate the fix against the",
-    "   original finding requirements.",
-    "6. If incomplete, dispatch again with precise gap details.",
-    "7. Respect the retry bounds above.",
-    "8. Persist your satisfaction report to " + "`.zflow/plans/" + changeId + "/fix-orchestration-report.md`.",
-    "9. Report back with:\n",
+    "1. **Read source context first.** Read the design, execution-groups,",
+    "   standards, and verification documents listed above. Understand the",
+    "   original intent before dispatching any fix worker.",
+    "2. **Read raw reviewer artifacts for each finding.** The consolidated",
+    "   findings are summaries — the raw artifacts have detailed evidence.",
+    "3. Analyze the findings and group by target file.",
+    "4. For each finding, choose a fix worker agent:",
+    "   - `zflow.implement-routine` for straightforward fixes",
+    "   - `zflow.implement-hard` for complex/cross-module/high-severity",
+    "5. **Build context-rich worker tasks.** Each task must include:",
+    "   - The original finding text (evidence, expected behavior, fix requirements)",
+    "   - Relevant excerpts from the raw reviewer artifact",
+    "   - Relevant design/standards context from the source documents",
+    "   - The exact validation/proof the fix must pass",
+    "6. Dispatch workers using `subagent` tool.",
+    "7. After each worker completes, validate the fix against:",
+    "   - The original finding requirements",
+    "   - The source design and standards documents",
+    "   - The raw reviewer evidence",
+    "8. If incomplete, dispatch again with precise gap details.",
+    "9. Respect the retry bounds above.",
+    "10. Persist your satisfaction report to " + "`.zflow/plans/" + changeId + "/fix-orchestration-report.md`.",
+    "11. Report back with:\n",
     "   - Which findings were FIXED (with attempt count)",
     "   - Which findings are UNRESOLVED (with explanation)",
     "   - Any recommendations for re-review",
     "   - Whether verification passed",
+    "   - Any source-document deviations you observed",
+    "   - A note about whether the fixes align with the original design intent",
   )
 
   return lines.join("\n")

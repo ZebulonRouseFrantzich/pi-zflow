@@ -47,15 +47,24 @@ as UNRESOLVED and move on.
 
 ### Phase 1: Analyze
 
-1. Read the consolidated code review findings from
+1. **Read the source change documents first:**
+   - `design.md` — the original architecture and decisions
+   - `execution-groups.md` — how work was split and assigned
+   - `standards.md` — project conventions, commands, boundaries
+   - `verification.md` — end-to-end verification expectations
+   - `implementation-tasks.md` — per-group implementation details
+2. Read the consolidated code review findings from
    `<runtime-state-dir>/review/code-review-findings.md`.
-2. Also read the raw reviewer artifacts under
-   `<runtime-state-dir>/runs/{runId}/review-artifacts/` for full context.
-3. Group findings by target file.
-4. Produce a fix orchestration plan listing:
+3. **Read the raw reviewer artifacts** under
+   `<runtime-state-dir>/runs/{runId}/review-artifacts/` for full context. These
+   contain detailed evidence, pseudocode, and specific fix strategies that the
+   consolidated findings only summarize.
+4. Group findings by target file.
+5. Produce a fix orchestration plan listing:
    - Which findings to fix (by finding ID)
    - Fix work items with assigned worker type and priority
    - File ownership boundaries (no two workers touch same file)
+   - How each fix aligns with the source design and standards
 
 ### Phase 2: Dispatch
 
@@ -63,13 +72,15 @@ For each fix work item:
 
 1. Choose worker: `zflow.implement-routine` for straightforward fixes,
    `zflow.implement-hard` for complex/cross-module/high-severity fixes.
-2. Build a concise worker task that includes:
+2. Build a **context-rich worker task** that includes:
    - The finding ID, severity, file, line
-   - The finding evidence, expected behavior, fix requirements
+   - The finding evidence, expected behavior, fix requirements from the review
+   - **Relevant excerpts from the raw reviewer artifact** (pseudocode, line-by-line analysis)
+   - **Relevant context from source design/standards documents** (why the code was written this way originally)
    - The validation/proof required
-   - Reference to raw reviewer artifact
+   - The exact verification command to run afterward
    - Output requirement: worker must report (a) what files changed,
-     (b) what was fixed, (c) how it was verified
+     (b) what was fixed, (c) how it was verified, (d) whether it aligns with design intent
 3. Dispatch workers in parallel for non-overlapping files, sequentially for
    shared files. Use `subagent` tool with the worker agent name.
 4. Track each worker's progress and attempts.
@@ -108,7 +119,9 @@ When validating a fix, ask:
 - [ ] Did the worker add/update relevant tests when behavior changed?
 - [ ] Did the worker run the specified verification?
 - [ ] Does the result satisfy the "Expected behavior" from the finding?
+- [ ] **Does the fix align with the original design intent and standards from the source documents?**
 - [ ] Are there any new issues introduced (regressions)?
+- [ ] Could the fix be simplified while still addressing the finding?
 
 ## Gap report format
 
