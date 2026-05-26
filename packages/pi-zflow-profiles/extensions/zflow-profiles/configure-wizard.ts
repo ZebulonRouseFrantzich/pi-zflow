@@ -161,6 +161,7 @@ class ConfigureWizard {
       const prevSelected = this.activeSelectList.getSelectedItem()
       this.activeSelectList.handleInput(data)
       const newSelected = this.activeSelectList.getSelectedItem()
+      this.invalidate()
       if (prevSelected !== newSelected) {
         this.ctx.tui.requestRender()
       }
