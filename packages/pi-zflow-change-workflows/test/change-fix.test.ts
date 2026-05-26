@@ -8,7 +8,7 @@
  * - parseReviewFindings handles empty findings file
  */
 import * as assert from "node:assert/strict"
-import { describe, it, before, after } from "node:test"
+import { describe, it } from "node:test"
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -107,21 +107,9 @@ GO
 
 // ── Tests ────────────────────────────────────────────────────────
 
-describe("parseReviewFindings", () => {
-  let tmpDir: string
-
-  before(async () => {
-    tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-fix-"))
-    // Create .zflow structure
-    const artDir = join(tmpDir, ".zflow")
-    await mkdir(artDir, { recursive: true })
-  })
-
-  after(async () => {
-    await rm(tmpDir, { recursive: true, force: true })
-  })
-
+describe("parseReviewFindings", { concurrency: false }, () => {
   it("parses findings with all fields from valid markdown", async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-fix-valid-"))
     const reviewDir = join(tmpDir, ".zflow", "review")
     await mkdir(reviewDir, { recursive: true })
     await writeFile(join(reviewDir, "code-review-findings.md"), VALID_FINDINGS_MD, "utf-8")
@@ -136,56 +124,71 @@ describe("parseReviewFindings", () => {
       // git may not be available in test env
     }
 
-    const { parseReviewFindings } = await import(
-      "../extensions/zflow-change-workflows/orchestration.js"
-    )
-    const { findings, rawPath } = await parseReviewFindings(tmpDir)
+    try {
+      const { parseReviewFindings } = await import(
+        "../extensions/zflow-change-workflows/orchestration.js"
+      )
+      const { findings, rawPath } = await parseReviewFindings(tmpDir)
 
-    assert.equal(findings.length, 4, "Expected 4 findings to be parsed")
+      assert.equal(findings.length, 4, "Expected 4 findings to be parsed")
+      assert.ok(rawPath.endsWith("code-review-findings.md"))
 
-    // Check critical finding
-    const critical = findings.find(f => f.severity === "critical")
-    assert.ok(critical, "Expected critical finding")
-    assert.equal(critical!.title, "Missing input validation in login handler")
-    assert.equal(critical!.file, "src/auth/login.ts")
-    assert.equal(critical!.line, 42)
-    assert.equal(critical!.reviewerRole, "correctness")
-    assert.ok(critical!.evidence.includes("input validation"), "Evidence should mention input validation")
-    assert.ok(critical!.recommendation.includes("input validation"), "Recommendation should mention fix")
+      // Check critical finding
+      const critical = findings.find(f => f.severity === "critical")
+      assert.ok(critical, "Expected critical finding")
+      assert.equal(critical!.title, "Missing input validation in login handler")
+      assert.equal(critical!.file, "src/auth/login.ts")
+      assert.equal(critical!.line, 42)
+      assert.equal(critical!.reviewerRole, "correctness")
+      assert.ok(critical!.evidence.includes("validation"), "Evidence should mention validation")
+      assert.ok(critical!.recommendation.includes("input validation"), "Recommendation should mention fix")
 
-    // Check major finding
-    const major = findings.find(f => f.severity === "major")
-    assert.ok(major, "Expected major finding")
-    assert.equal(major!.title, "Inconsistent error response format")
-    assert.equal(major!.file, "src/auth/types.ts")
+      // Check major finding
+      const major = findings.find(f => f.severity === "major")
+      assert.ok(major, "Expected major finding")
+      assert.equal(major!.title, "Inconsistent error response format")
+      assert.equal(major!.file, "src/auth/types.ts")
 
-    // Check finding IDs
-    assert.ok(critical!.findingId, "Finding should have an ID")
-    assert.ok(critical!.findingId.startsWith("finding-"), "Finding ID should start with 'finding-'")
+      // Check finding IDs
+      assert.ok(critical!.findingId, "Finding should have an ID")
+      assert.ok(critical!.findingId.startsWith("finding-"), "Finding ID should start with 'finding-'")
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
   })
 
   it("returns empty array for findings file with no findings", async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-fix-empty-"))
     const reviewDir = join(tmpDir, ".zflow", "review")
     await mkdir(reviewDir, { recursive: true })
     await writeFile(join(reviewDir, "code-review-findings.md"), FINDINGS_WITHOUT_FINDINGS, "utf-8")
 
-    const { parseReviewFindings } = await import(
-      "../extensions/zflow-change-workflows/orchestration.js"
-    )
-    const { findings } = await parseReviewFindings(tmpDir)
-    assert.equal(findings.length, 0, "Expected 0 findings")
+    try {
+      const { parseReviewFindings } = await import(
+        "../extensions/zflow-change-workflows/orchestration.js"
+      )
+      const { findings } = await parseReviewFindings(tmpDir)
+      assert.equal(findings.length, 0, "Expected 0 findings")
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
   })
 
   it("returns empty array when findings file does not exist", async () => {
-    const { parseReviewFindings } = await import(
-      "../extensions/zflow-change-workflows/orchestration.js"
-    )
-    const { findings } = await parseReviewFindings(tmpDir)
-    assert.equal(findings.length, 0, "Expected 0 findings when no file exists")
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-fix-missing-"))
+    try {
+      const { parseReviewFindings } = await import(
+        "../extensions/zflow-change-workflows/orchestration.js"
+      )
+      const { findings } = await parseReviewFindings(tmpDir)
+      assert.equal(findings.length, 0, "Expected 0 findings when no file exists")
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
   })
 })
 
-describe("buildFixPlan", () => {
+describe("buildFixPlan", { concurrency: false }, () => {
   it("includes all selected findings in the plan", async () => {
     const { parseReviewFindings, buildFixPlan } = await import(
       "../extensions/zflow-change-workflows/orchestration.js"

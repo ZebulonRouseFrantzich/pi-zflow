@@ -121,10 +121,17 @@ const VALID_VERIFICATION = `# Verification
 
 ## Commands
 
+Run these commands to verify the implementation:
+
 \`\`\`bash
 npm run build
 npm test
+npm run lint
 \`\`\`
+
+## Expected Results
+
+All tests should pass with no errors or warnings.
 `
 
 const VALID_IMPLEMENTATION_TASKS = `# Implementation Tasks
@@ -199,7 +206,9 @@ describe("validateAllPlanArtifacts", () => {
     const { baseDir } = await createTestDirWithArtifacts(artifacts)
     try {
       const result = await validateAllPlanArtifacts("test-change", "v1", baseDir)
-      assert.strictEqual(result.valid, true, `Expected all valid: ${result.summary}`)
+      const failingResults = result.results.filter(r => !r.valid)
+      const failDetails = failingResults.map(r => `${r.artifact}: ${r.issues.join("; ")}`).join(" | ")
+      assert.strictEqual(result.valid, true, `Expected all valid: ${result.summary}. Failing: ${failDetails}`)
       assert.strictEqual(result.results.length, 5, "Should have 5 artifact results")
       for (const r of result.results) {
         assert.strictEqual(r.valid, true, `Artifact "${r.artifact}" should be valid`)
@@ -237,10 +246,16 @@ describe("validateAllPlanArtifacts", () => {
   })
 
   test("execution-groups with empty scoped verification fails", async () => {
-    const invalidEG = VALID_EXECUTION_GROUPS.replace(
-      "**Scoped verification:** npm test -- --testPathPattern=src/auth/login",
-      "**Scoped verification:** ",
-    )
+    const invalidEG = `# Execution Groups
+
+## Group 1: Login handler
+
+**Files:** src/auth/login.ts
+**Agent:** zflow.implement-routine
+**Dependencies:** none
+**Scoped verification:** 
+**Parallelizable:** true
+`
     const artifacts = {
       "design": VALID_DESIGN,
       "execution-groups": invalidEG,
@@ -252,8 +267,9 @@ describe("validateAllPlanArtifacts", () => {
     const { baseDir } = await createTestDirWithArtifacts(artifacts)
     try {
       const result = await validateAllPlanArtifacts("test-change", "v1", baseDir)
-      assert.strictEqual(result.valid, false, "Should fail with empty verification")
       const egResult = result.results.find((r) => r.artifact === "execution-groups")
+      const issues = egResult ? egResult.issues.join("; ") : "no eg result"
+      assert.strictEqual(result.valid, false, "Should fail with empty verification. EG issues: " + issues)
       assert.ok(egResult)
       assert.strictEqual(egResult!.valid, false)
     } finally {

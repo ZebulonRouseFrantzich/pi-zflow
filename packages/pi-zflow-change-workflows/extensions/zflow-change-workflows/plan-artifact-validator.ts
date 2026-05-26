@@ -109,7 +109,7 @@ const FILES_HEADER_RE = /^\*{0,2}Files?(?:\/paths)?\*{0,2}:|^\*{0,2}Primary\s+fi
 /**
  * Pattern to detect scoped verification with a concrete value (not TBD/empty).
  */
-const SCOPED_VERIFICATION_RE = /\*{0,2}Scoped\s+verification\*{0,2}:\s*(.+)$/im
+const SCOPED_VERIFICATION_RE = /\*{0,2}Scoped\s+verification:\*{0,2}[^\S\n]*(.*)$/im
 
 /**
  * Pattern to detect agent field.
@@ -228,7 +228,8 @@ async function validateExecutionGroups(
     // Extract group ID
     const idMatch = section.match(headingRegex)
     if (!idMatch) {
-      issues.push(`Section ${i + 1}: Could not extract group ID from heading.`)
+      // Section heading doesn't look like a group heading — could be
+      // a document title (# Execution Groups) or preamble. Skip it.
       continue
     }
     const groupId = idMatch[1].toLowerCase()

@@ -12,7 +12,9 @@
     "test": "npm run test:all",
     "test:core": "npx tsx --test packages/pi-zflow-core/test/*.test.ts",
     "test:all": "sh -c 'set -e; for pkg in packages/*/; do test_dir=\"${pkg}test\"; if [ -d \"$test_dir\" ] && find \"$test_dir\" -maxdepth 1 -name \"*.test.ts\" -print -quit | grep -q .; then npx tsx --test \"$test_dir\"/*.test.ts; fi; done'",
-    "test:watch": "npx tsx --test --watch packages/pi-zflow-core/test/*.test.ts"
+    "lint": "sh scripts/check-typescript-parse.sh",
+    "lint:quick": "sh scripts/check-typescript-parse.sh 2>&1 | head -40",
+    "check": "sh scripts/check-typescript-parse.sh"
   },
   "engines": {
     "node": ">=22.0.0"

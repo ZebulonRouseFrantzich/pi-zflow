@@ -1696,13 +1696,22 @@ export function resolveFixOrchestratorConfig(
   const envMaxAttempts = process.env.ZFLOW_FIX_MAX_ATTEMPTS_PER_FINDING
   const envMaxRounds = process.env.ZFLOW_FIX_MAX_GLOBAL_ROUNDS
 
+  const readPositiveInteger = (value: unknown): number | undefined => {
+    if (typeof value === "number" && Number.isInteger(value) && value > 0) return value
+    if (typeof value !== "string" || value.trim().length === 0) return undefined
+    const parsed = Number.parseInt(value, 10)
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
+  }
+
   return {
-    maxAttemptsPerFinding: envMaxAttempts
-      ? parseInt(envMaxAttempts, 10)
-      : (profileSettings?.maxAttemptsPerFinding as number) ?? 2,
-    maxGlobalRounds: envMaxRounds
-      ? parseInt(envMaxRounds, 10)
-      : (profileSettings?.maxGlobalRounds as number) ?? 3,
+    maxAttemptsPerFinding:
+      readPositiveInteger(envMaxAttempts) ??
+      readPositiveInteger(profileSettings?.maxAttemptsPerFinding) ??
+      2,
+    maxGlobalRounds:
+      readPositiveInteger(envMaxRounds) ??
+      readPositiveInteger(profileSettings?.maxGlobalRounds) ??
+      3,
   }
 }
 
@@ -1909,6 +1918,8 @@ export async function buildFixOrchestratorTaskPrompt(
   const lines: string[] = [
     `# Fix Orchestration Task — ${changeId}`,
     "",
+    "Agent role: `zflow.fix-orchestrator`.",
+    "",
     "You are the fix orchestrator. Your role is to read the code review",
     "findings below, decompose them into fix work items, dispatch fix",
     "subagents, and validate that their work satisfies the original",
@@ -1957,7 +1968,7 @@ export async function buildFixOrchestratorTaskPrompt(
     "",
     "## Findings to address",
     "",
-  ]
+  )
 
   for (const finding of fixResult.parsedFindings) {
     lines.push(`### ${finding.findingId}: ${finding.title}`)
@@ -2151,9 +2162,9 @@ export async function parseReviewFindings(
     // Extract severity: look for severity heading text or infer from section
     let severity: ParsedFinding["severity"] = "minor"
     const sectionBefores = rawContent.slice(0, rawContent.indexOf(block)).split("\n").filter(Boolean)
-    const lastSectionHeading = sectionBefores.reverse().find(l => /^## (Critical|Major|Minor|Nits?) Findings?$/i.test(l))
+    const lastSectionHeading = sectionBefores.reverse().find(l => /^## (Critical|Major|Minor)(?: Findings?)?$|^## Nits?$/i.test(l))
     if (lastSectionHeading) {
-      const sev = lastSectionHeading.replace(/^## /i, "").replace(/s? Findings?$/i, "").trim().toLowerCase()
+      const sev = lastSectionHeading.replace(/^## /i, "").replace(/ Findings?$/i, "").trim().toLowerCase()
       if (sev === "critical") severity = "critical"
       else if (sev === "major") severity = "major"
       else if (sev === "minor") severity = "minor"
