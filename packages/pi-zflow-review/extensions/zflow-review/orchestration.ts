@@ -624,12 +624,16 @@ export async function runCodeReview(
     // Emit queued for all reviewers
     for (const name of reviewerNames) {
       const agentName = toCodeReviewAgentName(name)
-      emitReviewerUpdate(input.onReviewUpdate, name, agentName, "queued")
+      emitReviewerUpdate(input.onReviewUpdate, name, agentName, "queued", {
+        lastCommand: "queued",
+      })
     }
     const results = await Promise.allSettled(
       reviewerNames.map(async (name) => {
         const agentName = toCodeReviewAgentName(name)
-        emitReviewerUpdate(input.onReviewUpdate, name, agentName, "running")
+        emitReviewerUpdate(input.onReviewUpdate, name, agentName, "running", {
+          lastCommand: "starting",
+        })
         const prompt = await buildInternalReviewPrompt(name, internalCtx)
         const output = await runner(name, prompt)
         return { name, prompt, output }
@@ -647,7 +651,9 @@ export async function runCodeReview(
             r.name === name ? { ...r, status: "executed" as const } : r,
           ),
         }
-        emitReviewerUpdate(input.onReviewUpdate, name, agentName, "completed")
+        emitReviewerUpdate(input.onReviewUpdate, name, agentName, "completed", {
+          lastCommand: "complete",
+        })
         for (const f of output.findings) {
           allFindings.push({
             reviewerName: name,
@@ -686,6 +692,7 @@ export async function runCodeReview(
         emitReviewerUpdate(input.onReviewUpdate, name, agentName, "queued", {
           model: info.model,
           thinking: info.thinking,
+          lastCommand: "queued",
         })
       }
 
@@ -696,6 +703,7 @@ export async function runCodeReview(
           emitReviewerUpdate(input.onReviewUpdate, name, agentName, "running", {
             model: agentInfo.model,
             thinking: agentInfo.thinking,
+            lastCommand: "starting",
           })
           const prompt = await buildInternalReviewPrompt(name, internalCtx)
           let output: ReviewerOutput
@@ -767,6 +775,7 @@ export async function runCodeReview(
             emitReviewerUpdate(input.onReviewUpdate, name, agentName, "completed", {
               model: agentInfo.model,
               thinking: agentInfo.thinking,
+              lastCommand: "complete",
             })
             for (const f of output.findings) {
               allFindings.push({

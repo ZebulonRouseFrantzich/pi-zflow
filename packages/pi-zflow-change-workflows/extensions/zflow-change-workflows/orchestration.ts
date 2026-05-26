@@ -7165,9 +7165,27 @@ export async function finalizeCodeReview(
         }
       }
 
+      const findingsPath = (result as any).findingsPath as string | undefined
+
+      // Persist code review results to run.json so they survive restarts/resumes
+      try {
+        await updateRun(runId, {
+          codeReview: {
+            pass,
+            findingsPath: findingsPath ?? null,
+            severity,
+            summary,
+            completedAt: new Date().toISOString(),
+          },
+        } as any, cwd)
+      } catch {
+        // Non-fatal — review result is available via the findings file
+        console.warn("[zflow] Failed to persist code review result to run state")
+      }
+
       return {
         pass,
-        findingsPath: (result as any).findingsPath,
+        findingsPath,
         summary,
       }
     } catch (err) {
