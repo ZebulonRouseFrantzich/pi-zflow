@@ -1032,15 +1032,17 @@ export interface DispatchExecutionGroup {
 }
 
 /**
- * Coalesce execution groups that share files or have explicit dependencies.
+ * Coalesce execution groups that share files.
  *
- * Builds a graph where edges connect groups that share at least one file or
- * have an explicit dependency relationship. Groups in each connected component
- * are merged into a single coalesced group so they run in the same worktree.
+ * Builds a graph where edges connect groups that share at least one file.
+ * Groups in each connected component are merged into a single coalesced group
+ * so they run in the same worktree.
  *
- * This prevents the problem where groups with dependencies are dispatched
- * to independent worktrees from the same base commit and can't see each
- * other's files.
+ * This prevents overlapping groups from being dispatched to independent
+ * worktrees from the same base commit and producing incompatible versions of
+ * the same file. Explicit non-overlapping dependencies are preserved as
+ * ordering metadata for apply-back; they are not coalesced transitively because
+ * doing so collapses entire dependency chains into one worker.
  *
  * @param groups - The dispatch execution groups to coalesce.
  * @returns A new array of groups with connected components merged.
@@ -1051,7 +1053,9 @@ export function coalesceConnectedGroups(
   if (groups.length <= 1) return groups
 
   // ── Build adjacency list ────────────────────────────────────
-  // Two groups are connected if they share a file or have an explicit dependency.
+  // Two groups are connected if they share at least one file. Explicit
+  // dependencies alone are not coalescing edges; otherwise a dependency chain
+  // like group-1 -> group-2 -> group-3 -> group-4 becomes one huge worker.
   const groupIds = groups.map(g => g.id)
   const adjacency = new Map<string, string[]>()
   for (const g of groups) adjacency.set(g.id, [])
@@ -1060,12 +1064,7 @@ export function coalesceConnectedGroups(
     for (let j = i + 1; j < groups.length; j++) {
       const a = groups[i]!
       const b = groups[j]!
-      const connected =
-        // Share at least one file
-        a.files.some(f => b.files.includes(f)) ||
-        // Explicit dependency in either direction
-        a.dependencies.includes(b.id) ||
-        b.dependencies.includes(a.id)
+      const connected = a.files.some(f => b.files.includes(f))
 
       if (connected) {
         adjacency.get(a.id)!.push(b.id)
@@ -1098,10 +1097,14 @@ export function coalesceConnectedGroups(
   const groupMap = new Map(groups.map(g => [g.id, g]))
   const result: DispatchExecutionGroup[] = []
 
+  const idMap = new Map<string, string>()
+
   for (const component of components) {
     if (component.length === 1) {
       // No coalescing needed for singleton components
-      result.push(groupMap.get(component[0]!)!)
+      const group = groupMap.get(component[0]!)!
+      idMap.set(group.id, group.id)
+      result.push(group)
       continue
     }
 
@@ -1153,6 +1156,10 @@ export function coalesceConnectedGroups(
     component.sort()
     const mergedId = component.join("~")
 
+    for (const id of component) {
+      idMap.set(id, mergedId)
+    }
+
     result.push({
       id: mergedId,
       agent: mergedAgent,
@@ -1164,7 +1171,18 @@ export function coalesceConnectedGroups(
     })
   }
 
-  return result
+  // Remap dependencies that point at groups inside a coalesced component to
+  // the new coalesced group ID. This preserves apply-back ordering without
+  // leaving dependencies that reference no dispatched group.
+  return result.map((group) => {
+    const remappedDeps = group.dependencies
+      .map((dep) => idMap.get(dep) ?? dep)
+      .filter((dep) => dep !== group.id)
+    return {
+      ...group,
+      dependencies: [...new Set(remappedDeps)],
+    }
+  })
 }
 
 /**
@@ -2982,16 +3000,26 @@ export async function prepareWorktreeImplementationRun(
     taskPrompt: g.taskPrompt,
     scopedVerification: g.scopedVerification,
   }))
-  // Coalesce groups that share files or have explicit dependencies so they
-  // run in the same worktree instead of isolated worktrees from the same base.
+  // Coalesce groups that share files so overlapping file edits happen in one
+  // worktree instead of producing incompatible patches from the same base.
   const coalescedGroups = coalesceConnectedGroups(dispatchGroups)
   const tasks = buildWorktreeDispatchPlan(coalescedGroups, dispatchConfig, planArtifactPaths)
+  const planGroups = coalescedGroups.map((g) => ({
+    id: g.id,
+    files: g.files,
+    dependencies: g.dependencies,
+    parallelizable: true,
+    taskPrompt: g.taskPrompt,
+    scopedVerification: g.scopedVerification,
+    agent: g.agent,
+    coalescedFrom: g.coalescedFrom,
+  })) as unknown as ExecutionGroup[]
 
   return {
     runId,
     config: dispatchConfig,
     tasks,
-    groups,
+    groups: planGroups,
     plannedPaths,
     preflight,
     ownershipValidation,

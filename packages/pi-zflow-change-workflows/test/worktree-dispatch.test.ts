@@ -7,6 +7,7 @@ import { test, describe } from "node:test"
 import {
   buildWorkerTask,
   buildWorktreeDispatchPlan,
+  coalesceConnectedGroups,
   parseExecutionGroupsMd,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
@@ -124,6 +125,44 @@ describe("buildWorkerTask", () => {
     assert.ok(task.includes("Output format"))
     assert.ok(task.includes("Summary of changes"))
     assert.ok(task.includes("List of changed files"))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// coalesceConnectedGroups
+// ---------------------------------------------------------------------------
+
+describe("coalesceConnectedGroups", () => {
+  test("coalesces groups that share files", () => {
+    const groups = [
+      makeGroup("group-1", ["src/app.ts", "src/env.ts"], [], "zflow.implement-routine", "Foundation", "pnpm typecheck"),
+      makeGroup("group-2", ["src/app.ts", "src/routes.ts"], ["group-1"], "zflow.implement-routine", "Routes", "pnpm test"),
+      makeGroup("group-3", ["test/app.test.ts"], ["group-2"], "zflow.implement-routine", "Tests", "pnpm test"),
+    ]
+
+    const coalesced = coalesceConnectedGroups(groups)
+
+    assert.equal(coalesced.length, 2)
+    assert.equal(coalesced[0].id, "group-1~group-2")
+    assert.deepEqual(coalesced[0].coalescedFrom, ["group-1", "group-2"])
+    assert.deepEqual(coalesced[0].files, ["src/app.ts", "src/env.ts", "src/routes.ts"])
+    assert.deepEqual(coalesced[0].dependencies, [])
+    assert.equal(coalesced[0].scopedVerification, "pnpm typecheck && pnpm test")
+    assert.equal(coalesced[1].id, "group-3")
+    assert.deepEqual(coalesced[1].dependencies, ["group-1~group-2"])
+  })
+
+  test("does not coalesce dependency chains without file overlap", () => {
+    const groups = [
+      makeGroup("group-1", ["src/a.ts"]),
+      makeGroup("group-2", ["src/b.ts"], ["group-1"]),
+      makeGroup("group-3", ["src/c.ts"], ["group-2"]),
+      makeGroup("group-4", ["src/d.ts"], ["group-3"]),
+    ]
+
+    const coalesced = coalesceConnectedGroups(groups)
+
+    assert.deepEqual(coalesced.map(g => g.id), ["group-1", "group-2", "group-3", "group-4"])
   })
 })
 

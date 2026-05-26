@@ -3065,7 +3065,7 @@ async function runWorktreeDispatchAndFinalize(
 
   for (let idx = 0; idx < allResults.length; idx++) {
     const r = allResults[idx]!
-    const group = groups[idx]
+    const group = runPlan.groups[idx]
     if (!group) continue
 
     if (!r.ok) {
@@ -3254,7 +3254,7 @@ async function runWorktreeDispatchAndFinalize(
       cwd,
       changeId,
       planVersion,
-      executionGroups: groups,
+      executionGroups: runPlan.groups,
     },
   )
 
