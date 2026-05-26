@@ -54,6 +54,7 @@ import {
   type WizardEditState,
   resolveProviderModels,
   getSupportedThinkingLevels,
+  buildModelSelectItems,
   buildThinkingSelectItems,
   initWizardState,
   buildProfileDefinition,
@@ -160,6 +161,7 @@ class ConfigureWizard {
       const prevSelected = this.activeSelectList.getSelectedItem()
       this.activeSelectList.handleInput(data)
       const newSelected = this.activeSelectList.getSelectedItem()
+      this.invalidate()
       if (prevSelected !== newSelected) {
         this.ctx.tui.requestRender()
       }
@@ -399,7 +401,7 @@ class ConfigureWizard {
       }
     }
 
-    const items = buildModelSelectItems(allModels, this.ctx.theme, lane.selectedModels[0])
+    const items = buildModelSelectItems(allModels, lane.selectedModels[0])
     const selectList = new SelectList(items, 8, {
       selectedPrefix: (t: string) => this.ctx.theme.fg("accent", t),
       selectedText: (t: string) => this.ctx.theme.fg("accent", t),
@@ -418,7 +420,7 @@ class ConfigureWizard {
   }
 
   private buildProviderSelectList(): SelectList {
-    const items = buildProviderSelectItems(this.providerGroups, this.ctx.theme)
+    const items = buildProviderSelectItems(this.providerGroups)
     const selectList = new SelectList(items, 8, {
       selectedPrefix: (t: string) => this.ctx.theme.fg("accent", t),
       selectedText: (t: string) => this.ctx.theme.fg("accent", t),
@@ -433,7 +435,6 @@ class ConfigureWizard {
   private buildModelSelectListForProvider(): SelectList {
     const items = buildModelSelectItems(
       this.laneModelsForProvider,
-      this.ctx.theme,
       this.state.lanes[this.laneIndex]?.selectedModels[0],
     )
     const selectList = new SelectList(items, 8, {
