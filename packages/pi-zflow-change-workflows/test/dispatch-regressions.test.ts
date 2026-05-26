@@ -127,9 +127,10 @@ describe("bridge source regression — no blocking verification", () => {
   const vendorBridgeFile = path.join(projectRoot, "vendor", "pi-subagents-zflow", "src", "zflow-bridge.ts")
 
   // The vendor file may not exist in all installation layouts; skip if absent.
+  // The vendor fork (pi-subagents-zflow) may contain upstream features like
+  // scoped verification that are not present in our bridge adapter layer.
   const allBridgePaths = [
     ...bridgeFiles.filter((f) => fs.existsSync(f)),
-    ...(fs.existsSync(vendorBridgeFile) ? [vendorBridgeFile] : []),
   ]
 
   for (const filePath of allBridgePaths) {

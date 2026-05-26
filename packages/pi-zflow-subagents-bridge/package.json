@@ -16,7 +16,7 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "pi-subagents": "github:nicobailon/pi-subagents#7d8463d6c1c62d9e732246cb62fa54b8d68644be",
+    "pi-subagents": "github:ZebulonRouseFrantzich/pi-subagents-zflow#a35654bec671abac11e48dc0e32614a2e8bc4c5d",
     "pi-zflow-core": "0.1.0"
   },
   "bundledDependencies": [
