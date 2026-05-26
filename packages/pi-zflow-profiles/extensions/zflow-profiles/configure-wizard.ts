@@ -217,6 +217,10 @@ class ConfigureWizard {
     if (matchesKey(data, "enter")) {
       if (this.stage === "welcome") {
         this.goToStage("lanes")
+      } else if (this.stage === "lanes") {
+        this.goToStage("agents")
+      } else if (this.stage === "agents") {
+        this.goToStage("review")
       } else if (this.stage === "review") {
         this.reviewConfirmed = true
         this.finish(this.state)
@@ -789,7 +793,9 @@ class ConfigureWizard {
       : "This lane is optional — the profile activates even if no model is available."))
 
     lines.push("")
-    lines.push(pad + theme.fg("dim", "[tab] edit model  →  tab again: edit thinking  →  tab again: normal  ·  [esc] cancel  ·  [enter] select"))
+    lines.push(pad + theme.fg("dim", "[tab] edit model  →  tab again: edit thinking  →  tab again: normal  ·  [enter] next stage  ·  [esc] back"))
+    lines.push("")
+    lines.push(pad + theme.fg("success", theme.bold("Press ENTER to save lane choices and continue to Agent Configuration ▸")))
 
     return lines
   }
@@ -872,6 +878,8 @@ class ConfigureWizard {
     }
 
     lines.push(pad + theme.fg("dim", "[tab] edit lane/thinking  ·  [↑↓] change agent  ·  [enter] review & save"))
+    lines.push("")
+    lines.push(pad + theme.fg("success", theme.bold("Press ENTER to save agent choices and continue to Review ▸")))
 
     return lines
   }
