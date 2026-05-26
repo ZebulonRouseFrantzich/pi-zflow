@@ -79,6 +79,8 @@ interface WizardContext {
   theme: WizardTheme
   tui: { requestRender: () => void }
   done: (result: WizardEditState | null) => void
+  /** Called after each stage to persist progress. */
+  onProgress: (state: WizardEditState) => void
 }
 
 /**
@@ -142,6 +144,13 @@ class ConfigureWizard {
   // ── Navigation ────────────────────────────────────────────────
 
   private goToStage(stage: WizardStage): void {
+    // Auto-save progress when moving forward through stages
+    if (
+      (this.stage === "lanes" && stage === "agents") ||
+      (this.stage === "agents" && stage === "review")
+    ) {
+      this.ctx.onProgress(this.state)
+    }
     this.stage = stage
     this.activeSelectList = null
     this.activeSettingsList = null
@@ -366,14 +375,19 @@ class ConfigureWizard {
     const isMulti = lane.multiProvider && MULTI_PROVIDER_LANES.has(lane.laneName)
 
     if (isMulti && this.laneSelectedProvider >= 0) {
-      // Provider selected — show models for that provider
-      const providerName = this.providerGroups[this.laneSelectedProvider]?.name
+      // We were in provider selection mode — read the selected provider
+      // from the SelectList (NOT from laneSelectedProvider which is stale)
+      const selectedItem = this.activeSelectList?.getSelectedItem()
+      const providerName = selectedItem?.value ?? this.providerGroups[this.laneSelectedProvider]?.name
       if (providerName) {
         const group = this.providerGroups.find((g) => g.name === providerName)
         if (group) {
-          this.laneModelsForProvider = group.models.filter((m) => m.authenticated)
-          this.laneModelIndex = 0
+          this.laneModelsForProvider = group.models.filter((m) => m.authenticated && m.supportsTools)
+          // Reset selected provider flag so next enter picks the model
+          this.laneSelectedProvider = -1
           this.activeSelectList = this.buildModelSelectListForProvider()
+          this.invalidate()
+          this.ctx.tui.requestRender()
           return
         }
       }
@@ -430,7 +444,9 @@ class ConfigureWizard {
   }
 
   private buildProviderSelectList(): SelectList {
-    const items = buildProviderSelectItems(this.providerGroups)
+    // Only show providers the user has authenticated
+    const authedGroups = this.providerGroups.filter((g) => g.hasAuth)
+    const items = buildProviderSelectItems(authedGroups)
     const selectList = new SelectList(items, 8, {
       selectedPrefix: (t: string) => this.ctx.theme.fg("accent", t),
       selectedText: (t: string) => this.ctx.theme.fg("accent", t),
@@ -1024,8 +1040,47 @@ export async function launchConfigureWizard(
     ? profileNames[0] // Default to first; wizard welcome screen can change this
     : (profileNames[0] ?? "default")
 
-  // 5. Initialise wizard state
-  const wizardState = initWizardState(profileName, existingProfile, providerGroups)
+  // 5. Determine write path for auto-save and final output
+  const repoRoot = ctx.cwd ?? process.cwd()
+  const gitDir = (await import("pi-zflow-core/runtime-paths")).resolveGitDir(repoRoot)
+  const projectRoot = gitDir ? path.dirname(gitDir) : repoRoot
+  let finalWritePath = profileSourcePath && !profileSourcePath.includes("node_modules")
+    ? profileSourcePath
+    : path.join(projectRoot, ".pi", "zflow-profiles.json")
+  const wipPath = path.join(projectRoot, ".pi", ".zflow-profile-configure-wip.json")
+
+  // 5a. Try loading partial progress from a previous interrupted session
+  let resumedState: WizardEditState | null = null
+  try {
+    const wipRaw = await fs.readFile(wipPath, "utf8")
+    const wipData = JSON.parse(wipRaw)
+    if (wipData && wipData.profileName && Array.isArray(wipData.lanes) && Array.isArray(wipData.agentBindings)) {
+      resumedState = wipData as WizardEditState
+    }
+  } catch {
+    // No WIP file or invalid — start fresh
+  }
+
+  if (resumedState) {
+    ctx.ui.notify(
+      "Resuming previous configuration session. Your progress was auto-saved.\n" +
+        "Complete the wizard to finalise, or press escape at any time to discard.",
+      "info",
+    )
+  }
+
+  // 5b. Initialise wizard state (from resume or fresh)
+  const wizardState = resumedState ?? initWizardState(profileName, existingProfile, providerGroups)
+
+  // 5c. Auto-save callback — persists partial progress after each stage
+  async function saveProgress(state: WizardEditState): Promise<void> {
+    try {
+      await fs.mkdir(path.dirname(wipPath), { recursive: true })
+      await fs.writeFile(wipPath, JSON.stringify(state, null, 2), "utf8")
+    } catch {
+      // Best-effort; don't interrupt the wizard for save failures
+    }
+  }
 
   // 6. Launch the TUI wizard overlay
   const result = await ctx.ui.custom<WizardEditState | null>(
@@ -1034,6 +1089,10 @@ export async function launchConfigureWizard(
         theme,
         tui,
         done,
+        onProgress: (state: WizardEditState) => {
+          // Fire-and-forget save; don't block the UI
+          saveProgress(state).catch(() => {})
+        },
       })
 
       return {
@@ -1056,9 +1115,10 @@ export async function launchConfigureWizard(
     },
   )
 
-  // 7. User cancelled
+  // 7. User cancelled — clean up WIP progress file
   if (!result) {
-    ctx.ui.notify("Configuration cancelled.", "info")
+    try { await fs.unlink(wipPath) } catch { /* ignore */ }
+    ctx.ui.notify("Configuration cancelled. Progress was not saved.", "info")
     return
   }
 
@@ -1069,26 +1129,16 @@ export async function launchConfigureWizard(
     [result.profileName]: profileDef,
   }
 
-  // Determine write path
-  let writePath: string
-  if (profileSourcePath && !profileSourcePath.includes("node_modules")) {
-    writePath = profileSourcePath
-  } else {
-    // Write to project-local path
-    const repoRoot = ctx.cwd ?? process.cwd()
-    const gitDir = (await import("pi-zflow-core/runtime-paths")).resolveGitDir(repoRoot)
-    const projectRoot = gitDir ? path.dirname(gitDir) : repoRoot
-    writePath = path.join(projectRoot, ".pi", "zflow-profiles.json")
-  }
-
   // Ensure directory exists
-  await fs.mkdir(path.dirname(writePath), { recursive: true })
+  await fs.mkdir(path.dirname(finalWritePath), { recursive: true })
 
   // Write atomically
-  const tmpPath = writePath + ".tmp"
+  const tmpPath = finalWritePath + ".tmp"
   try {
     await fs.writeFile(tmpPath, JSON.stringify(profilesToWrite, null, 2), "utf8")
-    await fs.rename(tmpPath, writePath)
+    await fs.rename(tmpPath, finalWritePath)
+    // Remove WIP progress file on successful final write
+    try { await fs.unlink(wipPath) } catch { /* ignore */ }
   } catch (err) {
     try { await fs.unlink(tmpPath) } catch { /* ignore */ }
     ctx.ui.notify(
@@ -1102,7 +1152,7 @@ export async function launchConfigureWizard(
     `Profile "${result.profileName}" configured with:\n` +
     `  ${result.lanes.length} lanes\n` +
     `  ${result.agentBindings.length} agent bindings\n\n` +
-    `Written to: ${writePath}\n\n` +
+    `Written to: ${finalWritePath}\n\n` +
     `Next steps:\n` +
     `  Run /zflow-profile default to activate the profile.\n` +
     `  Run /zflow-profile sync-project to write agent overrides to .pi/settings.json.`,
