@@ -90,14 +90,35 @@ describe("PatchReplayStrategy", () => {
     await fs.rm(repoRoot, { recursive: true, force: true })
   })
 
-  test("applyPatch throws for invalid patch", async () => {
+  test("applyPatch throws with improved diagnostic for invalid patch", async () => {
     const repoRoot = await createTempRepo()
     const patchPath = path.join(os.tmpdir(), "bad-patch.patch")
     fsSync.writeFileSync(patchPath, "this is not a valid patch", "utf-8")
 
-    await assert.rejects(
-      () => strategy.applyPatch(patchPath, repoRoot, "bad-group"),
-      /Failed to apply patch/,
+    let thrown: Error | undefined
+    try {
+      await strategy.applyPatch(patchPath, repoRoot, "bad-group")
+    } catch (e: unknown) {
+      thrown = e as Error
+    }
+    assert.ok(thrown, "applyPatch should have thrown for invalid patch")
+    const msg = thrown!.message
+
+    // Verify improved diagnostic content
+    assert.ok(
+      msg.includes('Failed to apply patch for group "bad-group"'),
+      "must include group preamble",
+    )
+    assert.ok(msg.includes(patchPath), "must include patch path")
+    assert.ok(
+      msg.includes("patch artifact appears to be malformed"),
+      "must include corruption hint",
+    )
+    assert.ok(
+      msg.includes("No valid patches") ||
+        msg.includes("unrecognized input") ||
+        msg.includes("bad git-diff"),
+      "must include original git apply error detail",
     )
 
     await fs.rm(repoRoot, { recursive: true, force: true })
@@ -390,13 +411,35 @@ describe("ConsolidatedPatchStrategy", () => {
     assert.equal(content, 'console.log("v2")\n')
   })
 
-  test("throws on invalid consolidated patch", async () => {
+  test("throws with improved diagnostic for invalid consolidated patch", async () => {
     const patchPath = path.join(patchDir, "bad-consolidated.patch")
     fsSync.writeFileSync(patchPath, "not a valid patch", "utf-8")
 
     const strategy = new ConsolidatedPatchStrategy(patchPath)
-    await assert.rejects(
-      () => strategy.applyPatch(patchPath, repoRoot, "_bad"),
+    let thrown: Error | undefined
+    try {
+      await strategy.applyPatch(patchPath, repoRoot, "_bad")
+    } catch (e: unknown) {
+      thrown = e as Error
+    }
+    assert.ok(thrown, "applyPatch should have thrown for invalid patch")
+    const msg = thrown!.message
+
+    // Verify improved diagnostic content
+    assert.ok(
+      msg.includes('Failed to apply consolidated patch for group'),
+      "must include group preamble",
+    )
+    assert.ok(msg.includes(patchPath), "must include patch path")
+    assert.ok(
+      msg.includes("patch artifact appears to be malformed"),
+      "must include corruption hint",
+    )
+    assert.ok(
+      msg.includes("No valid patches") ||
+        msg.includes("unrecognized input") ||
+        msg.includes("bad git-diff"),
+      "must include original git apply error detail",
     )
   })
 })

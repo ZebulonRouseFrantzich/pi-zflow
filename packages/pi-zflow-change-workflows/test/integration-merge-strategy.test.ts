@@ -165,6 +165,18 @@ describe("runIntegrationMerge", () => {
     // Should fail since the patch is invalid
     assert.equal(result.success, false, "should fail with invalid patch")
     assert.ok(result.failingGroup, "should identify failing group")
+    // Verify improved diagnostic message contains group id, patch path, corruption hint
+    assert.ok(result.error, "should include error message")
+    assert.ok(
+      result.error!.includes('Failed to create synthetic commit for group "group-1"'),
+      "should include group preamble",
+    )
+    assert.ok(result.error!.includes("group-1.patch"), "should include patch path")
+    assert.ok(
+      result.error!.includes("malformed or corrupted") ||
+        result.error!.includes("No valid patches"),
+      "should include corruption-related diagnostic",
+    )
 
     // Cleanup worktree if it was created
     if (result.integrationWorktreePath) {

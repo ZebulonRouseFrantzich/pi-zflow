@@ -10,6 +10,9 @@
     ".": "./src/index.ts",
     "./package.json": "./package.json"
   },
+  "scripts": {
+    "test": "npx tsx --test test/*.test.ts"
+  },
   "keywords": [
     "pi-package",
     "pi-zflow"
