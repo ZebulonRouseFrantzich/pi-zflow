@@ -1777,15 +1777,67 @@ export function shouldForkImplementationSessionAfterPrepare(): boolean {
 
 /** Parsed arguments for `/zflow-change-plan`. */
 export interface ParsedChangePlanArgs {
-  changePath: string
+  changeSeed: string
   notes: string
+  explicitReference: boolean
+}
+
+function looksLikeChangePlanReference(value: string): boolean {
+  return value.startsWith("@") ||
+    value.includes("/") ||
+    value.includes("\\") ||
+    value.endsWith(".md") ||
+    /^[a-z0-9][a-z0-9-]*$/.test(value)
+}
+
+function isRuneContextReference(value: string): boolean {
+  return value.startsWith("@") || value.includes("/context/")
 }
 
 export function parseChangePlanArgs(args: string): ParsedChangePlanArgs {
-  const parts = args.trim().split(/\s+/).filter(Boolean)
+  const trimmed = args.trim()
+  if (!trimmed) {
+    return {
+      changeSeed: "",
+      notes: "",
+      explicitReference: false,
+    }
+  }
+
+  const separatorIndex = trimmed.indexOf(" -- ")
+  if (separatorIndex !== -1) {
+    const changeSeed = trimmed.slice(0, separatorIndex).trim()
+    const notes = trimmed.slice(separatorIndex + 4).trim()
+    return {
+      changeSeed,
+      notes,
+      explicitReference: looksLikeChangePlanReference(changeSeed),
+    }
+  }
+
+  const parts = trimmed.split(/\s+/).filter(Boolean)
+  const first = parts[0] ?? ""
+  const rest = parts.slice(1).join(" ")
+  if (first && rest && looksLikeChangePlanReference(first)) {
+    return {
+      changeSeed: first,
+      notes: rest,
+      explicitReference: true,
+    }
+  }
+
+  if (looksLikeChangePlanReference(trimmed)) {
+    return {
+      changeSeed: trimmed,
+      notes: "",
+      explicitReference: true,
+    }
+  }
+
   return {
-    changePath: parts[0] ?? "",
-    notes: parts.slice(1).join(" "),
+    changeSeed: trimmed,
+    notes: trimmed,
+    explicitReference: false,
   }
 }
 
@@ -5731,15 +5783,18 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
     description: "Create or update the durable plan.md entrypoint for a change",
     handler: async (args: string, ctx: InterviewableContext): Promise<void> => {
       const parsedArgs = parseChangePlanArgs(args)
-      if (!parsedArgs.changePath) {
-        ctx.ui.notify("Usage: /zflow-change-plan <change-path-or-id> [notes]", "warning")
+      if (!parsedArgs.changeSeed) {
+        ctx.ui.notify(
+          "Usage: /zflow-change-plan <description|change-id|path> [-- notes]",
+          "warning",
+        )
         return
       }
 
-      const changeId = deriveSemanticChangeId(parsedArgs.changePath)
+      const changeId = deriveSemanticChangeId(parsedArgs.changeSeed)
       if (!changeId) {
         ctx.ui.notify(
-          `Could not derive a semantic changeId from: ${parsedArgs.changePath}`,
+          `Could not derive a semantic changeId from: ${parsedArgs.changeSeed}`,
           "warning",
         )
         return
@@ -5758,7 +5813,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           changeId,
           status: existing?.frontmatter.status ?? "draft",
           sourceMode: existing?.frontmatter.sourceMode ?? (
-            parsedArgs.changePath.includes("/context/") || parsedArgs.changePath.startsWith("@")
+            parsedArgs.explicitReference && isRuneContextReference(parsedArgs.changeSeed)
               ? "runecontext"
               : "adhoc"
           ),
@@ -5776,7 +5831,13 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         `${existing ? "📝 Updated" : "📝 Created"} durable plan entrypoint for \"${changeId}\".`,
         "info",
       )
-      ctx.ui.notify(`Draft entrypoint: ${planDocPath}`, "info")
+      ctx.ui.notify(`Plan entrypoint: ${planDocPath}`, "info")
+      if (!parsedArgs.explicitReference && parsedArgs.notes) {
+        ctx.ui.notify(
+          `Derived changeId: ${changeId}`,
+          "info",
+        )
+      }
       ctx.ui.notify(
         `Review and refine ${planDocPath}, then run /zflow-change-prepare ${changeId} to generate versioned change docs.`,
         "info",

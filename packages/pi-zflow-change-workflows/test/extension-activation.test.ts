@@ -111,11 +111,28 @@ describe("zflow-change-workflows extension activation", () => {
     assert.equal(shouldForkImplementationSessionAfterPrepare(), false)
   })
 
-  it("parses change-plan args into path and notes", () => {
+  it("parses change-plan args into explicit change reference and notes", () => {
     const parsed = parseChangePlanArgs("oracle-mssql-entitlements-readonly initial read-only Oracle draft")
 
-    assert.equal(parsed.changePath, "oracle-mssql-entitlements-readonly")
+    assert.equal(parsed.changeSeed, "oracle-mssql-entitlements-readonly")
     assert.equal(parsed.notes, "initial read-only Oracle draft")
+    assert.equal(parsed.explicitReference, true)
+  })
+
+  it("allows freeform change descriptions without requiring a path", () => {
+    const parsed = parseChangePlanArgs("Draft a read-only Oracle and MSSQL entitlements plan")
+
+    assert.equal(parsed.changeSeed, "Draft a read-only Oracle and MSSQL entitlements plan")
+    assert.equal(parsed.notes, "Draft a read-only Oracle and MSSQL entitlements plan")
+    assert.equal(parsed.explicitReference, false)
+  })
+
+  it("supports -- notes separator for explicit ids", () => {
+    const parsed = parseChangePlanArgs("oracle-mssql-entitlements-readonly -- initial read-only Oracle draft")
+
+    assert.equal(parsed.changeSeed, "oracle-mssql-entitlements-readonly")
+    assert.equal(parsed.notes, "initial read-only Oracle draft")
+    assert.equal(parsed.explicitReference, true)
   })
 
   it("parses change-prepare notes and --no-runecontext opt-out", () => {

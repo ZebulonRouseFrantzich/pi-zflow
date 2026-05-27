@@ -16,7 +16,7 @@ This is a **drafting helper**, not the canonical automation flow. The formal wor
    - File-by-file change inventory
    - Dependency and risk assessment
 4. The output is a structured plan draft suitable for review and refinement.
-5. When you are ready to enter the formal workflow, use `/zflow-change-plan <change-path-or-id> [notes]`.
+5. When you are ready to enter the formal workflow, use `/zflow-change-plan <description|change-id|path> [-- notes]`.
 
 ## Output structure
 
@@ -32,6 +32,6 @@ A well-formed change plan should include:
 
 ## Related
 
-- Formal workflow: `/zflow-change-plan <change-path-or-id> [notes]` then `/zflow-change-prepare <change-path>`
+- Formal workflow: `/zflow-change-plan <description|change-id|path> [-- notes]` then `/zflow-change-prepare <change-path>`
 - Capture decisions: `/zflow-draft-change-capture-decisions`
 - Standards template: `/zflow-standards-template`

@@ -32,11 +32,12 @@ export const CHANGE_HELP_TOPIC: ZflowHelpTopic = {
   commands: [
     {
       name: "zflow-change-plan",
-      usage: "/zflow-change-plan <change-path-or-id> [notes]",
+      usage: "/zflow-change-plan <description|change-id|path> [-- notes]",
       description:
         "Create or update the durable docs/zflow-changes/<id>/plan.md " +
-        "entrypoint for a change. This single draft file is intended for " +
-        "human review and refinement before generating versioned plan artifacts.",
+        "entrypoint for a change. You can provide a freeform change description, " +
+        "an explicit change id, or a change path. This single plan file is intended " +
+        "for human review and refinement before generating versioned plan artifacts.",
     },
     {
       name: "zflow-change-prepare",

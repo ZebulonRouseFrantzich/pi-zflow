@@ -365,8 +365,10 @@ Runtime state lives outside the working tree. See `docs/foundation-versions.md` 
 The change workflow now has a durable plan entrypoint plus versioned prepared docs:
 
 - **Durable plan entrypoint** — `/zflow-change-plan` creates or updates
-  `docs/zflow-changes/<change-id>/plan.md`. This single file is intended for
-  human review and refinement before full change preparation.
+  `docs/zflow-changes/<change-id>/plan.md`. It accepts a freeform change
+  description, an explicit change id, or a change path, then derives the
+  durable change id when needed. This single file is intended for human review
+  and refinement before full change preparation.
 
 - **Durable change documents** — `/zflow-change-prepare` reads the draft
   `plan.md` when present, then publishes the five canonical plan artifacts
