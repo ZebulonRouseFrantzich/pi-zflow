@@ -102,6 +102,13 @@ export interface ParallelTaskInput {
   outputMode?: "inline" | "file-only"
   /** Optional live progress callback from the dispatch backend. */
   onUpdate?: (progress: AgentDispatchProgress) => void
+  /**
+   * Scoped verification command to run after the agent completes.
+   * The dispatch backend should execute this command in the worktree
+   * and return stdout/stderr in the result's `verification.output`.
+   * Omit or leave undefined to skip post-run verification.
+   */
+  scopedVerification?: string
 }
 
 /**

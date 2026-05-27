@@ -58,6 +58,8 @@ export interface GroupVerificationResult {
   command?: string
   /** Truncated stdout/stderr from verification. */
   output?: string
+  /** Path to the persisted verification output file (relative to worktree-results). */
+  outputPath?: string
 }
 
 /**

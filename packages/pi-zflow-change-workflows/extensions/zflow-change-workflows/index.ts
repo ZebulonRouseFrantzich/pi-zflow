@@ -1877,6 +1877,12 @@ import { DISPATCH_SERVICE_CAPABILITY } from "pi-zflow-core/dispatch-service"
 const IMPLEMENT_GROUP_MAX_RETRIES = 1
 const DEFAULT_IMPLEMENT_CONCURRENCY = 2
 
+// ── Fix loop bounds ──────────────────────────────────────────────
+/** Maximum fix attempts per group. */
+const MAX_FIX_ATTEMPTS_PER_GROUP = 2
+/** Maximum total time spent fixing a single group (15 minutes). */
+const MAX_TOTAL_FIX_TIME_MS = 15 * 60 * 1000
+
 function resolveImplementConcurrency(): number {
   const raw = process.env.ZFLOW_IMPLEMENT_CONCURRENCY
   if (!raw) return DEFAULT_IMPLEMENT_CONCURRENCY
@@ -1894,9 +1900,11 @@ type DispatchGroupResult = Awaited<ReturnType<DispatchService["runParallel"]>>["
  */
 export type GroupLedgerStatus =
   | "queued"
+  | "ready"
   | "running"
   | "succeeded"
   | "failed"
+  | "blocked"
   | "retrying"
   | "pending"
   | "applied"
@@ -1956,8 +1964,18 @@ export interface GroupStatusEntry {
   retryCount: number
   /** Error message if status is "failed". */
   error?: string
+  /** Group IDs that caused this group to be blocked (when status is "blocked"). */
+  blockedBy?: string[]
   /** Categorization of failure for retry policy. */
   failureKind?: "retryable" | "blocker"
+  /** Fix-loop state: number of fix attempts made so far. */
+  fixAttempts?: number
+  /** Fix-loop state: classification from the last fix attempt. */
+  fixClassification?: string
+  /** Fix-loop state: result of the last fix attempt ("succeeded" | "failed" | "needs-user-decision"). */
+  fixResult?: string
+  /** Fix-loop state: path to the fix patch (if separate from the original). */
+  fixPatchPath?: string
   /** Whether this group's patch has been applied back to the primary. */
   appliedToPrimary: boolean
   /** ISO timestamp of last state change. */
@@ -2096,6 +2114,236 @@ async function updateGroupLedger(
 }
 
 /**
+ * Attempt to fix a failed group by dispatching a targeted fix worker.
+ *
+ * The fix worker runs in a fresh worktree with the same base as the original
+ * group. It receives the verification failure context and produces a fix patch.
+ * The orchestrator stores BOTH the original patch and the fix patch. On apply-back,
+ * the original patch is applied first, then the fix patch on top.
+ *
+ * @param groupId - The failing group's ID.
+ * @param taskPrompt - The group's task description.
+ * @param files - Allowed file paths for this group.
+ * @param agent - The agent to use for the fix worker.
+ * @param failedResult - The failed dispatch result (contains error, verification output, patch path).
+ * @param dispatchService - The dispatch service.
+ * @param options - Context: runId, cwd, repoRoot, changeId, planVersion, worktreeResultsDir, onSubagentUpdate.
+ * @returns Object with fix outcome: whether fixed, fix patch path, classification, error.
+ */
+async function attemptGroupFix(
+  groupId: string,
+  taskPrompt: string,
+  files: string[],
+  agent: string,
+  failedResult: DispatchGroupResult,
+  dispatchService: DispatchService,
+  options: {
+    runId: string
+    cwd?: string
+    repoRoot: string
+    changeId: string
+    planVersion: string
+    worktreeResultsDir: string
+    onSubagentUpdate?: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) => void
+    onWorkflowUpdate?: (message: string) => void
+    implementModel: { dispatchModel?: string }
+  },
+): Promise<{ fixed: boolean; fixPatchPath?: string; fixClassification: string; error?: string; verificationCommand?: string; verificationOutput?: string }> {
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+
+  const fixOutputPath = path.join(options.worktreeResultsDir, `${groupId}-fix-result.md`)
+  const fixVerificationPath = path.join(options.worktreeResultsDir, `${groupId}-fix-verification.txt`)
+
+  // Read the original patch content to include in the fix prompt
+  let originalPatchContent = ""
+  if (failedResult.patchPath) {
+    try {
+      originalPatchContent = await fs.readFile(failedResult.patchPath, "utf-8")
+    } catch {
+      // Patch may not exist if the group had no changes
+    }
+  }
+
+  const verificationCmd = failedResult.verification?.command ?? "(not captured)"
+  const verificationOutput = failedResult.verification?.output ?? failedResult.error ?? "(not captured)"
+  const errorHint = failedResult.error ?? ""
+
+  // Build fix prompt
+  const fixPrompt = [
+    `# Fix: ${groupId} — ${taskPrompt}`,
+    "",
+    "## Original group failure",
+    "The implementation for this group passed scoped verification as reported by the dispatch backend.",
+    "The dispatch service reported that the worker produced output but verification failed.",
+    "",
+    "## Context",
+    "",
+    `**Group:** ${groupId}`,
+    `**Agent:** ${agent}`,
+    `**Allowed files:** ${files.join(", ")}`,
+    "",
+    `## Verification command that failed`,
+    "```bash",
+    verificationCmd,
+    "```",
+    "",
+    "## Verification output",
+    "```",
+    verificationOutput.slice(0, 10000),
+    "```",
+    "",
+    ...(errorHint ? [
+      "## Error hint",
+      errorHint,
+      "",
+    ] : []),
+    ...(originalPatchContent ? [
+      "## Original patch (the previous implementation attempt)",
+      "",
+      "The following patch was produced by the original implementation but did not pass verification.",
+      "```diff",
+      originalPatchContent.slice(0, 15000),
+      "```",
+      "",
+    ] : []),
+    "## Your task",
+    "",
+    "Fix the verification failure so this group's changes pass the verification command.",
+    "",
+    "## Rules",
+    "",
+    "1. Stay within the allowed files unless drift criteria require escalation.",
+    "2. If the original patch contains changes that are valid, reapply them in your implementation.",
+    "3. Focus on fixing what caused verification to fail — patch syntax errors, missing config,",
+    "   incompatible CLI flags, invalid file formats, etc.",
+    "4. After making your changes, run the verification command yourself:",
+    "   ```bash",
+    verificationCmd,
+    "   ```",
+    "5. If verification passes, you're done. Report what you fixed.",
+    "6. If verification STILL fails, fix the remaining issues and retry verification.",
+    "7. If you cannot fix within the allowed files, report why and suggest scope expansion.",
+    "",
+    "## Report format",
+    "",
+    "End your response with a summary:",
+    "- **Changes made**: (list of files changed and what was fixed)",
+    "- **Verification result**: passed / failed",
+    "- **Classification**: fixable-within-group / requires-prerequisite-change / needs-user-decision",
+    "",
+  ].join("\n")
+
+  options?.onSubagentUpdate?.(groupId, {
+    agent,
+    title: `fix: ${groupId}`,
+    status: "fixing",
+    lastCommand: "dispatching fix worker...",
+  })
+
+  try {
+    const fixResult = await dispatchService.runParallel({
+      tasks: [{
+        agent,
+        task: fixPrompt,
+        model: options.implementModel.dispatchModel,
+        output: fixOutputPath,
+        outputMode: "file-only" as const,
+        scopedVerification: verificationCmd,
+        onUpdate: (progress) => {
+          const recentOutput = Array.isArray(progress.recentOutput) ? progress.recentOutput : []
+          options?.onSubagentUpdate?.(groupId, {
+            agent,
+            title: `fix: ${groupId}`,
+            status: "fixing",
+            lastCommand: progress.currentTool
+              ? `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}`
+              : recentOutput[recentOutput.length - 1] ?? "fixing...",
+          })
+        },
+      }],
+      cwd: options.cwd,
+      concurrency: 1,
+      worktree: true,
+      maxOutput: { lines: 5000, bytes: 500_000 },
+    })
+
+    const fixTaskResult = fixResult.results[0]
+    if (!fixTaskResult) {
+      return { fixed: false, fixClassification: "fix-worker-error", error: "Fix worker produced no result" }
+    }
+
+    // Persist fix verification output
+    if (fixTaskResult.verification?.output) {
+      await fs.writeFile(fixVerificationPath, fixTaskResult.verification.output, "utf-8").catch(() => {})
+    }
+
+    const fixPassed = fixTaskResult.ok && fixTaskResult.verification?.status !== "fail" && fixTaskResult.verification?.status !== "failed"
+    const fixVerificationStatus = fixTaskResult.verification?.status
+
+    if (fixPassed && fixTaskResult.patchPath) {
+      options?.onSubagentUpdate?.(groupId, {
+        agent,
+        title: `fix: ${groupId}`,
+        status: "completed",
+        lastCommand: "fix succeeded",
+      })
+      return {
+        fixed: true,
+        fixPatchPath: fixTaskResult.patchPath,
+        fixClassification: "fixable-within-group",
+        verificationCommand: verificationCmd,
+        verificationOutput: fixTaskResult.verification?.output,
+      }
+    }
+
+    if (fixPassed && !fixTaskResult.patchPath) {
+      // Fix worker succeeded but didn't produce a patch — means the fix
+      // didn't need filesystem changes (e.g. the failure was environment-only)
+      // which shouldn't happen, but handle gracefully.
+      return {
+        fixed: true,
+        fixPatchPath: undefined,
+        fixClassification: "fixable-within-group",
+        verificationCommand: verificationCmd,
+        verificationOutput: fixTaskResult.verification?.output,
+      }
+    }
+
+    // Fix worker failed verification
+    const fixError = fixTaskResult.error
+      ? `Fix worker error: ${fixTaskResult.error}`
+      : fixVerificationStatus === "fail" || fixVerificationStatus === "failed"
+        ? `Fix verification failed: ${verificationCmd}`
+        : "Fix worker failed without error"
+
+    // Classify the failure from worker output
+    const workerOutput = fixTaskResult.rawOutput ?? ""
+    let classification = "fixable-within-group"
+    const lower = workerOutput.toLowerCase()
+    if (lower.includes("needs-user-decision") || lower.includes("needs_user_decision") || lower.includes("requires user")) {
+      classification = "needs-user-decision"
+    } else if (lower.includes("requires-prerequisite-change") || lower.includes("requires-prerequisite-change") || lower.includes("requires prerequisite") || lower.includes("scope expansion")) {
+      classification = "requires-prerequisite-change"
+    }
+
+    return {
+      fixed: false,
+      fixClassification: classification,
+      error: fixError,
+      verificationCommand: verificationCmd,
+      verificationOutput: fixTaskResult.verification?.output,
+    }
+  } catch (err) {
+    return {
+      fixed: false,
+      fixClassification: "fix-worker-error",
+      error: `Fix worker crashed: ${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
+}
+
+/**
  * Write a human-readable group status summary artifact.
  *
  * Path: `<run-dir>/group-status-summary.md`
@@ -2117,6 +2365,7 @@ async function writeGroupStatusSummary(
   const lines: string[] = []
   const succeeded = entries.filter((e) => e.status === "succeeded" || e.status === "applied")
   const failed = entries.filter((e) => e.status === "failed")
+  const blocked = entries.filter((e) => e.status === "blocked")
   const running_ = entries.filter((e) => e.status === "running" || e.status === "retrying")
   const pending_ = entries.filter((e) => e.status === "queued" || e.status === "pending")
 
@@ -2129,6 +2378,7 @@ async function writeGroupStatusSummary(
   lines.push(`- Total groups: ${entries.length}`)
   lines.push(`- Succeeded: ${succeeded.length}`)
   lines.push(`- Failed: ${failed.length}`)
+  lines.push(`- Blocked: ${blocked.length}`)
   lines.push(`- In progress: ${running_.length}`)
   lines.push(`- Pending: ${pending_.length}\n`)
 
@@ -2154,6 +2404,40 @@ async function writeGroupStatusSummary(
       lines.push(`  - Error: ${g.error ?? "(unknown)"}`)
       lines.push(`  - Failure kind: ${g.failureKind ?? "unknown"}`)
       lines.push(`  - Retry count: ${g.retryCount}`)
+      // Show verification output snippet when available
+      const scopedVer = g.scopedVerification as { output?: string; command?: string; outputPath?: string } | undefined
+      if (scopedVer?.command) {
+        lines.push(`  - Verification command: \`${scopedVer.command}\``)
+      }
+      if (scopedVer?.output) {
+        // Trim to last 5 lines or first 500 chars, whichever is smaller
+        const tail = scopedVer.output.split("\n").slice(-5).join("\n")
+        const snippet = tail.length > 500 ? tail.slice(0, 500) + "..." : tail
+        if (snippet.trim()) {
+          lines.push(`  - Verification output:`)
+          lines.push("```")
+          lines.push(snippet)
+          lines.push("```")
+        }
+      }
+      if (scopedVer?.outputPath) {
+        lines.push(`  - Verification output file: ${scopedVer.outputPath}`)
+      }
+      if (g.semanticCoupling.notes.length > 0) {
+        for (const note of g.semanticCoupling.notes) {
+          lines.push(`  - Note: ${note}`)
+        }
+      }
+    }
+    lines.push("")
+  }
+
+  if (blocked.length > 0) {
+    lines.push(`## Blocked Groups`)
+    for (const g of blocked) {
+      lines.push(`- **${g.groupId}** — ${g.agent}`)
+      lines.push(`  - Blocked by: ${g.blockedBy?.join(", ") ?? "(unknown)"}`)
+      lines.push(`  - Status: ${g.status}`)
       if (g.semanticCoupling.notes.length > 0) {
         for (const note of g.semanticCoupling.notes) {
           lines.push(`  - Note: ${note}`)
@@ -2960,18 +3244,99 @@ async function runWorktreeDispatchAndFinalize(
     },
   } as any, cwd)
 
+  // ── Build dependency graph for wave dispatch ────────────────
+  // Groups are dispatched in waves: only groups whose dependencies
+  // have all succeeded are eligible for the current wave. Failed groups
+  // cause dependents to be marked "blocked" rather than running.
+  const depGraph = new Map<string, string[]>()
+  const reverseDepGraph = new Map<string, string[]>()
+  const allGroupIds: string[] = []
+
+  for (const group of runPlan.groups) {
+    allGroupIds.push(group.id)
+    depGraph.set(group.id, group.dependencies.filter(d => d !== "none" && d !== ""))
+    // Build reverse deps
+    for (const dep of group.dependencies) {
+      if (dep === "none" || dep === "") continue
+      if (!reverseDepGraph.has(dep)) reverseDepGraph.set(dep, [])
+      reverseDepGraph.get(dep)!.push(group.id)
+    }
+  }
+
+  /**
+   * Walk the reverse dependency graph to find all groups transitively
+   * blocked by a failed group, and mark them as blocked in the ledger.
+   */
+  const markDependentsBlocked = async (failedGroupId: string): Promise<void> => {
+    const visited = new Set<string>()
+    const queue = [failedGroupId]
+    while (queue.length > 0) {
+      const current = queue.shift()!
+      const dependents = reverseDepGraph.get(current)
+      if (!dependents) continue
+      for (const depId of dependents) {
+        if (visited.has(depId)) continue
+        visited.add(depId)
+        // Only block groups that haven't already succeeded or started
+        const existing = (await readRun(runId, cwd).catch(() => null))
+          ?.metadata?.[GROUP_LEDGER_META_KEY] as Record<string, GroupStatusEntry> | undefined
+        const currentStatus = existing?.[depId]?.status
+        if (currentStatus === "succeeded" || currentStatus === "applied" || currentStatus === "running") continue
+        await updateGroupLedger(runId, depId, {
+          status: "blocked",
+          blockedBy: [...(existing?.[depId]?.blockedBy ?? []), failedGroupId],
+          failureKind: "blocker",
+        }, cwd).catch(() => {})
+        options?.onSubagentUpdate?.(depId, {
+          status: "blocked",
+          lastCommand: `blocked by ${failedGroupId}`,
+        })
+        queue.push(depId)
+      }
+    }
+  }
+
+  /**
+   * Get group IDs that are ready for dispatch in the current wave.
+   * Ready = status is "ready" or explicitly moved to ready state,
+   * and all their dependencies have status "succeeded" or "applied".
+   */
+  const getReadyGroupIds = async (): Promise<string[]> => {
+    const run = await readRun(runId, cwd).catch(() => null)
+    if (!run) return []
+    const ledger = (run.metadata?.[GROUP_LEDGER_META_KEY] ?? {}) as Record<string, GroupStatusEntry>
+    return allGroupIds.filter(gid => {
+      const entry = ledger[gid]
+      if (!entry) return false
+      // Already processed or blocked
+      if (entry.status === "succeeded" || entry.status === "applied" ||
+          entry.status === "running" || entry.status === "failed" ||
+          entry.status === "blocked" || entry.status === "skipped") return false
+      // Check dependencies
+      const deps = depGraph.get(gid)
+      if (!deps || deps.length === 0) return true
+      return deps.every(d => {
+        const depEntry = ledger[d]
+        return depEntry?.status === "succeeded" || depEntry?.status === "applied"
+      })
+    })
+  }
+
   // Dispatch via the dispatch service with worktree: true. Keep worker output
   // under runtime state so repo roots are not polluted with worktree-results/.
   const runDir = resolveRunDir(runId, cwd)
   const worktreeResultsDir = path.join(runDir, "worktree-results")
   await fs.mkdir(worktreeResultsDir, { recursive: true })
   const implementModel = await resolveWorkflowModel("zflow.implement-routine")
+
+  // Build the full tasks array once. Each wave will select a subset by index.
   const tasks = runPlan.tasks.map((t, taskIdx) => ({
     agent: t.agent,
     task: t.task,
     model: implementModel.dispatchModel,
     output: path.join(worktreeResultsDir, `${t.groupId}-result.md`),
     outputMode: "file-only" as const,
+    scopedVerification: t.scopedVerification,
     onUpdate: (progress: AgentDispatchProgress) => {
       const recentTools = Array.isArray(progress.recentTools) ? progress.recentTools : []
       const recentTool = recentTools[recentTools.length - 1]
@@ -2991,323 +3356,284 @@ async function runWorktreeDispatchAndFinalize(
     },
   }))
 
+  // Map groupId → task index for fast lookup
+  const groupIdToTaskIndex = new Map<string, number>()
+  for (let i = 0; i < runPlan.tasks.length; i++) {
+    groupIdToTaskIndex.set(runPlan.tasks[i]!.groupId, i)
+  }
+
   const WORKTREE_DISPATCH_CONCURRENCY = resolveImplementConcurrency()
   const MAX_OUTPUT_LINES = 5000
   const MAX_OUTPUT_BYTES = 500_000
 
-  for (let taskIdx = 0; taskIdx < runPlan.tasks.length; taskIdx++) {
-    const task = runPlan.tasks[taskIdx]!
-    const initiallyScheduled = taskIdx < WORKTREE_DISPATCH_CONCURRENCY
-    options?.onSubagentUpdate?.(task.groupId, {
-      agent: task.agent,
-      title: runPlan.groups[taskIdx]?.taskPrompt ?? undefined,
-      model: implementModel.model ?? "unavailable",
-      thinking: implementModel.thinking ?? "unavailable",
-      status: initiallyScheduled ? "running" : "queued",
-      lastCommand: initiallyScheduled ? "starting worktree dispatch..." : "queued waiting for dispatch slot",
-    })
-    await updateGroupLedger(runId, task.groupId, {
-      status: initiallyScheduled ? "running" : "queued",
-      agent: task.agent,
-    }, cwd).catch(() => {})
+  // Mark all pending/queued groups as "ready" (eligible for wave dispatch).
+  // The initial ready set will be determined by dependency resolution.
+  const initialLedger = ((await readRun(runId, cwd).catch(() => null))
+    ?.metadata?.[GROUP_LEDGER_META_KEY] ?? {}) as Record<string, GroupStatusEntry>
+  for (const gid of allGroupIds) {
+    const existing = initialLedger[gid]
+    if (!existing || existing.status === "queued" || existing.status === "pending") {
+      await updateGroupLedger(runId, gid, { status: "ready" }, cwd).catch(() => {})
+    }
   }
 
-  // ── Dispatch with heartbeat ──────────────────────────────────
-  // The dispatch blocks until all worktree tasks complete. Emit periodic
-  // heartbeat progress so the indicator doesn't appear frozen.
-  let heartbeatCount = 0
-  const dispatchStartTime = Date.now()
-  const heartbeat = setInterval(() => {
-    heartbeatCount++
-    const elapsed = Math.round((Date.now() - dispatchStartTime) / 1000)
-    const runningCount = runPlan.tasks.length
-    options?.onWorkflowUpdate?.(
-      `Workers running: ${runningCount} group(s) dispatched, ` +
-      `${heartbeatCount} heartbeat(s), ${elapsed}s elapsed`,
-    )
-  }, 10000)
-  heartbeat.unref?.()
-
-  let dispatchResult
-  try {
-    dispatchResult = await dispatchService.runParallel({
-      tasks,
-      cwd,
-      concurrency: WORKTREE_DISPATCH_CONCURRENCY,
-      worktree: true,
-      maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
-    })
-  } finally {
-    clearInterval(heartbeat)
-  }
-
-  // Classify results: successful groups go into collected; failures are classified
-  // as retryable or blocker. Retryable groups get one bounded re-run via runParallel
-  // (not sequential runAgent) so multiple retries run concurrently.
+  // ── Wave dispatch loop ──────────────────────────────────────
+  // Dispatch groups in dependency-order waves. Each wave runs the
+  // eligible groups in parallel (subject to concurrency limit).
+  const allResults: Array<{ groupId: string; result: DispatchGroupResult; index: number }> = []
   const decisions: FailedGroupDecision[] = []
-  const allResults: Array<DispatchGroupResult> = [...dispatchResult.results]
+  let waveIndex = 0
+  const dispatchStartTime = Date.now()
+  let waveHeartbeat: ReturnType<typeof setInterval> | undefined
 
-  for (let idx = 0; idx < allResults.length; idx++) {
-    const result = allResults[idx]!
-    const task = runPlan.tasks[idx]
-    if (result.ok) {
-      options?.onSubagentUpdate?.(task?.groupId ?? `group-${idx}`, {
-        agent: result.agent,
+  while (true) {
+    const readyGroupIds = await getReadyGroupIds()
+    if (readyGroupIds.length === 0) break
+
+    waveIndex++
+    options?.onWorkflowUpdate?.(`Wave ${waveIndex}: dispatching ${readyGroupIds.length} group(s) (${waveIndex === 1 ? "initial" : "dependency"} wave)`)
+
+    // Build task subset for this wave
+    const waveTaskIndices = readyGroupIds.map(gid => {
+      const idx = groupIdToTaskIndex.get(gid)
+      if (idx === undefined) throw new Error(`Group ${gid} not found in task list`)
+      return idx
+    })
+    const waveTasks = waveTaskIndices.map(idx => tasks[idx]!)
+
+    // Mark wave groups as running
+    for (const gid of readyGroupIds) {
+      const idx = groupIdToTaskIndex.get(gid)!
+      const task = runPlan.tasks[idx]!
+      options?.onSubagentUpdate?.(gid, {
+        agent: task.agent,
         title: runPlan.groups[idx]?.taskPrompt ?? undefined,
-        status: "completed",
-        finishedAt: Date.now(),
-        lastCommand: "agent complete; scoped verification deferred to final verification",
+        model: implementModel.model ?? "unavailable",
+        thinking: implementModel.thinking ?? "unavailable",
+        status: "running",
+        lastCommand: "starting worktree dispatch...",
       })
-      // Update ledger: group succeeded
-      const gId = task?.groupId ?? runPlan.groups[idx]?.id ?? `group-${idx}`
-      await updateGroupLedger(runId, gId, {
-        status: "succeeded",
-        agent: result.agent ?? "zflow.implement-routine",
-        error: undefined,
-        failureKind: undefined,
+      await updateGroupLedger(runId, gid, {
+        status: "running",
+        agent: task.agent,
       }, cwd).catch(() => {})
     }
-  }
 
-  const failedIndices: number[] = []
-  for (let idx = 0; idx < allResults.length; idx++) {
-    if (!allResults[idx]!.ok) failedIndices.push(idx)
-  }
+    // Dispatch this wave
+    const dispatchStartMs = Date.now()
+    let dispatchResult: Awaited<ReturnType<DispatchService["runParallel"]>>
 
-  if (failedIndices.length > 0) {
-    // ── Phase 1: classify every failed group immediately so UI shows honest state
-    const retryIndices: number[] = []
-    const retryDecisionIndices: number[] = []
-    for (const idx of failedIndices) {
-      const result = allResults[idx]!
+    // Heartbeat for this wave
+    let waveHeartbeatCount = 0
+    waveHeartbeat = setInterval(() => {
+      waveHeartbeatCount++
+      const elapsed = Math.round((Date.now() - dispatchStartTime) / 1000)
+      const ready = readyGroupIds.length
+      const done = allResults.length
+      const total = allGroupIds.length
+      options?.onWorkflowUpdate?.(
+        `Wave ${waveIndex}: ${ready} group(s) dispatched, ${done}/${total} complete, ${waveHeartbeatCount} heartbeat(s), ${elapsed}s elapsed`,
+      )
+    }, 10000)
+    waveHeartbeat.unref?.()
+
+    try {
+      dispatchResult = await dispatchService.runParallel({
+        tasks: waveTasks,
+        cwd,
+        concurrency: Math.min(WORKTREE_DISPATCH_CONCURRENCY, waveTasks.length),
+        worktree: true,
+        maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
+      })
+    } finally {
+      clearInterval(waveHeartbeat)
+      waveHeartbeat = undefined
+    }
+
+    // Process wave results
+    const waveElapsed = Math.round((Date.now() - dispatchStartMs) / 1000)
+    options?.onWorkflowUpdate?.(`Wave ${waveIndex} completed in ${waveElapsed}s: ${dispatchResult.results.filter(r => r.ok).length} succeeded, ${dispatchResult.results.filter(r => !r.ok).length} failed`)
+
+    for (let i = 0; i < dispatchResult.results.length; i++) {
+      const r = dispatchResult.results[i]!
+      const gid = readyGroupIds[i]
+      const idx = waveTaskIndices[i]
       const group = runPlan.groups[idx]
-      const decision = classifyFailedGroup(group?.id ?? `group-${idx}`, result, 0, IMPLEMENT_GROUP_MAX_RETRIES)
-      decisions.push(decision)
+      if (!gid || idx === undefined) continue
 
-      if (decision.decision === "retry") {
-        retryIndices.push(idx)
-        retryDecisionIndices.push(decisions.length - 1)
-        const task = runPlan.tasks[idx]!
-        options?.onSubagentUpdate?.(task.groupId, {
-          agent: result.agent,
+      allResults.push({ groupId: gid, result: r, index: idx })
+
+      if (r.ok) {
+        // Group succeeded
+        options?.onSubagentUpdate?.(gid, {
+          agent: r.agent ?? tasks[idx]?.agent,
           title: group?.taskPrompt ?? undefined,
-          status: "retry",
-          finishedAt: undefined,
-          startedAt: Date.now(),
-          lastCommand: "scheduling retry...",
+          status: "completed",
+          finishedAt: Date.now(),
+          lastCommand: "agent complete; scoped verification deferred to final verification",
         })
-        // Update ledger: group retrying
-        const gId = group?.id ?? task.groupId ?? `group-${idx}`
-        await updateGroupLedger(runId, gId, {
-          status: "retrying",
-          retryCount: 1,
+        await updateGroupLedger(runId, gid, {
+          status: "succeeded",
+          agent: r.agent ?? "zflow.implement-routine",
           error: undefined,
-          failureKind: "retryable",
+          failureKind: undefined,
         }, cwd).catch(() => {})
       } else {
-        const gId = group?.id ?? `group-${idx}`
-        options?.onSubagentUpdate?.(runPlan.tasks[idx]?.groupId ?? gId, {
-          agent: result.agent,
-          title: group?.taskPrompt ?? undefined,
-          status: "failed",
-          finishedAt: Date.now(),
-          lastCommand: decision.reason,
-        })
-        // Update ledger: group failed (blocker)
-        await updateGroupLedger(runId, gId, {
-          status: "failed",
-          error: decision.error ?? decision.reason,
-          failureKind: "blocker",
-          retryCount: 0,
-        }, cwd).catch(() => {})
-      }
-    }
+          // Group failed — attempt fix loop before blocking dependents
+          const currentFixAttempts = (await readRun(runId, cwd).catch(() => null))
+            ?.metadata?.[GROUP_LEDGER_META_KEY]?.[gid]?.fixAttempts ?? 0
 
-    // ── Phase 2: dispatch all retries in parallel (not one-at-a-time)
-    // IMPORTANT: retries run WITHOUT worktree isolation (matching the original
-    // runAgent behaviour). The initial dispatch already created worktrees for
-    // these groups; creating new ones would fail because git rejects duplicate
-    // worktree paths. Running retries in the main working directory lets the
-    // agent access the full repo and retry the implementation from scratch.
-    if (retryIndices.length > 0) {
-      const retryTasks = retryIndices.map((idx) => {
-        const task = runPlan.tasks[idx]!
-        const group = runPlan.groups[idx]
-        return {
-          agent: task.agent,
-          task: task.task,
-          model: implementModel.dispatchModel,
-          output: path.join(worktreeResultsDir, `${task.groupId}-retry-result.md`),
-          outputMode: "file-only" as const,
-          onUpdate: (progress: AgentDispatchProgress) => {
-            const recentTools = Array.isArray(progress.recentTools) ? progress.recentTools : []
-            const recentTool = recentTools[recentTools.length - 1]
-            const recentOutput = Array.isArray(progress.recentOutput) ? progress.recentOutput : []
-            options?.onSubagentUpdate?.(task.groupId, {
-              agent: task.agent,
-              title: group?.taskPrompt ?? undefined,
-              model: implementModel.model ?? "unavailable",
-              thinking: implementModel.thinking ?? "unavailable",
-              status: progress.status ?? "running",
-              lastCommand: progress.currentTool
-                ? `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}`
-                : recentTool?.tool
-                  ? `${recentTool.tool}${recentTool.args ? ` ${recentTool.args}` : ""}`
-                  : recentOutput[recentOutput.length - 1] ?? "retrying...",
-            })
-          },
-        }
-      })
+          const fixShouldRun = currentFixAttempts < MAX_FIX_ATTEMPTS_PER_GROUP &&
+            group && group.files && group.files.length > 0
 
-      let retryDispatchResult: Awaited<ReturnType<DispatchService["runParallel"]>>
-      try {
-        retryDispatchResult = await dispatchService.runParallel({
-          tasks: retryTasks,
-          cwd,
-          concurrency: WORKTREE_DISPATCH_CONCURRENCY,
-          maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
-        })
-      } catch (retryDispatchErr: unknown) {
-        // If the parallel retry dispatch itself throws, treat every retry as a blocker
-        const errMsg = retryDispatchErr instanceof Error ? retryDispatchErr.message : String(retryDispatchErr)
-        for (let rIdx = 0; rIdx < retryIndices.length; rIdx++) {
-          const originalIdx = retryIndices[rIdx]!
-          const decisionIdx = retryDecisionIndices[rIdx]!
-          const group = runPlan.groups[originalIdx]
-          const task = runPlan.tasks[originalIdx]!
-          decisions[decisionIdx] = {
-            ...decisions[decisionIdx]!,
-            decision: "blocker",
-            reason: `Retry dispatch threw: ${errMsg}`,
+          if (fixShouldRun) {
+            options?.onWorkflowUpdate?.(`Attempting fix for ${gid} (attempt ${currentFixAttempts + 1}/${MAX_FIX_ATTEMPTS_PER_GROUP})`)
+            await updateGroupLedger(runId, gid, {
+              status: "retrying",
+              fixAttempts: currentFixAttempts + 1,
+            }, cwd).catch(() => {})
+
+            const fixResult = await attemptGroupFix(
+              gid,
+              group?.taskPrompt ?? "",
+              group?.files ?? [],
+              r.agent ?? "zflow.implement-routine",
+              r,
+              dispatchService,
+              {
+                runId,
+                cwd,
+                repoRoot,
+                changeId,
+                planVersion,
+                worktreeResultsDir,
+                onSubagentUpdate: options?.onSubagentUpdate,
+                onWorkflowUpdate: options?.onWorkflowUpdate,
+                implementModel,
+              },
+            )
+
+            if (fixResult.fixed) {
+              // Fix succeeded — treat group as succeeded
+              options?.onSubagentUpdate?.(gid, {
+                agent: r.agent ?? tasks[idx]?.agent,
+                title: `fix: ${gid} (attempt ${currentFixAttempts + 1})`,
+                status: "completed",
+                finishedAt: Date.now(),
+                lastCommand: `fix succeeded${fixResult.fixPatchPath ? `; fix patch: ${fixResult.fixPatchPath}` : ""}`,
+              })
+              await updateGroupLedger(runId, gid, {
+                status: "succeeded",
+                agent: r.agent ?? "zflow.implement-routine",
+                error: undefined,
+                failureKind: undefined,
+                fixResult: "succeeded",
+                fixClassification: fixResult.fixClassification,
+                fixPatchPath: fixResult.fixPatchPath,
+              }, cwd).catch(() => {})
+              // Do NOT block dependents — fix succeeded
+              continue
+            }
+
+            // Fix failed — log and fall through to blocker
+            options?.onWorkflowUpdate?.(`Fix attempt ${currentFixAttempts + 1} for ${gid} failed: ${fixResult.error ?? "unknown fix failure"}`)
           }
-          options?.onSubagentUpdate?.(task.groupId, {
-            agent: task.agent,
+
+          // Fix not attempted, exhausted, or failed — mark as permanent blocker
+          decisions.push({
+            groupId: gid,
+            agent: r.agent ?? "zflow.implement-routine",
+            attempt: currentFixAttempts,
+            decision: "blocker",
+            reason: r.error ?? "Group dispatch failed",
+            error: r.error ?? "Group dispatch failed",
+          })
+          options?.onSubagentUpdate?.(tasks[idx]?.groupId ?? gid, {
+            agent: r.agent ?? tasks[idx]?.agent,
             title: group?.taskPrompt ?? undefined,
             status: "failed",
             finishedAt: Date.now(),
-            lastCommand: `retry dispatch threw: ${errMsg}`,
+            lastCommand: r.error ?? "group failed",
           })
-          await updateGroupLedger(runId, group?.id ?? task.groupId, {
+          await updateGroupLedger(runId, gid, {
             status: "failed",
-            error: `Retry dispatch threw: ${errMsg}`,
+            error: r.error ?? "group failed",
             failureKind: "blocker",
-            retryCount: 1,
+            fixAttempts: currentFixAttempts,
+            fixResult: fixShouldRun ? "failed" : undefined,
           }, cwd).catch(() => {})
+          // Block all transitive dependents
+          await markDependentsBlocked(gid)
         }
-        // Fall through to blocker check below
-        retryDispatchResult = { ok: false, results: [] }
-      }
+    }
+  }
 
-      // ── Phase 3: map retry results back to original indices.
-      // Guard against result/expectation length mismatches — if the backend
-      // returned fewer results than tasks (e.g. internal error), mark every
-      // unmapped retry as a blocker so it doesn't silently hang.
-      const mappedSet = new Set<number>()
-      for (let rIdx = 0; rIdx < retryDispatchResult.results.length; rIdx++) {
-        const originalIdx = retryIndices[rIdx]
-        const decisionIdx = retryDecisionIndices[rIdx]
-        if (originalIdx === undefined || decisionIdx === undefined) continue
-        mappedSet.add(rIdx)
-        const group = runPlan.groups[originalIdx]
-        const task = runPlan.tasks[originalIdx]!
-        const rResult = retryDispatchResult.results[rIdx]!
-        const mappedResult: DispatchGroupResult = {
-          ...rResult,
-          agent: rResult.agent ?? task.agent,
-        }
-        allResults[originalIdx] = mappedResult
+  options?.onWorkflowUpdate?.(`All waves complete. ${allResults.filter(r => r.result.ok).length}/${allGroupIds.length} groups succeeded. Checking for blockers...`)
 
-        if (rResult.ok) {
-          decisions[decisionIdx] = { ...decisions[decisionIdx]!, decision: "retry", reason: "Retry succeeded." }
-          options?.onSubagentUpdate?.(task.groupId, {
-            agent: rResult.agent ?? task.agent,
-            title: group?.taskPrompt ?? undefined,
-            status: "completed",
-            finishedAt: Date.now(),
-            lastCommand: "agent complete; scoped verification deferred to final verification",
-          })
-          // Update ledger: retry succeeded
-          await updateGroupLedger(runId, group?.id ?? task.groupId, {
-            status: "succeeded",
-            agent: rResult.agent ?? task.agent,
-            error: undefined,
-            failureKind: undefined,
-          }, cwd).catch(() => {})
-        } else {
-          decisions[decisionIdx] = classifyFailedGroup(group?.id ?? `group-${originalIdx}`, mappedResult, 1, IMPLEMENT_GROUP_MAX_RETRIES)
-          options?.onSubagentUpdate?.(task.groupId, {
-            agent: rResult.agent ?? task.agent,
-            title: group?.taskPrompt ?? undefined,
-            status: "failed",
-            finishedAt: Date.now(),
-            lastCommand: rResult.error ?? "retry failed",
-          })
-          // Update ledger: retry failed
-          await updateGroupLedger(runId, group?.id ?? task.groupId, {
-            status: "failed",
-            error: rResult.error ?? "retry failed",
-            failureKind: "blocker",
-            retryCount: 1,
-          }, cwd).catch(() => {})
-        }
-      }
+  // ── Check for blocked/failed groups after all waves ─────────
+  const finalRun = await readRun(runId, cwd).catch(() => null)
+  const finalLedger = (finalRun?.metadata?.[GROUP_LEDGER_META_KEY] ?? {}) as Record<string, GroupStatusEntry>
+  const finalBlocked = Object.values(finalLedger).filter(e => e.status === "blocked")
+  const finalFailed = Object.values(finalLedger).filter(e => e.status === "failed")
 
-      // Mark any retries that weren't mapped (backend returned fewer results)
-      for (let rIdx = 0; rIdx < retryIndices.length; rIdx++) {
-        if (mappedSet.has(rIdx)) continue
-        const originalIdx = retryIndices[rIdx]!
-        const decisionIdx = retryDecisionIndices[rIdx]!
-        const group = runPlan.groups[originalIdx]
-        const task = runPlan.tasks[originalIdx]!
-        decisions[decisionIdx] = {
-          ...decisions[decisionIdx]!,
-          decision: "blocker",
-          reason: `Retry produced no result for ${group?.id ?? `group-${originalIdx}`} — backend may have crashed`,
-        }
-        options?.onSubagentUpdate?.(task.groupId, {
-          agent: task.agent,
-          title: group?.taskPrompt ?? undefined,
-          status: "failed",
-          finishedAt: Date.now(),
-          lastCommand: "retry produced no result — backend may have crashed",
-        })
-        await updateGroupLedger(runId, group?.id ?? task.groupId, {
-          status: "failed",
-          error: "Retry produced no result — backend may have crashed",
-          failureKind: "blocker",
-          retryCount: 1,
-        }, cwd).catch(() => {})
+  // ── Store verification output files for all groups ──────────
+  for (const entry of allResults) {
+    if (entry.result.verification?.output) {
+      const verPath = path.join(worktreeResultsDir, `${entry.groupId}-verification.txt`)
+      try {
+        await fs.writeFile(verPath, entry.result.verification.output, "utf-8")
+      } catch {
+        // Best-effort
       }
     }
   }
 
-  const blockers = decisions.filter((d) => d.decision === "blocker")
-  if (blockers.length > 0) {
+  // If there are blockers, write failure report and throw
+  if (finalFailed.length > 0 || finalBlocked.length > 0) {
     const reportPath = path.join(worktreeResultsDir, "failure-report.json")
-    await fs.writeFile(reportPath, JSON.stringify({ decisions, allResults: allResults.map(r => ({ agent: r.agent, ok: r.ok, error: r.error })) }, null, 2))
+    await fs.writeFile(reportPath, JSON.stringify({
+      decisions,
+      allResults: allResults.map(r => ({
+        agent: r.result.agent,
+        ok: r.result.ok,
+        error: r.result.error,
+        verificationCommand: r.result.verification?.command,
+        verificationOutputPath: r.result.verification?.output
+          ? path.join(worktreeResultsDir, `${r.groupId}-verification.txt`)
+          : undefined,
+        verificationExitCode: r.result.verification?.status === "fail" ? 1 : r.result.verification?.status === "pass" ? 0 : undefined,
+      })),
+      blockedGroups: finalBlocked.map(g => ({ groupId: g.groupId, blockedBy: g.blockedBy })),
+    }, null, 2))
 
-    // ── Write group-status-summary and update phase to partial ──
-    // Even though some groups failed, preserve succeeded group data
-    // so the user can resume or apply successful groups independently.
     const summaryPath = await writeGroupStatusSummary(runId, changeId, cwd).catch(() => reportPath)
     await updateRun(runId, {
       phase: "partial",
       metadata: {
-        ...((await readRun(runId, cwd)).metadata ?? {}),
-        partialRunNote: `${blockers.length} group(s) failed. Successful groups preserved. Use --resume to retry failed groups or --apply-successful to apply successful groups.`,
+        ...(finalRun?.metadata ?? {}),
+        partialRunNote: `${finalFailed.length} group(s) failed, ${finalBlocked.length} group(s) blocked. Successful groups preserved.`,
         groupStatusSummaryPath: summaryPath,
       },
     } as any, cwd)
 
+    const errorParts: string[] = []
+    if (finalFailed.length > 0) {
+      errorParts.push(`${finalFailed.length} group(s) failed: ${finalFailed.map(g => `${g.groupId}: ${g.error ?? "unknown"}`).join("; ")}`)
+    }
+    if (finalBlocked.length > 0) {
+      errorParts.push(`${finalBlocked.length} group(s) blocked by failed dependencies: ${finalBlocked.map(g => `${g.groupId} (blocked by ${g.blockedBy?.join(", ") ?? "unknown"})`).join("; ")}`)
+    }
+
     await recordDispatchFailurePolicy(runId, cwd, decisions, reportPath, "partial")
     throw new Error(
-      `${blockers.length} group(s) could not be dispatched after ${IMPLEMENT_GROUP_MAX_RETRIES} retry: ` +
-      blockers.map((d) => `${d.groupId}: ${d.reason}`).join("; ") +
+      `Implementation dispatch failed:\n` +
+      errorParts.join("\n") +
       `\nFailure report: ${reportPath}` +
       `\nGroup status summary: ${summaryPath}`,
     )
   }
 
+  // ── All groups succeeded — collect worktree results ────────
   options?.onWorkflowUpdate?.("All subagents finished; collecting worker results. Scoped verification is deferred to the final verification phase.")
 
   // Collect group results from dispatch outputs
@@ -3316,9 +3642,9 @@ async function runWorktreeDispatchAndFinalize(
   const patchesDir = path.join(runDir, "patches")
   await fs.mkdir(patchesDir, { recursive: true })
 
-  for (let idx = 0; idx < allResults.length; idx++) {
-    const r = allResults[idx]!
-    const group = runPlan.groups[idx]
+  for (const entry of allResults) {
+    const { result: r, index: idx, groupId } = entry
+    const group = runPlan.groups.find(g => g.id === groupId)
     if (!group) continue
 
     if (!r.ok) {
@@ -3327,9 +3653,69 @@ async function runWorktreeDispatchAndFinalize(
 
     const verification = normalizeDispatchVerification(r.verification)
 
-    // If the bridge explicitly reported failed scoped verification, fail the group.
+    // If the bridge explicitly reported failed scoped verification, attempt fix loop.
     // Missing verification (bridge no longer runs it) = deferred to final verification, not a blocker.
     if (verification && verification.status === "fail") {
+      // Attempt fix loop before giving up
+      const currentFixAttempts = (await readRun(runId, cwd).catch(() => null))
+        ?.metadata?.[GROUP_LEDGER_META_KEY]?.[group.id]?.fixAttempts ?? 0
+
+      const fixShouldRun = currentFixAttempts < MAX_FIX_ATTEMPTS_PER_GROUP
+      if (fixShouldRun) {
+        options?.onWorkflowUpdate?.(`Attempting fix for ${group.id} (attempt ${currentFixAttempts + 1}/${MAX_FIX_ATTEMPTS_PER_GROUP})`)
+        await updateGroupLedger(runId, group.id, {
+          status: "retrying",
+          fixAttempts: currentFixAttempts + 1,
+        }, cwd).catch(() => {})
+
+        const fixResult = await attemptGroupFix(
+          group.id,
+          group?.taskPrompt ?? "",
+          group?.files ?? [],
+          r.agent ?? "zflow.implement-routine",
+          r,
+          dispatchService,
+          {
+            runId,
+            cwd,
+            repoRoot,
+            changeId,
+            planVersion,
+            worktreeResultsDir,
+            onSubagentUpdate: options?.onSubagentUpdate,
+            onWorkflowUpdate: options?.onWorkflowUpdate,
+            implementModel,
+          },
+        )
+
+        if (fixResult.fixed) {
+          // Fix succeeded — treat group as succeeded and capture normally
+          options?.onSubagentUpdate?.(group.id, {
+            agent: r.agent ?? tasks[idx]?.agent,
+            title: `fix: ${group.id} (attempt ${currentFixAttempts + 1})`,
+            status: "completed",
+            finishedAt: Date.now(),
+            lastCommand: `fix succeeded via post-dispatch fix`,
+          })
+          await updateGroupLedger(runId, group.id, {
+            status: "succeeded",
+            agent: r.agent ?? "zflow.implement-routine",
+            error: undefined,
+            failureKind: undefined,
+            fixResult: "succeeded",
+            fixClassification: fixResult.fixClassification,
+            fixPatchPath: fixResult.fixPatchPath,
+          }, cwd).catch(() => {})
+          // Replace the result's verification with success so the normal capture path below runs
+          r.verification = { status: "pass", command: verification.command, output: fixResult.verificationOutput }
+          continue // skip to the capture logic below
+        }
+
+        // Fix failed
+        options?.onWorkflowUpdate?.(`Fix attempt ${currentFixAttempts + 1} for ${group.id} failed: ${fixResult.error ?? "unknown"}`)
+      }
+
+      // Fix exhausted or not attempted — mark as failed
       const failure = `${group.id}: scoped verification failed`
       postDispatchFailures.push(failure)
       options?.onSubagentUpdate?.(group.id, {
@@ -3342,6 +3728,8 @@ async function runWorktreeDispatchAndFinalize(
         error: failure,
         failureKind: "blocker",
         scopedVerification: verification,
+        fixAttempts: currentFixAttempts,
+        fixResult: currentFixAttempts > 0 ? "failed" : undefined,
       }, cwd).catch(() => {})
       continue
     }
@@ -3373,6 +3761,13 @@ async function runWorktreeDispatchAndFinalize(
         scopedVerification,
       }, cwd).catch(() => {})
       continue
+    }
+
+    // Persist verification output to a file alongside the result
+    if (r.verification?.output) {
+      const verPath = path.join(worktreeResultsDir, `${group.id}-verification.txt`)
+      await fs.writeFile(verPath, r.verification.output, "utf-8").catch(() => {})
+      scopedVerification.outputPath = verPath
     }
 
     if (r.patchPath) {

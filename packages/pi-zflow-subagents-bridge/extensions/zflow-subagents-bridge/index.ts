@@ -563,6 +563,49 @@ async function runParallelWithCompatWorktrees(
           maxOutput: task.maxOutput,
           onUpdate: forwardCompatProgress(task.agent, task.onUpdate),
         })
+
+        // Run scoped verification if specified
+        const scopedVerification = (task as { scopedVerification?: string }).scopedVerification
+        let verificationResult: {
+          status: "pass" | "fail" | "skipped"
+          command?: string
+          output?: string
+        } | undefined
+
+        if (scopedVerification && scopedVerification.trim()) {
+          try {
+            const { execFileSync } = await import("node:child_process")
+            const verOut = execFileSync("bash", ["-c", scopedVerification.trim()], {
+              cwd: agentCwd,
+              encoding: "utf-8",
+              maxBuffer: 50 * 1024,   // 50KB
+              timeout: 300_000,        // 5 minutes
+            })
+            verificationResult = {
+              status: "pass",
+              command: scopedVerification.trim(),
+              output: verOut.substring(0, 50 * 1024),
+            }
+          } catch (verErr: unknown) {
+            const execErr = verErr as {
+              stdout?: Buffer | string
+              stderr?: Buffer | string
+              status?: number
+              message?: string
+            }
+            const parts: string[] = []
+            if (execErr.stdout) parts.push(execErr.stdout.toString().trim())
+            if (execErr.stderr) parts.push(execErr.stderr.toString().trim())
+            if (!parts.length && execErr.message) parts.push(execErr.message)
+            const verOutput = parts.join("\n---stderr---\n").substring(0, 50 * 1024)
+            verificationResult = {
+              status: "fail",
+              command: scopedVerification.trim(),
+              output: verOutput,
+            }
+          }
+        }
+
         return {
           agent: task.agent,
           ok: result.exitCode === 0 && !result.error,
@@ -570,7 +613,7 @@ async function runParallelWithCompatWorktrees(
           rawOutput: result.finalOutput ?? "",
           savedOutputPath: result.savedOutputPath,
           outputPath: result.savedOutputPath,
-          verification: undefined,
+          verification: verificationResult,
         }
       } catch (err) {
         return {
