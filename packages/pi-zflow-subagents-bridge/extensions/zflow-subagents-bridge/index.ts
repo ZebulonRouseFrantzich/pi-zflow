@@ -207,6 +207,8 @@ class SubagentsDispatchService implements DispatchService {
           outputMode: t.outputMode,
           maxOutput: input.maxOutput,
           onUpdate: t.onUpdate,
+          scopedVerification: (t as { scopedVerification?: string }).scopedVerification,
+          worktreeSetupCommand: (t as { worktreeSetupCommand?: string }).worktreeSetupCommand,
         })),
         cwd: input.cwd,
         concurrency: input.concurrency,
@@ -552,6 +554,27 @@ async function runParallelWithCompatWorktrees(
         recentOutput: ["starting worktree dispatch..."],
         lastActivityAt: Date.now(),
       })
+      // Run worktree setup command if provided (e.g. pnpm install --frozen-lockfile)
+      const worktreeSetupCommand = (task as { worktreeSetupCommand?: string }).worktreeSetupCommand
+      if (worktreeSetupCommand && worktreeSetupCommand.trim()) {
+        try {
+          const { execFileSync } = await import("node:child_process")
+          execFileSync("bash", ["-c", worktreeSetupCommand.trim()], {
+            cwd: agentCwd,
+            stdio: "pipe",
+            timeout: 120_000,
+          })
+        } catch (setupErr: unknown) {
+          const setupError = setupErr as { stderr?: Buffer; message?: string }
+          return {
+            agent: task.agent,
+            ok: false,
+            error: `Worktree setup failed: ${setupError.stderr?.toString().trim() || setupError.message || "unknown error"}`,
+            rawOutput: "",
+          }
+        }
+      }
+
       try {
         const resolvedAgent = findAgent(agents, task.agent)!
         const result = await modules.runSync(agentCwd, agents, resolvedAgent.name, task.task, {

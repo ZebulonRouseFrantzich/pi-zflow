@@ -109,6 +109,15 @@ export interface ParallelTaskInput {
    * Omit or leave undefined to skip post-run verification.
    */
   scopedVerification?: string
+
+  /**
+   * Shell command to run in the worktree BEFORE the agent starts.
+   * Used to ensure dependencies are installed (e.g. "pnpm install --frozen-lockfile").
+   * If specified, this runs before the agent and before scoped verification.
+   * If the command fails, the task fails immediately with a clear error.
+   * Omit or leave undefined to skip worktree setup.
+   */
+  worktreeSetupCommand?: string
 }
 
 /**

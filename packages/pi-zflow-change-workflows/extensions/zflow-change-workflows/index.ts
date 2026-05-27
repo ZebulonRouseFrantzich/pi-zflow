@@ -2242,6 +2242,8 @@ async function attemptGroupFix(
   })
 
   try {
+    const { detectWorktreeSetupCommand } = await import("./orchestration.js")
+    const fixWorktreeSetupCommand = await detectWorktreeSetupCommand(options.repoRoot)
     const fixResult = await dispatchService.runParallel({
       tasks: [{
         agent,
@@ -2250,6 +2252,7 @@ async function attemptGroupFix(
         output: fixOutputPath,
         outputMode: "file-only" as const,
         scopedVerification: verificationCmd,
+        worktreeSetupCommand: fixWorktreeSetupCommand,
         onUpdate: (progress) => {
           const recentOutput = Array.isArray(progress.recentOutput) ? progress.recentOutput : []
           options?.onSubagentUpdate?.(groupId, {
@@ -2791,12 +2794,15 @@ async function resumeWorktreeDispatch(
   await fs.mkdir(worktreeResultsDir, { recursive: true })
 
   const implementModel = await resolveWorkflowModel("zflow.implement-routine")
+  const { detectWorktreeSetupCommand } = await import("./orchestration.js")
+  const worktreeSetupCommand = await detectWorktreeSetupCommand(repoRoot)
   const tasks = runPlan.tasks.map((t) => ({
     agent: t.agent,
     task: t.task,
     model: implementModel.dispatchModel,
     output: path.join(worktreeResultsDir, `${t.groupId}-resume-result.md`),
     outputMode: "file-only" as const,
+    worktreeSetupCommand,
     onUpdate: (progress: AgentDispatchProgress) => {
       const recentTools = Array.isArray(progress.recentTools) ? progress.recentTools : []
       const recentTool = recentTools[recentTools.length - 1]
@@ -3329,6 +3335,10 @@ async function runWorktreeDispatchAndFinalize(
   await fs.mkdir(worktreeResultsDir, { recursive: true })
   const implementModel = await resolveWorkflowModel("zflow.implement-routine")
 
+  // Auto-detect worktree setup command (pnpm install, npm ci, etc.)
+  const { detectWorktreeSetupCommand } = await import("./orchestration.js")
+  const worktreeSetupCommand = await detectWorktreeSetupCommand(repoRoot)
+
   // Build the full tasks array once. Each wave will select a subset by index.
   const tasks = runPlan.tasks.map((t, taskIdx) => ({
     agent: t.agent,
@@ -3337,6 +3347,7 @@ async function runWorktreeDispatchAndFinalize(
     output: path.join(worktreeResultsDir, `${t.groupId}-result.md`),
     outputMode: "file-only" as const,
     scopedVerification: t.scopedVerification,
+    worktreeSetupCommand,
     onUpdate: (progress: AgentDispatchProgress) => {
       const recentTools = Array.isArray(progress.recentTools) ? progress.recentTools : []
       const recentTool = recentTools[recentTools.length - 1]

@@ -8441,3 +8441,53 @@ export async function scanForOrphanedScripts(
 
   return orphans
 }
+
+/**
+ * Auto-detect the repo's toolchain and return a shell command to install
+ * dependencies in a worktree.  Returns `null` if no supported toolchain is
+ * detected, meaning the caller should skip setup (worktree setup hooks are
+ * still honoured separately).
+ *
+ * Detection order (highest priority first):
+ *  1. pnpm workspace / pnpm-lock.yaml
+ *  2. npm package-lock.json
+ *  3. yarn.lock
+ *  4. bun.lockb / bun.lock
+ *
+ * If `flake.nix` is also present, wraps the command in `nix develop`.
+ *
+ * @param repoRoot - Absolute path to the repository root.
+ * @returns A shell command string, or `null` if no toolchain is detected.
+ */
+export async function detectWorktreeSetupCommand(repoRoot: string): Promise<string | null> {
+  const fs = await import("node:fs")
+  const path = await import("node:path")
+
+  const hasNix = fs.existsSync(path.join(repoRoot, "flake.nix"))
+  const prefix = hasNix ? "nix develop --command " : ""
+
+  // 1. pnpm workspace / pnpm-lock.yaml
+  if (fs.existsSync(path.join(repoRoot, "pnpm-workspace.yaml")) ||
+      fs.existsSync(path.join(repoRoot, "pnpm-lock.yaml"))) {
+    const cmd = "pnpm install --frozen-lockfile"
+    return `${prefix}${cmd}`
+  }
+
+  // 2. npm
+  if (fs.existsSync(path.join(repoRoot, "package-lock.json"))) {
+    return `${prefix}npm ci`
+  }
+
+  // 3. yarn
+  if (fs.existsSync(path.join(repoRoot, "yarn.lock"))) {
+    return `${prefix}yarn install --frozen-lockfile`
+  }
+
+  // 4. bun
+  if (fs.existsSync(path.join(repoRoot, "bun.lockb")) ||
+      fs.existsSync(path.join(repoRoot, "bun.lock"))) {
+    return `${prefix}bun install --frozen-lockfile`
+  }
+
+  return null
+}
