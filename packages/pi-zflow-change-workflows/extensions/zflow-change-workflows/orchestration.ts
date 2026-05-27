@@ -1034,17 +1034,16 @@ export interface DispatchExecutionGroup {
 }
 
 /**
- * Coalesce execution groups that share files.
+ * Coalesce execution groups that share files and have no explicit ordering.
  *
- * Builds a graph where edges connect groups that share at least one file.
- * Groups in each connected component are merged into a single coalesced group
- * so they run in the same worktree.
+ * Builds a graph where edges connect groups that share at least one file AND
+ * have no dependency relationship (direct or transitive). Groups with explicit
+ * ordering (Group B depends on Group A) are not coalesced — the apply-back
+ * engine patches them sequentially in topological order.
  *
- * This prevents overlapping groups from being dispatched to independent
- * worktrees from the same base commit and producing incompatible versions of
- * the same file. Explicit non-overlapping dependencies are preserved as
- * ordering metadata for apply-back; they are not coalesced transitively because
- * doing so collapses entire dependency chains into one worker.
+ * Groups in each connected component (file-sharing + independent) are merged
+ * into a single coalesced group so they run in the same worktree and produce
+ * compatible patches from the same base commit.
  *
  * @param groups - The dispatch execution groups to coalesce.
  * @returns A new array of groups with connected components merged.
@@ -1054,10 +1053,34 @@ export function coalesceConnectedGroups(
 ): DispatchExecutionGroup[] {
   if (groups.length <= 1) return groups
 
+  // ── Build transitive dependency closure ─────────────────────
+  // Used to avoid coalescing groups that already have explicit dependency
+  // ordering — the apply-back engine applies patches in topological order,
+  // so sequential groups don't need to run in the same worktree.
+  const transitiveDeps = new Map<string, Set<string>>()
+  for (const g of groups) {
+    const closure = new Set<string>()
+    const stack = [...g.dependencies]
+    while (stack.length > 0) {
+      const depId = stack.pop()!
+      if (closure.has(depId)) continue
+      closure.add(depId)
+      const depGroup = groups.find(x => x.id === depId)
+      if (depGroup) {
+        for (const d of depGroup.dependencies) {
+          if (!closure.has(d)) stack.push(d)
+        }
+      }
+    }
+    transitiveDeps.set(g.id, closure)
+  }
+
   // ── Build adjacency list ────────────────────────────────────
-  // Two groups are connected if they share at least one file. Explicit
-  // dependencies alone are not coalescing edges; otherwise a dependency chain
-  // like group-1 -> group-2 -> group-3 -> group-4 becomes one huge worker.
+  // Two groups are connected if they share at least one file AND have
+  // no explicit dependency ordering between them (neither directly nor
+  // transitively depends on the other). Groups with dependency ordering
+  // don't need coalescing — the apply-back engine handles them by
+  // applying patches in topological order.
   const groupIds = groups.map(g => g.id)
   const adjacency = new Map<string, string[]>()
   for (const g of groups) adjacency.set(g.id, [])
@@ -1066,9 +1089,10 @@ export function coalesceConnectedGroups(
     for (let j = i + 1; j < groups.length; j++) {
       const a = groups[i]!
       const b = groups[j]!
-      const connected = a.files.some(f => b.files.includes(f))
+      const shareFiles = a.files.some(f => b.files.includes(f))
+      const independent = !(transitiveDeps.get(a.id)?.has(b.id) || transitiveDeps.get(b.id)?.has(a.id))
 
-      if (connected) {
+      if (shareFiles && independent) {
         adjacency.get(a.id)!.push(b.id)
         adjacency.get(b.id)!.push(a.id)
       }
@@ -3083,7 +3107,7 @@ export async function prepareWorktreeImplementationRun(
 
   const dispatchGroups: DispatchExecutionGroup[] = groups.map(g => ({
     id: g.id,
-    agent: "zflow.implement-routine",
+    agent: g.agent || "zflow.implement-routine",
     files: g.files,
     dependencies: g.dependencies,
     taskPrompt: g.taskPrompt,

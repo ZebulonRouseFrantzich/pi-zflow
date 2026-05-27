@@ -181,7 +181,9 @@ describe("buildWorkerTask", () => {
 // ---------------------------------------------------------------------------
 
 describe("coalesceConnectedGroups", () => {
-  test("coalesces groups that share files", () => {
+  test("coalesces groups that share files when independent (no dependency path)", () => {
+    // Groups sharing a file but with a dependency edge (group-2 -> group-1)
+    // should NOT be coalesced; the apply-back will sequence patches correctly.
     const groups = [
       makeGroup("group-1", ["src/app.ts", "src/env.ts"], [], "zflow.implement-routine", "Foundation", "pnpm typecheck"),
       makeGroup("group-2", ["src/app.ts", "src/routes.ts"], ["group-1"], "zflow.implement-routine", "Routes", "pnpm test"),
@@ -190,14 +192,31 @@ describe("coalesceConnectedGroups", () => {
 
     const coalesced = coalesceConnectedGroups(groups)
 
-    assert.equal(coalesced.length, 2)
-    assert.equal(coalesced[0].id, "group-1~group-2")
-    assert.deepEqual(coalesced[0].coalescedFrom, ["group-1", "group-2"])
-    assert.deepEqual(coalesced[0].files, ["src/app.ts", "src/env.ts", "src/routes.ts"])
+    // group-1 and group-2 share src/app.ts but have dependency ordering (2->1),
+    // so they are NOT coalesced. group-3 has no file overlap → separate.
+    assert.equal(coalesced.length, 3)
+    assert.equal(coalesced[0].id, "group-1")
+    assert.equal(coalesced[1].id, "group-2")
+    assert.deepEqual(coalesced[1].dependencies, ["group-1"])
+    assert.equal(coalesced[2].id, "group-3")
+    assert.deepEqual(coalesced[2].dependencies, ["group-2"])
+  })
+
+  test("coalesces independent groups that share files but have no dependency path", () => {
+    // Two groups sharing a file with no dependency edge between them
+    // MUST be coalesced to avoid incompatible git patches from the same base.
+    const groups = [
+      makeGroup("group-a", ["src/shared.ts", "src/feature-a.ts"], [], "zflow.implement-routine", "Feature A", "pnpm test -- featureA"),
+      makeGroup("group-b", ["src/shared.ts", "src/feature-b.ts"], [], "zflow.implement-routine", "Feature B", "pnpm test -- featureB"),
+    ]
+
+    const coalesced = coalesceConnectedGroups(groups)
+
+    assert.equal(coalesced.length, 1)
+    assert.equal(coalesced[0].id, "group-a~group-b")
+    assert.deepEqual(coalesced[0].coalescedFrom, ["group-a", "group-b"])
+    assert.deepEqual(coalesced[0].files, ["src/shared.ts", "src/feature-a.ts", "src/feature-b.ts"])
     assert.deepEqual(coalesced[0].dependencies, [])
-    assert.equal(coalesced[0].scopedVerification, "pnpm typecheck\npnpm test")
-    assert.equal(coalesced[1].id, "group-3")
-    assert.deepEqual(coalesced[1].dependencies, ["group-1~group-2"])
   })
 
   test("does not coalesce dependency chains without file overlap", () => {

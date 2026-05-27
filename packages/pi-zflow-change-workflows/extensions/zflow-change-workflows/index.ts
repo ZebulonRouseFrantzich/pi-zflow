@@ -2549,13 +2549,34 @@ async function resumeWorktreeDispatch(
 
   // ── Dispatch ──────────────────────────────────────────────────
 
-  const dispatchResult = await dispatchService.runParallel({
-    tasks,
-    cwd,
-    concurrency: WORKTREE_DISPATCH_CONCURRENCY,
-    worktree: true,
-    maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
-  })
+  // ── Dispatch with heartbeat ──────────────────────────────────
+  // The dispatch blocks until all worktree tasks complete. Emit periodic
+  // heartbeat progress so the indicator doesn't appear frozen.
+  let heartbeatCount = 0
+  const dispatchStartTime = Date.now()
+  const heartbeat = setInterval(() => {
+    heartbeatCount++
+    const elapsed = Math.round((Date.now() - dispatchStartTime) / 1000)
+    const runningCount = runPlan.tasks.length
+    options?.onWorkflowUpdate?.(
+      `⏳ Workers running: ${runningCount} group(s) dispatched, ` +
+      `${heartbeatCount} heartbeat(s), ${elapsed}s elapsed`,
+    )
+  }, 10000)
+  heartbeat.unref?.()
+
+  let dispatchResult
+  try {
+    dispatchResult = await dispatchService.runParallel({
+      tasks,
+      cwd,
+      concurrency: WORKTREE_DISPATCH_CONCURRENCY,
+      worktree: true,
+      maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
+    })
+  } finally {
+    clearInterval(heartbeat)
+  }
 
   // ── Collect results and update ledger ─────────────────────────
   const newResults: Array<DispatchGroupResult> = [...dispatchResult.results]
@@ -2991,13 +3012,34 @@ async function runWorktreeDispatchAndFinalize(
     }, cwd).catch(() => {})
   }
 
-  const dispatchResult = await dispatchService.runParallel({
-    tasks,
-    cwd,
-    concurrency: WORKTREE_DISPATCH_CONCURRENCY,
-    worktree: true,
-    maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
-  })
+  // ── Dispatch with heartbeat ──────────────────────────────────
+  // The dispatch blocks until all worktree tasks complete. Emit periodic
+  // heartbeat progress so the indicator doesn't appear frozen.
+  let heartbeatCount = 0
+  const dispatchStartTime = Date.now()
+  const heartbeat = setInterval(() => {
+    heartbeatCount++
+    const elapsed = Math.round((Date.now() - dispatchStartTime) / 1000)
+    const runningCount = runPlan.tasks.length
+    options?.onWorkflowUpdate?.(
+      `Workers running: ${runningCount} group(s) dispatched, ` +
+      `${heartbeatCount} heartbeat(s), ${elapsed}s elapsed`,
+    )
+  }, 10000)
+  heartbeat.unref?.()
+
+  let dispatchResult
+  try {
+    dispatchResult = await dispatchService.runParallel({
+      tasks,
+      cwd,
+      concurrency: WORKTREE_DISPATCH_CONCURRENCY,
+      worktree: true,
+      maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
+    })
+  } finally {
+    clearInterval(heartbeat)
+  }
 
   // Classify results: successful groups go into collected; failures are classified
   // as retryable or blocker. Retryable groups get one bounded re-run via runParallel
