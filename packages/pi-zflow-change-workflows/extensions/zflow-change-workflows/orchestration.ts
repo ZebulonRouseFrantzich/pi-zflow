@@ -4071,6 +4071,8 @@ export interface ChangePlanWorkflowOptions {
   changeDescription: string
   /** Original user input seed (description, path, or explicit id). */
   changeSeed: string
+  /** Optional extracted repo path/folder/file reference mentioned by the user. */
+  changeReferencePath?: string
   /** Whether the change seed was an explicit path/id reference. */
   explicitReference?: boolean
   /** Durable plan source mode. */
@@ -5628,6 +5630,7 @@ function buildChangePlanDraftTaskPrompt(input: {
   planDocPath: string
   repoMapPath: string
   reconnaissancePath: string
+  changeReferencePath?: string
   existingPlanBody?: string
 }): string {
   return [
@@ -5637,6 +5640,7 @@ function buildChangePlanDraftTaskPrompt(input: {
     `Target durable plan path: ${input.planDocPath}`,
     `Repository map path: ${input.repoMapPath}`,
     `Reconnaissance path: ${input.reconnaissancePath}`,
+    input.changeReferencePath ? `Referenced repo path: ${input.changeReferencePath}` : "",
     input.existingPlanBody
       ? [
         "Existing durable plan body to refine:",
@@ -5694,7 +5698,9 @@ export async function runChangePlanWorkflow(
   options.onProgress?.("🔎 Building reconnaissance context for change planning...", "info")
   const reconResult = await buildReconnaissance(
     cwd,
-    options.explicitReference ? options.changeSeed : undefined,
+    options.explicitReference
+      ? options.changeSeed
+      : options.changeReferencePath,
   )
 
   const registry = getZflowRegistry()
@@ -5723,6 +5729,7 @@ export async function runChangePlanWorkflow(
       planDocPath,
       repoMapPath: repoMapResult.path,
       reconnaissancePath: reconResult.path,
+      changeReferencePath: options.explicitReference ? options.changeSeed : options.changeReferencePath,
       existingPlanBody: existingPlanBody || undefined,
     }),
     onUpdate: (progress) => {

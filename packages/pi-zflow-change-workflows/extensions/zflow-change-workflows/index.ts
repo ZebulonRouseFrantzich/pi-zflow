@@ -1790,6 +1790,33 @@ function looksLikeChangePlanReference(value: string): boolean {
     /^[a-z0-9][a-z0-9-]*$/.test(value)
 }
 
+function isStandaloneChangePlanReference(value: string): boolean {
+  return !/\s/.test(value.trim()) && looksLikeChangePlanReference(value.trim())
+}
+
+export function extractChangePlanReference(value: string): string | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  if (isStandaloneChangePlanReference(trimmed)) {
+    return trimmed.replace(/[),.;:]+$/g, "")
+  }
+
+  const tokens = trimmed.split(/\s+/)
+  for (const token of tokens) {
+    const normalized = token.replace(/^[('"\[]+|[)'"\],.;:]+$/g, "")
+    if (!normalized) continue
+    const tokenLooksPathLike = normalized.startsWith("@") ||
+      normalized.includes("/") ||
+      normalized.includes("\\") ||
+      normalized.endsWith(".md")
+    if (tokenLooksPathLike) {
+      return normalized
+    }
+  }
+
+  return null
+}
+
 function isRuneContextReference(value: string): boolean {
   return value.startsWith("@") || value.includes("/context/")
 }
@@ -1852,6 +1879,12 @@ export function deriveChangePlanId(changeSeed: string, explicitReference: boolea
     return deriveSemanticChangeId(changeSeed)
   }
 
+  const referencedPath = extractChangePlanReference(changeSeed)
+  if (referencedPath) {
+    const fromReference = deriveSemanticChangeId(referencedPath)
+    if (fromReference) return fromReference
+  }
+
   const tokens = changeSeed
     .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
     .replace(/[^a-zA-Z0-9]+/g, "-")
@@ -1899,7 +1932,7 @@ export function parseChangePlanArgs(args: string): ParsedChangePlanArgs {
     }
   }
 
-  if (looksLikeChangePlanReference(trimmed)) {
+  if (isStandaloneChangePlanReference(trimmed)) {
     return {
       changeSeed: trimmed,
       notes: "",
@@ -5942,6 +5975,10 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         changeDescription = prompted.changeDescription
       }
 
+      const referencedPath = parsedArgs.explicitReference
+        ? parsedArgs.changeSeed
+        : extractChangePlanReference(changeDescription)
+
       const progress = createWorkflowProgressIndicator(pi, ctx, parsedArgs.changeSeed, {
         command: "zflow-change-plan",
         initialMessage: "Collecting change context and drafting a detailed durable plan.md",
@@ -5989,8 +6026,9 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           changeId,
           changeSeed: parsedArgs.changeSeed,
           changeDescription,
+          changeReferencePath: referencedPath ?? undefined,
           explicitReference: parsedArgs.explicitReference,
-          sourceMode: parsedArgs.explicitReference && isRuneContextReference(parsedArgs.changeSeed)
+          sourceMode: referencedPath && isRuneContextReference(referencedPath)
             ? "runecontext"
             : "adhoc",
           onProgress: (message) => progress.update(message),

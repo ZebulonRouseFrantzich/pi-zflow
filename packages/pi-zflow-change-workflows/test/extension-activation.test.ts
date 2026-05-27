@@ -10,6 +10,7 @@ import * as assert from "node:assert/strict"
 
 import activateZflowChangeWorkflowsExtension, {
   deriveChangePlanId,
+  extractChangePlanReference,
   parseChangePlanArgs,
   parseChangePrepareArgs,
   shouldForkImplementationSessionAfterPrepare,
@@ -136,6 +137,17 @@ describe("zflow-change-workflows extension activation", () => {
     assert.equal(parsed.explicitReference, true)
   })
 
+  it("keeps prose with embedded paths as freeform descriptions", () => {
+    const parsed = parseChangePlanArgs("Please pull all detail needed for this plan from @.zflow/plans/oracle-mssql-entitlements-readonly/")
+
+    assert.equal(parsed.explicitReference, false)
+    assert.match(parsed.notes, /Please pull all detail needed/)
+    assert.equal(
+      extractChangePlanReference(parsed.changeSeed),
+      "@.zflow/plans/oracle-mssql-entitlements-readonly/",
+    )
+  })
+
   it("derives compact change ids from freeform descriptions", () => {
     const changeId = deriveChangePlanId(
       "oracle mssql entitlements readonly or in its subfolders",
@@ -147,6 +159,15 @@ describe("zflow-change-workflows extension activation", () => {
 
   it("preserves explicit change ids when provided", () => {
     const changeId = deriveChangePlanId("oracle-mssql-entitlements-readonly", true)
+
+    assert.equal(changeId, "oracle-mssql-entitlements-readonly")
+  })
+
+  it("derives ids from repo paths mentioned inside prose", () => {
+    const changeId = deriveChangePlanId(
+      "Please pull detail from @.zflow/plans/oracle-mssql-entitlements-readonly/ and its subfolders.",
+      false,
+    )
 
     assert.equal(changeId, "oracle-mssql-entitlements-readonly")
   })
