@@ -7563,6 +7563,10 @@ export async function finalizeVerification(
       completedAt: new Date().toISOString(),
       failureCount: result.pass ? 0 : 1,
     },
+    // Invalidate stale code review when verification reruns successfully.
+    // A new verification pass means any previous review was based on different
+    // code state, so it should not remain silently authoritative.
+    ...(result.pass ? { codeReview: null } : {}),
   } as any, cwd)
 
   // Log to failure log if failed
@@ -7615,6 +7619,8 @@ export async function runBoundedFixLoop(
       completedAt: new Date().toISOString(),
       failureCount: result.success ? 0 : result.fixAttempts.length,
     },
+    // Invalidate stale code review when fix loop succeeds
+    ...(result.success ? { codeReview: null } : {}),
   } as any, cwd)
 
   if (!result.success) {

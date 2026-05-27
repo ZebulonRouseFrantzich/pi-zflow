@@ -85,6 +85,19 @@ async function fileExists(filePath: string): Promise<boolean> {
 }
 
 /**
+ * Compare two ISO timestamps.
+ * Returns true if `a` is strictly before `b`.
+ * Returns false if either is missing, empty, or invalid.
+ */
+function isTimestampBefore(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false
+  const ta = new Date(a).getTime()
+  const tb = new Date(b).getTime()
+  if (isNaN(ta) || isNaN(tb)) return false
+  return ta < tb
+}
+
+/**
  * Normalized group status from run.json groups array vs groupLedger.
  *
  * The run.json has both:
@@ -335,27 +348,78 @@ export async function reconcileResumeState(
   // Always prefer cascade
   const applyBackCanUseCascade = true
 
-  // Determine verification/review need based on phase history
+  // ── Inspect persisted run metadata for smarter staleness detection ──
+  const codeReviewRaw = (run as any).codeReview as Record<string, unknown> | undefined
+  const verificationStatus = run.verification?.status
+  const verificationCompletedAt = run.verification?.completedAt
+  const applyBackCompletedAt = run.applyBack?.completedAt
+  const codeReviewPass = codeReviewRaw?.pass as boolean | undefined
+  const codeReviewCompletedAt = codeReviewRaw?.completedAt as string | undefined
+
+  // Determine if verification is stale (apply-back completed after verification)
+  const verificationStale = !!(
+    applyBackCompletedAt && verificationCompletedAt &&
+    isTimestampBefore(verificationCompletedAt, applyBackCompletedAt)
+  )
+
+  // Determine if code review is stale (verification completed after code review)
+  const codeReviewStale = !!(
+    verificationCompletedAt && codeReviewCompletedAt &&
+    isTimestampBefore(codeReviewCompletedAt, verificationCompletedAt)
+  )
+
+  // Verification is considered current if status is passed/failed and not stale.
+  // Review should only proceed when verification specifically passed.
+  const verificationCurrent = !!(
+    (verificationStatus === "passed" || verificationStatus === "failed") &&
+    !verificationStale
+  )
+  const verificationPassedCurrent = verificationStatus === "passed" && !verificationStale
+
+  // ── Determine verification need ──
+  // Cases:
+  // - Phase forces re-verify (verification-failed)
+  // - completed phase implies full re-run
+  // - Apply-back completed after verification means verification is stale
+  // - Groups are applied but verification never ran (pending/in-progress)
   const verificationNeeded =
     previousPhase === "verification-failed" ||
-    previousPhase === "review-failed" ||
     previousPhase === "completed" ||
-    (previousPhase !== "verification-failed" && allApplied)
+    verificationStale ||
+    (allApplied && (!verificationStatus || verificationStatus === "pending" || verificationStatus === "in-progress"))
 
-  const reviewNeeded = previousPhase === "review-failed"
+  // ── Determine review need ──
+  // Cases:
+  // - Phase explicitly says review-failed
+  // - Verification is current and no code review was done
+  // - Code review exists but is stale (older than verification)
+  // - Code review exists, is current, but failed (needs rerun)
+  let reviewNeeded = previousPhase === "review-failed"
+  if (!reviewNeeded && verificationPassedCurrent) {
+    if (!codeReviewRaw) {
+      reviewNeeded = true
+    } else if (codeReviewStale) {
+      reviewNeeded = true
+    } else if (codeReviewPass === false) {
+      // Code review exists, is current, but failed — needs attention
+      reviewNeeded = true
+    }
+  }
 
-  // Determine the recommended next step
+  // ── Determine the recommended next step ──
   let recommendedNextStep: ResumeReconciliation["recommendedNextStep"]
   if (anyNeedRerun) {
     recommendedNextStep = "rerun-groups"
   } else if (applyBackNeeded) {
     recommendedNextStep = "apply-back"
-  } else if (previousPhase === "verification-failed") {
+  } else if (verificationNeeded) {
     recommendedNextStep = "verify"
-  } else if (previousPhase === "review-failed") {
+  } else if (reviewNeeded) {
     recommendedNextStep = "review"
+  } else if (allApplied && verificationPassedCurrent && codeReviewPass === true) {
+    recommendedNextStep = "complete"
   } else if (allApplied) {
-    recommendedNextStep = "verify"
+    recommendedNextStep = "inspect"
   } else {
     recommendedNextStep = "inspect"
   }

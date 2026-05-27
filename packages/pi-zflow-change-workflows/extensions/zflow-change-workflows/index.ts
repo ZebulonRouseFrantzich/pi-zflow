@@ -6589,6 +6589,57 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
               implProgress.updatePhaseCard("workflow-complete", finalCardTitle, `Phase: ${postResult.phase}, status: ${postResult.status}`, finalCardStatus)
               implProgress.updatePhaseCard("workflow-complete", finalCardTitle, buildWorkflowFinalNextStepsLine(postResult, changeInput), finalCardStatus)
               implProgress.stop(finalCardTitle)
+            } else if (reconciliation.reviewNeeded) {
+              // ── Review-only continuation ──────────────────────────
+              // Verification is already current — skip directly to code review.
+              ctx.ui.notify(
+                "📋 Verification is up-to-date. Running code review...",
+                "info",
+              )
+
+              try {
+                const reviewResult = await finalizeCodeReview(partialRunId, ctx.cwd)
+
+                if (reviewResult.pass) {
+                  ctx.ui.notify("✅ Code review passed. Completing workflow...", "info")
+                  await completeWorkflow(resumeChangeId, partialRunId, ctx.cwd)
+                  ctx.ui.notify(
+                    `✅ Workflow completed for change "${resumeChangeId}".`,
+                    "info",
+                  )
+                } else {
+                  ctx.ui.notify(
+                    `⚠️ Code review found issues: ${reviewResult.summary}\n` +
+                    (reviewResult.findingsPath
+                      ? `  Review findings: ${reviewResult.findingsPath}\n`
+                      : "") +
+                    "  Use /zflow-change-fix to address findings, then resume.",
+                    "warning",
+                  )
+
+                  // Mark phase as review-failed and keep lifecycle/index in sync
+                  const { setRunPhase } = await import("pi-zflow-artifacts")
+                  await setRunPhase(partialRunId, "review-failed", ctx.cwd).catch(() => {})
+                  try {
+                    const { updateStateIndexEntry, getChangeLifecycle, upsertChangeLifecycle } = await import("pi-zflow-artifacts/state-index")
+                    await updateStateIndexEntry(partialRunId, { status: "review-failed" }, ctx.cwd)
+                    const lifecycle = await getChangeLifecycle(resumeChangeId, ctx.cwd)
+                    if (lifecycle) {
+                      await upsertChangeLifecycle({
+                        ...lifecycle,
+                        lastPhase: "review-failed",
+                      }, ctx.cwd)
+                    }
+                  } catch {
+                    // Best-effort state sync
+                  }
+                }
+              } catch (err: unknown) {
+                ctx.ui.notify(
+                  `Code review failed: ${err instanceof Error ? err.message : String(err)}`,
+                  "error",
+                )
+              }
             }
 
             cleanupMode()

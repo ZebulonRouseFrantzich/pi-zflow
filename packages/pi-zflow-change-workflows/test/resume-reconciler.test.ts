@@ -50,6 +50,7 @@ async function createRunJson(
     patchPath?: string
   }>,
   groupLedger?: Record<string, Record<string, unknown>>,
+  extraFields?: Record<string, unknown>,
 ): Promise<void> {
   await fs.mkdir(path.join(runDir, ".zflow", "runs", runId), { recursive: true })
   const runJson = {
@@ -77,6 +78,7 @@ async function createRunJson(
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     metadata: groupLedger ? { groupLedger } : {},
+    ...extraFields,
   }
   await fs.writeFile(
     path.join(runDir, ".zflow", "runs", runId, "run.json"),
@@ -346,6 +348,338 @@ describe("reconcileResumeState", () => {
     assert.equal(result.hasPreviousRun, false)
     assert.equal(result.groupsNeedingRerun.length, 0)
     assert.equal(result.recommendedNextStep, "inspect")
+  })
+
+  test("marks review needed when verification is newer than codeReview (stale review)", async () => {
+    const repo = await createTempRepo()
+    writeFile(repo, "README.md", "# Test\n")
+    gitAddCommit(repo, "initial")
+
+    const runId = "test-run-stale-review"
+    const changeId = "test-change"
+    const runDir = repo
+
+    // Create patch file on disk
+    const patchesDir = path.join(runDir, ".zflow", "runs", runId, "patches")
+    await fs.mkdir(patchesDir, { recursive: true })
+    const patch1 = path.join(patchesDir, "group-1.patch")
+    fsSync.writeFileSync(patch1, "diff --git a/a.ts b/a.ts\nindex a..b 100644\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-// old\n+// new\n", "utf-8")
+
+    // Set up: all groups applied, verification passed (newer timestamp),
+    // codeReview exists (older timestamp, pass=false)
+    const groupLedger: Record<string, Record<string, unknown>> = {
+      "group-1": {
+        groupId: "group-1",
+        status: "applied",
+        agent: "zflow.implement-routine",
+        taskPrompt: "Do work",
+        files: ["a.ts"],
+        dependencies: [],
+        semanticCoupling: { dependsOnGroups: [], blocksGroups: [], sharedFiles: [], notes: [] },
+        patchPath: patch1,
+        appliedToPrimary: true,
+        retryCount: 0,
+        updatedAt: new Date().toISOString(),
+      },
+    }
+
+    const verificationPassedAt = new Date(Date.now() - 1000 * 60).toISOString()  // 1 min ago
+    const codeReviewCompletedAt = new Date(Date.now() - 1000 * 60 * 10).toISOString()  // 10 min ago
+
+    await createRunJson(
+      runDir, runId, repo, changeId, "executing",
+      [{ groupId: "group-1", changedFiles: ["a.ts"], patchPath: patch1 }],
+      groupLedger,
+      {
+        applyBack: { status: "completed", completedAt: new Date(Date.now() - 1000 * 60 * 20).toISOString() },
+        verification: { status: "passed", completedAt: verificationPassedAt },
+        codeReview: { pass: false, summary: "Found issues", completedAt: codeReviewCompletedAt },
+      },
+    )
+
+    writeExecGroupsMd(repo, [["1", "a.ts"]])
+
+    const result = await reconcileResumeState(runId, changeId, "v1", repo)
+    assert.equal(result.hasPreviousRun, true)
+    assert.equal(result.alreadyAppliedGroups.length, 1)
+    assert.equal(result.applyBackNeeded, false)
+    assert.equal(result.verificationNeeded, false)  // verification already current
+    assert.equal(result.reviewNeeded, true)  // stale code review
+    assert.equal(result.recommendedNextStep, "review")
+
+    await fs.rm(repo, { recursive: true, force: true })
+  })
+
+  test("marks review needed when codeReview exists with pass=false and is current", async () => {
+    const repo = await createTempRepo()
+    writeFile(repo, "README.md", "# Test\n")
+    gitAddCommit(repo, "initial")
+
+    const runId = "test-run-failed-review"
+    const changeId = "test-change"
+    const runDir = repo
+
+    const patchesDir = path.join(runDir, ".zflow", "runs", runId, "patches")
+    await fs.mkdir(patchesDir, { recursive: true })
+    const patch1 = path.join(patchesDir, "group-1.patch")
+    fsSync.writeFileSync(patch1, "diff --git a/a.ts b/a.ts\nindex a..b 100644\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-// old\n+// new\n", "utf-8")
+
+    // Set up: all groups applied, verification passed, codeReview exists
+    // with pass=false and is current (same timeframe as verification).
+    const now = new Date()
+    const sharedTs = now.toISOString()
+
+    const groupLedger: Record<string, Record<string, unknown>> = {
+      "group-1": {
+        groupId: "group-1",
+        status: "applied",
+        agent: "zflow.implement-routine",
+        taskPrompt: "Do work",
+        files: ["a.ts"],
+        dependencies: [],
+        semanticCoupling: { dependsOnGroups: [], blocksGroups: [], sharedFiles: [], notes: [] },
+        patchPath: patch1,
+        appliedToPrimary: true,
+        retryCount: 0,
+        updatedAt: sharedTs,
+      },
+    }
+
+    await createRunJson(
+      runDir, runId, repo, changeId, "executing",
+      [{ groupId: "group-1", changedFiles: ["a.ts"], patchPath: patch1 }],
+      groupLedger,
+      {
+        applyBack: { status: "completed", completedAt: sharedTs },
+        verification: { status: "passed", completedAt: sharedTs },
+        codeReview: { pass: false, summary: "Found issues", completedAt: sharedTs },
+      },
+    )
+
+    writeExecGroupsMd(repo, [["1", "a.ts"]])
+
+    const result = await reconcileResumeState(runId, changeId, "v1", repo)
+    assert.equal(result.hasPreviousRun, true)
+    assert.equal(result.verificationNeeded, false)
+    assert.equal(result.reviewNeeded, true)  // failed review needs rerun
+    assert.equal(result.recommendedNextStep, "review")
+
+    await fs.rm(repo, { recursive: true, force: true })
+  })
+
+  test("review not needed when codeReview passed and is current", async () => {
+    const repo = await createTempRepo()
+    writeFile(repo, "README.md", "# Test\n")
+    gitAddCommit(repo, "initial")
+
+    const runId = "test-run-passed-review"
+    const changeId = "test-change"
+    const runDir = repo
+
+    const patchesDir = path.join(runDir, ".zflow", "runs", runId, "patches")
+    await fs.mkdir(patchesDir, { recursive: true })
+    const patch1 = path.join(patchesDir, "group-1.patch")
+    fsSync.writeFileSync(patch1, "diff --git a/a.ts b/a.ts\nindex a..b 100644\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-// old\n+// new\n", "utf-8")
+
+    const now = new Date()
+    const sharedTs = now.toISOString()
+
+    const groupLedger: Record<string, Record<string, unknown>> = {
+      "group-1": {
+        groupId: "group-1",
+        status: "applied",
+        agent: "zflow.implement-routine",
+        taskPrompt: "Do work",
+        files: ["a.ts"],
+        dependencies: [],
+        semanticCoupling: { dependsOnGroups: [], blocksGroups: [], sharedFiles: [], notes: [] },
+        patchPath: patch1,
+        appliedToPrimary: true,
+        retryCount: 0,
+        updatedAt: sharedTs,
+      },
+    }
+
+    await createRunJson(
+      runDir, runId, repo, changeId, "executing",
+      [{ groupId: "group-1", changedFiles: ["a.ts"], patchPath: patch1 }],
+      groupLedger,
+      {
+        applyBack: { status: "completed", completedAt: sharedTs },
+        verification: { status: "passed", completedAt: sharedTs },
+        codeReview: { pass: true, summary: "All good", completedAt: sharedTs },
+      },
+    )
+
+    writeExecGroupsMd(repo, [["1", "a.ts"]])
+
+    const result = await reconcileResumeState(runId, changeId, "v1", repo)
+    assert.equal(result.hasPreviousRun, true)
+    assert.equal(result.verificationNeeded, false)
+    assert.equal(result.reviewNeeded, false)
+    assert.equal(result.recommendedNextStep, "complete")
+
+    await fs.rm(repo, { recursive: true, force: true })
+  })
+
+  test("verification stale when apply-back completed after verification", async () => {
+    const repo = await createTempRepo()
+    writeFile(repo, "README.md", "# Test\n")
+    gitAddCommit(repo, "initial")
+
+    const runId = "test-run-stale-verif"
+    const changeId = "test-change"
+    const runDir = repo
+
+    const patchesDir = path.join(runDir, ".zflow", "runs", runId, "patches")
+    await fs.mkdir(patchesDir, { recursive: true })
+    const patch1 = path.join(patchesDir, "group-1.patch")
+    fsSync.writeFileSync(patch1, "diff --git a/a.ts b/a.ts\nindex a..b 100644\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-// old\n+// new\n", "utf-8")
+
+    // Set up: apply-back completed AFTER verification — verification is stale
+    const now = Date.now()
+    const verificationTs = new Date(now - 1000 * 60 * 30).toISOString()  // 30 min ago
+    const applyBackTs = new Date(now - 1000 * 60 * 15).toISOString()    // 15 min ago (newer)
+
+    const groupLedger: Record<string, Record<string, unknown>> = {
+      "group-1": {
+        groupId: "group-1",
+        status: "applied",
+        agent: "zflow.implement-routine",
+        taskPrompt: "Do work",
+        files: ["a.ts"],
+        dependencies: [],
+        semanticCoupling: { dependsOnGroups: [], blocksGroups: [], sharedFiles: [], notes: [] },
+        patchPath: patch1,
+        appliedToPrimary: true,
+        retryCount: 0,
+        updatedAt: applyBackTs,
+      },
+    }
+
+    await createRunJson(
+      runDir, runId, repo, changeId, "executing",
+      [{ groupId: "group-1", changedFiles: ["a.ts"], patchPath: patch1 }],
+      groupLedger,
+      {
+        applyBack: { status: "completed", completedAt: applyBackTs },
+        verification: { status: "passed", completedAt: verificationTs },
+      },
+    )
+
+    writeExecGroupsMd(repo, [["1", "a.ts"]])
+
+    const result = await reconcileResumeState(runId, changeId, "v1", repo)
+    assert.equal(result.hasPreviousRun, true)
+    assert.equal(result.verificationNeeded, true)  // stale
+    assert.equal(result.recommendedNextStep, "verify")
+
+    await fs.rm(repo, { recursive: true, force: true })
+  })
+
+  test("review needed when verification passed but no codeReview exists", async () => {
+    const repo = await createTempRepo()
+    writeFile(repo, "README.md", "# Test\n")
+    gitAddCommit(repo, "initial")
+
+    const runId = "test-run-no-review"
+    const changeId = "test-change"
+    const runDir = repo
+
+    const patchesDir = path.join(runDir, ".zflow", "runs", runId, "patches")
+    await fs.mkdir(patchesDir, { recursive: true })
+    const patch1 = path.join(patchesDir, "group-1.patch")
+    fsSync.writeFileSync(patch1, "diff --git a/a.ts b/a.ts\nindex a..b 100644\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-// old\n+// new\n", "utf-8")
+
+    const now = new Date()
+    const sharedTs = now.toISOString()
+
+    const groupLedger: Record<string, Record<string, unknown>> = {
+      "group-1": {
+        groupId: "group-1",
+        status: "applied",
+        agent: "zflow.implement-routine",
+        taskPrompt: "Do work",
+        files: ["a.ts"],
+        dependencies: [],
+        semanticCoupling: { dependsOnGroups: [], blocksGroups: [], sharedFiles: [], notes: [] },
+        patchPath: patch1,
+        appliedToPrimary: true,
+        retryCount: 0,
+        updatedAt: sharedTs,
+      },
+    }
+
+    await createRunJson(
+      runDir, runId, repo, changeId, "executing",
+      [{ groupId: "group-1", changedFiles: ["a.ts"], patchPath: patch1 }],
+      groupLedger,
+      {
+        applyBack: { status: "completed", completedAt: sharedTs },
+        verification: { status: "passed", completedAt: sharedTs },
+        // No codeReview field
+      },
+    )
+
+    writeExecGroupsMd(repo, [["1", "a.ts"]])
+
+    const result = await reconcileResumeState(runId, changeId, "v1", repo)
+    assert.equal(result.hasPreviousRun, true)
+    assert.equal(result.verificationNeeded, false)
+    assert.equal(result.reviewNeeded, true)  // no code review done
+    assert.equal(result.recommendedNextStep, "review")
+
+    await fs.rm(repo, { recursive: true, force: true })
+  })
+
+  test("review is not needed when verification failed and no codeReview exists", async () => {
+    const repo = await createTempRepo()
+    writeFile(repo, "README.md", "# Test\n")
+    gitAddCommit(repo, "initial")
+
+    const runId = "test-run-no-review-on-failed-verification"
+    const changeId = "test-change"
+    const runDir = repo
+
+    const patchesDir = path.join(runDir, ".zflow", "runs", runId, "patches")
+    await fs.mkdir(patchesDir, { recursive: true })
+    const patch1 = path.join(patchesDir, "group-1.patch")
+    fsSync.writeFileSync(patch1, "diff --git a/a.ts b/a.ts\nindex a..b 100644\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-// old\n+// new\n", "utf-8")
+
+    const verificationCompletedAt = new Date().toISOString()
+    const groupLedger: Record<string, Record<string, unknown>> = {
+      "group-1": {
+        groupId: "group-1",
+        status: "applied",
+        agent: "zflow.implement-routine",
+        taskPrompt: "Do work",
+        files: ["a.ts"],
+        dependencies: [],
+        semanticCoupling: { dependsOnGroups: [], blocksGroups: [], sharedFiles: [], notes: [] },
+        patchPath: patch1,
+        appliedToPrimary: true,
+        retryCount: 0,
+        updatedAt: verificationCompletedAt,
+      },
+    }
+
+    await createRunJson(
+      runDir, runId, repo, changeId, "executing",
+      [{ groupId: "group-1", changedFiles: ["a.ts"], patchPath: patch1 }],
+      groupLedger,
+      {
+        applyBack: { status: "completed", completedAt: verificationCompletedAt },
+        verification: { status: "failed", completedAt: verificationCompletedAt },
+      },
+    )
+
+    writeExecGroupsMd(repo, [["1", "a.ts"]])
+
+    const result = await reconcileResumeState(runId, changeId, "v1", repo)
+    assert.equal(result.reviewNeeded, false)
+    assert.notEqual(result.recommendedNextStep, "review")
+
+    await fs.rm(repo, { recursive: true, force: true })
   })
 })
 
