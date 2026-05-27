@@ -100,46 +100,77 @@ const GROUP_SHORT_HEADING_RE = /^#{1,4}\s+G([A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)\
 const GROUP_EXEC_HEADING_RE = /^#{1,4}\s+Execution\s+Group\s+([A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)\s*(?::|[—-])\s+.+$/im
 
 // ── Required field patterns for execution groups ─────────────────
+//
+// Note: All field regexes below match normalized field labels with
+// bold markers already stripped. The normalizeFieldBold() helper is
+// applied to each group section BEFORE field matching, so the regexes
+// do not need to handle asterisk/bold variants.
+
+/**
+ * Pattern to normalize bold markers around field labels.
+ *
+ * LLMs sometimes write fields with the colon inside the bold markers:
+ *   **Execution mode:** isolated   ← colon inside bold (common LLM output)
+ * Instead of the canonical:
+ *   **Execution mode:** isolated   ← colon after bold (expected by regex)
+ *
+ * This normalizer strips leading ** and trailing ** before/after
+ * the colon on field-label lines, so all field regexes can use simple
+ * "FieldName:" patterns without worrying about bold variants.
+ */
+function normalizeFieldBold(section: string): string {
+  // Match lines starting with optional ** or *, a field name (word chars,
+  // spaces, slashes, hyphens), then ** or * before/after the colon.
+  // Rewrite to clean "FieldName: " form.
+  // Uses [^\S\n] (non-newline whitespace) instead of \s to avoid
+  // consuming newlines and collapsing adjacent field lines together.
+  return section.replace(
+    /^(\*{1,2})([A-Za-z][\w\s/-]+?)[^\S\n]*(\*{0,2}):[^\S\n]*(\*{0,2})[^\S\n]*/gm,
+    (_, _open, fieldName, _closeBefore, _closeAfter) => `${fieldName}: `
+  )
+}
 
 /**
  * Patterns to detect the files section heading.
  */
-const FILES_HEADER_RE = /^\*{0,2}Files?(?:\/paths)?\*{0,2}:|^\*{0,2}Primary\s+files?(?:\/paths)?\s+touched\*{0,2}:/im
+const FILES_HEADER_RE = /^Files?(?:\/paths)?:|^Primary\s+files?(?:\/paths)?\s+touched:/im
 
 /**
  * Pattern to detect scoped verification with a concrete value (not TBD/empty).
+ * Uses [^\S\n] (non-newline whitespace) instead of \s to avoid consuming
+ * newlines when the field value is empty or missing.
  */
-const SCOPED_VERIFICATION_RE = /\*{0,2}Scoped\s+verification:\*{0,2}[^\S\n]*(.*)$/im
+const SCOPED_VERIFICATION_RE = /Scoped\s+verification:[^\S\n]*(.*)$/im
 
 /**
  * Pattern to detect agent field.
  */
-const AGENT_RE = /\*{0,2}Agent\*{0,2}:\s*(.+)$/im
+const AGENT_RE = /Agent:[^\S\n]*(.+)$/im
 
 /**
  * Pattern to detect dependencies field.
  */
-const DEPENDENCIES_RE = /\*{0,2}Dependencies\*{0,2}:\s*(.+)$/im
+const DEPENDENCIES_RE = /Dependencies:[^\S\n]*(.+)$/im
 
 /**
  * Pattern to detect parallelizable field.
  */
-const PARALLELIZABLE_RE = /\*{0,2}Parallelizable\*{0,2}:\s*(.+)$/im
+const PARALLELIZABLE_RE = /Parallelizable:[^\S\n]*(.+)$/im
 
 /** Pattern to detect execution mode field. */
-const EXECUTION_MODE_RE = /\*{0,2}Execution\s+mode\*{0,2}:\s*(.+)$/im
+const EXECUTION_MODE_RE = /Execution\s+mode:[^\S\n]*(.+)$/im
 
 /** Pattern to detect workspace id field. */
-const WORKSPACE_ID_RE = /\*{0,2}Workspace\s+ID\*{0,2}:\s*(.+)$/im
+const WORKSPACE_ID_RE = /Workspace\s+ID:[^\S\n]*(.+)$/im
 
 /** Pattern to detect workspace concurrency field. */
-const WORKSPACE_CONCURRENCY_RE = /\*{0,2}Workspace\s+concurrency\*{0,2}:\s*(.+)$/im
+const WORKSPACE_CONCURRENCY_RE = /Workspace\s+concurrency:[^\S\n]*(.+)$/im
 
 /** Pattern to detect base strategy field. */
-const BASE_STRATEGY_RE = /\*{0,2}Base\s+strategy\*{0,2}:\s*(.+)$/im
+const BASE_STRATEGY_RE = /Base\s+strategy:[^\S\n]*(.+)$/im
 
 /** Pattern to detect execution rationale field. */
-const EXECUTION_RATIONALE_RE = /\*{0,2}Execution\s+rationale\*{0,2}:\s*(.+)$/im
+const EXECUTION_RATIONALE_RE = /Execution\s+rationale:[^\S\n]*(.+)$/im
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -153,6 +184,41 @@ function isPlaceholderOrEmpty(value: string): boolean {
   if (upper === "TBD" || upper === "TODO" || upper === "NONE" || upper === "[]") return true
   if (PLACEHOLDER_PATTERNS.some((p) => p.test(trimmed))) return true
   return false
+}
+
+/**
+ * Check which failed plan artifacts exist on disk.
+ *
+ * Returns the subset of failedResults that exist on disk, plus a list
+ * of artifact names that are missing entirely. Useful for deciding
+ * whether a repair dispatch should regenerate missing artifacts or
+ * only fix formatting issues in existing ones.
+ */
+async function checkArtifactExistence(
+  changeId: string,
+  planVersion: string,
+  failedResults: ArtifactValidationResult[],
+  cwd?: string,
+): Promise<{
+  existing: ArtifactValidationResult[]
+  missingArtifacts: string[]
+}> {
+  const { default: fs } = await import("node:fs/promises")
+  const { resolvePlanArtifactPath } = await import("pi-zflow-artifacts/artifact-paths")
+
+  const existing: ArtifactValidationResult[] = []
+  const missingArtifacts: string[] = []
+
+  for (const failed of failedResults) {
+    try {
+      await fs.access(resolvePlanArtifactPath(changeId, planVersion, failed.artifact, cwd))
+      existing.push(failed)
+    } catch {
+      missingArtifacts.push(failed.artifact)
+    }
+  }
+
+  return { existing, missingArtifacts }
 }
 
 /**
@@ -255,13 +321,20 @@ async function validateExecutionGroups(
     }
     seenIds.add(groupId)
 
+    // Normalize bold markers in field labels before matching
+    // LLMs may write "**FieldName:** value" (colon inside bold) instead
+    // of the expected "**FieldName:** value" (colon after bold). The
+    // normalizer strips leading/trailing ** around the field label so
+    // that all field regexes below can use simple "FieldName:" patterns.
+    const normalizedSection = normalizeFieldBold(section)
+
     // Check Files section
-    if (!FILES_HEADER_RE.test(section)) {
+    if (!FILES_HEADER_RE.test(normalizedSection)) {
       issues.push(`Group "${groupId}" (section ${i + 1}): missing "Files:" or "Primary files/paths touched:" section.`)
     }
 
     // Check Scoped verification
-    const verificationMatch = section.match(SCOPED_VERIFICATION_RE)
+    const verificationMatch = normalizedSection.match(SCOPED_VERIFICATION_RE)
     if (!verificationMatch) {
       issues.push(
         `Group "${groupId}" (section ${i + 1}): missing "Scoped verification:" field. ` +
@@ -278,7 +351,7 @@ async function validateExecutionGroups(
     }
 
     // Check Agent field
-    const agentMatch = section.match(AGENT_RE)
+    const agentMatch = normalizedSection.match(AGENT_RE)
     if (!agentMatch || !agentMatch[1].trim()) {
       issues.push(
         `Group "${groupId}" (section ${i + 1}): missing "Agent:" field. ` +
@@ -287,7 +360,7 @@ async function validateExecutionGroups(
     }
 
     // Check Dependencies field
-    const depMatch = section.match(DEPENDENCIES_RE)
+    const depMatch = normalizedSection.match(DEPENDENCIES_RE)
     if (!depMatch || !depMatch[1].trim()) {
       issues.push(
         `Group "${groupId}" (section ${i + 1}): missing "Dependencies:" field. ` +
@@ -296,7 +369,7 @@ async function validateExecutionGroups(
     }
 
     // Check Parallelizable field
-    const parallelMatch = section.match(PARALLELIZABLE_RE)
+    const parallelMatch = normalizedSection.match(PARALLELIZABLE_RE)
     if (!parallelMatch || !parallelMatch[1].trim()) {
       issues.push(
         `Group "${groupId}" (section ${i + 1}): missing "Parallelizable:" field. ` +
@@ -305,11 +378,11 @@ async function validateExecutionGroups(
     }
 
     // Check optional advanced execution strategy fields
-    const executionModeValue = section.match(EXECUTION_MODE_RE)?.[1]?.trim().toLowerCase() ?? "isolated"
-    const workspaceIdValue = section.match(WORKSPACE_ID_RE)?.[1]?.trim().replace(/^`|`$/g, "")
-    const workspaceConcurrencyValue = section.match(WORKSPACE_CONCURRENCY_RE)?.[1]?.trim().toLowerCase() ?? "serialized"
-    const baseStrategyValue = section.match(BASE_STRATEGY_RE)?.[1]?.trim().toLowerCase() ?? "head"
-    const executionRationaleValue = section.match(EXECUTION_RATIONALE_RE)?.[1]?.trim() ?? ""
+    const executionModeValue = normalizedSection.match(EXECUTION_MODE_RE)?.[1]?.trim().toLowerCase() ?? "isolated"
+    const workspaceIdValue = normalizedSection.match(WORKSPACE_ID_RE)?.[1]?.trim().replace(/^`|`$/g, "")
+    const workspaceConcurrencyValue = normalizedSection.match(WORKSPACE_CONCURRENCY_RE)?.[1]?.trim().toLowerCase() ?? "serialized"
+    const baseStrategyValue = normalizedSection.match(BASE_STRATEGY_RE)?.[1]?.trim().toLowerCase() ?? "head"
+    const executionRationaleValue = normalizedSection.match(EXECUTION_RATIONALE_RE)?.[1]?.trim() ?? ""
 
     if (!["isolated", "shared-staging"].includes(executionModeValue)) {
       issues.push(
@@ -547,6 +620,8 @@ export interface ArtifactRepairResult {
  * @param planVersion - Plan version (e.g. "v1").
  * @param failedResults - The validation results for artifacts that failed.
  * @param cwd - Working directory (optional).
+ * @param missingArtifacts - Optional list of artifact names that don't exist on disk
+ *   and need full creation (not just repair).
  * @returns A prompt string for the planner agent.
  */
 export async function buildRepairPrompt(
@@ -554,6 +629,7 @@ export async function buildRepairPrompt(
   planVersion: string,
   failedResults: ArtifactValidationResult[],
   cwd?: string,
+  missingArtifacts?: string[],
 ): Promise<string> {
   const { default: pathModule } = await import("node:path")
   const { resolvePlanVersionDir } = await import("pi-zflow-artifacts/artifact-paths")
@@ -590,6 +666,20 @@ export async function buildRepairPrompt(
         sections.push(`- ${issue}`)
       }
     }
+    sections.push("")
+  }
+
+  // Add missing artifacts section if any don't exist on disk
+  if (missingArtifacts && missingArtifacts.length > 0) {
+    sections.push("### Missing Artifacts (need full creation)")
+    sections.push("")
+    sections.push("The following artifacts do not exist on disk yet and need to be created from scratch:")
+    for (const name of missingArtifacts) {
+      const artifactPath = pathModule.join(versionDir, `${name}.md`)
+      sections.push(`- **${name}**: ${artifactPath}`)
+    }
+    sections.push("")
+    sections.push("Use zflow_write_plan_artifact to write these files with complete content.")
     sections.push("")
   }
 
@@ -680,13 +770,18 @@ export async function runArtifactRepair(
     return { repaired: false, remainingIssues: failedResults, attempts: 0 }
   }
 
+  // Check which failed artifacts actually exist on disk. If an artifact
+  // file is missing entirely (e.g. the initial planner dispatch completely
+  // failed before writing it), the repair prompt needs to note that.
+  const { missingArtifacts } = await checkArtifactExistence(changeId, planVersion, failedResults, cwd)
+
   const remaining = [...failedResults]
   let attempts = 0
 
   for (attempts = 1; attempts <= maxAttempts; attempts++) {
     if (remaining.length === 0) break
 
-    const repairPrompt = await buildRepairPrompt(changeId, planVersion, remaining, cwd)
+    const repairPrompt = await buildRepairPrompt(changeId, planVersion, remaining, cwd, missingArtifacts)
     const versionDir = resolvePlanVersionDir(changeId, planVersion, cwd)
     const repairOutputPath = pathModule.join(versionDir, `repair-attempt-${attempts}.md`)
 

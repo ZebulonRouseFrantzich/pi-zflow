@@ -5544,6 +5544,30 @@ async function resolveProfileModelForAgent(agentName: string): Promise<string | 
   }
 }
 
+/**
+ * Detect transport-level dispatch errors that are safe to retry.
+ * Defined locally to avoid circular dependency with index.ts.
+ */
+function isTransportDispatchError(error: string | undefined): boolean {
+  if (!error) return false
+  const TRANSPORT_ERROR_PATTERNS = [
+    /WebSocket error/i,
+    /ECONNRESET/i,
+    /connection (closed|reset|refused)/i,
+    /transport/i,
+    /timeout/i,
+    /network/i,
+    /socket/i,
+    /tls/i,
+    /ETIMEDOUT/i,
+    /ENOTFOUND/i,
+    /EPIPE/i,
+    /ECONNREFUSED/i,
+    /keepalive/i,
+  ]
+  return TRANSPORT_ERROR_PATTERNS.some((pattern) => pattern.test(error))
+}
+
 function formatDispatchElapsed(ms: number | undefined): string {
   if (typeof ms !== "number" || !Number.isFinite(ms)) return "00:00"
   const totalSeconds = Math.max(0, Math.floor(ms / 1000))
@@ -5741,55 +5765,150 @@ export async function runPrepareAgentsIfAvailable(
         "and expected.",
       ].filter(Boolean).join("\n")
 
-      let sawChildProgress = false
-      const launchStartedAt = Date.now()
-      onAgentProgress?.("zflow.planner-frontier launch requested — waiting for first child event")
-      const heartbeat = setInterval(() => {
-        if (sawChildProgress) return
-        onAgentProgress?.(
-          `zflow.planner-frontier launch pending — no child tool events yet after ${formatDispatchElapsed(Date.now() - launchStartedAt)}`,
-        )
-      }, 15_000)
-      heartbeat.unref?.()
+      // ── Dispatch with transport-error retry ──
+      const MAX_DISPATCH_RETRIES = 3
+      const RETRY_BACKOFF_MS = [1_000, 3_000, 5_000]
 
-      const result = await zflowDispatch.runAgent({
-        agent: "zflow.planner-frontier",
-        task,
-        cwd: cwd ?? process.cwd(),
-        model: await resolveProfileModelForAgent("zflow.planner-frontier"),
-        onUpdate: (progress) => {
-          sawChildProgress = true
-          onAgentProgress?.(formatPrepareAgentProgress(progress))
-        },
-        output: pathModule.join(versionDir, "planner-frontier-output.md"),
-        outputMode: "file-only",
-        maxOutput: { lines: 400, bytes: 24000 },
-      }).finally(() => clearInterval(heartbeat))
-      const outputs = await collectOutputs()
+      let attempt = 0
+      let lastResult: Awaited<ReturnType<DispatchService["runAgent"]>> | null = null
+      let outputs: string[] = []
 
-      if (!result.ok) {
-        await recordDispatchMetadata({
-          agentDispatchStatus: "failed",
-          agentDispatchService: DISPATCH_SERVICE_CAPABILITY,
-          agentDispatchMethod: "runAgent",
-          agentDispatchError: result.error ?? "Planner dispatch failed",
-        })
-        return {
-          dispatched: false,
-          agentDispatchStatus: "failed",
-          serviceName: DISPATCH_SERVICE_CAPABILITY,
-          methodUsed: "runAgent",
-          producedOutputs: outputs,
-          error: result.error ?? "Planner dispatch failed",
+      while (attempt <= MAX_DISPATCH_RETRIES) {
+        if (attempt > 0) {
+          onAgentProgress?.(
+            `zflow.planner-frontier transport error, retry ${attempt}/${MAX_DISPATCH_RETRIES}...`,
+          )
+          await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS[attempt - 1]))
+        } else {
+          onAgentProgress?.("zflow.planner-frontier launch requested — waiting for first child event")
+        }
+
+        let sawChildProgress = false
+        const launchStartedAt = Date.now()
+        const heartbeat = setInterval(() => {
+          if (sawChildProgress) return
+          onAgentProgress?.(
+            `zflow.planner-frontier launch pending — no child tool events yet after ${formatDispatchElapsed(Date.now() - launchStartedAt)}`,
+          )
+        }, 15_000)
+        heartbeat.unref?.()
+
+        try {
+          lastResult = await zflowDispatch.runAgent({
+            agent: "zflow.planner-frontier",
+            task,
+            cwd: cwd ?? process.cwd(),
+            model: await resolveProfileModelForAgent("zflow.planner-frontier"),
+            onUpdate: (progress) => {
+              sawChildProgress = true
+              onAgentProgress?.(formatPrepareAgentProgress(progress))
+            },
+            output: pathModule.join(versionDir, "planner-frontier-output.md"),
+            outputMode: "file-only",
+            maxOutput: { lines: 400, bytes: 24000 },
+          })
+          outputs = await collectOutputs()
+
+          // Check for both thrown errors and returned errors that are
+          // transport-related. runAgent may return ok=false with a
+          // transport error instead of throwing (e.g. WebSocket error
+          // during long-running agent execution). In both cases we
+          // should retry if the agent didn't write enough artifacts.
+          if (lastResult.ok || outputs.length >= 3) {
+            break // success, or recovered with artifacts on disk
+          }
+
+          // result.ok is false — check if retryable transport error
+          if (!isTransportDispatchError(lastResult.error) || attempt >= MAX_DISPATCH_RETRIES) {
+            break // non-transport error or exhausted retries
+          }
+
+          // Transport error with no artifacts written — retry the dispatch
+          clearInterval(heartbeat)
+          attempt++
+          continue
+        } catch (err) {
+          clearInterval(heartbeat)
+          outputs = await collectOutputs()
+
+          // If the agent wrote artifacts before the error, it did its work
+          if (outputs.length >= 3) {
+            lastResult = null // signal recovered-without-result
+            break
+          }
+
+          const errMsg = err instanceof Error ? err.message : String(err)
+          if (!isTransportDispatchError(errMsg) || attempt >= MAX_DISPATCH_RETRIES) {
+            throw err // re-thrown, caught by outer catch
+          }
+          attempt++
+        } finally {
+          clearInterval(heartbeat)
         }
       }
 
+      // ── Post-dispatch result handling with artifact recovery ──
+      if (lastResult) {
+        // runAgent returned (even if !ok) — handle normally with recovery check
+        if (!lastResult.ok) {
+          // Agent returned error but may have written artifacts
+          if (outputs.length >= 3) {
+            await recordDispatchMetadata({
+              agentDispatchStatus: "dispatched",
+              agentDispatchService: DISPATCH_SERVICE_CAPABILITY,
+              agentDispatchMethod: "runAgent",
+              agentDispatchedAt: new Date().toISOString(),
+              agentDispatchError: `Recovered: agent wrote ${outputs.length} artifacts before ${lastResult.error ?? "transport error"}`,
+            })
+            return {
+              dispatched: true,
+              agentDispatchStatus: "dispatched",
+              serviceName: DISPATCH_SERVICE_CAPABILITY,
+              methodUsed: "runAgent",
+              producedOutputs: outputs,
+              error: lastResult.error,
+            }
+          }
+          await recordDispatchMetadata({
+            agentDispatchStatus: "failed",
+            agentDispatchService: DISPATCH_SERVICE_CAPABILITY,
+            agentDispatchMethod: "runAgent",
+            agentDispatchError: lastResult.error ?? "Planner dispatch failed",
+          })
+          return {
+            dispatched: false,
+            agentDispatchStatus: "failed",
+            serviceName: DISPATCH_SERVICE_CAPABILITY,
+            methodUsed: "runAgent",
+            producedOutputs: outputs,
+            error: lastResult.error ?? "Planner dispatch failed",
+          }
+        }
+
+        // Clean success
+        await recordDispatchMetadata({
+          agentDispatchStatus: "dispatched",
+          agentDispatchService: DISPATCH_SERVICE_CAPABILITY,
+          agentDispatchMethod: "runAgent",
+          agentDispatchedAt: new Date().toISOString(),
+          plannerOutputPath: lastResult.outputPath,
+        })
+        return {
+          dispatched: true,
+          agentDispatchStatus: "dispatched",
+          serviceName: DISPATCH_SERVICE_CAPABILITY,
+          methodUsed: "runAgent",
+          producedOutputs: outputs,
+        }
+      }
+
+      // lastResult is null — all attempts failed but artifacts exist
       await recordDispatchMetadata({
         agentDispatchStatus: "dispatched",
         agentDispatchService: DISPATCH_SERVICE_CAPABILITY,
         agentDispatchMethod: "runAgent",
         agentDispatchedAt: new Date().toISOString(),
-        plannerOutputPath: result.outputPath,
+        agentDispatchError: `Recovered: found ${outputs.length} existing artifacts after transport failures`,
       })
       return {
         dispatched: true,
