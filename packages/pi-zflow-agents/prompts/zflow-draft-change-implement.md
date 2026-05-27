@@ -2,13 +2,13 @@
 
 ## When to use this helper
 
-Use this prompt helper to manually implement a change from an approved plan **before** the formal `/zflow-change-implement <change-path>` extension command exists, or when you need to implement outside the automated worktree execution flow.
+Use this prompt helper to manually implement a change from an approved plan when you need to work outside the automated worktree execution flow.
 
-This is a **drafting helper**, not the canonical automation flow. The formal `/zflow-change-implement` command (when available) provides worktree isolation, verification/fix loops, deviation tracking, and automated apply-back. Use this helper for simple changes, exploratory implementation, or environments where the extension is not installed.
+This is a **drafting helper**, not the canonical automation flow. The formal `/zflow-change-implement` command provides worktree isolation, verification/fix loops, deviation tracking, and automated apply-back. Use this helper for simple changes, exploratory implementation, or environments where the extension is not installed.
 
 ## Usage
 
-1. Ensure you have an approved plan (produced by `/zflow-change-prepare` or `/zflow-draft-change-prepare`).
+1. Ensure you have an approved plan (typically produced by `/zflow-change-plan` + `/zflow-change-prepare`).
 2. Invoke with `/zflow-draft-change-implement` and reference the approved plan.
 3. The assistant will:
    - Walk through each planned change in order
@@ -25,7 +25,7 @@ This is a **drafting helper**, not the canonical automation flow. The formal `/z
 
 ## Related
 
-- Change preparation: `/zflow-draft-change-prepare`
+- Change preparation: `/zflow-change-plan`, `/zflow-change-prepare`
 - Audit implementation: `/zflow-draft-change-audit`
 - Fix issues: `/zflow-draft-change-fix`
-- Formal workflow: `/zflow-change-implement <change-path>` (when available)
+- Formal workflow: `/zflow-change-implement <change-path>`

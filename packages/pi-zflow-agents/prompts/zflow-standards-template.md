@@ -62,4 +62,4 @@ The generated standards file covers:
 ## Related
 
 - Documentation audit: `/zflow-docs-standards-audit`
-- Change preparation: `/zflow-draft-change-prepare`
+- Change preparation: `/zflow-change-plan`, `/zflow-change-prepare`

@@ -4,8 +4,8 @@
  * Phase 7 implementation:
  * - Path resolution helpers integrated from pi-zflow-artifacts
  * - `resolveAllPaths` convenience helper for workflow commands
- * - Registers `/zflow-change-prepare`, `/zflow-change-implement`,
- *   `/zflow-change-audit`, `/zflow-change-fix`, and `/zflow-clean`
+ * - Registers `/zflow-change-plan`, `/zflow-change-prepare`,
+ *   `/zflow-change-implement`, `/zflow-change-audit`, `/zflow-change-fix`, and `/zflow-clean`
  * - Wires state-driven resume, HITL gates, handoff, prompt reminders,
  *   verification/review sequencing, cleanup, and path-guard enforcement
  */
@@ -165,6 +165,7 @@ import {
   discoverUnfinishedWork,
   promptResumeChoices,
   checkUnfinishedOnEntry,
+  runChangePlanWorkflow,
   runChangePrepareWorkflow,
   resolveProfileIfAvailable,
   buildRepoMap,
@@ -211,6 +212,8 @@ import {
   buildCodeReviewInputFromContext,
   publishPlanArtifacts,
   deriveSemanticChangeId,
+  writeDurablePlanDoc,
+  listPublishedDurablePlanVersions,
   resolveChangeImplementTarget,
   applyPatchesWithLedger,
   buildSubagentResolutionPrompt,
@@ -1770,6 +1773,228 @@ export function isAdHocPlanModeActive(): boolean {
  */
 export function shouldForkImplementationSessionAfterPrepare(): boolean {
   return false
+}
+
+/** Parsed arguments for `/zflow-change-plan`. */
+export interface ParsedChangePlanArgs {
+  changeSeed: string
+  notes: string
+  explicitReference: boolean
+}
+
+function looksLikeChangePlanReference(value: string): boolean {
+  return value.startsWith("@") ||
+    value.includes("/") ||
+    value.includes("\\") ||
+    value.endsWith(".md") ||
+    /^[a-z0-9][a-z0-9-]*$/.test(value)
+}
+
+function isStandaloneChangePlanReference(value: string): boolean {
+  return !/\s/.test(value.trim()) && looksLikeChangePlanReference(value.trim())
+}
+
+export function extractChangePlanReference(value: string): string | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  if (isStandaloneChangePlanReference(trimmed)) {
+    return trimmed.replace(/[),.;:]+$/g, "")
+  }
+
+  const tokens = trimmed.split(/\s+/)
+  for (const token of tokens) {
+    const normalized = token.replace(/^[('"\[]+|[)'"\],.;:]+$/g, "")
+    if (!normalized) continue
+    const tokenLooksPathLike = normalized.startsWith("@") ||
+      normalized.includes("/") ||
+      normalized.includes("\\") ||
+      normalized.endsWith(".md")
+    if (tokenLooksPathLike) {
+      return normalized
+    }
+  }
+
+  return null
+}
+
+function isRuneContextReference(value: string): boolean {
+  return value.startsWith("@") || value.includes("/context/")
+}
+
+const CHANGE_PLAN_DESCRIPTION_NOISE_TOKENS = new Set([
+  "a",
+  "an",
+  "the",
+  "and",
+  "or",
+  "to",
+  "from",
+  "for",
+  "of",
+  "in",
+  "on",
+  "with",
+  "without",
+  "within",
+  "under",
+  "through",
+  "across",
+  "this",
+  "that",
+  "these",
+  "those",
+  "it",
+  "its",
+  "s",
+  "file",
+  "files",
+  "folder",
+  "folders",
+  "subfolder",
+  "subfolders",
+  "path",
+  "paths",
+  "include",
+  "includes",
+  "including",
+  "add",
+  "adds",
+  "adding",
+  "update",
+  "updates",
+  "updating",
+  "create",
+  "creates",
+  "creating",
+  "enable",
+  "enables",
+  "enabling",
+  "support",
+  "supports",
+  "supporting",
+])
+
+export function deriveChangePlanId(changeSeed: string, explicitReference: boolean): string | null {
+  if (explicitReference) {
+    return deriveSemanticChangeId(changeSeed)
+  }
+
+  const referencedPath = extractChangePlanReference(changeSeed)
+  if (referencedPath) {
+    const fromReference = deriveSemanticChangeId(referencedPath)
+    if (fromReference) return fromReference
+  }
+
+  const tokens = changeSeed
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .toLowerCase()
+    .split("-")
+    .filter(Boolean)
+
+  const semanticTokens = tokens.filter((token) => !CHANGE_PLAN_DESCRIPTION_NOISE_TOKENS.has(token))
+  const chosenTokens = (semanticTokens.length >= 2 ? semanticTokens : tokens).slice(0, 6)
+  const slug = chosenTokens.join("-").slice(0, 72).replace(/-+$/g, "")
+  return slug || deriveSemanticChangeId(changeSeed)
+}
+
+export function parseChangePlanArgs(args: string): ParsedChangePlanArgs {
+  const trimmed = args.trim()
+  if (!trimmed) {
+    return {
+      changeSeed: "",
+      notes: "",
+      explicitReference: false,
+    }
+  }
+
+  const separatorIndex = trimmed.indexOf(" -- ")
+  if (separatorIndex !== -1) {
+    const changeSeed = trimmed.slice(0, separatorIndex).trim()
+    const notes = trimmed.slice(separatorIndex + 4).trim()
+    return {
+      changeSeed,
+      notes,
+      explicitReference: looksLikeChangePlanReference(changeSeed),
+    }
+  }
+
+  const parts = trimmed.split(/\s+/).filter(Boolean)
+  const first = parts[0] ?? ""
+  const rest = parts.slice(1).join(" ")
+  if (first && rest && looksLikeChangePlanReference(first)) {
+    return {
+      changeSeed: first,
+      notes: rest,
+      explicitReference: true,
+    }
+  }
+
+  if (isStandaloneChangePlanReference(trimmed)) {
+    return {
+      changeSeed: trimmed,
+      notes: "",
+      explicitReference: true,
+    }
+  }
+
+  return {
+    changeSeed: trimmed,
+    notes: trimmed,
+    explicitReference: false,
+  }
+}
+
+function buildChangePlanInputQuestions(): string {
+  return JSON.stringify({
+    title: "Create Change Plan",
+    description: "Describe the change you want zflow to plan. The command will explore the repository and draft a detailed durable plan.md file for your review.",
+    questions: [
+      {
+        id: "changeDescription",
+        type: "text",
+        question: "Describe the change you want planned:",
+      },
+      {
+        id: "preferredChangeId",
+        type: "text",
+        question: "Optional: enter a preferred change id / folder name (kebab-case). Leave blank to auto-derive one.",
+      },
+    ],
+  })
+}
+
+async function promptForChangePlanInput(
+  ctx: InterviewableContext,
+): Promise<{ changeDescription: string; preferredChangeId?: string } | null> {
+  const questionsJson = buildChangePlanInputQuestions()
+  let raw: string | undefined
+
+  if (typeof ctx.interview === "function") {
+    raw = await Promise.resolve(ctx.interview(questionsJson))
+  } else if (typeof ctx.ui?.interview === "function") {
+    raw = await Promise.resolve(ctx.ui.interview(questionsJson))
+  } else {
+    ctx.ui?.notify?.(
+      "No interactive interview UI is available. Re-run /zflow-change-plan with a description.",
+      "warning",
+    )
+    return null
+  }
+
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw)
+    return {
+      changeDescription: typeof parsed.changeDescription === "string" ? parsed.changeDescription.trim() : "",
+      preferredChangeId: typeof parsed.preferredChangeId === "string" ? parsed.preferredChangeId.trim() : undefined,
+    }
+  } catch {
+    ctx.ui?.notify?.("Could not parse change-plan interview response. Please try again.", "warning")
+    return null
+  }
 }
 
 /** Parsed arguments for `/zflow-change-prepare`. */
@@ -5708,6 +5933,155 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
     },
   })
 
+  // ── Command: /zflow-change-plan ───────────────────────────────
+
+  pi.registerCommand("zflow-change-plan", {
+    description: "Create or update the durable plan.md entrypoint for a change",
+    handler: async (args: string, ctx: InterviewableContext): Promise<void> => {
+      let parsedArgs = parseChangePlanArgs(args)
+      let changeDescription = parsedArgs.explicitReference
+        ? parsedArgs.notes.trim()
+        : (parsedArgs.notes || parsedArgs.changeSeed).trim()
+
+      if (!parsedArgs.changeSeed || !changeDescription) {
+        const prompted = await promptForChangePlanInput(ctx)
+        if (!prompted?.changeDescription) {
+          ctx.ui.notify(
+            "Usage: /zflow-change-plan <description|change-id|path> [-- notes]",
+            "warning",
+          )
+          return
+        }
+
+        if (prompted.preferredChangeId) {
+          parsedArgs = {
+            changeSeed: prompted.preferredChangeId,
+            notes: prompted.changeDescription,
+            explicitReference: true,
+          }
+        } else if (parsedArgs.explicitReference && parsedArgs.changeSeed) {
+          parsedArgs = {
+            changeSeed: parsedArgs.changeSeed,
+            notes: prompted.changeDescription,
+            explicitReference: true,
+          }
+        } else {
+          parsedArgs = {
+            changeSeed: prompted.changeDescription,
+            notes: prompted.changeDescription,
+            explicitReference: false,
+          }
+        }
+        changeDescription = prompted.changeDescription
+      }
+
+      const referencedPath = parsedArgs.explicitReference
+        ? parsedArgs.changeSeed
+        : extractChangePlanReference(changeDescription)
+
+      const progress = createWorkflowProgressIndicator(pi, ctx, parsedArgs.changeSeed, {
+        command: "zflow-change-plan",
+        initialMessage: "Collecting change context and drafting a detailed durable plan.md",
+      })
+
+      try {
+        progress.updatePhaseCard(
+          "resolve-change-plan-input",
+          "Resolve change input",
+          "Deriving durable change id from command input",
+          "running",
+        )
+
+        const changeId = deriveChangePlanId(parsedArgs.changeSeed, parsedArgs.explicitReference)
+        if (!changeId) {
+          progress.updatePhaseCard(
+            "resolve-change-plan-input",
+            "Resolve change input",
+            `Could not derive a semantic changeId from: ${parsedArgs.changeSeed}`,
+            "failed",
+          )
+          progress.stop("zflow-change-plan failed", "failed")
+          ctx.ui.notify(
+            `Could not derive a semantic changeId from: ${parsedArgs.changeSeed}`,
+            "warning",
+          )
+          return
+        }
+
+        progress.updatePhaseCard(
+          "resolve-change-plan-input",
+          "Resolve change input",
+          `Derived changeId: ${changeId}`,
+          "completed",
+        )
+        progress.updatePhaseCard(
+          "draft-durable-plan",
+          "Draft durable plan",
+          `Building detailed docs/zflow-changes/${changeId}/plan.md`,
+          "running",
+        )
+
+        const result = await runChangePlanWorkflow({
+          cwd: ctx.cwd,
+          changeId,
+          changeSeed: parsedArgs.changeSeed,
+          changeDescription,
+          changeReferencePath: referencedPath ?? undefined,
+          explicitReference: parsedArgs.explicitReference,
+          sourceMode: referencedPath && isRuneContextReference(referencedPath)
+            ? "runecontext"
+            : "adhoc",
+          onProgress: (message) => progress.update(message),
+          onAgentProgress: (agentProgress) => {
+            progress.updateSubagent("change-plan-drafter", {
+              agent: "planner",
+              title: "Draft durable plan.md",
+              status: "running",
+              lastCommand: agentProgress.currentTool
+                ? `${agentProgress.currentTool}${agentProgress.currentToolArgs ? ` ${agentProgress.currentToolArgs}` : ""}`
+                : agentProgress.recentTools?.at(-1)?.tool,
+            })
+            progress.update(`planner: ${agentProgress.status ?? "running"}`)
+          },
+        })
+
+        progress.updateSubagent("change-plan-drafter", {
+          agent: "planner",
+          title: "Draft durable plan.md",
+          status: "completed",
+        })
+        progress.updatePhaseCard(
+          "draft-durable-plan",
+          "Draft durable plan",
+          `${result.existingPlanUpdated ? "Updated" : "Created"} ${result.planDocPath}`,
+          "completed",
+        )
+        progress.stop("zflow-change-plan finished", "completed")
+
+        ctx.ui.notify(
+          `${result.existingPlanUpdated ? "📝 Updated" : "📝 Created"} durable plan entrypoint for \"${changeId}\".`,
+          "info",
+        )
+        ctx.ui.notify(`Plan entrypoint: ${result.planDocPath}`, "info")
+        if (!parsedArgs.explicitReference) {
+          ctx.ui.notify(`Derived changeId: ${changeId}`, "info")
+        }
+        ctx.ui.notify(
+          `Review and refine ${result.planDocPath}, then run /zflow-change-prepare ${changeId} to generate versioned change docs.`,
+          "info",
+        )
+      } catch (error) {
+        progress.updateSubagent("change-plan-drafter", {
+          agent: "planner",
+          title: "Draft durable plan.md",
+          status: "failed",
+        })
+        progress.stop("zflow-change-plan failed", "failed")
+        throw error
+      }
+    },
+  })
+
   // ── Command: /zflow-change-prepare ────────────────────────────
 
   pi.registerCommand("zflow-change-prepare", {
@@ -5716,7 +6090,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       const parsedArgs = parseChangePrepareArgs(args)
       const changePath = parsedArgs.changePath
       if (!changePath) {
-        ctx.ui.notify("Usage: /zflow-change-prepare <change-path>", "warning")
+        ctx.ui.notify("Usage: /zflow-change-prepare <change-id|change-folder|plan-file>", "warning")
         return
       }
 
@@ -5906,6 +6280,19 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           return
         }
 
+        const durableVersions = await listPublishedDurablePlanVersions(result.changeId, { cwd: ctx.cwd })
+        await writeDurablePlanDoc(
+          result.changeId,
+          {
+            status: reviewResult.pass ? "reviewed" : "validated",
+            currentVersion: result.planVersion,
+          },
+          {
+            cwd: ctx.cwd,
+            publishedVersions: durableVersions,
+          },
+        )
+
         ctx.ui.notify(
           `✅ Durable plan artifacts published to: ${publishResult.durableDir}`,
           "info",
@@ -5967,6 +6354,18 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         switch (interviewResult.decision) {
           case "approve": {
             await approvePlanVersion(result.changeId, result.planVersion, ctx.cwd)
+            await writeDurablePlanDoc(
+              result.changeId,
+              {
+                status: "approved",
+                currentVersion: result.planVersion,
+                approvedVersion: result.planVersion,
+              },
+              {
+                cwd: ctx.cwd,
+                publishedVersions: await listPublishedDurablePlanVersions(result.changeId, { cwd: ctx.cwd }),
+              },
+            )
             ctx.ui.notify(
               `✅ Plan "${result.changeId}" version ${result.planVersion} approved.`,
               "info",
@@ -5989,6 +6388,17 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           case "revise": {
             await bumpPlanVersion(result.changeId, ctx.cwd)
             await advancePlanLifecycle(result.changeId, "draft", ctx.cwd)
+            await writeDurablePlanDoc(
+              result.changeId,
+              {
+                status: "draft",
+                currentVersion: result.planVersion,
+              },
+              {
+                cwd: ctx.cwd,
+                publishedVersions: await listPublishedDurablePlanVersions(result.changeId, { cwd: ctx.cwd }),
+              },
+            )
             ctx.ui.notify(
               `📝 Revision requested for "${result.changeId}". ` +
               (interviewResult.revisionNotes
@@ -6002,6 +6412,17 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             await updatePlanState(result.changeId, {
               lifecycleState: "cancelled",
             }, ctx.cwd)
+            await writeDurablePlanDoc(
+              result.changeId,
+              {
+                status: "cancelled",
+                currentVersion: result.planVersion,
+              },
+              {
+                cwd: ctx.cwd,
+                publishedVersions: await listPublishedDurablePlanVersions(result.changeId, { cwd: ctx.cwd }),
+              },
+            )
             ctx.ui.notify(
               `🛑 Plan "${result.changeId}" version ${result.planVersion} cancelled by user.`,
               "warning",

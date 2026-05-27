@@ -2,9 +2,9 @@
 
 ## When to use this helper
 
-Use this prompt helper to draft a change request plan **before** the formal `/zflow-change-prepare <change-path>` extension command exists, or when you are manually refining a change request outside the automated workflow.
+Use this prompt helper to brainstorm or manually refine a change request before you commit it to the formal workflow.
 
-This is a **drafting helper**, not the canonical automation flow. The formal `/zflow-change-prepare` command (when available) provides artifact lifecycle management, automated scout runs, and plan validation. Use this helper for early-stage exploration, brainstorming, or when working in an environment where the extension is not installed.
+This is a **drafting helper**, not the canonical automation flow. The formal workflow now uses `/zflow-change-plan` to draft a detailed `docs/zflow-changes/<changeId>/plan.md`, then `/zflow-change-prepare` to generate versioned plan artifacts from that reviewed plan. Use this helper for early-stage exploration, brainstorming, or when working in an environment where the extension is not installed.
 
 ## Usage
 
@@ -16,6 +16,7 @@ This is a **drafting helper**, not the canonical automation flow. The formal `/z
    - File-by-file change inventory
    - Dependency and risk assessment
 4. The output is a structured plan draft suitable for review and refinement.
+5. When you are ready to enter the formal workflow, use `/zflow-change-plan <description|change-id|path> [-- notes]`.
 
 ## Output structure
 
@@ -31,6 +32,6 @@ A well-formed change plan should include:
 
 ## Related
 
-- Formal workflow: `/zflow-change-prepare <change-path>` (when available)
+- Formal workflow: `/zflow-change-plan <description|change-id|path> [-- notes]` then `/zflow-change-prepare <change-id|change-folder|plan-file>`
 - Capture decisions: `/zflow-draft-change-capture-decisions`
 - Standards template: `/zflow-standards-template`
