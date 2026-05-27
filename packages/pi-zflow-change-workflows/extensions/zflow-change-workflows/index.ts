@@ -3514,7 +3514,12 @@ async function runWorktreeDispatchAndFinalize(
             )
 
             if (fixResult.fixed) {
-              // Fix succeeded — treat group as succeeded
+              // Fix succeeded — treat group as succeeded.
+              // Update the allResults entry so the "N groups succeeded" count is accurate.
+              const resultEntry = allResults.find(e => e.groupId === gid)
+              if (resultEntry) {
+                resultEntry.result = { ...resultEntry.result, ok: true, error: undefined }
+              }
               options?.onSubagentUpdate?.(gid, {
                 agent: r.agent ?? tasks[idx]?.agent,
                 title: `fix: ${gid} (attempt ${currentFixAttempts + 1})`,
@@ -3926,7 +3931,7 @@ async function runWorktreeDispatchAndFinalize(
 
   console.info(
     `[zflow] Worktree dispatch completed via "${dispatchService.name}". ` +
-    `${dispatchResult.results.filter(r => r.ok).length}/${dispatchResult.results.length} groups succeeded.`,
+    `${allResults.filter(r => r.result.ok).length}/${allGroupIds.length} groups succeeded.`,
   )
 }
 
