@@ -133,8 +133,13 @@ describe("getResolvedAgentBinding", () => {
   })
 
   it("returns null when no cache exists", async () => {
-    const result = await getResolvedAgentBinding("zflow.planner-frontier")
-    assert.equal(result, null)
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-api-test-missing-"))
+    try {
+      const result = await getResolvedAgentBinding("zflow.planner-frontier", path.join(dir, "missing-active-profile.json"))
+      assert.equal(result, null)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
   })
 })
 
@@ -184,8 +189,13 @@ describe("getResolvedLane", () => {
   })
 
   it("returns null when no cache exists", async () => {
-    const result = await getResolvedLane("planning-frontier")
-    assert.equal(result, null)
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-api-test-missing-"))
+    try {
+      const result = await getResolvedLane("planning-frontier", path.join(dir, "missing-active-profile.json"))
+      assert.equal(result, null)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
   })
 })
 

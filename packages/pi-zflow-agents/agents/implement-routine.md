@@ -2,7 +2,7 @@
 name: implement-routine
 package: zflow
 description: Execute approved plan groups for routine implementation work. Reads tests first, implements changes, runs scoped verification.
-tools: read, grep, find, ls, bash, edit, write
+tools: read, grep, find, ls, bash, edit, write, intercom
 thinking: medium
 # model is resolved via the profile system at launch time; placeholder means "must be overridden by profile"
 model: placeholder
@@ -66,4 +66,8 @@ If the planned approach is infeasible:
 - Provide concise progress updates: which file you are implementing, what
   verification you ran, and the result.
 - If you encounter ambiguity in the plan, ask rather than guess.
+- Prefer `contact_supervisor` when it is available for blocking clarification
+  or drift escalation. Use raw `intercom` only as fallback when an exact
+  orchestrator target is supplied in the task context.
+- Do not use intercom for routine narration or completion chatter.
 - After completion, state what was done and what remains for other groups.

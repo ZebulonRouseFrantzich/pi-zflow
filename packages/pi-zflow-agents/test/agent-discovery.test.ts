@@ -318,15 +318,25 @@ describe("agent-discovery", () => {
 
   describe("getInstalledAgents", () => {
     it("should return installed agents with correct runtime names", () => {
-      installAgents({ customPackageRoot: pkgRoot, customAgentsTarget: agentsTarget, silent: true })
+      // First install agents to a temp target directory
+      installAgents({
+        customPackageRoot: pkgRoot,
+        customAgentsTarget: agentsTarget,
+        silent: true,
+      })
 
-      const agents = getInstalledAgents()
+      // Then query using the same custom target (hermetic — no dependency on real ~/.pi)
+      const agents = getInstalledAgents({ customAgentsTarget: agentsTarget })
+      const agentNames = agents.map(a => a.name)
 
-      // Update the internal paths to point to our test target
-      // (getInstalledAgents uses ~/.pi, so we need a different approach)
-      // Instead, let's just verify the core logic by testing the helper functions
-
-      assert.equal(agents.length, 0, "Should return 0 when using default path (test env)")
+      // Must have the three agents from the fake package root
+      assert.ok(agentNames.includes("zflow.planner-frontier"),
+        "planner-frontier should be discoverable")
+      assert.ok(agentNames.includes("zflow.implement-routine"),
+        "implement-routine should be discoverable")
+      assert.ok(agentNames.includes("zflow.review-correctness"),
+        "review-correctness should be discoverable")
+      assert.equal(agents.length, 3, "Should have exactly 3 agents from test package")
     })
   })
 

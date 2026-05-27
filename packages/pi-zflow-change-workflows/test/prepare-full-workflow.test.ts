@@ -583,9 +583,18 @@ describe("runChangeImplementWorkflow", () => {
         versions: { v1: { state: "approved", artifacts: {} } },
       }, null, 2), "utf-8")
       await fs.writeFile(path.join(legacyVersionDir, "design.md"), "# Design\n", "utf-8")
-      await fs.writeFile(path.join(legacyVersionDir, "execution-groups.md"), "# Execution Groups\n", "utf-8")
+      await fs.writeFile(path.join(legacyVersionDir, "execution-groups.md"), `# Execution Groups
+
+## Group 1: Legacy implementation
+
+**Files:** README.md
+**Agent:** zflow.implement-routine
+**Dependencies:** none
+**Scoped verification:** npm test
+**Parallelizable:** false
+`, "utf-8")
       await fs.writeFile(path.join(legacyVersionDir, "standards.md"), "# Standards\n", "utf-8")
-      await fs.writeFile(path.join(legacyVersionDir, "verification.md"), "# Verification\n", "utf-8")
+      await fs.writeFile(path.join(legacyVersionDir, "verification.md"), "# Verification\n\n```bash\nnpm test\n```\n", "utf-8")
 
       const result = await runChangeImplementWorkflow({
         cwd: repoRoot,

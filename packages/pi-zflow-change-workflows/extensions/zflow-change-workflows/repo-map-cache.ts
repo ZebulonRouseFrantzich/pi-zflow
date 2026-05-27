@@ -184,7 +184,20 @@ export function computeRepoStructureHash(cwd?: string): string {
       stdio: ["ignore", "pipe", "pipe"],
       cwd: repoRoot,
     }).trim()
-    statusEntries = rawStatus ? rawStatus.split("\n").filter(Boolean).sort() : []
+    statusEntries = rawStatus
+      ? rawStatus.split("\n")
+        .filter(Boolean)
+        .filter((line) => {
+          const filePath = line.slice(3).trim()
+          return !(
+            filePath === ".zflow" ||
+            filePath.startsWith(".zflow/") ||
+            filePath === ".git/pi-zflow" ||
+            filePath.startsWith(".git/pi-zflow/")
+          )
+        })
+        .sort()
+      : []
   } catch {
     // Not in a git repo — hash will be unique per call (always stale)
     const ts = Date.now().toString()

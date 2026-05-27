@@ -493,15 +493,32 @@ export function readInstallManifest(): Record<string, unknown> | null {
 }
 
 /**
+ * Options for getInstalledAgents.
+ */
+export interface GetInstalledAgentsOptions {
+  /** Override the agents directory path (for hermetic testing). */
+  customAgentsTarget?: string
+}
+
+/**
+ * Options for getInstalledChains.
+ */
+export interface GetInstalledChainsOptions {
+  /** Override the chains directory path (for hermetic testing). */
+  customChainsTarget?: string
+}
+
+/**
  * Get a list of installed zflow agents.
  *
  * Scans `~/.pi/agent/agents/zflow/` for `.md` files and returns
  * information about each installed agent.
  *
+ * @param options - Optional overrides (e.g. custom agents target for testing).
  * @returns Array of installed agent information.
  */
-export function getInstalledAgents(): InstalledAgentInfo[] {
-  const agentsDir = ZFLOW_AGENTS_DIR
+export function getInstalledAgents(options?: GetInstalledAgentsOptions): InstalledAgentInfo[] {
+  const agentsDir = options?.customAgentsTarget ?? ZFLOW_AGENTS_DIR
 
   if (!existsSync(agentsDir)) return []
 
@@ -531,10 +548,11 @@ export function getInstalledAgents(): InstalledAgentInfo[] {
  * Scans `~/.pi/agent/chains/` for `.chain.md` files and returns
  * information about each installed chain.
  *
+ * @param options - Optional overrides (e.g. custom chains target for testing).
  * @returns Array of installed chain information.
  */
-export function getInstalledChains(): InstalledChainInfo[] {
-  const chainsDir = ZFLOW_CHAINS_DIR
+export function getInstalledChains(options?: GetInstalledChainsOptions): InstalledChainInfo[] {
+  const chainsDir = options?.customChainsTarget ?? ZFLOW_CHAINS_DIR
 
   if (!existsSync(chainsDir)) return []
 

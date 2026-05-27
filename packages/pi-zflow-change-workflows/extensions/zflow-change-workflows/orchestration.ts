@@ -1017,6 +1017,8 @@ export interface WorktreeDispatchConfig {
   changeId: string
   /** Plan version (e.g. "v1"). */
   planVersion: string
+  /** Exact intercom target for the supervising orchestrator, when known. */
+  orchestratorTarget?: string
 }
 
 // Type for an execution group used by worktree dispatch
@@ -1027,6 +1029,219 @@ export interface DispatchExecutionGroup {
   dependencies: string[]
   taskPrompt: string
   scopedVerification?: string
+  /** When set, this is a coalesced group that merges multiple original groups. */
+  coalescedFrom?: string[]
+}
+
+/**
+ * Coalesce execution groups that share files and have no explicit ordering.
+ *
+ * Builds a graph where edges connect groups that share at least one file AND
+ * have no dependency relationship (direct or transitive). Groups with explicit
+ * ordering (Group B depends on Group A) are not coalesced — the apply-back
+ * engine patches them sequentially in topological order.
+ *
+ * Groups in each connected component (file-sharing + independent) are merged
+ * into a single coalesced group so they run in the same worktree and produce
+ * compatible patches from the same base commit.
+ *
+ * @param groups - The dispatch execution groups to coalesce.
+ * @returns A new array of groups with connected components merged.
+ */
+export function coalesceConnectedGroups(
+  groups: DispatchExecutionGroup[],
+): DispatchExecutionGroup[] {
+  if (groups.length <= 1) return groups
+
+  // ── Build transitive dependency closure ─────────────────────
+  // Used to avoid coalescing groups that already have explicit dependency
+  // ordering — the apply-back engine applies patches in topological order,
+  // so sequential groups don't need to run in the same worktree.
+  const transitiveDeps = new Map<string, Set<string>>()
+  for (const g of groups) {
+    const closure = new Set<string>()
+    const stack = [...g.dependencies]
+    while (stack.length > 0) {
+      const depId = stack.pop()!
+      if (closure.has(depId)) continue
+      closure.add(depId)
+      const depGroup = groups.find(x => x.id === depId)
+      if (depGroup) {
+        for (const d of depGroup.dependencies) {
+          if (!closure.has(d)) stack.push(d)
+        }
+      }
+    }
+    transitiveDeps.set(g.id, closure)
+  }
+
+  // ── Build adjacency list ────────────────────────────────────
+  // Two groups are connected if they share at least one file AND have
+  // no explicit dependency ordering between them (neither directly nor
+  // transitively depends on the other). Groups with dependency ordering
+  // don't need coalescing — the apply-back engine handles them by
+  // applying patches in topological order.
+  const groupIds = groups.map(g => g.id)
+  const adjacency = new Map<string, string[]>()
+  for (const g of groups) adjacency.set(g.id, [])
+
+  for (let i = 0; i < groups.length; i++) {
+    for (let j = i + 1; j < groups.length; j++) {
+      const a = groups[i]!
+      const b = groups[j]!
+      const shareFiles = a.files.some(f => b.files.includes(f))
+      const independent = !(transitiveDeps.get(a.id)?.has(b.id) || transitiveDeps.get(b.id)?.has(a.id))
+
+      if (shareFiles && independent) {
+        adjacency.get(a.id)!.push(b.id)
+        adjacency.get(b.id)!.push(a.id)
+      }
+    }
+  }
+
+  // ── Find connected components ───────────────────────────────
+  const visited = new Set<string>()
+  const components: string[][] = []
+
+  for (const id of groupIds) {
+    if (visited.has(id)) continue
+    const component: string[] = []
+    const stack = [id]
+    while (stack.length > 0) {
+      const nodeId = stack.pop()!
+      if (visited.has(nodeId)) continue
+      visited.add(nodeId)
+      component.push(nodeId)
+      for (const neighbor of adjacency.get(nodeId) ?? []) {
+        if (!visited.has(neighbor)) stack.push(neighbor)
+      }
+    }
+    components.push(component)
+  }
+
+  // ── Merge each component into a single group ────────────────
+  const groupMap = new Map(groups.map(g => [g.id, g]))
+  const result: DispatchExecutionGroup[] = []
+
+  const idMap = new Map<string, string>()
+
+  for (const component of components) {
+    if (component.length === 1) {
+      // No coalescing needed for singleton components
+      const group = groupMap.get(component[0]!)!
+      idMap.set(group.id, group.id)
+      result.push(group)
+      continue
+    }
+
+    const members = component.map(id => groupMap.get(id)!).filter(Boolean)
+    const componentSet = new Set(component)
+
+    // Merged files (union, deduplicated, preserving order)
+    const mergedFiles: string[] = []
+    const seenFiles = new Set<string>()
+    for (const m of members) {
+      for (const f of m.files) {
+        if (!seenFiles.has(f)) {
+          seenFiles.add(f)
+          mergedFiles.push(f)
+        }
+      }
+    }
+
+    // Merged dependencies: union of all member dep IDs minus IDs within this component
+    const depsSet = new Set<string>()
+    for (const m of members) {
+      for (const d of m.dependencies) {
+        if (!componentSet.has(d)) depsSet.add(d)
+      }
+    }
+    const mergedDeps = [...depsSet]
+
+    // Merged task prompt: describe each original subgroup
+    const mergedPrompt = members.length === 2
+      ? members.map((m, i) => `Sub-group ${i + 1} — ${m.taskPrompt}`).join("\n")
+      : members.map((m, i) => `Sub-group ${i + 1} (${m.id}): ${m.taskPrompt}`).join("\n")
+
+    // Merged scoped verification: join with newlines so each command
+    // stays separate. Do NOT shell-chain with `&&` because guarded bash
+    // execution rejects multi-command syntax. Each command is rendered
+    // individually in the worker task prompt so the agent runs them as
+    // separate guarded bash calls.
+    const verificationCmds = members
+      .map(m => m.scopedVerification)
+      .filter((v): v is string => v !== undefined && v !== "")
+    const mergedVerification = verificationCmds.length > 0
+      ? verificationCmds.join("\n")
+      : undefined
+
+    // Agent: use the deepest dependency member (one that no other member depends on),
+    // or fall back to the first member's agent.
+    const leafMember = members.find(m => !members.some(other => other.dependencies.includes(m.id)))
+    const mergedAgent = leafMember?.agent ?? members[0]!.agent
+
+    // Merged ID: join original IDs with "~" separator
+    // Sort so IDs are stable (group-1, group-2, etc.)
+    component.sort()
+    const mergedId = component.join("~")
+
+    for (const id of component) {
+      idMap.set(id, mergedId)
+    }
+
+    result.push({
+      id: mergedId,
+      agent: mergedAgent,
+      files: mergedFiles,
+      dependencies: mergedDeps,
+      taskPrompt: mergedPrompt,
+      scopedVerification: mergedVerification,
+      coalescedFrom: [...component],
+    })
+  }
+
+  // Remap dependencies that point at groups inside a coalesced component to
+  // the new coalesced group ID. This preserves apply-back ordering without
+  // leaving dependencies that reference no dispatched group.
+  return result.map((group) => {
+    const remappedDeps = group.dependencies
+      .map((dep) => idMap.get(dep) ?? dep)
+      .filter((dep) => dep !== group.id)
+    return {
+      ...group,
+      dependencies: [...new Set(remappedDeps)],
+    }
+  })
+}
+
+/**
+ * Build the narrow control-plane contract included in worker/orchestrator tasks.
+ */
+function buildLimitedCoordinationLines(
+  label: string,
+  orchestratorTarget?: string,
+): string[] {
+  const lines = [
+    "## Control-plane coordination (use only at the margins)",
+    "- Prefer `contact_supervisor` when available. It is the most reliable way to reach your supervising orchestrator.",
+    "- Use coordination only for: `DRIFT_DETECTED`, `BLOCKED`, `NEED_CLARIFICATION`, or `VERIFICATION_FAILED`.",
+    `- Keep each message terse, with a leading tag and the relevant ID (for example: \`${label}\`).`,
+    "- Write or reference the authoritative artifact first when reporting drift or verification failure.",
+    "- Do NOT use intercom for routine narration, detailed discussion, or completion chatter.",
+  ]
+
+  if (orchestratorTarget) {
+    lines.push(
+      `- Fallback raw intercom target: \`${orchestratorTarget}\`.`,
+      "- If `contact_supervisor` is unavailable but `intercom` is available, use that exact target.",
+    )
+  } else {
+    lines.push(
+      "- If `contact_supervisor` is unavailable and no explicit intercom target is provided, stop and return a clear BLOCKED summary in your task result.",
+    )
+  }
+
+  return lines
 }
 
 /**
@@ -1049,11 +1264,37 @@ export function buildWorkerTask(
   config: WorktreeDispatchConfig,
   planArtifactPaths?: Record<string, string>,
 ): string {
-  const lines: string[] = [
-    `# Task: ${group.id}`,
-    "",
-    `Execute the approved plan for group **${group.id}** in this isolated worktree.`,
-    "",
+  const lines: string[] = []
+
+  // Handle coalesced groups (merged from multiple original groups)
+  if (group.coalescedFrom && group.coalescedFrom.length > 1) {
+    lines.push(
+      `# Task: ${group.coalescedFrom.join(" + ")}`,
+      "",
+      `This worktree implements multiple execution groups that share files or have ` +
+      `dependencies. They have been combined so you can implement them together ` +
+      `in dependency order within this single worktree.`,
+      "",
+      `## Coalesced groups`,
+    )
+    for (const origId of group.coalescedFrom) {
+      lines.push(`- ${origId}`)
+    }
+    lines.push("")
+  } else {
+    lines.push(
+      `# Task: ${group.id}`,
+      "",
+      `Execute the approved plan for group **${group.id}** in this isolated worktree.`,
+      "",
+    )
+  }
+
+  const scopeDesc = group.coalescedFrom && group.coalescedFrom.length > 1
+    ? `- Files you may modify across all sub-groups: ${group.files.join(", ") || "(none specified)"}`
+    : `- Files you may modify: ${group.files.join(", ") || "(none specified)"}`
+
+  lines.push(
     `## Run context`,
     `- Run ID: ${config.runId}`,
     `- Change: ${config.changeId}`,
@@ -1061,7 +1302,7 @@ export function buildWorkerTask(
     `- Repo root: ${config.repoRoot}`,
     "",
     `## Scope`,
-    `- Files you may modify: ${group.files.join(", ") || "(none specified)"}`,
+    scopeDesc,
     `- Agent: ${group.agent}`,
     "",
     `## Rules`,
@@ -1074,7 +1315,12 @@ export function buildWorkerTask(
     `7. Do NOT launch subagents.`,
     `8. Do NOT commit to the primary branch. Your worktree commits are disposable.`,
     `9. Report all changed files and verification results in your output summary.`,
-  ]
+    ``,
+    `## Ephemeral Script Policy`,
+    `Any temporary helper script MUST be written ONLY to:`,
+    `\`<runtime-state-dir>/runs/${config.runId}/scratch/scripts/\``,
+    `Never write helper scripts to the repo root, scripts/, test/, tests/, src/, or lib/.`,
+  )
 
   if (group.dependencies.length > 0) {
     lines.push(
@@ -1087,19 +1333,49 @@ export function buildWorkerTask(
   }
 
   if (group.scopedVerification) {
-    lines.push(
-      "",
-      "## Scoped verification",
-      "After implementing, run the following command to verify your changes:",
-      "",
-      "```bash",
-      group.scopedVerification,
-      "```",
-      "",
-      "Include the verification result (pass/fail/output) in your summary.",
-      "Do NOT invent or run repo-wide verification commands. Run only the",
-      "scoped verification command specified above.",
-    )
+    const commands = group.scopedVerification.split("\n").filter(Boolean)
+    if (commands.length > 1) {
+      // Multi-command (coalesced groups): render each separately so the
+      // agent runs them as individual guarded bash calls, not shell-chained.
+      lines.push(
+        "",
+        "## Scoped verification",
+        "After implementing, run each of the following verification commands",
+        "separately (do NOT chain them with `&&`, `;`, or `|`):",
+        "",
+      )
+      for (let i = 0; i < commands.length; i++) {
+        lines.push(
+          `### Verification ${i + 1}`,
+          "",
+          "```bash",
+          commands[i]!,
+          "```",
+          "",
+        )
+      }
+      lines.push(
+        "Include the verification result (pass/fail/output) for each command",
+        "in your summary.",
+        "Do NOT invent or run repo-wide verification commands. Run only the",
+        "scoped verification commands specified above.",
+      )
+    } else {
+      // Single command (non-coalesced group)
+      lines.push(
+        "",
+        "## Scoped verification",
+        "After implementing, run the following command to verify your changes:",
+        "",
+        "```bash",
+        commands[0]!,
+        "```",
+        "",
+        "Include the verification result (pass/fail/output) in your summary.",
+        "Do NOT invent or run repo-wide verification commands. Run only the",
+        "scoped verification command specified above.",
+      )
+    }
   } else {
     lines.push(
       "",
@@ -1141,6 +1417,8 @@ export function buildWorkerTask(
   }
 
   lines.push(
+    "",
+    ...buildLimitedCoordinationLines(`group ${group.id}`, config.orchestratorTarget),
     "",
     "## Output format",
     "When finished, provide:",
@@ -1656,6 +1934,60 @@ export async function runChangeAuditWorkflow(
   }
 }
 
+// ── Fix orchestrator configuration ───────────────────────────────
+
+/**
+ * Configuration for the fix orchestrator retry bounds.
+ *
+ * Controls how many fix attempts are made per finding and globally.
+ * Environment variables take precedence over profile settings, and both
+ * take precedence over defaults.
+ */
+export interface FixOrchestratorConfig {
+  /** Max fix attempts per individual finding. Default: 2 */
+  maxAttemptsPerFinding: number
+  /** Max global rounds of fix dispatch. Default: 3 */
+  maxGlobalRounds: number
+}
+
+/**
+ * Resolve the fix orchestrator configuration from environment variables,
+ * profile settings, or defaults.
+ *
+ * Precedence (highest first):
+ * 1. `ZFLOW_FIX_MAX_ATTEMPTS_PER_FINDING` env var
+ * 2. `ZFLOW_FIX_MAX_GLOBAL_ROUNDS` env var
+ * 3. `profileSettings.maxAttemptsPerFinding` / `maxGlobalRounds`
+ * 4. Hardcoded defaults (2, 3)
+ *
+ * @param profileSettings - Optional settings from the active profile.
+ * @returns The resolved fix orchestrator config.
+ */
+export function resolveFixOrchestratorConfig(
+  profileSettings?: Record<string, unknown>,
+): FixOrchestratorConfig {
+  const envMaxAttempts = process.env.ZFLOW_FIX_MAX_ATTEMPTS_PER_FINDING
+  const envMaxRounds = process.env.ZFLOW_FIX_MAX_GLOBAL_ROUNDS
+
+  const readPositiveInteger = (value: unknown): number | undefined => {
+    if (typeof value === "number" && Number.isInteger(value) && value > 0) return value
+    if (typeof value !== "string" || value.trim().length === 0) return undefined
+    const parsed = Number.parseInt(value, 10)
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
+  }
+
+  return {
+    maxAttemptsPerFinding:
+      readPositiveInteger(envMaxAttempts) ??
+      readPositiveInteger(profileSettings?.maxAttemptsPerFinding) ??
+      2,
+    maxGlobalRounds:
+      readPositiveInteger(envMaxRounds) ??
+      readPositiveInteger(profileSettings?.maxGlobalRounds) ??
+      3,
+  }
+}
+
 /**
  * Options for the change-fix workflow.
  */
@@ -1668,6 +2000,11 @@ export interface FixWorkflowOptions {
   findingIndices?: number[]
   /** Whether to auto-apply fixes without manual review. */
   autoFix?: boolean
+  /**
+   * Override for fix orchestrator config.
+   * Falls back to env vars → profile settings → defaults if omitted.
+   */
+  fixOrchestratorConfig?: Partial<FixOrchestratorConfig>
 }
 
 /**
@@ -1682,16 +2019,30 @@ export interface FixWorkflowResult {
   filesToModify: string[]
   /** Resolved verification command if available. */
   verificationCommand?: string
+  /** Parsed findings from review. */
+  parsedFindings: ParsedFinding[]
+  /** The raw findings content and path. */
+  rawFindingsPath?: string
+  /** Plan version used. */
+  planVersion: string
+  /** Plan lifecycle state. */
+  lifecycleState: string
+  /** Resolved fix orchestrator configuration. */
+  fixOrchestratorConfig: FixOrchestratorConfig
+  /** Task prompt for the fix orchestrator agent. */
+  fixOrchestratorTaskPrompt?: string
+  /** Paths to the five canonical plan artifacts for source context. */
+  planArtifactPaths?: Record<string, string>
 }
 
 /**
  * Run the `/zflow-change-fix <change-path>` workflow.
  *
- * Loads selected findings or verification failures, builds a focused
- * fix plan, and returns the fix context for dispatch.
+ * Loads plan state, parses review findings, builds a focused fix plan
+ * with structured finding IDs, and returns the fix context for dispatch.
  *
  * @param options - Fix workflow options.
- * @returns Fix result with plan and target files.
+ * @returns Fix result with plan, target files, and parsed findings.
  */
 export async function runChangeFixWorkflow(
   options: FixWorkflowOptions,
@@ -1715,15 +2066,13 @@ export async function runChangeFixWorkflow(
   const planVersion = (planState.approvedVersion ?? planState.currentVersion ?? "v1") as string
   const lifecycleState = (planState.lifecycleState ?? "unknown") as string
 
-  // Read review findings
-  const reviewFindingsPath = resolveCodeReviewFindingsPath(cwd)
-  let findingsContent = ""
-  let findingsLines: string[] = []
-  try {
-    findingsContent = await fs.readFile(reviewFindingsPath, "utf-8")
-    findingsLines = findingsContent.split("\n").filter(l => l.trim().startsWith("-") || l.trim().startsWith("*"))
-  } catch {
-    // no findings file
+  // Read review findings using the structured parser
+  const { findings, rawPath, rawContent } = await parseReviewFindings(cwd)
+
+  // Filter findings by indices if specified
+  let selectedFindings = findings
+  if (options.findingIndices && options.findingIndices.length > 0) {
+    selectedFindings = findings.filter((_, i) => options.findingIndices!.includes(i))
   }
 
   // Read verification artifact
@@ -1746,7 +2095,6 @@ export async function runChangeFixWorkflow(
   try {
     const egPath = resolvePlanArtifactPath(changeId, planVersion, "execution-groups", cwd)
     const egContent = await fs.readFile(egPath, "utf-8")
-    // Extract file paths from execution groups
     const fileMatches = egContent.matchAll(/[`"']([^`"']*\.[a-zA-Z]+)[`"']/g)
     for (const match of fileMatches) {
       const filePath = match[1]
@@ -1758,67 +2106,555 @@ export async function runChangeFixWorkflow(
     // no execution groups artifact
   }
 
-  // Build fix plan
-  const fixPlanLines: string[] = [
-    `# Fix Plan for ${changeId}`,
-    "",
-    `**Plan Version:** ${planVersion}`,
-    `**Plan State:** ${lifecycleState}`,
-    "",
-  ]
-
-  if (findingsLines.length > 0) {
-    fixPlanLines.push(
-      "## Findings to Address",
-      "",
-      ...(options.findingIndices && options.findingIndices.length > 0
-        ? findingsLines
-            .filter((_, i) => options.findingIndices!.includes(i))
-            .map(l => `- ${l}`)
-        : findingsLines.map(l => `- ${l}`)),
-      "",
-    )
+  // Build fix plan using the structured builder
+  let fixPlan: string
+  if (selectedFindings.length > 0) {
+    fixPlan = await buildFixPlan(changeId, selectedFindings, cwd)
   } else {
-    fixPlanLines.push("## Findings", "No review findings available.", "")
+    // Fallback: basic plan
+    const lines: string[] = [
+      `# Fix Plan for ${changeId}`,
+      "",
+      `**Plan Version:** ${planVersion}`,
+      `**Plan State:** ${lifecycleState}`,
+      "",
+      "## Findings",
+      "",
+      "No structured review findings available. Manual review may be needed.",
+      "",
+    ]
+    if (filesToModify.length > 0) {
+      lines.push("## Target Files")
+      lines.push("")
+      for (const f of filesToModify) {
+        lines.push(`- \`${f}\``)
+      }
+      lines.push("")
+    }
+    if (verificationCommand) {
+      lines.push("## Verification Command")
+      lines.push("")
+      lines.push("```bash")
+      lines.push(verificationCommand)
+      lines.push("```")
+      lines.push("")
+    }
+    fixPlan = lines.join("\n")
   }
 
-  fixPlanLines.push(
-    "## Approach",
-    "",
-    options.autoFix
-      ? "Auto-fix mode: applying targeted fixes based on findings."
-      : "Manual review mode: findings loaded for inspection.",
-    "",
-  )
-
-  if (filesToModify.length > 0) {
-    fixPlanLines.push(
-      "## Target Files",
-      "",
-      ...filesToModify.map(f => `- \`${f}\``),
-      "",
-    )
-  }
-
-  if (verificationCommand) {
-    fixPlanLines.push(
-      "## Verification Command",
-      "",
-      "```bash",
-      verificationCommand,
-      "```",
-      "",
-    )
-  }
-
-  const fixPlan = fixPlanLines.join("\n")
+  // Resolve fix orchestrator config
+  const fixOrchestratorConfig = resolveFixOrchestratorConfig()
 
   return {
     changeId,
     fixPlan,
     filesToModify,
     verificationCommand,
+    parsedFindings: selectedFindings,
+    rawFindingsPath: rawPath,
+    planVersion,
+    lifecycleState,
+    fixOrchestratorConfig,
+    fixOrchestratorTaskPrompt: undefined, // caller builds this via buildFixOrchestratorTaskPrompt
+    planArtifactPaths: {
+      design: resolvePlanArtifactPath(changeId, planVersion, "design", cwd),
+      executionGroups: resolvePlanArtifactPath(changeId, planVersion, "execution-groups", cwd),
+      standards: resolvePlanArtifactPath(changeId, planVersion, "standards", cwd),
+      verification: resolvePlanArtifactPath(changeId, planVersion, "verification", cwd),
+      implementationTasks: resolvePlanArtifactPath(changeId, planVersion, "implementation-tasks", cwd),
+    },
   }
+}
+
+/**
+ * Build the task prompt for the fix orchestrator agent.
+ *
+ * Constructs a prompt that tells the fix orchestrator which change it is
+ * working on, provides the review findings, and configures retry bounds.
+ *
+ * @param changeId - The change identifier.
+ * @param fixResult - The result from runChangeFixWorkflow.
+ * @param findingsPath - Path to the consolidated findings file.
+ * @param rawReviewerDir - Path to the raw reviewer artifacts directory.
+ * @param cwd - Working directory (optional).
+ * @returns A markdown task prompt for the fix orchestrator agent.
+ */
+export async function buildFixOrchestratorTaskPrompt(
+  changeId: string,
+  fixResult: FixWorkflowResult,
+  findingsPath: string,
+  rawReviewerDir?: string,
+  cwd?: string,
+  orchestratorTarget?: string,
+): Promise<string> {
+  const config = fixResult.fixOrchestratorConfig
+  const planPaths = fixResult.planArtifactPaths
+  const lines: string[] = [
+    `# Fix Orchestration Task — ${changeId}`,
+    "",
+    "Agent role: `zflow.fix-orchestrator`.",
+    "",
+    "You are the fix orchestrator. Your role is to read the code review",
+    "findings below, decompose them into fix work items, dispatch fix",
+    "subagents, and validate that their work satisfies the original",
+    "finding requirements AND the original change documents.",
+    "",
+    "## Configuration",
+    "",
+    `- Max attempts per finding: ${config.maxAttemptsPerFinding}`,
+    `- Max global rounds: ${config.maxGlobalRounds}`,
+    "",
+    "## Source Change Context (MUST read before dispatching fix workers)",
+    "",
+    "The original change was planned and implemented based on these documents.",
+    "Fix workers must respect the design intent, standards, and verification",
+    "requirements described here. When validating fixes, check that they align",
+    "with these documents, not just the individual finding text.",
+    "",
+  ]
+
+  if (planPaths) {
+    lines.push(
+      "| Document | Path |",
+      "| -------- | ---- |",
+      `| Design | \`${planPaths.design}\` |`,
+      `| Execution Groups | \`${planPaths.executionGroups}\` |`,
+      `| Standards | \`${planPaths.standards}\` |`,
+      `| Verification | \`${planPaths.verification}\` |`,
+      `| Implementation Tasks | \`${planPaths.implementationTasks}\` |`,
+      "",
+      "**Read these documents before dispatching any fix worker.**",
+      "If a fix would contradict the approved design or standards, note it in",
+      "your gap report and escalate rather than silently diverging.",
+      "",
+    )
+  }
+
+  lines.push(
+    "## Change context",
+    "",
+    `- Change ID: ${changeId}`,
+    `- Plan version: ${fixResult.planVersion}`,
+    `- Plan state: ${fixResult.lifecycleState}`,
+    fixResult.verificationCommand
+      ? `- Verification command: \`${fixResult.verificationCommand}\``
+      : "",
+    "",
+    "## Findings to address",
+    "",
+  )
+
+  for (const finding of fixResult.parsedFindings) {
+    lines.push(`### ${finding.findingId}: ${finding.title}`)
+    lines.push("")
+    lines.push(`- **Severity**: ${finding.severity}`)
+    lines.push(`- **File**: ${finding.file ?? "(not specified)"}`)
+    if (finding.line) lines.push(`- **Line**: ${finding.line}`)
+    lines.push(`- **Reviewer**: ${finding.reviewerRole}`)
+    lines.push(`- **Evidence**: ${finding.evidence}`)
+    lines.push(`- **Recommendation**: ${finding.recommendation}`)
+    if (finding.expectedBehavior) {
+      lines.push(`- **Expected behavior**: ${finding.expectedBehavior}`)
+    }
+    if (finding.fixRequirements) {
+      lines.push(`- **Fix requirements**: ${finding.fixRequirements}`)
+    }
+    if (finding.validation) {
+      lines.push(`- **Validation**: ${finding.validation}`)
+    }
+    if (finding.suggestedApproach) {
+      lines.push(`- **Suggested approach**: ${finding.suggestedApproach}`)
+    }
+    if (finding.artifactPath) {
+      lines.push(`- **Artifact**: ${finding.artifactPath}`)
+    }
+    if (finding.whyItMatters) {
+      lines.push(`- **Why it matters**: ${finding.whyItMatters}`)
+    }
+    lines.push("")
+  }
+
+  if (rawReviewerDir) {
+    lines.push("## Raw reviewer artifacts (MUST read for each finding)")
+    lines.push("")
+    lines.push("The consolidated findings above are summaries. The raw reviewer")
+    lines.push(`artifacts at \`${rawReviewerDir}\` contain the full analysis,`)
+    lines.push("pseudocode, line-by-line evidence, and specific fix strategies from")
+    lines.push("each reviewer agent. These are ESSENTIAL context for fix workers.")
+    lines.push("")
+    lines.push("**For each finding you dispatch to a fix worker:**")
+    lines.push("1. Read the raw reviewer artifact referenced by the finding's Artifact path.")
+    lines.push("2. Extract the detailed evidence (file snippets, pseudocode, reasoning).")
+    lines.push("3. Include that detail in the fix worker's task prompt.")
+    lines.push("4. Use the raw evidence as the validation baseline when checking the fix.")
+    lines.push("")
+  }
+
+  if (findingsPath) {
+    lines.push("## Consolidated findings path")
+    lines.push("")
+    lines.push(`\`${findingsPath}\``)
+    lines.push("")
+  }
+
+  lines.push(
+    ...buildLimitedCoordinationLines(`change ${changeId}`, orchestratorTarget),
+    "- When you dispatch fix workers, pass through the same narrow coordination contract.",
+    "- Fix workers should prefer `contact_supervisor` when available and use raw `intercom` only as fallback plumbing.",
+    ...(orchestratorTarget
+      ? [`- If you must pass a raw intercom fallback to a fix worker, use \`${orchestratorTarget}\`.`]
+      : []),
+    "",
+  )
+
+  lines.push(
+    "## Instructions",
+    "",
+    "1. **Read source context first.** Read the design, execution-groups,",
+    "   standards, and verification documents listed above. Understand the",
+    "   original intent before dispatching any fix worker.",
+    "2. **Read raw reviewer artifacts for each finding.** The consolidated",
+    "   findings are summaries — the raw artifacts have detailed evidence.",
+    "3. Analyze the findings and group by target file.",
+    "4. For each finding, choose a fix worker agent:",
+    "   - `zflow.implement-routine` for straightforward fixes",
+    "   - `zflow.implement-hard` for complex/cross-module/high-severity",
+    "5. **Build context-rich worker tasks.** Each task must include:",
+    "   - The original finding text (evidence, expected behavior, fix requirements)",
+    "   - Relevant excerpts from the raw reviewer artifact",
+    "   - Relevant design/standards context from the source documents",
+    "   - The exact validation/proof the fix must pass",
+    "6. Dispatch workers using `subagent` tool.",
+    "7. After each worker completes, validate the fix against:",
+    "   - The original finding requirements",
+    "   - The source design and standards documents",
+    "   - The raw reviewer evidence",
+    "8. If incomplete, dispatch again with precise gap details.",
+    "9. Respect the retry bounds above.",
+    "10. Persist your satisfaction report to " + "`.zflow/plans/" + changeId + "/fix-orchestration-report.md`.",
+    "11. Report back with:\n",
+    "   - Which findings were FIXED (with attempt count)",
+    "   - Which findings are UNRESOLVED (with explanation)",
+    "   - Any recommendations for re-review",
+    "   - Whether verification passed",
+    "   - Any source-document deviations you observed",
+    "   - A note about whether the fixes align with the original design intent",
+  )
+
+  return lines.join("\n")
+}
+
+/**
+ * A single finding parsed from the code-review-findings.md file.
+ */
+export interface ParsedFinding {
+  /** Stable identifier like "finding-1", "finding-2". */
+  findingId: string
+  /** Severity level. */
+  severity: "critical" | "major" | "minor" | "nit"
+  /** Short title of the finding. */
+  title: string
+  /** Source file path, if available. */
+  file?: string
+  /** Source line number, if available. */
+  line?: number
+  /** Reviewer role that identified this finding. */
+  reviewerRole: string
+  /** Detailed evidence from the reviewer. */
+  evidence: string
+  /** Recommendation for fixing the issue. */
+  recommendation: string
+  /** Path to the raw reviewer artifact for traceability. */
+  artifactPath?: string
+  /** Why the finding matters. */
+  whyItMatters?: string
+  /** What the code SHOULD do instead (enriched field for fix orchestrator). */
+  expectedBehavior?: string
+  /** Concrete things a fix must accomplish (enriched field for fix orchestrator). */
+  fixRequirements?: string
+  /** How to verify the fix works (enriched field for fix orchestrator). */
+  validation?: string
+  /** Optional hint for the fix worker (enriched field for fix orchestrator). */
+  suggestedApproach?: string
+}
+
+/**
+ * Parse review findings from the canonical code-review-findings.md file.
+ *
+ * The findings file uses the format produced by pi-zflow-review:
+ *
+ * ```
+ * ### {Finding Title}
+ * **Reviewer support**: correctness, integration
+ * **Evidence**: ... 
+ * **Why it matters**: ...
+ * **Recommendation**: ...
+ * **File**: `path/to/file.ts`
+ * **Lines**: 42
+ * ```
+ *
+ * Each heading (h3) becomes a ParsedFinding with an auto-incrementing ID.
+ *
+ * @param cwd - Working directory for runtime state resolution.
+ * @returns Parsed findings and the raw file path.
+ */
+export async function parseReviewFindings(
+  cwd?: string,
+): Promise<{
+  findings: ParsedFinding[]
+  rawPath: string
+  rawContent: string
+}> {
+  const { default: fs } = await import("node:fs/promises")
+  const { resolveCodeReviewFindingsPath } = await import("pi-zflow-artifacts/artifact-paths")
+  const { resolveReviewDir } = await import("pi-zflow-artifacts/artifact-paths")
+
+  const rawPath = resolveCodeReviewFindingsPath(cwd)
+  let rawContent: string
+
+  try {
+    rawContent = await fs.readFile(rawPath, "utf-8")
+  } catch {
+    rawContent = ""
+  }
+
+  if (!rawContent || rawContent.trim().length === 0) {
+    return { findings: [], rawPath, rawContent: "" }
+  }
+
+  const findings: ParsedFinding[] = []
+  let findingCounter = 0
+
+  // Split on h3 (###) headings to isolate each finding block
+  // The split pattern looks for "### " at the start of a line
+  const blocks = rawContent.split(/(?=^### )/m).filter(Boolean)
+
+  for (const block of blocks) {
+    // Extract heading title from ### title
+    const headingMatch = block.match(/^### (.+)$/m)
+    if (!headingMatch) continue
+
+    const title = headingMatch[1].trim()
+
+    // Skip non-finding sections like "Critical Findings", "Major Findings", etc.
+    if (/^(Critical|Major|Minor|Nit|None)[\s.:]|^None\.$/i.test(title)) continue
+    if (/^(Coverage|Reviewed|Verification|Findings Summary)/i.test(title)) continue
+
+    // Skip noise findings — reviewer preamble/scope statements with no actionable content.
+    // These have identical title and evidence and describe what was reviewed, not what was found.
+    if (/^(Reviewed (the |scope: )|I reviewed |Security review scope)/i.test(title)) {
+      // Quick check: if title and first line of evidence are near-identical, it's noise
+      const firstEvidenceLine = block.split("\n").find(l => /^\*\*Evidence\*\*:/i.test(l))?.replace(/^\*\*Evidence\*\*:\s*/i, "").trim() ?? ""
+      const normalizedTitle = title.toLowerCase().replace(/\s+/g, " ")
+      const normalizedEvidence = firstEvidenceLine.toLowerCase().replace(/\s+/g, " ")
+      if (normalizedTitle === normalizedEvidence || normalizedEvidence.includes(normalizedTitle.substring(0, 30))) {
+        continue
+      }
+    }
+
+    findingCounter++
+    const findingId = `finding-${findingCounter}`
+
+    // Extract severity: look for severity heading text or infer from section
+    let severity: ParsedFinding["severity"] = "minor"
+    const sectionBefores = rawContent.slice(0, rawContent.indexOf(block)).split("\n").filter(Boolean)
+    const lastSectionHeading = sectionBefores.reverse().find(l => /^## (Critical|Major|Minor)(?: Findings?)?$|^## Nits?$/i.test(l))
+    if (lastSectionHeading) {
+      const sev = lastSectionHeading.replace(/^## /i, "").replace(/ Findings?$/i, "").trim().toLowerCase()
+      if (sev === "critical") severity = "critical"
+      else if (sev === "major") severity = "major"
+      else if (sev === "minor") severity = "minor"
+      else if (/^nit/i.test(sev)) severity = "nit"
+    }
+
+    // Extract fields with regex — use multi-line patterns for enriched evidence
+    // and recommendation fields which may span multiple lines.
+    const fileMatch = block.match(/\*\*File\*\*:\s*`?([^`\n]+)`?/i)
+    const lineMatch = block.match(/\*\*Lines?\*\*:\s*(\d+)/i)
+    const supportMatch = block.match(/\*\*Reviewer support\*\*:\s*(.+)$/im)
+    // Multi-line: capture from **Evidence**: to the next ** field or end of block
+    const evidenceBlockMatch = block.match(/\*\*Evidence\*\*:\s*([\s\S]+?)(?=\n\*\*[^*\n]+\*\*|\n\*\*$|$)/i)
+    const evidenceMulti = evidenceBlockMatch ? evidenceBlockMatch[1].trim() : ""
+    const whyBlockMatch = block.match(/\*\*Why it matters\*\*:\s*([\s\S]+?)(?=\n\*\*[^*\n]+\*\*|\n\*\*$|$)/i)
+    const whyMulti = whyBlockMatch ? whyBlockMatch[1].trim() : ""
+    const recBlockMatch = block.match(/\*\*Recommendation\*\*:\s*([\s\S]+?)(?=\n\*\*[^*\n]+\*\*|\n\*\*$|$)/i)
+    const recMulti = recBlockMatch ? recBlockMatch[1].trim() : ""
+    // Single-line fallbacks for basic reviewers
+    const evidenceLineMatch = block.match(/\*\*Evidence\*\*:\s*(.+)$/im)
+    const whyLineMatch = block.match(/\*\*Why it matters\*\*:\s*(.+)$/im)
+    const recLineMatch = block.match(/\*\*Recommendation\*\*:\s*(.+)$/im)
+    const artifactMatch = block.match(/\*\*Artifact[^:]*\*\*:\s*`?([^`\n]+)`?/i)
+    // Enriched fields from the new finding format (all optional)
+    const expectedBehaviorMatch = block.match(/\*\*Expected behavior\*\*:\s*(.+)$/im)
+    const fixRequirementsMatch = block.match(/\*\*Fix requirements\*\*:\s*(.+)$/im)
+    const validationMatch = block.match(/\*\*Validation\*\*:\s*(.+)$/im)
+    const suggestedApproachMatch = block.match(/\*\*Suggested approach\*\*:\s*(.+)$/im)
+
+    // Prefer multi-line extraction; fall back to single-line
+    const evidence = evidenceMulti || (evidenceLineMatch ? evidenceLineMatch[1].trim() : "")
+    const recommendation = recMulti || (recLineMatch ? recLineMatch[1].trim() : "")
+    const whyItMatters = whyMulti || (whyLineMatch ? whyLineMatch[1].trim() : "")
+
+    findings.push({
+      findingId,
+      severity,
+      title,
+      file: fileMatch ? fileMatch[1].trim() : undefined,
+      line: lineMatch ? Number.parseInt(lineMatch[1], 10) : undefined,
+      reviewerRole: supportMatch ? supportMatch[1].trim() : "reviewer",
+      evidence: evidence || (block.split("\n").slice(1, 4).join(" ").trim().slice(0, 300) || title),
+      recommendation: recommendation || "Review the finding and apply appropriate fix.",
+      artifactPath: artifactMatch ? artifactMatch[1].trim() : undefined,
+      whyItMatters: whyItMatters || undefined,
+      expectedBehavior: expectedBehaviorMatch ? expectedBehaviorMatch[1].trim() : undefined,
+      fixRequirements: fixRequirementsMatch ? fixRequirementsMatch[1].trim() : undefined,
+      validation: validationMatch ? validationMatch[1].trim() : undefined,
+      suggestedApproach: suggestedApproachMatch ? suggestedApproachMatch[1].trim() : undefined,
+    })
+  }
+
+  return { findings, rawPath, rawContent }
+}
+
+/**
+ * Build a structured JSON interview question payload for the fix selection gate.
+ *
+ * Presents the user with options:
+ * 1. Fix All Findings (recommended)
+ * 2. Select Findings to Fix
+ * 3. Cancel
+ *
+ * For "Select Findings", the second question presents a multi-select list.
+ *
+ * @param changeId - The change identifier.
+ * @param findings - Parsed findings to present.
+ * @returns A JSON string suitable for pi-interview.
+ */
+export function buildFixSelectionQuestions(
+  changeId: string,
+  findings: ParsedFinding[],
+): string {
+  const critical = findings.filter((f) => f.severity === "critical").length
+  const major = findings.filter((f) => f.severity === "major").length
+  const minor = findings.filter((f) => f.severity === "minor").length
+  const nit = findings.filter((f) => f.severity === "nit").length
+
+  const findingOptions = findings.map((f) => ({
+    label: `[${f.severity.toUpperCase()}] ${f.findingId}: ${f.title.slice(0, 80)}${f.file ? ` (${f.file})` : ""}`,
+    content: `${f.severity.toUpperCase()}: ${f.title}${f.file ? `\nFile: ${f.file}` : ""}${f.line ? `:${f.line}` : ""}\nEvidence: ${f.evidence.slice(0, 200)}`,
+  }))
+
+  const summaryParts: string[] = []
+  if (critical > 0) summaryParts.push(`${critical} critical`)
+  if (major > 0) summaryParts.push(`${major} major`)
+  if (minor > 0) summaryParts.push(`${minor} minor`)
+  if (nit > 0) summaryParts.push(`${nit} nits`)
+
+  const summary = summaryParts.length > 0
+    ? `${findings.length} total — ${summaryParts.join(", ")}`
+    : "No findings"
+
+  return JSON.stringify({
+    title: `Fix Selection — ${changeId}`,
+    description: `Found ${summary} for change "${changeId}".\n\nHow would you like to proceed?`,
+    questions: [
+      {
+        id: "action",
+        type: "single",
+        question: "Which fixes would you like to apply?",
+        options: [
+          {
+            label: "Fix All Findings",
+            content: "Apply fixes for all findings.",
+            recommended: true,
+          },
+          ...(findingOptions.length > 1
+            ? [{
+                label: "Select Findings to Fix",
+                content: "Choose which specific findings to fix.",
+              }]
+            : []),
+          {
+            label: "Cancel",
+            content: "Cancel — no fixes applied.",
+          },
+        ],
+        recommended: "Fix All Findings",
+      },
+      {
+        id: "selectedFindings",
+        type: "multi",
+        question: "Select which findings to fix:",
+        options: findingOptions,
+        condition: { field: "action", value: "Select Findings to Fix" },
+      },
+    ],
+  })
+}
+
+/**
+ * Build a markdown fix plan document from selected findings.
+ *
+ * Produces a structured markdown document listing each finding with
+ * its evidence, recommendation, and target files for the fix worker.
+ *
+ * @param changeId - The change identifier.
+ * @param selectedFindings - The findings selected for fixing.
+ * @param cwd - Working directory (optional).
+ * @returns A markdown string of the fix plan.
+ */
+export async function buildFixPlan(
+  changeId: string,
+  selectedFindings: ParsedFinding[],
+  cwd?: string,
+): Promise<string> {
+  const critical = selectedFindings.filter((f) => f.severity === "critical").length
+  const major = selectedFindings.filter((f) => f.severity === "major").length
+  const minor = selectedFindings.filter((f) => f.severity === "minor").length
+  const nit = selectedFindings.filter((f) => f.severity === "nit").length
+
+  const targetFiles = [...new Set(selectedFindings.filter((f) => f.file).map((f) => f.file!))].sort()
+
+  const lines: string[] = [
+    `# Fix Plan for ${changeId}`,
+    "",
+    `**Generated:** ${new Date().toISOString()}`,
+    `**Findings to fix:** ${selectedFindings.length} (${critical}/${major}/${minor}/${nit})`,
+    "",
+    "## Findings",
+    "",
+  ]
+
+  for (const finding of selectedFindings) {
+    lines.push(`### ${finding.findingId}: ${finding.title}`)
+    lines.push(`**Severity:** ${finding.severity}`)
+    if (finding.file) lines.push(`**File:** \`${finding.file}\`${finding.line ? ` (line ${finding.line})` : ""}`)
+    if (finding.reviewerRole) lines.push(`**Reviewer:** ${finding.reviewerRole}`)
+    if (finding.evidence) lines.push(`**Evidence:** ${finding.evidence}`)
+    if (finding.recommendation) lines.push(`**Recommendation:** ${finding.recommendation}`)
+    if (finding.artifactPath) lines.push(`**Artifact:** \`${finding.artifactPath}\``)
+    if (finding.whyItMatters) lines.push(`**Why it matters:** ${finding.whyItMatters}`)
+    lines.push("")
+  }
+
+  lines.push("## Fix Strategy")
+  lines.push("")
+  lines.push("- Each finding will be assigned to a fix worker.")
+  lines.push("- Workers must read the full finding evidence before fixing.")
+  lines.push("- After each fix, verification will confirm the fix resolved the issue.")
+  lines.push("- Max 2 attempts per finding, 3 global rounds.")
+  lines.push("")
+
+  if (targetFiles.length > 0) {
+    lines.push("## Target Files")
+    lines.push("")
+    for (const file of targetFiles) {
+      lines.push(`- \`${file}\``)
+    }
+    lines.push("")
+  }
+
+  return lines.join("\n")
 }
 
 // ── Code review input builder (Task 7.12) ────────────────────────
@@ -1969,17 +2805,22 @@ export async function signalDriftDetected(
   workerName: string,
   deviationPath?: string,
   cwd?: string,
+  orchestratorTarget?: string,
 ): Promise<void> {
   // Always update run phase to drift-pending
   await setRunPhase(runId, "drift-pending", cwd)
 
   // Attempt intercom signaling (optional — graceful fallback)
   let intercomAvailable = false
+  const resolvedTarget = orchestratorTarget?.trim()
+    || process.env.ZFLOW_INTERCOM_ORCHESTRATOR_TARGET?.trim()
+    || process.env.PI_INTERCOM_ORCHESTRATOR_TARGET?.trim()
+
   try {
     // Dynamic import to check for pi-intercom without hard dependency
     // @ts-expect-error - optional dependency, handled via catch
     const intercomModule: { intercom?: Function } | null = await import("pi-intercom").catch(() => null)
-    if (intercomModule && typeof intercomModule.intercom === "function") {
+    if (intercomModule && typeof intercomModule.intercom === "function" && resolvedTarget) {
       intercomAvailable = true
       const msg = [
         `DRIFT DETECTED: Group "${groupId}" (worker: ${workerName})`,
@@ -1992,7 +2833,7 @@ export async function signalDriftDetected(
 
       await intercomModule.intercom({
         action: "send",
-        to: "orchestrator",
+        to: resolvedTarget,
         message: msg,
       })
     }
@@ -2004,8 +2845,11 @@ export async function signalDriftDetected(
     // Fallback: drift is still tracked via run.json phase and deviation report files.
     // Workers independently write deviation reports and mark tasks blocked.
     // No intercom signal was sent, but drift-pending state is recorded.
+    const reason = resolvedTarget
+      ? "pi-intercom not available"
+      : "no intercom target available"
     console.warn(
-      `[pi-zflow] pi-intercom not available. Drift signal suppressed for group "${groupId}". ` +
+      `[pi-zflow] ${reason}. Drift signal suppressed for group "${groupId}". ` +
       `Workers will still write deviation reports. Run marked as drift-pending.`,
     )
   }
@@ -2110,6 +2954,8 @@ export async function prepareWorktreeImplementationRun(
     plannedPaths?: Set<string>
     /** Explicit repo root. Defaults to git rev-parse --show-toplevel from cwd. */
     repoRoot?: string
+    /** Exact intercom target for the supervising orchestrator, when known. */
+    orchestratorTarget?: string
     /**
      * Explicit run ID override. When provided, skips creating a new run.json
      * and state-index entry (the caller already created them). Useful when
@@ -2256,23 +3102,37 @@ export async function prepareWorktreeImplementationRun(
     repoRoot,
     changeId,
     planVersion,
+    orchestratorTarget: options?.orchestratorTarget,
   }
 
   const dispatchGroups: DispatchExecutionGroup[] = groups.map(g => ({
     id: g.id,
-    agent: "zflow.implement-routine",
+    agent: g.agent || "zflow.implement-routine",
     files: g.files,
     dependencies: g.dependencies,
     taskPrompt: g.taskPrompt,
     scopedVerification: g.scopedVerification,
   }))
-  const tasks = buildWorktreeDispatchPlan(dispatchGroups, dispatchConfig, planArtifactPaths)
+  // Coalesce groups that share files so overlapping file edits happen in one
+  // worktree instead of producing incompatible patches from the same base.
+  const coalescedGroups = coalesceConnectedGroups(dispatchGroups)
+  const tasks = buildWorktreeDispatchPlan(coalescedGroups, dispatchConfig, planArtifactPaths)
+  const planGroups = coalescedGroups.map((g) => ({
+    id: g.id,
+    files: g.files,
+    dependencies: g.dependencies,
+    parallelizable: true,
+    taskPrompt: g.taskPrompt,
+    scopedVerification: g.scopedVerification,
+    agent: g.agent,
+    coalescedFrom: g.coalescedFrom,
+  })) as unknown as ExecutionGroup[]
 
   return {
     runId,
     config: dispatchConfig,
     tasks,
-    groups,
+    groups: planGroups,
     plannedPaths,
     preflight,
     ownershipValidation,
@@ -2586,6 +3446,82 @@ export async function applyPatchesWithLedger(
 // ── Subagent resolution for apply-back conflicts ────────────────
 
 /**
+ * Format a user-facing apply-back failure message that always includes
+ * the run ID and the exact recovery command.
+ *
+ * Builds a consistent message from run.json metadata and optional extra
+ * info about preserved artifacts.  Every apply-back failure handler
+ * should call this instead of constructing its own ad-hoc message.
+ *
+ * @param runId - Unique run identifier.
+ * @param changeInput - Original command argument (for --resume / --abandon hints).
+ * @param error - Human-readable error description.
+ * @param cwd - Working directory for runtime state dir resolution.
+ * @param extra - Optional paths to preserved artifacts.
+ * @returns A formatted markdown message string.
+ */
+export async function formatApplyBackFailureMessage(
+  runId: string,
+  changeInput: string,
+  error: string,
+  cwd?: string,
+  extra?: {
+    integrationWorktreePath?: string
+    patchesDir?: string
+    resolutionPromptPath?: string
+    strategiesAttempted?: string[]
+  },
+): Promise<string> {
+  const { default: path } = await import("node:path")
+  const { default: fs } = await import("node:fs/promises")
+  const { resolveRunDir } = await import("pi-zflow-artifacts/artifact-paths")
+
+  let changeId: string | undefined
+  try {
+    const run = await readRun(runId, cwd)
+    changeId = run.changeId
+  } catch {
+    changeId = undefined
+  }
+
+  const runDir = resolveRunDir(runId, cwd)
+  const defaultPatchesDir = extra?.patchesDir ?? path.join(runDir, "patches")
+  const strategies = extra?.strategiesAttempted?.length
+    ? extra.strategiesAttempted.join(", ")
+    : "patch-replay, structured-merge, integration-merge"
+
+  const lines: string[] = [
+    `⚠️ **Apply-back failed for run \`${runId}\`**` +
+      (changeId ? ` on change \`${changeId}\`.` : "."),
+    "",
+    `**Error:** ${error}`,
+    "",
+    "**What was preserved:**",
+    `- All group patches: \`${defaultPatchesDir}\``,
+  ]
+
+  if (extra?.integrationWorktreePath) {
+    lines.push(`- Integration worktree: \`${extra.integrationWorktreePath}\``)
+  }
+  if (extra?.resolutionPromptPath) {
+    lines.push(`- Resolution prompt: \`${extra.resolutionPromptPath}\``)
+  }
+  lines.push(`- Strategies attempted: ${strategies}`)
+  lines.push("")
+
+  lines.push(
+    "**Options to recover:**",
+    "",
+    `1. 🤖 Subagent resolution: \`/zflow-resolve-apply-back ${runId}\``,
+    `2. 🔧 Manual resolution, then resume: \`/zflow-change-implement ${changeInput} --resume\``,
+    `3. 📂 Inspect artifacts at: \`${runDir}\``,
+    `4. 🗑️ Abandon and start fresh: \`/zflow-change-implement ${changeInput} --abandon\``,
+  )
+
+  return lines.join("\n")
+}
+
+/**
  * Generate a resolution prompt for a subagent when all automated strategies fail.
  *
  * This prompt includes:
@@ -2698,6 +3634,11 @@ export async function buildSubagentResolutionPrompt(
   }
 
   lines.push("")
+  lines.push("## Ephemeral Script Policy")
+  lines.push("")
+  const scratchScriptsDir = path.join(path.dirname(path.dirname(runDir)), "scratch", "scripts")
+  lines.push(buildEphemeralScriptRule(scratchScriptsDir))
+  lines.push("")
   lines.push("## Important constraints")
   lines.push("")
   lines.push("- Keep ALL group changes. Missing a group's changes is a failure.")
@@ -2772,10 +3713,19 @@ export async function requestSubagentResolution(
   const promptPath = path.join(runDir, "subagent-resolution-prompt.md")
   await fs.writeFile(promptPath, resolutionPrompt, "utf-8")
 
+  // Inject ephemeral script policy into the prompt written to disk
+  const scratchScriptsDir = path.join(path.dirname(path.dirname(runDir)), "scratch", "scripts")
+  const scriptPolicy = buildEphemeralScriptRule(scratchScriptsDir)
+
+  // Re-read the prompt and prepend the script policy
+  const existingContent = await fs.readFile(promptPath, "utf-8")
+  const enhancedPrompt = `${scriptPolicy}\n\n${existingContent}`
+  await fs.writeFile(promptPath, enhancedPrompt, "utf-8")
+
   return {
     success: true,  // prompt was prepared — actual dispatch result set by caller
     summary: [
-      "Subagent resolution prompt prepared.",
+      "Subagent resolution prompt prepared (with ephemeral script policy).",
       `Prompt saved to: ${promptPath}`,
       "",
       "To dispatch the resolution subagent, the command handler should:",
@@ -4559,15 +5509,48 @@ export async function runPrepareAgentsIfAvailable(
         `Repository map path: ${artifactPaths.repoMap}`,
         `Reconnaissance path: ${artifactPaths.reconnaissance}`,
         "",
-        "## Critical: execution-groups.md format",
+        "## CRITICAL: Machine-Readable Format Contract",
         "",
-        "Each group MUST use this heading and field format so the implementation",
-        "workflow can parse it. Group IDs may be digit-first (1, 1A) or letter-first (A1, B2).",
+        "The plan artifacts MUST be parseable by automated tools. The parsers are strict.",
+        "Validation will fail if the format contract is violated, and the planner will",
+        "receive EXACT parser errors to repair the artifacts.",
+        "",
+        "### execution-groups.md — REQUIRED format",
+        "",
+        "Each group heading: `## Group X: Name` or `## GX — Name` or `## Execution Group X: Name`",
+        "Group IDs: digit-first (1, 1A, 2B) or letter-first (A1, B2, C3a).",
+        "",
+        "Required fields per group:",
+        "- `**Files:**` or `**Primary files/paths touched:**` — comma-separated paths or bullet list.",
+        "  Each file path must be concrete (e.g. `src/auth/login.ts`), not vague like `src/auth/*`.",
+        "- `**Scoped verification:**` — a concrete shell command. NOT \"TBD\", not empty.",
+        "- `**Agent:**` — required (e.g. `zflow.implement-routine` or `zflow.implement-hard`).",
+        "- `**Dependencies:**` — required (group IDs or `none`).",
+        "- `**Parallelizable:**` — required (`true` or `false`).",
+        "",
+        "### CRITICAL: File ownership and cross-group dependencies",
+        "",
+        "When two groups claim the same file, the execution dispatcher MUST know",
+        "which group runs first. The ownership validator will REJECT the plan at",
+        "implementation time if overlapping files have no dependency ordering.",
+        "",
+        "Rules:",
+        "- If groups share ANY file, one must declare an explicit dependency on the other.",
+        "- Set `Parallelizable: false` on groups that share files with peers.",
+        "- Transitive dependencies count: if G8→G6→G5, then G8 is ordered after G5.",
+        "  But if G7 and G8 both touch `app.ts` and neither depends on the other,",
+        "  that overlap IS a violation — add `Dependencies: 6, 7` to G8.",
+        "- After drafting all groups, scan the Files: lists for every same-phase group",
+        "  pair. For every overlapping file, ensure a dependency edge exists between",
+        "  the two groups touching it.",
+        "- Phase 3 cross-cutting groups (redaction, rate-limit, access guardrails)",
+        "  commonly all touch integration files like `app.ts`. They MUST declare",
+        "  dependencies on each other, not just on Phase 2 groups.",
+        "",
+        "Example:",
         "",
         "```markdown",
-        "### Group A1: Short descriptive name for this group",
-        "",
-        "Brief paragraph describing what this group implements.",
+        "## Group A1: Short descriptive name",
         "",
         "**Files:** src/path/file.ts, src/other/file.ts",
         "**Agent:** zflow.implement-routine",
@@ -4576,26 +5559,23 @@ export async function runPrepareAgentsIfAvailable(
         "**Parallelizable:** true",
         "```",
         "",
-        "Alternative: files may be listed as a numbered bullet list:",
+        "VALID: `**Scoped verification:** npm test -- --testPathPattern=src/auth`",
+        "INVALID: `**Scoped verification:** TBD`",
+        "INVALID: `**Scoped verification:** ` (empty)",
         "",
-        "```markdown",
-        "**Primary files/paths touched:**",
-        "  1. apps/api/package.json",
-        "  2. apps/api/tsconfig.json",
-        "```",
+        "### Other artifacts",
         "",
-        "Alternative: agent may be written as `**Owner agent:**`.",
-        "Alternative: dependencies use comma-separated IDs: `Group A1, Group B1` or bare `A1, B1`.",
-        "Alternative: scoped verification may be a bullet list of commands.",
+        "- **design.md**: Must have >=50 chars of concrete design content.",
+        "- **standards.md**: Must have >=50 chars. No [TODO] or [placeholder] markers.",
+        "- **verification.md**: Must have >=50 chars and at least one code fence with a command.",
+        "- **implementation-tasks.md**: Must have >=100 chars. No placeholder markers.",
         "",
-        "Rules:",
-        "- Start each group with `## Group N: Name` or `### Group X1: Name` (h2-h4 heading).",
-        "- Use `**Key:** value` format (or `- **Key:** value` with leading dash) for all fields.",
-        "- Group IDs may be numeric (1, 2), digit-letter (1A, 2B), or letter-digit (A1, B2).",
-        "- Every group MUST have a concrete `**Scoped verification:**` command (not TBD or placeholder).",
-        "- `**Files:**` (or `**Primary files/paths touched:**`) lists paths this group touches.",
-        "- `**Dependencies:**` lists group IDs this group depends on (e.g. `A1, B1`), or `none`/`[]`.",
-        "- `**Parallelizable:**` should be `true` unless this group shares files with another group.",
+        "### Failure is OK",
+        "",
+        "If your plan artifacts fail validation, you will receive the EXACT parser errors",
+        "and can rewrite only the invalid artifact. This is NOT a criticism — it is a",
+        "normal part of ensuring machine-ingestible output. Repair passes are bounded",
+        "and expected.",
       ].filter(Boolean).join("\n")
 
       let sawChildProgress = false
@@ -5181,6 +6161,45 @@ export async function runChangePrepareWorkflow(
     )
   }
 
+  // ── Step 11: Validate plan artifacts ────────────────────────────
+  const { validateAllPlanArtifacts } = await import("./plan-artifact-validator.js")
+  options.onProgress?.("🔍 Validating plan artifacts against format contracts...", "info")
+  const validationResult = await validateAllPlanArtifacts(changeId, "v1", cwd)
+
+  if (!validationResult.valid) {
+    const errors = validationResult.results
+      .filter((r) => !r.valid)
+      .map((r) => `- **${r.artifact}**: ${r.issues.join("; ")}`)
+      .join("\n")
+    options.onProgress?.(
+      `⚠️ Plan artifacts have validation issues:\n${errors}\n` +
+      `Attempting planner repair pass...`,
+      "warning",
+    )
+
+    // Attempt automated repair via the planner agent
+    const { runArtifactRepair } = await import("./plan-artifact-validator.js")
+    const repairResult = await runArtifactRepair(changeId, "v1", validationResult.results.filter(r => !r.valid), 2, cwd)
+
+    if (repairResult.repaired) {
+      options.onProgress?.("✅ Plan artifacts repaired successfully.", "info")
+    } else {
+      const remaining = repairResult.remainingIssues
+        .filter((r) => !r.valid)
+        .map((r) => `- **${r.artifact}**: ${r.issues.join("; ")}`)
+        .join("\n")
+      options.onProgress?.(
+        `⚠️ Some plan artifacts could not be automatically repaired:\n${remaining}\n` +
+        `Plan approval will be blocked until these are resolved.\n` +
+        `Artifact paths for manual editing:\n` +
+        Object.entries(artifactPaths).map(([k, v]) => `  - ${k}: ${v}`).join("\n"),
+        "warning",
+      )
+    }
+  } else {
+    options.onProgress?.("✅ All plan artifacts pass format validation.", "info")
+  }
+
   return {
     changeId,
     planVersion: "v1",
@@ -5319,12 +6338,13 @@ export function buildImplementationGateQuestions(
  */
 export function parseInterviewResponse(
   response: string,
-): { decision: string; revisionNotes?: string } {
+): { decision: string; revisionNotes?: string; selectedFindings?: string[] } {
   try {
     const parsed = JSON.parse(response)
     return {
       decision: parsed.decision ?? parsed.action ?? "cancel",
       revisionNotes: parsed.revisionNotes,
+      ...(parsed.selectedFindings ? { selectedFindings: parsed.selectedFindings } : {}),
     }
   } catch {
     return { decision: "cancel" }
@@ -6485,9 +7505,27 @@ export async function finalizeCodeReview(
         }
       }
 
+      const findingsPath = (result as any).findingsPath as string | undefined
+
+      // Persist code review results to run.json so they survive restarts/resumes
+      try {
+        await updateRun(runId, {
+          codeReview: {
+            pass,
+            findingsPath: findingsPath ?? null,
+            severity,
+            summary,
+            completedAt: new Date().toISOString(),
+          },
+        } as any, cwd)
+      } catch {
+        // Non-fatal — review result is available via the findings file
+        console.warn("[zflow] Failed to persist code review result to run state")
+      }
+
       return {
         pass,
-        findingsPath: (result as any).findingsPath,
+        findingsPath,
         summary,
       }
     } catch (err) {
@@ -6674,19 +7712,49 @@ export async function runImplementationPostStartSequence(
     const reason = run.applyBack.error ?? `apply-back ${run.applyBack.status}`
     const failPhase = "apply-back-conflicted" as RunPhase
     await transitionTo(failPhase)
+
+    // Build a rich failure message using the centralized formatter.
+    // Use changeId as the changeInput since we don't have the original
+    // command argument in this context.
+    const { default: pathModule } = await import("node:path")
+    const runDir = resolveRunDir(runId, cwd)
+    const patchesPath = pathModule.join(runDir, "patches")
+    const intWorktreePath = pathModule.join(runDir, "integration-worktree")
+    const resolutionPromptPath = pathModule.join(runDir, "subagent-resolution-prompt.md")
+    let hasResolutionPrompt = false
+    try { await import("node:fs/promises").then(fs => fs.access(resolutionPromptPath)); hasResolutionPrompt = true } catch {}
+    const failureMsg = await formatApplyBackFailureMessage(
+      runId,
+      changeId,
+      reason,
+      cwd,
+      {
+        patchesDir: patchesPath,
+        integrationWorktreePath: run.applyBack.integrationWorktreePath ?? (
+          await import("node:fs/promises").then(fs =>
+            fs.access(intWorktreePath).then(() => intWorktreePath).catch(() => undefined)
+          ).catch(() => undefined)
+        ),
+        resolutionPromptPath: hasResolutionPrompt ? resolutionPromptPath : undefined,
+        strategiesAttempted: (run.metadata as any)?.strategiesAttempted ?? undefined,
+      },
+    )
+
     const nextSteps = [
       `⚠️ Apply-back ${run.applyBack.status}. The primary worktree does not have the implementation changes.`,
       `   Reason: ${reason}`,
-      "1. Retained patches are available in the run directory for manual recovery.",
-      "2. Resolve the apply-back conflict, then run /zflow-change-implement --resume to continue.",
-      "3. Use /zflow-change-audit to inspect the run status.",
+      `1. 🤖 Subagent resolution: /zflow-resolve-apply-back ${runId}`,
+      "2. 🔧 Resolve manually, then run: /zflow-change-implement --resume",
+      "3. 📂 Use /zflow-change-audit to inspect the run status.",
+      "4. 🗑️ Abandon: /zflow-change-implement --abandon",
     ]
     await recordImplementationNextSteps(runId, nextSteps, cwd)
+    reportProgress(failureMsg)
     return {
       phase: failPhase,
       status: "failed",
       verificationStatus: "pending",
-      error: reason,
+      error: `${reason}\n\n${failureMsg}`,
       runId,
       changeId,
       nextSteps,
@@ -6945,6 +8013,21 @@ export async function runImplementationPostStartSequence(
     await completeWorkflow(changeId, runId, cwd)
     reportProgress("Workflow completion persisted")
 
+    // Check for orphaned helper scripts left outside .zflow/
+    try {
+      const { scanForOrphanedScripts } = await import("./orchestration.js")
+      const orphans = await scanForOrphanedScripts({ cwd })
+      if (orphans.length > 0) {
+        reportProgress(
+          `⚠️ Found ${orphans.length} orphaned helper script(s) outside .zflow/:\n` +
+          orphans.map((o) => `  - ${o}`).join("\n") +
+          "\nThese should be removed or moved to `.zflow/runs/<runId>/scratch/scripts/`.",
+        )
+      }
+    } catch {
+      // Non-critical — best-effort scan
+    }
+
     return {
       phase: "completed",
       status: "completed",
@@ -6961,6 +8044,21 @@ export async function runImplementationPostStartSequence(
   reportProgress("Review skipped; completing workflow")
   await transitionTo("completed")
   await completeWorkflow(changeId, runId, cwd)
+
+  // Check for orphaned helper scripts left outside .zflow/
+  try {
+    const { scanForOrphanedScripts } = await import("./orchestration.js")
+    const orphans = await scanForOrphanedScripts({ cwd })
+    if (orphans.length > 0) {
+      reportProgress(
+        `⚠️ Found ${orphans.length} orphaned helper script(s) outside .zflow/:\n` +
+        orphans.map((o) => `  - ${o}`).join("\n") +
+        "\nThese should be removed or moved to `.zflow/runs/<runId>/scratch/scripts/`.",
+      )
+    }
+  } catch {
+    // Non-critical — best-effort scan
+  }
 
   return {
     phase: "completed",
@@ -7150,4 +8248,196 @@ export async function publishPlanArtifacts(
     artifactCount: Object.keys(publishedArtifacts).length,
     errors,
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Ephemeral script policy helpers
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Resolve the scratch scripts directory for a run.
+ *
+ * Path: `<runtime-state-dir>/runs/<runId>/scratch/scripts/`
+ *
+ * This directory is the ONLY allowed location for ephemeral helper scripts
+ * (verification wrappers, debug scripts, temp build scripts, etc.) created
+ * by subagent workers during workflow execution. Scripts placed here are
+ * gitignored, cleanup-tracked, and automatically removed by `/zflow-clean`.
+ *
+ * @param runId - Unique run identifier.
+ * @param cwd - Working directory (optional).
+ * @returns Absolute path to the scratch scripts directory.
+ */
+export async function resolveScratchScriptsDir(
+  runId: string,
+  cwd?: string,
+): Promise<string> {
+  const { default: path } = await import("node:path")
+  const { resolveRunDir } = await import("pi-zflow-artifacts/artifact-paths")
+  const runDir = resolveRunDir(runId, cwd)
+  return path.join(runDir, "scratch", "scripts")
+}
+
+/**
+ * Ensure the scratch scripts directory exists and return its path.
+ *
+ * Creates the directory (and any parent directories) if it does not exist.
+ * Also registers the scratch directory as a retained artifact with a 3-day TTL
+ * so `/zflow-clean` picks it up for cleanup.
+ *
+ * @param runId - Unique run identifier.
+ * @param cwd - Working directory (optional).
+ * @returns Absolute path to the scratch scripts directory.
+ */
+export async function ensureScratchScriptsDir(
+  runId: string,
+  cwd?: string,
+): Promise<string> {
+  const { default: fs } = await import("node:fs/promises")
+  const scratchDir = await resolveScratchScriptsDir(runId, cwd)
+  await fs.mkdir(scratchDir, { recursive: true })
+
+  // Track as retained artifact with 3-day TTL for cleanup discovery
+  try {
+    const { addRetainedArtifact } = await import("pi-zflow-artifacts")
+    await addRetainedArtifact(runId, {
+      type: "scratch",
+      path: scratchDir,
+      reason: "Ephemeral helper scripts directory",
+      expiresAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
+    }, cwd)
+  } catch {
+    // Non-critical — best-effort tracking
+  }
+
+  return scratchDir
+}
+
+/**
+ * Build a markdown snippet describing the ephemeral script policy.
+ *
+ * This rule must be injected into subagent task prompts for workflows
+ * that may create temporary helper scripts, such as apply-back resolution
+ * and fix implementation.
+ *
+ * @param scratchScriptsDir - Absolute path to the scratch scripts directory.
+ * @returns A markdown string with the ephemeral script policy.
+ */
+export function buildEphemeralScriptRule(scratchScriptsDir: string): string {
+  return [
+    "## Ephemeral Script Policy",
+    "",
+    "Any temporary helper script you write (verification wrappers, debug scripts,",
+    "build helpers, etc.) MUST be written ONLY to:",
+    "",
+    `\`\`\``,
+    `${scratchScriptsDir}/`,
+    `\`\`\``,
+    "",
+    "**NEVER write helper scripts to:**",
+    "- The repo root (`/`)",
+    "- `scripts/` directory",
+    "- `test/` or `tests/` directories (unless they are part of the actual code change)",
+    "- Source directories (`src/`, `lib/`, `packages/*/src/`)",
+    "",
+    "Scripts in the scratch directory are gitignored and automatically cleaned up.",
+    "Scripts elsewhere pollute the repository and will be flagged as orphaned.",
+    "",
+    "If you need to run a multi-step verification, write a temporary script to:",
+    `\`\`\``,
+    `${scratchScriptsDir}/`,
+    `\`\`\``,
+    "and run it from there.",
+    "",
+    "**Violations of this policy will be blocked by the path guard.**",
+  ].join("\n")
+}
+
+/**
+ * Scan for orphaned helper scripts at the repo root and `scripts/` directory.
+ *
+ * Checks for files matching patterns commonly used for temporary helper scripts:
+ * `verify*`, `check*`, `debug*`, `tmp*`, `fix*`, `test-*`, `run-*`
+ *
+ * Only reports files modified within the last hour (default) to avoid flagging
+ * legitimate project files.
+ *
+ * @param options - Scan options.
+ * @param options.cwd - Working directory (defaults to `process.cwd()`).
+ * @param options.maxAgeMinutes - Maximum age in minutes for files to report (default: 60).
+ * @returns Array of paths to orphaned script files.
+ */
+export async function scanForOrphanedScripts(
+  options?: {
+    cwd?: string
+    maxAgeMinutes?: number,
+  },
+): Promise<string[]> {
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+  const maxAge = (options?.maxAgeMinutes ?? 60) * 60 * 1000
+  const now = Date.now()
+  const cwd = options?.cwd ?? process.cwd()
+
+  const scanDirs = [cwd]
+  const scriptsDir = path.join(cwd, "scripts")
+  try {
+    await fs.access(scriptsDir)
+    scanDirs.push(scriptsDir)
+  } catch {
+    // scripts/ doesn't exist — skip
+  }
+
+  const scriptPatterns = [
+    /^verify/i,
+    /^check/i,
+    /^debug/i,
+    /^tmp\b/i,
+    /^fix-/i,
+    /^test-/i,
+    /^run-/i,
+  ]
+
+  const orphans: string[] = []
+
+  for (const dir of scanDirs) {
+    let entries: string[]
+    try {
+      entries = await fs.readdir(dir)
+    } catch {
+      continue
+    }
+
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry)
+
+      // Skip directories, hidden files, and known project files
+      if (entry.startsWith(".")) continue
+      if (entry === "scripts" && dir === cwd) continue
+
+      try {
+        const stat = await fs.stat(fullPath)
+        if (stat.isDirectory()) continue
+
+        // Only flag files modified recently
+        const age = now - stat.mtimeMs
+        if (age > maxAge) continue
+
+        // Check if name matches ephemeral script patterns
+        const matchesPattern = scriptPatterns.some((p) => p.test(entry))
+        if (!matchesPattern) continue
+
+        // Check if this is a script-like file (shell, js, py, etc.)
+        const ext = path.extname(entry).toLowerCase()
+        const isScript = [".sh", ".bash", ".zsh", ".js", ".mjs", ".ts", ".py", ".rb", ".pl", ".php", ""].includes(ext)
+        if (!isScript) continue
+
+        orphans.push(fullPath)
+      } catch {
+        // stat failed — skip
+      }
+    }
+  }
+
+  return orphans
 }

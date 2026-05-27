@@ -14,14 +14,14 @@
       "planning-frontier": {
         "required": true,
         "thinking": "high",
-        "preferredModels": ["openai-codex/gpt-5.4", "opencode-go/mimo-v2.5-pro"]
+        "preferredModels": ["openai-codex/gpt-5.5", "opencode-go/mimo-v2.5-pro"]
       },
       "worker-cheap": {
         "required": true,
-        "thinking": "medium",
+        "thinking": "xhigh",
         "preferredModels": [
-          "openai-codex/gpt-5.4-mini",
-          "opencode-go/deepseek-v4-flash"
+          "opencode-go/deepseek-v4-flash",
+          "openai-codex/gpt-5.4-mini"
         ]
       },
       "worker-strong": {
@@ -33,46 +33,40 @@
         "required": true,
         "thinking": "medium",
         "preferredModels": [
-          "openai-codex/gpt-5.3-codex",
-          "opencode-go/qwen3.6-plus"
+          "opencode-go/deepseek-v4-pro",
+          "openai-codex/gpt-5.4"
         ]
       },
       "review-integration": {
         "required": true,
         "thinking": "medium",
-        "preferredModels": [
-          "openai-codex/gpt-5.3-codex",
-          "opencode-go/qwen3.6-plus"
-        ]
+        "preferredModels": ["opencode-go/mimo-v2.5-pro", "openai-codex/gpt-5.4"]
       },
       "review-security": {
         "required": true,
         "thinking": "high",
         "preferredModels": [
-          "openai-codex/gpt-5.3-codex",
-          "opencode-go/qwen3.6-plus"
+          "openai-codex/gpt-5.5",
+          "opencode-go/deepseek-v4-pro"
         ]
       },
       "review-logic": {
         "optional": true,
         "thinking": "medium",
         "preferredModels": [
-          "openai-codex/gpt-5.3-codex",
-          "opencode-go/qwen3.6-plus"
+          "opencode-go/kimi-k2.6",
+          "opencode-go/deepseek-v4-pro"
         ]
       },
       "review-system": {
         "optional": true,
         "thinking": "high",
-        "preferredModels": [
-          "openai-codex/gpt-5.3-codex",
-          "opencode-go/qwen3.6-plus"
-        ]
+        "preferredModels": ["opencode-go/qwen3.6-plus", "openai-codex/gpt-5.4"]
       },
       "synthesis-frontier": {
         "required": true,
         "thinking": "high",
-        "preferredModels": ["openai-codex/gpt-5.4", "opencode-go/mimo-v2.5-pro"]
+        "preferredModels": ["openai-codex/gpt-5.5", "opencode-go/mimo-v2.5-pro"]
       }
     },
 
@@ -103,13 +97,13 @@
       },
       "zflow.implement-routine": {
         "lane": "worker-cheap",
-        "tools": "read, grep, find, ls, bash, edit, write",
+        "tools": "read, grep, find, ls, bash, edit, write, intercom",
         "maxOutput": 8000,
         "maxSubagentDepth": 0
       },
       "zflow.implement-hard": {
         "lane": "worker-strong",
-        "tools": "read, grep, find, ls, bash, edit, write",
+        "tools": "read, grep, find, ls, bash, edit, write, intercom",
         "maxOutput": 10000,
         "maxSubagentDepth": 0
       },

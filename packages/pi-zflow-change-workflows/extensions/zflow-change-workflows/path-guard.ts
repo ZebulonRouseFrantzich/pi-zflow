@@ -41,6 +41,9 @@ export type GuardIntent =
   | "planner-artifact" // Planner writing approved plan artifacts
   | "bash-mutation"   // Bash command with destructive side effects
   | "implement"       // Implementation workflow write
+  | "fix-worker"      // Fix worker (may only write to scratch/ or approved plan files)
+  | "fix-orchestrator" // Fix orchestrator (trusted — may restructure files/dirs per fix plan)
+  | "apply-back-resolver" // Apply-back resolver (may only write to scratch/ or integration worktree)
 
 /**
  * Result of a path guard check.
@@ -287,6 +290,81 @@ export function guardWrite(
     }
   }
 
+  // 4. Fix-worker intent: restrict to scratch scripts dir only (or approved plan files)
+  if (intent === "fix-worker") {
+    // Allow runtime state dir (includes .zflow/runs/*/scratch/)
+    if (isPathWithinOrEqual(runtimeStateDir, resolvedPath)) {
+      return {
+        allowed: true,
+        message: `Fix-worker write allowed to runtime state directory "${resolvedPath}".`,
+        resolvedPath,
+      }
+    }
+
+    // Compute relative path from project root to check against restricted locations
+    const relativePath = path.relative(projectRoot, resolvedPath)
+    const relativePathSlash = `/${relativePath.replace(/\\/g, "/")}`
+
+    // Block writes to repo root, scripts/, test/, tests/, src/, lib/, packages/*/src/
+    // unless the target is in the runtime state directory (handled above).
+    const blockedRootDirs = [
+      /^\/scripts\//i,
+      /^\/test\//i,
+      /^\/tests\//i,
+      /^\/src\//i,
+      /^\/lib\//i,
+      /^\/packages\/[^/]+\/src\//i,
+      /^\/[^/]+\.(sh|bash|py|js|ts)$/i,
+    ]
+
+    // Also block bare repo root files that look like scripts
+    for (const pattern of blockedRootDirs) {
+      if (pattern.test(relativePathSlash)) {
+        return {
+          allowed: false,
+          message: `Fix-worker write denied: path "${resolvedPath}" is in a restricted location. ` +
+            `Fix workers may only write to the runtime state directory (`.zflow/`) ` +
+            `or files explicitly listed in the approved plan.`,
+          resolvedPath,
+        }
+      }
+    }
+  }
+
+  // 5. Apply-back-resolver intent: restrict to scratch scripts dir or integration worktree path
+  if (intent === "apply-back-resolver") {
+    // Allow runtime state dir (includes .zflow/runs/*/scratch/)
+    if (isPathWithinOrEqual(runtimeStateDir, resolvedPath)) {
+      return {
+        allowed: true,
+        message: `Apply-back-resolver write allowed to runtime state directory "${resolvedPath}".`,
+        resolvedPath,
+      }
+    }
+
+    // Allow writes within the integration worktree (under run dir)
+    // Integration worktrees are under <runtime-state-dir>/runs/<runId>/integration-worktree/
+    const runsDir = path.join(runtimeStateDir, "runs")
+    if (isPathWithinOrEqual(runsDir, resolvedPath)) {
+      return {
+        allowed: true,
+        message: `Apply-back-resolver write allowed to runs directory "${resolvedPath}".`,
+        resolvedPath,
+      }
+    }
+
+    // Block writes to repo root during apply-back resolution
+    const relativeToProject = path.relative(projectRoot, resolvedPath)
+    if (!relativeToProject.startsWith("..") && relativeToProject !== "" && !relativeToProject.startsWith(".zflow")) {
+      return {
+        allowed: false,
+        message: `Apply-back-resolver write denied: path "${resolvedPath}" is outside the run directory. ` +
+          `Apply-back resolvers may only write to the integration worktree or scratch directory.`,
+        resolvedPath,
+      }
+    }
+  }
+
   return {
     allowed: true,
     message: `Write allowed to "${resolvedPath}".`,
@@ -416,7 +494,19 @@ export function guardBashCommand(
   // (the read-only prefix check below is tighter and already safe).
   // For commands that are NOT read-only, check destructive patterns.
   const isReadOnly = READ_ONLY_PREFIXES.some((re) => re.test(normalised))
-  if (!isReadOnly) {
+
+  // Fix orchestrator is trusted to restructure files per the fix plan.
+  // Allow rm, rmdir, mkdir, mv, touch so it can delete legacy dirs and
+  // restructure repositories as directed by review findings.
+  const isOrchFileRestructure = intent === "fix-orchestrator" && (
+    /\brm\s+(?:-[rfv]*\s+)?/.test(normalised) ||
+    /\brmdir\b/.test(normalised) ||
+    /\bmkdir\b/.test(normalised) ||
+    /\btouch\b/.test(normalised) ||
+    /^mv\b/.test(normalised)
+  )
+
+  if (!isReadOnly && !isOrchFileRestructure) {
     for (const pattern of destructivePatterns) {
       if (pattern.test(normalised)) {
         return {
@@ -574,6 +664,18 @@ const READ_ONLY_PREFIXES: RegExp[] = [
   // Data format tools — read-only
   /^jq\b/,
   /^yq\b/,
+
+  // Verification/build tools — allowed for scoped verification in
+  // implement/fix workers.  These tools typecheck, test, lint, or
+  // generate code without mutating source-controlled files.
+  /^npm\s+(?:test|run\s+test|run\s+test:core|run\s+test:all)\b/,
+  /^npx\s+tsx\s+(?:--test|--eval)/,
+  /^tsx\s+(?:--test|--eval)/,
+  /^pnpm\s+(?:--[a-z-]+\s+\S+\s+)*(?:typecheck|test|lint|run\s+(?:typecheck|test|lint|check|ci)(?:\s|$))/,
+  /^just\s+(?:--list|--summary|codegen|smoke\b)/,
+  /^tsc\s/,
+  /^npx\s+tsc\s/,
+  /^nix\s+(?:develop|shell|run)\b/,
 ]
 
 /**

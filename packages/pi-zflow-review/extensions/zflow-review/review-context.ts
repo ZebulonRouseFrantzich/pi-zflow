@@ -153,10 +153,24 @@ const FINDINGS_FORMAT_INSTRUCTION =
   "- **File**: relative path to the file containing the issue\n" +
   "- **Lines**: line range or specific line(s) where the issue occurs\n" +
   "- **Role**: your reviewer role (e.g. correctness, security)\n" +
-  "- **Observation**: what the code currently does; be specific about " +
-  "the behaviour, value, or state you observed in the diff\n" +
+  "- **Observation**: what the code currently does on the filesystem; " +
+  "be specific about the behaviour, value, or state you observed. " +
+  "Include HOW you verified it (e.g. \"ls confirmed file exists\", " +
+  "\"read showed line 42 contains...\")\n" +
+  "- **Expected behavior**: (optional) what the code SHOULD do instead " +
+  "of what it currently does. Useful when the correct behaviour is " +
+  "clear from the plan or project conventions.\n" +
   "- **Impact**: concrete example of what goes wrong — who is affected, " +
   "under what conditions, and how severe the consequence is\n" +
+  "- **Fix requirements**: (optional) concrete things a fix must " +
+  "accomplish. E.g. \"must validate input before passing to SQL query\" " +
+  "or \"must return 404 when resource not found\". Useful for the " +
+  "fix-orchestrator to validate fixes.\n" +
+  "- **Validation**: (optional) how to verify the fix works, e.g. a " +
+  "test command or assertion that should pass after the fix.\n" +
+  "- **Suggested approach**: (optional) optional hint for the fix " +
+  "worker, such as which library function to use or which pattern " +
+  "to follow.\n" +
   "- **Recommendation**: detailed explanation of the fix, including " +
   "your reasoning and professional opinion on the best approach\n" +
   "- **Pseudocode**: a code snippet illustrating the recommended " +
@@ -173,9 +187,19 @@ const FINDINGS_FORMAT_INSTRUCTION =
   "- **Role**: correctness\n" +
   "- **Observation**: `verifyToken` returns `subject: payload.sub ?? ''` " +
   "instead of rejecting tokens that lack a `sub` claim.\n" +
+  "- **Expected behavior**: Tokens with missing or empty `sub` should " +
+  "be rejected before returning `VerifiedToken`. The `sub` claim is " +
+  "mandatory per OIDC Core 1.0 §2.\n" +
   "- **Impact**: Two validly-signed tokens from the same issuer with " +
   "missing `sub` both resolve to the same identity key (`issuer + ''`), " +
   "causing user A's data to be served to user B.\n" +
+  "- **Fix requirements**: Token parsing must throw a " +
+  "`TokenValidationError` when `sub` is missing or empty. No fallback " +
+  "to empty string.\n" +
+  "- **Validation**: After the fix, a unit test that creates a token " +
+  "without `sub` should expect `TokenValidationError` to be thrown.\n" +
+  "- **Suggested approach**: Add an early validation check after " +
+  "signature verification, before extracting claims.\n" +
   "- **Recommendation**: Reject tokens with missing or empty `sub` before " +
   "returning `VerifiedToken`. This is a hard identity invariant — the " +
   "subject claim is mandatory per OIDC Core 1.0 §2.\n" +
@@ -208,8 +232,16 @@ const PR_FINDINGS_FORMAT_INSTRUCTION =
   "- **Role**: your reviewer role (e.g. correctness, security)\n" +
   "- **Observation**: what the code currently does; be specific about " +
   "the behaviour, value, or state you observed in the diff\n" +
+  "- **Expected behavior**: (optional) what the code SHOULD do instead " +
+  "of what it currently does.\n" +
   "- **Impact**: concrete example of what goes wrong — who is affected, " +
   "under what conditions, and how severe the consequence is\n" +
+  "- **Fix requirements**: (optional) concrete things a fix must " +
+  "accomplish. Useful for the fix-orchestrator to validate fixes.\n" +
+  "- **Validation**: (optional) how to verify the fix works, e.g. a " +
+  "test command or assertion.\n" +
+  "- **Suggested approach**: (optional) optional hint for the fix " +
+  "worker.\n" +
   "- **Recommendation**: detailed explanation of the fix, including " +
   "your reasoning and professional opinion on the best approach\n" +
   "- **Pseudocode**: a code snippet illustrating the recommended " +
@@ -223,8 +255,19 @@ const PR_FINDINGS_FORMAT_INSTRUCTION =
   "- **Role**: correctness\n" +
   "- **Observation**: `invalidate()` deletes the entry without holding " +
   "the read lock, so a concurrent `get()` can observe a partially-cleared map.\n" +
+  "- **Expected behavior**: `invalidate()` should acquire the write lock " +
+  "before modifying the internal map to prevent concurrent reads from " +
+  "seeing a partially-cleared state.\n" +
   "- **Impact**: Under concurrent access, a cache miss is returned " +
   "instead of a stale-but-valid entry, causing unnecessary fetches.\n" +
+  "- **Fix requirements**: The fix must use the existing `_rwLock` to " +
+  "acquire write exclusivity during map modifications. Read locks should " +
+  "not be held during writes.\n" +
+  "- **Validation**: A concurrent access test that calls `get()` and " +
+  "`invalidate()` simultaneously should never return a miss for a " +
+  "previously cached key.\n" +
+  "- **Suggested approach**: Wrap `this._store.delete(key)` and " +
+  "`this._lru.delete(key)` in `this._rwLock.writeLock()`.\n" +
   "- **Recommendation**: Acquire the write lock before modifying the " +
   "internal map. The existing `_rwLock` can be upgraded via `writeLock()` " +
   "which is already available on the class.\n" +
@@ -325,6 +368,33 @@ export async function buildInternalReviewPrompt(
     "Return findings only. Do not attempt to fix the code yourself.\n",
   )
 
+  // ── Filesystem-verification instruction ─────────────────────
+  // Reviewers receive a git diff that may be stale (e.g. after a fix
+  // run).  Claims about file existence, deletion, or retention MUST be
+  // verified against the actual filesystem before being reported.
+  parts.push(
+    "## Filesystem verification REQUIRED — do not skip\n\n" +
+    "The diff bundle below shows what changed in the original implementation, " +
+    "but fixes may have been applied since then. **Every claim about a file's " +
+    "existence, contents, or state must be verified against the actual " +
+    "filesystem before you report it as a finding.**\n\n" +
+    "### Mandatory verification checklist\n\n" +
+    "- **Before reporting a file as \"missing\" or \"non-existent\":** Run " +
+    "`ls <path>` or `read <path>`. If the file exists on disk, do NOT report " +
+    "it as missing.\n" +
+    "- **Before reporting a file/directory as \"retained\" or \"not deleted\":** " +
+    "Run `ls <path>`. If the path does not exist on disk, do NOT report it as " +
+    "retained.\n" +
+    "- **Before reporting file contents as \"contains X\" or \"does Y\":** " +
+    "Run `read <path>` to see the current state. Do not rely on the diff — " +
+    "the file on disk may be different.\n" +
+    "- **Evidence field must cite the verification:** Instead of repeating " +
+    "the claim, say \"Verified via `ls <path>` — file does not exist\" or " +
+    "\"Verified via `read <path>` — line 12 contains...\"\n" +
+    "- **If you cannot verify a claim with `ls` or `read`:** Drop the " +
+    "finding. Do not report unverifiable claims.\n",
+  )
+
   // ── Plan-adherence instruction ──────────────────────────────
   parts.push(getPlanAdherenceInstruction())
   parts.push("")
@@ -367,6 +437,11 @@ export async function buildInternalReviewPrompt(
   // ── Diff bundle ─────────────────────────────────────────────
   parts.push("## Diff bundle")
   parts.push("")
+  parts.push(
+    "This diff shows what the ORIGINAL IMPLEMENTATION changed. Fixes may have " +
+    "been applied since — always verify current state with `ls`/`read`.",
+  )
+  parts.push("")
 
   // The diffBundle field may be a file path or inline content.
   // If it looks like a path to an existing file, read it.
@@ -377,6 +452,22 @@ export async function buildInternalReviewPrompt(
     diffContent = fileContent
   } catch {
     // Not a file path — treat as inline content
+  }
+
+  // Extract a file list from the diff for quick reference
+  const fileList = [...new Set(
+    diffContent
+      .split("\n")
+      .filter(l => l.startsWith("+++ ") || l.startsWith("--- "))
+      .map(l => l.replace(/^[+-]{3} [ab]\//, ""))
+      .filter(f => f !== "/dev/null")
+  )].sort()
+  if (fileList.length > 0) {
+    parts.push("**Files touched by implementation:**")
+    for (const f of fileList) {
+      parts.push(`- \`${f}\``)
+    }
+    parts.push("")
   }
 
   parts.push("```diff")

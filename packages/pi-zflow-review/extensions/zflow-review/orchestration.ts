@@ -74,6 +74,14 @@ export interface ReviewerOutput {
     lines?: string
     /** Optional diff-line coordinate used for chunk line-map translation. */
     diffLine?: number
+    /** Enriched: what the code SHOULD do instead. */
+    expectedBehavior?: string
+    /** Enriched: concrete things a fix must accomplish. */
+    fixRequirements?: string
+    /** Enriched: how to verify the fix works. */
+    validation?: string
+    /** Enriched: optional hint for the fix worker. */
+    suggestedApproach?: string
   }>
   rawOutput: string
 }
@@ -119,6 +127,10 @@ function parseReviewerOutput(rawOutput: string): ReviewerOutput {
           evidence: f.evidence ? String(f.evidence) : undefined,
           file: f.file ? String(f.file) : undefined,
           line: typeof f.line === "number" ? f.line : undefined,
+          expectedBehavior: f.expectedBehavior ? String(f.expectedBehavior) : undefined,
+          fixRequirements: f.fixRequirements ? String(f.fixRequirements) : undefined,
+          validation: f.validation ? String(f.validation) : undefined,
+          suggestedApproach: f.suggestedApproach ? String(f.suggestedApproach) : undefined,
         })),
         rawOutput,
       }
@@ -174,7 +186,20 @@ function parseReviewerOutput(rawOutput: string): ReviewerOutput {
     const file = fileMatch ? fileMatch[1].trim() : undefined
     const lineStr = linesMatch ? linesMatch[1].trim() : undefined
     const line = lineStr ? parseInt(lineStr.replace(/[^0-9].*$/, ""), 10) || undefined : undefined
-    findings.push({ severity, title, description: evidence ?? title, evidence, file, line })
+    // Extract enriched fields
+    const expectedBehaviorMatch = block.match(/\*\*Expected behavior\*\*:\s*(.+)$/im)
+    const fixRequirementsMatch = block.match(/\*\*Fix requirements\*\*:\s*(.+)$/im)
+    const validationMatch = block.match(/\*\*Validation\*\*:\s*(.+)$/im)
+    const suggestedApproachMatch = block.match(/\*\*Suggested approach\*\*:\s*(.+)$/im)
+    findings.push({
+      severity, title,
+      description: evidence ?? title,
+      evidence, file, line,
+      expectedBehavior: expectedBehaviorMatch ? expectedBehaviorMatch[1].trim() : undefined,
+      fixRequirements: fixRequirementsMatch ? fixRequirementsMatch[1].trim() : undefined,
+      validation: validationMatch ? validationMatch[1].trim() : undefined,
+      suggestedApproach: suggestedApproachMatch ? suggestedApproachMatch[1].trim() : undefined,
+    })
   }
 
   // Last resort: each non-empty line could be a finding if other extraction failed
@@ -599,12 +624,16 @@ export async function runCodeReview(
     // Emit queued for all reviewers
     for (const name of reviewerNames) {
       const agentName = toCodeReviewAgentName(name)
-      emitReviewerUpdate(input.onReviewUpdate, name, agentName, "queued")
+      emitReviewerUpdate(input.onReviewUpdate, name, agentName, "queued", {
+        lastCommand: "queued",
+      })
     }
     const results = await Promise.allSettled(
       reviewerNames.map(async (name) => {
         const agentName = toCodeReviewAgentName(name)
-        emitReviewerUpdate(input.onReviewUpdate, name, agentName, "running")
+        emitReviewerUpdate(input.onReviewUpdate, name, agentName, "running", {
+          lastCommand: "starting",
+        })
         const prompt = await buildInternalReviewPrompt(name, internalCtx)
         const output = await runner(name, prompt)
         return { name, prompt, output }
@@ -622,7 +651,9 @@ export async function runCodeReview(
             r.name === name ? { ...r, status: "executed" as const } : r,
           ),
         }
-        emitReviewerUpdate(input.onReviewUpdate, name, agentName, "completed")
+        emitReviewerUpdate(input.onReviewUpdate, name, agentName, "completed", {
+          lastCommand: "complete",
+        })
         for (const f of output.findings) {
           allFindings.push({
             reviewerName: name,
@@ -630,11 +661,18 @@ export async function runCodeReview(
               severity: f.severity,
               title: f.title,
               reviewerSupport: [name],
-              evidence: f.evidence || "See raw reviewer output.",
+              file: f.file,
+              line: f.line,
+              lines: f.lines,
+              evidence: f.evidence || f.description || "See raw reviewer output.",
               whyItMatters: "Issue identified during code review.",
               recommendation: f.description,
               artifactPath: `runs/${manifest.runId}/review-artifacts/${name}.md`,
               runId: manifest.runId,
+              expectedBehavior: f.expectedBehavior,
+              fixRequirements: f.fixRequirements,
+              validation: f.validation,
+              suggestedApproach: f.suggestedApproach,
             },
           })
         }
@@ -657,6 +695,7 @@ export async function runCodeReview(
         emitReviewerUpdate(input.onReviewUpdate, name, agentName, "queued", {
           model: info.model,
           thinking: info.thinking,
+          lastCommand: "queued",
         })
       }
 
@@ -667,6 +706,7 @@ export async function runCodeReview(
           emitReviewerUpdate(input.onReviewUpdate, name, agentName, "running", {
             model: agentInfo.model,
             thinking: agentInfo.thinking,
+            lastCommand: "starting",
           })
           const prompt = await buildInternalReviewPrompt(name, internalCtx)
           let output: ReviewerOutput
@@ -738,6 +778,7 @@ export async function runCodeReview(
             emitReviewerUpdate(input.onReviewUpdate, name, agentName, "completed", {
               model: agentInfo.model,
               thinking: agentInfo.thinking,
+              lastCommand: "complete",
             })
             for (const f of output.findings) {
               allFindings.push({
@@ -746,11 +787,18 @@ export async function runCodeReview(
                   severity: f.severity,
                   title: f.title,
                   reviewerSupport: [name],
-                  evidence: f.evidence || "See raw reviewer output.",
+                  file: f.file,
+                  line: f.line,
+                  lines: f.lines,
+                  evidence: f.evidence || f.description || "See raw reviewer output.",
                   whyItMatters: "Issue identified during code review.",
                   recommendation: f.description,
                   artifactPath: `runs/${manifest.runId}/review-artifacts/${name}.md`,
                   runId: manifest.runId,
+                  expectedBehavior: f.expectedBehavior,
+                  fixRequirements: f.fixRequirements,
+                  validation: f.validation,
+                  suggestedApproach: f.suggestedApproach,
                 },
               })
             }

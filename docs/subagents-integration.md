@@ -258,6 +258,25 @@ subagent output → workflow package receives output text
                → implementation output → diff captured, applied back
 ```
 
+### Limited control-plane coordination
+
+Implementation/fix workers may use `pi-intercom` only as a **narrow control
+plane**, not as a second transcript.
+
+Rules:
+
+- Prefer `contact_supervisor` when the `pi-subagents` intercom bridge makes it
+  available.
+- Use coordination only for blocker/exception cases such as
+  `DRIFT_DETECTED`, `BLOCKED`, `NEED_CLARIFICATION`, and
+  `VERIFICATION_FAILED`.
+- Keep messages terse and typed; do not send routine completion chatter.
+- Canonical state still lives in plan artifacts, deviation reports,
+  `plan-state.json`, `run.json`, and review findings.
+
+This preserves file/state-driven resume while still giving workers a small
+margin channel for urgent coordination.
+
 ### maxOutput limits
 
 Every agent has a configured `maxOutput` limit enforced at launch time:

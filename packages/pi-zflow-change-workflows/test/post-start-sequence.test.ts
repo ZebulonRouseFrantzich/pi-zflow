@@ -449,7 +449,7 @@ describe("runImplementationPostStartSequence", () => {
 
   describe("state-index persistence", () => {
     test("persists phase transitions in state-index and change lifecycle", async () => {
-      const repoRoot = await createTestRepo()
+      const repoRoot = await createTestRepoWithPassingVerification()
       const { runId, changeId } = await setupImplementRun(repoRoot, "test-state-persist")
 
       // Run sequence without dispatch artifacts — should stay in executing

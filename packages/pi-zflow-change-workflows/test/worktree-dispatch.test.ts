@@ -7,6 +7,7 @@ import { test, describe } from "node:test"
 import {
   buildWorkerTask,
   buildWorktreeDispatchPlan,
+  coalesceConnectedGroups,
   parseExecutionGroupsMd,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
@@ -26,8 +27,9 @@ function makeGroup(
   agent = "zflow.implement-routine",
   taskPrompt = "",
   scopedVerification?: string,
+  coalescedFrom?: string[],
 ): DispatchExecutionGroup {
-  return { id, agent, files, dependencies: deps, taskPrompt, scopedVerification }
+  return { id, agent, files, dependencies: deps, taskPrompt, scopedVerification, coalescedFrom }
 }
 
 function makeConfig(
@@ -90,6 +92,38 @@ describe("buildWorkerTask", () => {
 
     assert.ok(task.includes("Scoped verification"))
     assert.ok(task.includes("npm test -- src/foo.test.ts"))
+    // Single-command uses "the following command" (singular)
+    assert.ok(task.includes("the following command"))
+  })
+
+  test("renders multi-command verification separately for coalesced groups", () => {
+    const group = makeGroup(
+      "group-1~group-2",
+      ["src/a.ts", "src/b.ts"],
+      [],
+      "zflow.implement-routine",
+      "Multi-group task",
+      "pnpm typecheck\npnpm test\npnpm lint",
+      ["group-1", "group-2"],
+    )
+    const config = makeConfig()
+    const task = buildWorkerTask(group, config)
+
+    // Multi-command uses "each of the following" (plural)
+    assert.ok(task.includes("each of the following"))
+    // Each command rendered in its own code fence
+    assert.ok(task.includes("pnpm typecheck"))
+    assert.ok(task.includes("pnpm test"))
+    assert.ok(task.includes("pnpm lint"))
+    // Has numbering
+    assert.ok(task.includes("Verification 1"))
+    assert.ok(task.includes("Verification 2"))
+    assert.ok(task.includes("Verification 3"))
+    // No shell-chained verification command in code fences
+    const fenceBlocks = task.match(/```bash\n[\s\S]*?\n```/g) || []
+    for (const block of fenceBlocks) {
+      assert.ok(!block.includes("&&"), `Code fence block should not contain &&: ${block.slice(0, 80)}`)
+    }
   })
 
   test("includes plan artifact paths when provided", () => {
@@ -124,6 +158,78 @@ describe("buildWorkerTask", () => {
     assert.ok(task.includes("Output format"))
     assert.ok(task.includes("Summary of changes"))
     assert.ok(task.includes("List of changed files"))
+  })
+
+  test("includes narrow coordination contract and fallback intercom target when provided", () => {
+    const group = makeGroup("group-1", ["src/foo.ts"])
+    const config = {
+      ...makeConfig(),
+      orchestratorTarget: "zflow-implement-feat-auth-deadbeef",
+    }
+    const task = buildWorkerTask(group, config)
+
+    assert.ok(task.includes("Control-plane coordination"))
+    assert.ok(task.includes("contact_supervisor"))
+    assert.ok(task.includes("DRIFT_DETECTED"))
+    assert.ok(task.includes("NEED_CLARIFICATION"))
+    assert.ok(task.includes("zflow-implement-feat-auth-deadbeef"))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// coalesceConnectedGroups
+// ---------------------------------------------------------------------------
+
+describe("coalesceConnectedGroups", () => {
+  test("coalesces groups that share files when independent (no dependency path)", () => {
+    // Groups sharing a file but with a dependency edge (group-2 -> group-1)
+    // should NOT be coalesced; the apply-back will sequence patches correctly.
+    const groups = [
+      makeGroup("group-1", ["src/app.ts", "src/env.ts"], [], "zflow.implement-routine", "Foundation", "pnpm typecheck"),
+      makeGroup("group-2", ["src/app.ts", "src/routes.ts"], ["group-1"], "zflow.implement-routine", "Routes", "pnpm test"),
+      makeGroup("group-3", ["test/app.test.ts"], ["group-2"], "zflow.implement-routine", "Tests", "pnpm test"),
+    ]
+
+    const coalesced = coalesceConnectedGroups(groups)
+
+    // group-1 and group-2 share src/app.ts but have dependency ordering (2->1),
+    // so they are NOT coalesced. group-3 has no file overlap → separate.
+    assert.equal(coalesced.length, 3)
+    assert.equal(coalesced[0].id, "group-1")
+    assert.equal(coalesced[1].id, "group-2")
+    assert.deepEqual(coalesced[1].dependencies, ["group-1"])
+    assert.equal(coalesced[2].id, "group-3")
+    assert.deepEqual(coalesced[2].dependencies, ["group-2"])
+  })
+
+  test("coalesces independent groups that share files but have no dependency path", () => {
+    // Two groups sharing a file with no dependency edge between them
+    // MUST be coalesced to avoid incompatible git patches from the same base.
+    const groups = [
+      makeGroup("group-a", ["src/shared.ts", "src/feature-a.ts"], [], "zflow.implement-routine", "Feature A", "pnpm test -- featureA"),
+      makeGroup("group-b", ["src/shared.ts", "src/feature-b.ts"], [], "zflow.implement-routine", "Feature B", "pnpm test -- featureB"),
+    ]
+
+    const coalesced = coalesceConnectedGroups(groups)
+
+    assert.equal(coalesced.length, 1)
+    assert.equal(coalesced[0].id, "group-a~group-b")
+    assert.deepEqual(coalesced[0].coalescedFrom, ["group-a", "group-b"])
+    assert.deepEqual(coalesced[0].files, ["src/shared.ts", "src/feature-a.ts", "src/feature-b.ts"])
+    assert.deepEqual(coalesced[0].dependencies, [])
+  })
+
+  test("does not coalesce dependency chains without file overlap", () => {
+    const groups = [
+      makeGroup("group-1", ["src/a.ts"]),
+      makeGroup("group-2", ["src/b.ts"], ["group-1"]),
+      makeGroup("group-3", ["src/c.ts"], ["group-2"]),
+      makeGroup("group-4", ["src/d.ts"], ["group-3"]),
+    ]
+
+    const coalesced = coalesceConnectedGroups(groups)
+
+    assert.deepEqual(coalesced.map(g => g.id), ["group-1", "group-2", "group-3", "group-4"])
   })
 })
 

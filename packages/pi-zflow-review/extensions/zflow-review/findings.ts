@@ -399,6 +399,12 @@ export interface CodeReviewFinding {
   title: string
   reviewerSupport: string[]
   reviewerDissent?: string[]
+  /** Source file path for this finding (when available from the reviewer). */
+  file?: string
+  /** Starting line number for the finding. */
+  line?: number
+  /** Rendered line/range string (e.g. "42-56"). */
+  lines?: string
   evidence: string
   whyItMatters: string
   failureMode?: string
@@ -407,6 +413,14 @@ export interface CodeReviewFinding {
   artifactPath?: string
   /** Run ID for cross-referencing */
   runId?: string
+  /** Enriched: what the code SHOULD do instead. */
+  expectedBehavior?: string
+  /** Enriched: concrete things a fix must accomplish. */
+  fixRequirements?: string
+  /** Enriched: how to verify the fix works. */
+  validation?: string
+  /** Enriched: optional hint for the fix worker. */
+  suggestedApproach?: string
 }
 
 /**
@@ -465,6 +479,7 @@ export function formatSeveritySummary(findings: CodeReviewFinding[]): string {
   let nit = 0
 
   for (const f of findings) {
+    if (isNoiseFinding(f)) continue
     switch (f.severity) {
       case "critical": critical++; break
       case "major":    major++; break
@@ -519,7 +534,49 @@ export function formatCoverageNotes(manifest: ReviewerManifest): string {
 }
 
 /**
+ * Returns true if a finding is a reviewer preamble/scope statement rather
+ * than an actionable finding.  These typically have identical or near-identical
+ * title and evidence, no file paths, no line numbers, no expected behavior,
+ * and no fix requirements — they describe what the reviewer looked at, not
+ * what they found.
+ */
+function isNoiseFinding(f: CodeReviewFinding): boolean {
+  // Must have at least one of: file path, line numbers, expected behavior,
+  // fix requirements, validation, or suggested approach to be actionable.
+  const hasFile = !!(f as any).file
+  const hasLine = !!(f as any).line
+  const hasConcrete = !!(
+    f.expectedBehavior ||
+    f.fixRequirements ||
+    f.validation ||
+    f.suggestedApproach
+  )
+
+  // If it has concrete details, it's a real finding regardless of title/evidence overlap
+  if (hasFile || hasLine || hasConcrete) return false
+
+  // Check for title/evidence near-identity (reviewer scope statements)
+  const t = f.title.toLowerCase().replace(/\s+/g, " ")
+  const e = f.evidence.toLowerCase().replace(/\s+/g, " ")
+  if (t === e) return true
+
+  // Check for common preamble patterns
+  const preamblePatterns = [
+    /^reviewed (the |scope: )/i,
+    /^i reviewed /i,
+    /^security review scope/i,
+  ]
+  const isPreamble = preamblePatterns.some((p) => p.test(f.title))
+  if (isPreamble && !hasFile && !hasLine && !hasConcrete) return true
+
+  return false
+}
+
+/**
  * Group findings by severity and format them as markdown sections.
+ *
+ * Noise findings (reviewer preamble/scope statements with no actionable
+ * content) are filtered out before formatting. See `isNoiseFinding`.
  *
  * Sections appear in order: Critical, Major, Minor, Nits.
  * Each finding is formatted with support, dissent, evidence,
@@ -537,6 +594,7 @@ export function formatFindingsBySeverity(findings: CodeReviewFinding[]): string 
   }
 
   for (const f of findings) {
+    if (isNoiseFinding(f)) continue
     grouped[f.severity].push(f)
   }
 
@@ -568,10 +626,33 @@ export function formatFindingsBySeverity(findings: CodeReviewFinding[]): string 
       if (f.reviewerDissent && f.reviewerDissent.length > 0) {
         lines.push(`**Reviewer dissent**: ${f.reviewerDissent.join(", ")}`)
       }
+      if (f.file) {
+        lines.push(`**File**: ${f.file}`)
+      }
+      if (f.lines) {
+        lines.push(`**Lines**: ${f.lines}`)
+      } else if (f.line) {
+        lines.push(`**Lines**: ${f.line}`)
+      }
+      if (f.artifactPath) {
+        lines.push(`**Artifact path**: ${f.artifactPath}`)
+      }
       lines.push(`**Evidence**: ${f.evidence}`)
       lines.push(`**Why it matters**: ${f.whyItMatters}`)
       if (f.failureMode) {
         lines.push(`**Failure mode**: ${f.failureMode}`)
+      }
+      if (f.expectedBehavior) {
+        lines.push(`**Expected behavior**: ${f.expectedBehavior}`)
+      }
+      if (f.fixRequirements) {
+        lines.push(`**Fix requirements**: ${f.fixRequirements}`)
+      }
+      if (f.validation) {
+        lines.push(`**Validation**: ${f.validation}`)
+      }
+      if (f.suggestedApproach) {
+        lines.push(`**Suggested approach**: ${f.suggestedApproach}`)
       }
       lines.push(`**Recommendation**: ${f.recommendation}`)
       lines.push(``)

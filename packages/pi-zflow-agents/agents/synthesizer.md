@@ -33,16 +33,37 @@ merge review findings from multiple angles into a single consolidated report.
 ## Synthesis workflow
 
 1. **Read all reviewer output.** Gather findings from each reviewer that ran.
-2. **Deduplicate.** If two or more reviewers flag the same issue (same file,
+2. **Filter noise.** Remove reviewer preamble/scope statements that are not
+   actual findings. A finding is noise and must be dropped if:
+   - Its title and evidence are near-identical (within 80% character overlap)
+   - Both fields describe what was reviewed rather than what was found
+     (e.g. "Reviewed the current filesystem state for..." "I reviewed the
+     scaffold integration surface across...", "Security review scope: ...")
+   - It has no concrete file path, no line numbers, no expected behavior,
+     and no fix requirements — it's a scope statement, not a finding.
+   - Drop noise findings entirely. Do not include them in the report. Note
+     count of dropped findings in Coverage Notes.
+3. **Deduplicate.** If two or more reviewers flag the same issue (same file,
    same concern), keep the most detailed entry and credit all reviewers who
    identified it.
-3. **Record support and dissent.** Note which reviewers agree or disagree on
+4. **Preserve original finding IDs** from each reviewer. When deduplicating,
+   keep the original finding ID and add aliases for consolidated IDs.
+5. **Preserve raw artifact paths** — include the path to each reviewer's raw
+   output artifact for traceability.
+6. **Assign fixPriority** to each finding based on severity:
+   - critical → 1
+   - major → 2
+   - minor → 3
+   - nit → 4
+7. **Group findings by file** in addition to severity — include a "Per-file
+   breakdown" section so fix workers can be assigned per file.
+8. **Record support and dissent.** Note which reviewers agree or disagree on
    each finding. Disagreement is valuable signal.
-4. **Group by severity.** Present findings in order: critical, major, minor,
+9. **Group by severity.** Present findings in order: critical, major, minor,
    nit.
-5. **Assess coverage.** Identify any review angles that were not covered or
-   were only partially covered.
-6. **Produce a go/no-go recommendation** based on the consolidated findings.
+10. **Assess coverage.** Identify any review angles that were not covered or
+    were only partially covered.
+11. **Produce a go/no-go recommendation** based on the consolidated findings.
 
 ## Report format
 
@@ -53,21 +74,39 @@ merge review findings from multiple angles into a single consolidated report.
 **Reviewers**: {list of reviewer roles that participated}
 **Status**: GO | NO-GO | CONDITIONAL-GO
 
+## Summary
+
+- **Total findings**: {count}
+- **Critical**: {N} | **Major**: {N} | **Minor**: {N} | **Nit**: {N}
+
+## Per-file breakdown
+
+### `path/to/file.ts`
+
+- {finding-id-1}: {severity} — {brief title}
+- {finding-id-2}: {severity} — {brief title}
+
+### `path/to/other-file.ts`
+
+- {finding-id-3}: {severity} — {brief title}
+
 ## Critical findings
 
-{findings that block approval}
+{findings that block approval, with full detail including observation,
+expected behavior, impact, fix requirements, validation, raw artifact paths,
+and fixPriority=1}
 
 ## Major findings
 
-{findings that should be resolved}
+{findings that should be resolved, with full detail and fixPriority=2}
 
 ## Minor findings
 
-{findings that are nice to fix}
+{findings that are nice to fix, fixPriority=3}
 
 ## Nits
 
-{optional suggestions}
+{optional suggestions, fixPriority=4}
 
 ## Coverage notes
 
@@ -88,6 +127,8 @@ merge review findings from multiple angles into a single consolidated report.
   systemic).
 - Severity differences: keep the higher severity from either reviewer. Note
   the discrepancy.
+- When deduplicating, preserve the original finding ID from the first
+  reviewer and add aliases for consolidated IDs.
 
 ## Coverage notes
 

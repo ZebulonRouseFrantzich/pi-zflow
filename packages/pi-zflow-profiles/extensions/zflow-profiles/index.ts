@@ -86,6 +86,8 @@ import * as path from "node:path"
 
 import { createPiModelRegistryAdapter } from "./pi-registry-adapter.js"
 
+import { launchConfigureWizard } from "./configure-wizard.js"
+
 // Re-export the public profile API so sibling packages or extensions
 // can import from "pi-zflow-profiles" directly.
 export {
@@ -1378,15 +1380,20 @@ async function handleProfileCommand(
     case "sync-project":
       await handleSyncProject(ctx.ui, { cwd: ctx.cwd })
       break
+    case "configure":
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await launchConfigureWizard(ctx as any)
+      break
     default:
       ctx.ui.notify(
         `Unknown subcommand: "${subcommand}".\n\n` +
           `Available subcommands:\n` +
-          `  /zflow-profile          — show active profile summary\n` +
-          `  /zflow-profile default   — activate the default profile\n` +
-          `  /zflow-profile show      — display detailed profile info\n` +
-          `  /zflow-profile lanes     — show lane definitions and status\n` +
-          `  /zflow-profile refresh   — force re-resolution\n` +
+          `  /zflow-profile            — show active profile summary\n` +
+          `  /zflow-profile default     — activate the default profile\n` +
+          `  /zflow-profile show        — display detailed profile info\n` +
+          `  /zflow-profile lanes       — show lane definitions and status\n` +
+          `  /zflow-profile refresh     — force re-resolution\n` +
+          `  /zflow-profile configure   — interactive TUI profile configuration wizard\n` +
           `  /zflow-profile sync-project — write resolved overrides to .pi/settings.json`,
       )
   }
@@ -1472,7 +1479,7 @@ export default function activateZflowProfilesExtension(pi: ExtensionAPI): void {
   pi.registerCommand("zflow-profile", {
     description:
       "Manage and inspect zflow profiles. Subcommands: " +
-      "default, show, lanes, refresh, sync-project. " +
+      "default, show, lanes, refresh, configure, sync-project. " +
       "Use without arguments for a summary.",
     handler: async (args: string, ctx: {
       ui: {
@@ -1499,6 +1506,47 @@ export default function activateZflowProfilesExtension(pi: ExtensionAPI): void {
       cwd?: string
     }): Promise<void> => {
       await handleProfileCommand(args, ctx)
+    },
+  })
+
+  // ── Register the /zflow-profile-configure standalone command ────
+  pi.registerCommand("zflow-profile-configure", {
+    description:
+      "Interactive TUI wizard for configuring zflow profiles. " +
+      "Guide through lane model selection, thinking levels, and agent bindings.",
+    handler: async (_args: string, ctx: {
+      ui: {
+        notify: (message: string, type?: "info" | "warning" | "error") => void
+        setStatus: (key: string, text: string | undefined) => void
+        confirm: (title: string, message: string) => Promise<boolean>
+        custom: <T>(
+          factory: unknown,
+          options?: unknown,
+        ) => Promise<T>
+      }
+      modelRegistry?: {
+        getAll(): Array<{
+          provider: string
+          id: string
+          reasoning?: boolean
+          input?: string[]
+          contextWindow?: number
+          maxTokens?: number
+          thinkingLevelMap?: Record<string, string | null>
+          name?: string
+          supportsTools?: boolean
+          [key: string]: unknown
+        }>
+        hasConfiguredAuth(model: {
+          provider: string
+          id: string
+          [key: string]: unknown
+        }): boolean
+      }
+      cwd?: string
+    }): Promise<void> => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await launchConfigureWizard(ctx as any)
     },
   })
 
