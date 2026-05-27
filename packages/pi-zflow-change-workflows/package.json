@@ -28,6 +28,10 @@
     "@earendil-works/pi-agent-core": "*",
     "typebox": "*"
   },
+  "scripts": {
+    "test": "npx tsx --test test/apply-back.test.ts test/apply-back-failure-message.test.ts",
+    "test:apply-back": "npx tsx --test test/apply-back.test.ts"
+  },
   "pi": {
     "extensions": [
       "./extensions"

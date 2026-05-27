@@ -501,18 +501,32 @@ function normalizeWorktreeStrategy(
   }
 }
 
-function gitOutput(cwd: string, args: string[]): string {
+/** Preserve exact bytes from git commands (needed for patch content). */
+function gitOutputRaw(cwd: string, args: string[]): string {
   return execFileSync("git", args, {
     cwd,
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 10 * 1024 * 1024,
-  }).trimEnd()
+  })
 }
 
-function gitOutputSafe(cwd: string, args: string[]): string {
+/** Trimmed variant for commands where trailing whitespace is harmless (rev-parse, --name-only). */
+function gitOutputTrimmed(cwd: string, args: string[]): string {
+  return gitOutputRaw(cwd, args).trimEnd()
+}
+
+function gitOutputSafeRaw(cwd: string, args: string[]): string {
   try {
-    return gitOutput(cwd, args)
+    return gitOutputRaw(cwd, args)
+  } catch {
+    return ""
+  }
+}
+
+function gitOutputSafeTrimmed(cwd: string, args: string[]): string {
+  try {
+    return gitOutputTrimmed(cwd, args)
   } catch {
     return ""
   }
@@ -524,15 +538,51 @@ function resetWorktreeToBaseRef(worktreePath: string, baseRef: string): string {
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 10 * 1024 * 1024,
   })
-  return gitOutput(worktreePath, ["rev-parse", "HEAD"])
+  return gitOutputTrimmed(worktreePath, ["rev-parse", "HEAD"])
+}
+
+/**
+ * Validate a patch file by attempting to apply it against a base commit's tree.
+ * Uses a temporary index to avoid modifying the actual working tree or index.
+ * Throws if the patch is structurally invalid.
+ */
+function validatePatchFile(worktreePath: string, patchPath: string, baseRef: string): void {
+  const tmpIndex = path.join(os.tmpdir(), `zflow-validate-${crypto.randomUUID()}`)
+  try {
+    execFileSync("git", ["read-tree", "--reset", baseRef], {
+      cwd: worktreePath,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, GIT_INDEX_FILE: tmpIndex },
+      maxBuffer: 10 * 1024 * 1024,
+    })
+    execFileSync("git", ["apply", "--cached", "--check", "--binary", patchPath], {
+      cwd: worktreePath,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, GIT_INDEX_FILE: tmpIndex },
+      maxBuffer: 10 * 1024 * 1024,
+    })
+  } catch (err: unknown) {
+    const execErr = err as { stderr?: Buffer | string; status?: number; message?: string }
+    const stderr = execErr.stderr ? String(execErr.stderr) : execErr.message ?? "unknown error"
+    throw new Error(
+      `Bridge produced invalid patch artifact at ${patchPath}: git apply --check failed.\n` +
+      `Stderr: ${stderr.trimEnd()}\n` +
+      `This indicates the bridge generated a malformed patch.`,
+    )
+  } finally {
+    try { fs.unlinkSync(tmpIndex) } catch { /* cleanup errors ignored */ }
+  }
 }
 
 function writePatchFromRange(worktreePath: string, patchPath: string, baseRef: string): { changedFiles: string[]; headCommit: string } {
-  const headCommit = gitOutput(worktreePath, ["rev-parse", "HEAD"])
-  const patch = gitOutputSafe(worktreePath, ["diff", "--binary", baseRef, "HEAD"])
+  const headCommit = gitOutputTrimmed(worktreePath, ["rev-parse", "HEAD"])
+  const patch = gitOutputSafeRaw(worktreePath, ["diff", "--binary", baseRef, "HEAD"])
   fs.mkdirSync(path.dirname(patchPath), { recursive: true })
   fs.writeFileSync(patchPath, patch ? `${patch}${patch.endsWith("\n") ? "" : "\n"}` : "", "utf-8")
-  const changedFilesOut = gitOutputSafe(worktreePath, ["diff", "--name-only", baseRef, "HEAD"])
+  if (patch && patch.trim()) {
+    validatePatchFile(worktreePath, patchPath, baseRef)
+  }
+  const changedFilesOut = gitOutputSafeTrimmed(worktreePath, ["diff", "--name-only", baseRef, "HEAD"])
   const changedFiles = changedFilesOut ? changedFilesOut.split("\n").filter(Boolean) : []
   return { changedFiles, headCommit }
 }
@@ -548,7 +598,7 @@ function checkpointSharedWorkspace(worktreePath: string, message: string): strin
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 10 * 1024 * 1024,
   })
-  return gitOutput(worktreePath, ["rev-parse", "HEAD"])
+  return gitOutputTrimmed(worktreePath, ["rev-parse", "HEAD"])
 }
 
 async function maybeRunCompatWorktreeSetupHook(
@@ -893,12 +943,15 @@ function captureCompatPatchAgainstBase(
   patchPath: string,
 ): { changedFiles: string[]; headCommit: string } {
   stageAllCompatChanges(worktreePath)
-  const patch = gitOutputSafe(worktreePath, ["diff", "--cached", "--binary", baseCommit])
+  const patch = gitOutputSafeRaw(worktreePath, ["diff", "--cached", "--binary", baseCommit])
   fs.mkdirSync(path.dirname(patchPath), { recursive: true })
   fs.writeFileSync(patchPath, patch ? `${patch}${patch.endsWith("\n") ? "" : "\n"}` : "", "utf-8")
-  const changedFilesOut = gitOutputSafe(worktreePath, ["diff", "--cached", "--name-only", baseCommit])
+  if (patch && patch.trim()) {
+    validatePatchFile(worktreePath, patchPath, baseCommit)
+  }
+  const changedFilesOut = gitOutputSafeTrimmed(worktreePath, ["diff", "--cached", "--name-only", baseCommit])
   const changedFiles = changedFilesOut ? changedFilesOut.split("\n").filter(Boolean) : []
-  const headCommit = gitOutput(worktreePath, ["rev-parse", "HEAD"])
+  const headCommit = gitOutputTrimmed(worktreePath, ["rev-parse", "HEAD"])
   return { changedFiles, headCommit }
 }
 
@@ -1065,7 +1118,7 @@ async function runParallelWithCompatWorktrees(
     const clusterRuns = workspacePlans.map((plan, clusterIndex) => async () => {
       const worktree = worktreeSetup!.worktrees[clusterIndex]!
       const orderedTaskIndexes = topoSortWorkspaceTaskIndexes(input.tasks, plan.taskIndexes)
-      let currentBaseCommit = plan.baseRef ? gitOutput(worktree.path, ["rev-parse", "HEAD"]) : worktreeSetup!.baseCommit
+      let currentBaseCommit = plan.baseRef ? gitOutputTrimmed(worktree.path, ["rev-parse", "HEAD"]) : worktreeSetup!.baseCommit
       let blockedByFailure: string | undefined
 
       for (const taskIndex of orderedTaskIndexes) {
@@ -1261,3 +1314,7 @@ export default async function activateZflowSubagentsBridgeExtension(_pi: Extensi
 
   registry.provide(DISPATCH_SERVICE_CAPABILITY, service)
 }
+
+// ── Test-only exports ──────────────────────────────────────────────
+/** @internal Exported for unit testing only. */
+export { validatePatchFile, writePatchFromRange, captureCompatPatchAgainstBase }

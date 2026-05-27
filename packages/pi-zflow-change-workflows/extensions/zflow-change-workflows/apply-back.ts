@@ -44,6 +44,58 @@ import { runIntegrationMerge } from "./integration-merge-strategy.js"
 import { resolveAllConflicts } from "./structured-merge-strategy.js"
 
 // ---------------------------------------------------------------------------
+// Patch-corruption diagnostics
+// ---------------------------------------------------------------------------
+
+/**
+ * Detect whether a `git apply` failure message indicates a corrupt/malformed
+ * patch artifact rather than a legitimate merge conflict.
+ *
+ * Corrupt-patch indicators come from `git apply` when the input is not a
+ * valid git diff at all (e.g. binary garbage, plain text, truncated diffs).
+ * Merge-conflict indicators appear when the patch is structurally valid but
+ * the target context has diverged.
+ */
+export function isCorruptPatchError(stderr: string): boolean {
+  const corruptIndicators = [
+    "No valid patches in input",
+    "corrupt patch at line",
+    "bad git-diff",
+    "invalid mode in patch line",
+    "unrecognized input",
+    "fragment doesn't start",
+  ]
+  return corruptIndicators.some((pattern) => stderr.includes(pattern))
+}
+
+/**
+ * Format an improved error message for a failed `git apply` operation.
+ *
+ * Includes the group id, patch path, original git error, and when the
+ * error suggests a corrupted patch artifact, an actionable hint pointing
+ * upstream to patch capture / bridge serialization.
+ */
+export function formatApplyPatchError(
+  groupId: string,
+  patchPath: string,
+  stderr: string,
+  label: "patch" | "consolidated patch" = "patch",
+): string {
+  const lines: string[] = [
+    `Failed to apply ${label} for group "${groupId}"`,
+    `Patch path: ${patchPath}`,
+  ]
+  if (isCorruptPatchError(stderr)) {
+    lines.push(
+      "The patch artifact appears to be malformed or corrupted. " +
+      "This may indicate a patch capture or bridge serialization issue upstream.",
+    )
+  }
+  lines.push(`Git apply error: ${stderr}`)
+  return lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
 // Strategy interface
 // ---------------------------------------------------------------------------
 
@@ -118,7 +170,7 @@ export class ConsolidatedPatchStrategy implements ApplyBackStrategy {
     } catch (err: unknown) {
       const stderr = err instanceof Error ? err.message : String(err)
       throw new Error(
-        `Failed to apply consolidated patch for group "${groupId}": ${stderr}`,
+        formatApplyPatchError(groupId, this.consolidatedPatchPath, stderr, "consolidated patch"),
       )
     }
   }
@@ -179,7 +231,7 @@ export class PatchReplayStrategy implements ApplyBackStrategy {
     } catch (err: unknown) {
       const stderr = err instanceof Error ? err.message : String(err)
       throw new Error(
-        `Failed to apply patch for group "${groupId}": ${stderr}`,
+        formatApplyPatchError(groupId, patchPath, stderr),
       )
     }
   }
