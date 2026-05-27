@@ -1871,8 +1871,14 @@ export function resetWorkflowState(): void {
 // Dispatch service helpers
 // ═══════════════════════════════════════════════════════════════════
 
-import type { AgentDispatchProgress, DispatchService } from "pi-zflow-core/dispatch-service"
+import type { AgentDispatchProgress, DispatchService, DispatchWorktreeSetupHook } from "pi-zflow-core/dispatch-service"
 import { DISPATCH_SERVICE_CAPABILITY } from "pi-zflow-core/dispatch-service"
+import {
+  buildFixWorkerWorktreeStrategy,
+  extractFixVerificationCommand,
+  mergeSuccessfulFixResult,
+  selectCanonicalGroupPatchPath,
+} from "./fix-dispatch.js"
 
 const IMPLEMENT_GROUP_MAX_RETRIES = 1
 const DEFAULT_IMPLEMENT_CONCURRENCY = 2
@@ -1953,6 +1959,7 @@ export interface GroupStatusEntry {
     status: "pass" | "fail" | "skipped" | "missing"
     command?: string
     output?: string
+    outputPath?: string
   }
   /** Path to the patch artifact (if produced and captured). */
   patchPath?: string
@@ -2116,10 +2123,10 @@ async function updateGroupLedger(
 /**
  * Attempt to fix a failed group by dispatching a targeted fix worker.
  *
- * The fix worker runs in a fresh worktree with the same base as the original
- * group. It receives the verification failure context and produces a fix patch.
- * The orchestrator stores BOTH the original patch and the fix patch. On apply-back,
- * the original patch is applied first, then the fix patch on top.
+ * The fix worker runs in a fresh isolated worktree rooted at the same base
+ * commit as the original group. When it succeeds, its patch becomes the
+ * canonical patch for downstream lineage/apply-back while the original failed
+ * patch remains available only for diagnostics.
  *
  * @param groupId - The failing group's ID.
  * @param taskPrompt - The group's task description.
@@ -2128,7 +2135,7 @@ async function updateGroupLedger(
  * @param failedResult - The failed dispatch result (contains error, verification output, patch path).
  * @param dispatchService - The dispatch service.
  * @param options - Context: runId, cwd, repoRoot, changeId, planVersion, worktreeResultsDir, onSubagentUpdate.
- * @returns Object with fix outcome: whether fixed, fix patch path, classification, error.
+ * @returns Object with fix outcome: whether fixed, canonical fix patch path, classification, error.
  */
 async function attemptGroupFix(
   groupId: string,
@@ -2144,11 +2151,21 @@ async function attemptGroupFix(
     changeId: string
     planVersion: string
     worktreeResultsDir: string
+    worktreeSetupHook?: DispatchWorktreeSetupHook
     onSubagentUpdate?: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) => void
     onWorkflowUpdate?: (message: string) => void
     implementModel: { dispatchModel?: string }
   },
-): Promise<{ fixed: boolean; fixPatchPath?: string; fixClassification: string; error?: string; verificationCommand?: string; verificationOutput?: string }> {
+): Promise<{
+  fixed: boolean
+  fixPatchPath?: string
+  fixClassification: string
+  error?: string
+  verificationCommand?: string
+  verificationOutput?: string
+  verificationOutputPath?: string
+  dispatchResult?: DispatchGroupResult
+}> {
   const { default: fs } = await import("node:fs/promises")
   const { default: path } = await import("node:path")
 
@@ -2165,7 +2182,7 @@ async function attemptGroupFix(
     }
   }
 
-  const verificationCmd = failedResult.verification?.command ?? "(not captured)"
+  const verificationCmd = extractFixVerificationCommand(failedResult)
   const verificationOutput = failedResult.verification?.output ?? failedResult.error ?? "(not captured)"
   const errorHint = failedResult.error ?? ""
 
@@ -2174,8 +2191,9 @@ async function attemptGroupFix(
     `# Fix: ${groupId} — ${taskPrompt}`,
     "",
     "## Original group failure",
-    "The implementation for this group passed scoped verification as reported by the dispatch backend.",
-    "The dispatch service reported that the worker produced output but verification failed.",
+    verificationCmd
+      ? "The dispatch service reported that the worker did not pass scoped verification."
+      : "The dispatch service reported that the worker failed before a scoped verification command could be confirmed.",
     "",
     "## Context",
     "",
@@ -2183,12 +2201,18 @@ async function attemptGroupFix(
     `**Agent:** ${agent}`,
     `**Allowed files:** ${files.join(", ")}`,
     "",
-    `## Verification command that failed`,
-    "```bash",
-    verificationCmd,
-    "```",
-    "",
-    "## Verification output",
+    ...(verificationCmd ? [
+      "## Verification command that failed",
+      "```bash",
+      verificationCmd,
+      "```",
+      "",
+    ] : [
+      "## Verification command",
+      "No scoped verification command was captured for the original failure.",
+      "",
+    ]),
+    "## Failure output",
     "```",
     verificationOutput.slice(0, 10000),
     "```",
@@ -2201,7 +2225,7 @@ async function attemptGroupFix(
     ...(originalPatchContent ? [
       "## Original patch (the previous implementation attempt)",
       "",
-      "The following patch was produced by the original implementation but did not pass verification.",
+      "The following patch was produced by the original implementation but did not complete successfully.",
       "```diff",
       originalPatchContent.slice(0, 15000),
       "```",
@@ -2209,27 +2233,34 @@ async function attemptGroupFix(
     ] : []),
     "## Your task",
     "",
-    "Fix the verification failure so this group's changes pass the verification command.",
+    verificationCmd
+      ? "Fix the implementation so this group's changes pass the scoped verification command."
+      : "Fix the implementation failure within the allowed files. If you can infer the relevant scoped verification command from project context, run it yourself before finishing.",
     "",
     "## Rules",
     "",
     "1. Stay within the allowed files unless drift criteria require escalation.",
     "2. If the original patch contains changes that are valid, reapply them in your implementation.",
-    "3. Focus on fixing what caused verification to fail — patch syntax errors, missing config,",
-    "   incompatible CLI flags, invalid file formats, etc.",
-    "4. After making your changes, run the verification command yourself:",
-    "   ```bash",
-    verificationCmd,
-    "   ```",
-    "5. If verification passes, you're done. Report what you fixed.",
-    "6. If verification STILL fails, fix the remaining issues and retry verification.",
-    "7. If you cannot fix within the allowed files, report why and suggest scope expansion.",
+    "3. Focus on the concrete failure mode — patch syntax errors, missing config, incompatible CLI flags, invalid file formats, etc.",
+    ...(verificationCmd ? [
+      "4. After making your changes, run the verification command yourself:",
+      "   ```bash",
+      verificationCmd,
+      "   ```",
+      "5. If verification passes, you're done. Report what you fixed.",
+      "6. If verification still fails, fix the remaining issues and retry verification.",
+      "7. If you cannot fix within the allowed files, report why and suggest scope expansion.",
+    ] : [
+      "4. Run the most relevant scoped verification you can determine from the group's context before finishing.",
+      "5. If you cannot determine a reliable verification command, state that clearly in the summary.",
+      "6. If you cannot fix within the allowed files, report why and suggest scope expansion.",
+    ]),
     "",
     "## Report format",
     "",
     "End your response with a summary:",
     "- **Changes made**: (list of files changed and what was fixed)",
-    "- **Verification result**: passed / failed",
+    "- **Verification result**: passed / failed / not-confirmed",
     "- **Classification**: fixable-within-group / requires-prerequisite-change / needs-user-decision",
     "",
   ].join("\n")
@@ -2245,10 +2276,13 @@ async function attemptGroupFix(
     const fixResult = await dispatchService.runParallel({
       tasks: [{
         agent,
+        groupId,
         task: fixPrompt,
         model: options.implementModel.dispatchModel,
         output: fixOutputPath,
         outputMode: "file-only" as const,
+        claimedFiles: files,
+        worktreeStrategy: buildFixWorkerWorktreeStrategy(failedResult),
         scopedVerification: verificationCmd,
         onUpdate: (progress) => {
           const recentOutput = Array.isArray(progress.recentOutput) ? progress.recentOutput : []
@@ -2265,6 +2299,7 @@ async function attemptGroupFix(
       cwd: options.cwd,
       concurrency: 1,
       worktree: true,
+      worktreeSetupHook: options.worktreeSetupHook,
       maxOutput: { lines: 5000, bytes: 500_000 },
     })
 
@@ -2273,15 +2308,16 @@ async function attemptGroupFix(
       return { fixed: false, fixClassification: "fix-worker-error", error: "Fix worker produced no result" }
     }
 
-    // Persist fix verification output
+    let verificationOutputPath: string | undefined
     if (fixTaskResult.verification?.output) {
+      verificationOutputPath = fixVerificationPath
       await fs.writeFile(fixVerificationPath, fixTaskResult.verification.output, "utf-8").catch(() => {})
     }
 
     const fixPassed = fixTaskResult.ok && fixTaskResult.verification?.status !== "fail" && fixTaskResult.verification?.status !== "failed"
     const fixVerificationStatus = fixTaskResult.verification?.status
 
-    if (fixPassed && fixTaskResult.patchPath) {
+    if (fixPassed) {
       options?.onSubagentUpdate?.(groupId, {
         agent,
         title: `fix: ${groupId}`,
@@ -2294,36 +2330,23 @@ async function attemptGroupFix(
         fixClassification: "fixable-within-group",
         verificationCommand: verificationCmd,
         verificationOutput: fixTaskResult.verification?.output,
+        verificationOutputPath,
+        dispatchResult: fixTaskResult,
       }
     }
 
-    if (fixPassed && !fixTaskResult.patchPath) {
-      // Fix worker succeeded but didn't produce a patch — means the fix
-      // didn't need filesystem changes (e.g. the failure was environment-only)
-      // which shouldn't happen, but handle gracefully.
-      return {
-        fixed: true,
-        fixPatchPath: undefined,
-        fixClassification: "fixable-within-group",
-        verificationCommand: verificationCmd,
-        verificationOutput: fixTaskResult.verification?.output,
-      }
-    }
-
-    // Fix worker failed verification
     const fixError = fixTaskResult.error
       ? `Fix worker error: ${fixTaskResult.error}`
       : fixVerificationStatus === "fail" || fixVerificationStatus === "failed"
-        ? `Fix verification failed: ${verificationCmd}`
+        ? `Fix verification failed: ${verificationCmd ?? "(not captured)"}`
         : "Fix worker failed without error"
 
-    // Classify the failure from worker output
     const workerOutput = fixTaskResult.rawOutput ?? ""
     let classification = "fixable-within-group"
     const lower = workerOutput.toLowerCase()
     if (lower.includes("needs-user-decision") || lower.includes("needs_user_decision") || lower.includes("requires user")) {
       classification = "needs-user-decision"
-    } else if (lower.includes("requires-prerequisite-change") || lower.includes("requires-prerequisite-change") || lower.includes("requires prerequisite") || lower.includes("scope expansion")) {
+    } else if (lower.includes("requires-prerequisite-change") || lower.includes("requires prerequisite") || lower.includes("scope expansion")) {
       classification = "requires-prerequisite-change"
     }
 
@@ -2333,6 +2356,8 @@ async function attemptGroupFix(
       error: fixError,
       verificationCommand: verificationCmd,
       verificationOutput: fixTaskResult.verification?.output,
+      verificationOutputPath,
+      dispatchResult: fixTaskResult,
     }
   } catch (err) {
     return {
@@ -2733,6 +2758,11 @@ async function resumeWorktreeDispatch(
   const execFileAsync = promisify(execFile)
   const { stdout: repoRootRaw } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd })
   const repoRoot = repoRootRaw.trim()
+  const { resolveDispatchWorktreeSetup } = await import("./worktree-setup.js")
+  const worktreeSetupResolution = await resolveDispatchWorktreeSetup(repoRoot)
+  if (!worktreeSetupResolution.ok) {
+    throw new Error(worktreeSetupResolution.message ?? "worktree setup requirements were not satisfied")
+  }
 
   // Read existing execution groups from plan artifact
   const executionGroupsArtifactPath = resolvePlanArtifactPath(changeId, planVersion, "execution-groups", cwd)
@@ -2791,27 +2821,56 @@ async function resumeWorktreeDispatch(
   await fs.mkdir(worktreeResultsDir, { recursive: true })
 
   const implementModel = await resolveWorkflowModel("zflow.implement-routine")
-  const tasks = runPlan.tasks.map((t) => ({
-    agent: t.agent,
-    task: t.task,
-    model: implementModel.dispatchModel,
-    output: path.join(worktreeResultsDir, `${t.groupId}-resume-result.md`),
-    outputMode: "file-only" as const,
-    onUpdate: (progress: AgentDispatchProgress) => {
-      const recentTools = Array.isArray(progress.recentTools) ? progress.recentTools : []
-      const recentTool = recentTools[recentTools.length - 1]
-      const recentOutput = Array.isArray(progress.recentOutput) ? progress.recentOutput : []
-      options?.onSubagentUpdate?.(t.groupId, {
-        agent: t.agent,
-        title: undefined,
-        status: progress.status ?? "running",
-        lastCommand: progress.currentTool
-          ? `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}`
-          : recentTool?.tool
-            ? `${recentTool.tool}${recentTool.args ? ` ${recentTool.args}` : ""}`
-            : recentOutput[recentOutput.length - 1] ?? "resume dispatching...",
-      })
-    },
+  const tasks = await Promise.all(runPlan.tasks.map(async (t, taskIndex) => {
+    const planGroup = runPlan.groups[taskIndex] as unknown as {
+      id: string
+      files: string[]
+      dependencies: string[]
+      parallelizable: boolean
+    }
+    const lineage = t.worktreeStrategy?.baseStrategy === "dependency-lineage"
+      ? await materializeDependencyLineageRef(
+          runId,
+          repoRoot,
+          planGroup,
+          runPlan.groups as Array<{ id: string; files: string[]; dependencies: string[]; parallelizable: boolean }>,
+          cwd,
+        )
+      : null
+
+    return {
+      agent: t.agent,
+      groupId: t.groupId,
+      task: t.task,
+      model: implementModel.dispatchModel,
+      output: path.join(worktreeResultsDir, `${t.groupId}-resume-result.md`),
+      outputMode: "file-only" as const,
+      scopedVerification: t.scopedVerification,
+      claimedFiles: t.claimedFiles,
+      dependencies: t.dependencies,
+      worktreeStrategy: lineage
+        ? {
+            ...t.worktreeStrategy,
+            baseStrategy: "dependency-lineage" as const,
+            baseRef: lineage.ref,
+          }
+        : t.worktreeStrategy,
+      onUpdate: (progress: AgentDispatchProgress) => {
+        const recentTools = Array.isArray(progress.recentTools) ? progress.recentTools : []
+        const recentTool = recentTools[recentTools.length - 1]
+        const recentOutput = Array.isArray(progress.recentOutput) ? progress.recentOutput : []
+        options?.onSubagentUpdate?.(t.groupId, {
+          agent: t.agent,
+          title: undefined,
+          status: progress.status ?? "running",
+          lastCommand: progress.currentTool
+            ? `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}`
+            : recentTool?.tool
+              ? `${recentTool.tool}${recentTool.args ? ` ${recentTool.args}` : ""}`
+              : recentOutput[recentOutput.length - 1] ?? "resume dispatching...",
+        })
+      },
+    }
   }))
 
   const WORKTREE_DISPATCH_CONCURRENCY = resolveImplementConcurrency()
@@ -2856,6 +2915,7 @@ async function resumeWorktreeDispatch(
       cwd,
       concurrency: WORKTREE_DISPATCH_CONCURRENCY,
       worktree: true,
+      worktreeSetupHook: worktreeSetupResolution.hook,
       maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
     })
   } finally {
@@ -2919,6 +2979,8 @@ async function resumeWorktreeDispatch(
       agent: r.agent ?? "zflow.implement-routine",
       error: undefined,
       failureKind: undefined,
+      patchPath: r.patchPath,
+      changedFiles: r.changedFiles ?? group.files,
       scopedVerification: { status: scopedVerification.status, command: scopedVerification.command, output: scopedVerification.output },
     }, cwd).catch(() => {})
     options?.onSubagentUpdate?.(group.id, {
@@ -2939,8 +3001,8 @@ async function resumeWorktreeDispatch(
         groupId: group.id,
         agent: r.agent ?? "zflow.implement-routine",
         worktreePath: r.worktreePath ?? "(patch-based)",
-        baseCommit: run.head as string,
-        headCommit: run.head as string,
+        baseCommit: r.baseCommit ?? run.head as string,
+        headCommit: r.headCommit ?? run.head as string,
         changedFiles: r.changedFiles ?? group.files,
         uncommittedChanges: [],
         patchPath: destPatchPath,
@@ -2958,6 +3020,8 @@ async function resumeWorktreeDispatch(
         worktreePath: r.worktreePath,
         runId,
         repoRoot,
+        baseCommit: r.baseCommit,
+        headCommit: r.headCommit,
         scopedFiles: group.files,
         verification: scopedVerification,
         cwd,
@@ -3096,6 +3160,159 @@ function normalizeDispatchVerification(
   }
 }
 
+function collectDependencyClosure(
+  groups: ReadonlyArray<{ id: string; dependencies: string[] }>,
+  targetId: string,
+): string[] {
+  const byId = new Map(groups.map((group) => [group.id, group]))
+  const closure = new Set<string>()
+  const stack = [...(byId.get(targetId)?.dependencies ?? [])]
+
+  while (stack.length > 0) {
+    const next = stack.pop()!
+    if (closure.has(next)) continue
+    closure.add(next)
+    const group = byId.get(next)
+    if (group) {
+      for (const dep of group.dependencies) {
+        if (!closure.has(dep)) stack.push(dep)
+      }
+    }
+  }
+
+  return [...closure]
+}
+
+async function materializeDependencyLineageRef(
+  runId: string,
+  repoRoot: string,
+  targetGroup: { id: string; dependencies: string[] },
+  allGroups: Array<{ id: string; files: string[]; dependencies: string[]; parallelizable: boolean }>,
+  cwd?: string,
+): Promise<{ ref: string; headCommit: string; dependencyGroupIds: string[]; worktreePath: string } | null> {
+  const dependencyGroupIds = collectDependencyClosure(allGroups, targetGroup.id)
+  if (dependencyGroupIds.length === 0) return null
+
+  const { readRun, updateRun } = await import("pi-zflow-artifacts")
+  const { resolveRunDir } = await import("pi-zflow-artifacts/artifact-paths")
+  const { default: path } = await import("node:path")
+  const run = await readRun(runId, cwd)
+  const existing = (run.lineageRefs ?? []).find((entry) => entry.groupId === targetGroup.id && entry.status === "materialized")
+
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const execFileAsync = promisify(execFile)
+
+  if (existing) {
+    try {
+      await execFileAsync("git", ["rev-parse", "--verify", existing.ref], { cwd: repoRoot })
+      return {
+        ref: existing.ref,
+        headCommit: existing.headCommit ?? existing.baseCommit,
+        dependencyGroupIds: existing.dependencyGroupIds,
+        worktreePath: existing.worktreePath ?? path.join(resolveRunDir(runId, cwd), `lineage-${targetGroup.id}`),
+      }
+    } catch {
+      // Rebuild stale lineage refs.
+    }
+  }
+
+  const dependencyGroups = allGroups.filter((group) => dependencyGroupIds.includes(group.id))
+  if (dependencyGroups.length === 0) return null
+
+  const patchesDir = path.join(resolveRunDir(runId, cwd), "patches")
+  const ledger = await getGroupLedger(runId, cwd)
+  const patchMap = new Map<string, string>()
+  for (const dependencyGroupId of dependencyGroupIds) {
+    const ledgerPatchPath = selectCanonicalGroupPatchPath(ledger[dependencyGroupId])
+    const patchPath = ledgerPatchPath ?? path.join(patchesDir, `${dependencyGroupId}.patch`)
+    try {
+      await import("node:fs/promises").then((fs) => fs.access(patchPath))
+      patchMap.set(dependencyGroupId, patchPath)
+    } catch {
+      throw new Error(
+        `Cannot materialize dependency lineage for ${targetGroup.id}: missing patch artifact for dependency ${dependencyGroupId}.`,
+      )
+    }
+  }
+
+  const { runIntegrationMerge } = await import("./integration-merge-strategy.js")
+  const lineageResult = await runIntegrationMerge({
+    runId: `${runId}-lineage-${targetGroup.id}`,
+    repoRoot,
+    snapshot: run.preApplySnapshot ?? {
+      head: run.head,
+      indexState: "clean",
+      recoveryRef: `refs/zflow/recovery/${runId}`,
+    },
+    groups: dependencyGroups,
+    patches: patchMap,
+    cwd,
+  })
+
+  if (!lineageResult.success || !lineageResult.integrationWorktreePath) {
+    throw new Error(
+      lineageResult.error ??
+      `Failed to materialize dependency lineage for ${targetGroup.id}.`,
+    )
+  }
+
+  const { stdout: headCommitRaw } = await execFileAsync("git", ["rev-parse", "HEAD"], {
+    cwd: lineageResult.integrationWorktreePath,
+  })
+  const headCommit = headCommitRaw.trim()
+  const ref = `refs/zflow/lineage/${runId}/${targetGroup.id}`
+  await execFileAsync("git", ["update-ref", ref, headCommit], { cwd: repoRoot })
+
+  const lineageEntry = {
+    id: `lineage-${targetGroup.id}`,
+    groupId: targetGroup.id,
+    dependencyGroupIds,
+    ref,
+    baseCommit: run.head,
+    headCommit,
+    worktreePath: lineageResult.integrationWorktreePath,
+    status: "materialized" as const,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
+
+  const nextLineageRefs = [
+    ...(run.lineageRefs ?? []).filter((entry) => entry.groupId !== targetGroup.id),
+    lineageEntry,
+  ]
+  const nextRetainedArtifacts = [
+    ...(run.retainedArtifacts ?? []),
+  ]
+  if (!nextRetainedArtifacts.some((artifact) => artifact.path === lineageResult.integrationWorktreePath)) {
+    nextRetainedArtifacts.push({
+      type: "worktree",
+      path: lineageResult.integrationWorktreePath,
+      reason: `dependency-lineage materialization for ${targetGroup.id}`,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    })
+  }
+  if (lineageResult.consolidatedPatchPath && !nextRetainedArtifacts.some((artifact) => artifact.path === lineageResult.consolidatedPatchPath)) {
+    nextRetainedArtifacts.push({
+      type: "patch",
+      path: lineageResult.consolidatedPatchPath,
+      reason: `dependency-lineage consolidated patch for ${targetGroup.id}`,
+      expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+    })
+  }
+  await updateRun(runId, {
+    lineageRefs: nextLineageRefs,
+    retainedArtifacts: nextRetainedArtifacts,
+  }, cwd)
+
+  return {
+    ref,
+    headCommit,
+    dependencyGroupIds,
+    worktreePath: lineageResult.integrationWorktreePath,
+  }
+}
+
 /**
  * Try to discover and return a dispatch service from the zflow registry.
  *
@@ -3165,6 +3382,11 @@ async function runWorktreeDispatchAndFinalize(
   const execFileAsync = promisify(execFile)
   const { stdout: repoRootRaw } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd })
   const repoRoot = repoRootRaw.trim()
+  const { resolveDispatchWorktreeSetup } = await import("./worktree-setup.js")
+  const worktreeSetupResolution = await resolveDispatchWorktreeSetup(repoRoot)
+  if (!worktreeSetupResolution.ok) {
+    throw new Error(worktreeSetupResolution.message ?? "worktree setup requirements were not satisfied")
+  }
 
   // Read execution groups from the approved plan artifact
   const executionGroupsArtifactPath = resolvePlanArtifactPath(changeId, planVersion, "execution-groups", cwd)
@@ -3332,11 +3554,15 @@ async function runWorktreeDispatchAndFinalize(
   // Build the full tasks array once. Each wave will select a subset by index.
   const tasks = runPlan.tasks.map((t, taskIdx) => ({
     agent: t.agent,
+    groupId: t.groupId,
     task: t.task,
     model: implementModel.dispatchModel,
     output: path.join(worktreeResultsDir, `${t.groupId}-result.md`),
     outputMode: "file-only" as const,
     scopedVerification: t.scopedVerification,
+    claimedFiles: t.claimedFiles,
+    dependencies: t.dependencies,
+    worktreeStrategy: t.worktreeStrategy,
     onUpdate: (progress: AgentDispatchProgress) => {
       const recentTools = Array.isArray(progress.recentTools) ? progress.recentTools : []
       const recentTool = recentTools[recentTools.length - 1]
@@ -3399,7 +3625,37 @@ async function runWorktreeDispatchAndFinalize(
       if (idx === undefined) throw new Error(`Group ${gid} not found in task list`)
       return idx
     })
-    const waveTasks = waveTaskIndices.map(idx => tasks[idx]!)
+    const waveTasks = await Promise.all(waveTaskIndices.map(async (idx) => {
+      const baseTask = tasks[idx]!
+      const planGroup = runPlan.groups[idx] as unknown as {
+        id: string
+        files: string[]
+        dependencies: string[]
+        parallelizable: boolean
+        baseStrategy?: "head" | "dependency-lineage"
+      }
+      if (baseTask.worktreeStrategy?.baseStrategy !== "dependency-lineage") {
+        return baseTask
+      }
+
+      const lineage = await materializeDependencyLineageRef(
+        runId,
+        repoRoot,
+        planGroup,
+        runPlan.groups as Array<{ id: string; files: string[]; dependencies: string[]; parallelizable: boolean }>,
+        cwd,
+      )
+      if (!lineage) return baseTask
+
+      return {
+        ...baseTask,
+        worktreeStrategy: {
+          ...baseTask.worktreeStrategy,
+          baseStrategy: "dependency-lineage",
+          baseRef: lineage.ref,
+        },
+      }
+    }))
 
     // Mark wave groups as running
     for (const gid of readyGroupIds) {
@@ -3443,6 +3699,7 @@ async function runWorktreeDispatchAndFinalize(
         cwd,
         concurrency: Math.min(WORKTREE_DISPATCH_CONCURRENCY, waveTasks.length),
         worktree: true,
+        worktreeSetupHook: worktreeSetupResolution.hook,
         maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
       })
     } finally {
@@ -3461,115 +3718,130 @@ async function runWorktreeDispatchAndFinalize(
       const group = runPlan.groups[idx]
       if (!gid || idx === undefined) continue
 
+      const verification = normalizeDispatchVerification(r.verification)
+      const dispatchFailed = !r.ok || verification?.status === "fail"
       allResults.push({ groupId: gid, result: r, index: idx })
 
-      if (r.ok) {
-        // Group succeeded
+      if (!dispatchFailed) {
         options?.onSubagentUpdate?.(gid, {
           agent: r.agent ?? tasks[idx]?.agent,
           title: group?.taskPrompt ?? undefined,
           status: "completed",
           finishedAt: Date.now(),
-          lastCommand: "agent complete; scoped verification deferred to final verification",
+          lastCommand: verification?.status === "pass"
+            ? "agent complete; scoped verification passed"
+            : "agent complete; scoped verification deferred to final verification",
         })
         await updateGroupLedger(runId, gid, {
           status: "succeeded",
           agent: r.agent ?? "zflow.implement-routine",
           error: undefined,
           failureKind: undefined,
+          patchPath: r.patchPath,
+          changedFiles: r.changedFiles ?? group?.files,
+          scopedVerification: verification,
         }, cwd).catch(() => {})
-      } else {
-          // Group failed — attempt fix loop before blocking dependents
-          const currentFixAttempts = (await readRun(runId, cwd).catch(() => null))
-            ?.metadata?.[GROUP_LEDGER_META_KEY]?.[gid]?.fixAttempts ?? 0
+        continue
+      }
 
-          const fixShouldRun = currentFixAttempts < MAX_FIX_ATTEMPTS_PER_GROUP &&
-            group && group.files && group.files.length > 0
+      const currentFixAttempts = (await readRun(runId, cwd).catch(() => null))
+        ?.metadata?.[GROUP_LEDGER_META_KEY]?.[gid]?.fixAttempts ?? 0
 
-          if (fixShouldRun) {
-            options?.onWorkflowUpdate?.(`Attempting fix for ${gid} (attempt ${currentFixAttempts + 1}/${MAX_FIX_ATTEMPTS_PER_GROUP})`)
-            await updateGroupLedger(runId, gid, {
-              status: "retrying",
-              fixAttempts: currentFixAttempts + 1,
-            }, cwd).catch(() => {})
+      const fixShouldRun = currentFixAttempts < MAX_FIX_ATTEMPTS_PER_GROUP &&
+        group && group.files && group.files.length > 0
 
-            const fixResult = await attemptGroupFix(
-              gid,
-              group?.taskPrompt ?? "",
-              group?.files ?? [],
-              r.agent ?? "zflow.implement-routine",
-              r,
-              dispatchService,
-              {
-                runId,
-                cwd,
-                repoRoot,
-                changeId,
-                planVersion,
-                worktreeResultsDir,
-                onSubagentUpdate: options?.onSubagentUpdate,
-                onWorkflowUpdate: options?.onWorkflowUpdate,
-                implementModel,
-              },
-            )
+      if (fixShouldRun) {
+        options?.onWorkflowUpdate?.(`Attempting fix for ${gid} (attempt ${currentFixAttempts + 1}/${MAX_FIX_ATTEMPTS_PER_GROUP})`)
+        await updateGroupLedger(runId, gid, {
+          status: "retrying",
+          fixAttempts: currentFixAttempts + 1,
+        }, cwd).catch(() => {})
 
-            if (fixResult.fixed) {
-              // Fix succeeded — treat group as succeeded.
-              // Update the allResults entry so the "N groups succeeded" count is accurate.
-              const resultEntry = allResults.find(e => e.groupId === gid)
-              if (resultEntry) {
-                resultEntry.result = { ...resultEntry.result, ok: true, error: undefined }
-              }
-              options?.onSubagentUpdate?.(gid, {
-                agent: r.agent ?? tasks[idx]?.agent,
-                title: `fix: ${gid} (attempt ${currentFixAttempts + 1})`,
-                status: "completed",
-                finishedAt: Date.now(),
-                lastCommand: `fix succeeded${fixResult.fixPatchPath ? `; fix patch: ${fixResult.fixPatchPath}` : ""}`,
-              })
-              await updateGroupLedger(runId, gid, {
-                status: "succeeded",
-                agent: r.agent ?? "zflow.implement-routine",
-                error: undefined,
-                failureKind: undefined,
-                fixResult: "succeeded",
-                fixClassification: fixResult.fixClassification,
-                fixPatchPath: fixResult.fixPatchPath,
-              }, cwd).catch(() => {})
-              // Do NOT block dependents — fix succeeded
-              continue
-            }
+        const fixResult = await attemptGroupFix(
+          gid,
+          group?.taskPrompt ?? "",
+          group?.files ?? [],
+          r.agent ?? "zflow.implement-routine",
+          verification ? { ...r, verification } : r,
+          dispatchService,
+          {
+            runId,
+            cwd,
+            repoRoot,
+            changeId,
+            planVersion,
+            worktreeResultsDir,
+            worktreeSetupHook: worktreeSetupResolution.hook,
+            onSubagentUpdate: options?.onSubagentUpdate,
+            onWorkflowUpdate: options?.onWorkflowUpdate,
+            implementModel,
+          },
+        )
 
-            // Fix failed — log and fall through to blocker
-            options?.onWorkflowUpdate?.(`Fix attempt ${currentFixAttempts + 1} for ${gid} failed: ${fixResult.error ?? "unknown fix failure"}`)
+        if (fixResult.fixed) {
+          const mergedResult = mergeSuccessfulFixResult(r, fixResult.dispatchResult)
+          const mergedVerification = normalizeDispatchVerification(mergedResult.verification)
+          const resultEntry = allResults.find((entry) => entry.groupId === gid)
+          if (resultEntry) {
+            resultEntry.result = mergedResult
           }
-
-          // Fix not attempted, exhausted, or failed — mark as permanent blocker
-          decisions.push({
-            groupId: gid,
-            agent: r.agent ?? "zflow.implement-routine",
-            attempt: currentFixAttempts,
-            decision: "blocker",
-            reason: r.error ?? "Group dispatch failed",
-            error: r.error ?? "Group dispatch failed",
-          })
-          options?.onSubagentUpdate?.(tasks[idx]?.groupId ?? gid, {
-            agent: r.agent ?? tasks[idx]?.agent,
-            title: group?.taskPrompt ?? undefined,
-            status: "failed",
+          options?.onSubagentUpdate?.(gid, {
+            agent: mergedResult.agent ?? tasks[idx]?.agent,
+            title: `fix: ${gid} (attempt ${currentFixAttempts + 1})`,
+            status: "completed",
             finishedAt: Date.now(),
-            lastCommand: r.error ?? "group failed",
+            lastCommand: `fix succeeded${fixResult.fixPatchPath ? `; fix patch: ${fixResult.fixPatchPath}` : ""}`,
           })
           await updateGroupLedger(runId, gid, {
-            status: "failed",
-            error: r.error ?? "group failed",
-            failureKind: "blocker",
-            fixAttempts: currentFixAttempts,
-            fixResult: fixShouldRun ? "failed" : undefined,
+            status: "succeeded",
+            agent: mergedResult.agent ?? "zflow.implement-routine",
+            error: undefined,
+            failureKind: undefined,
+            patchPath: fixResult.fixPatchPath ?? mergedResult.patchPath,
+            changedFiles: mergedResult.changedFiles ?? group?.files,
+            scopedVerification: mergedVerification
+              ? {
+                  ...mergedVerification,
+                  outputPath: fixResult.verificationOutputPath,
+                }
+              : undefined,
+            fixResult: "succeeded",
+            fixClassification: fixResult.fixClassification,
+            fixPatchPath: fixResult.fixPatchPath,
           }, cwd).catch(() => {})
-          // Block all transitive dependents
-          await markDependentsBlocked(gid)
+          continue
         }
+
+        options?.onWorkflowUpdate?.(`Fix attempt ${currentFixAttempts + 1} for ${gid} failed: ${fixResult.error ?? "unknown fix failure"}`)
+      }
+
+      const failureReason = verification?.status === "fail"
+        ? `${gid}: scoped verification failed`
+        : r.error ?? "Group dispatch failed"
+      decisions.push({
+        groupId: gid,
+        agent: r.agent ?? "zflow.implement-routine",
+        attempt: currentFixAttempts,
+        decision: "blocker",
+        reason: failureReason,
+        error: failureReason,
+      })
+      options?.onSubagentUpdate?.(tasks[idx]?.groupId ?? gid, {
+        agent: r.agent ?? tasks[idx]?.agent,
+        title: group?.taskPrompt ?? undefined,
+        status: "failed",
+        finishedAt: Date.now(),
+        lastCommand: failureReason,
+      })
+      await updateGroupLedger(runId, gid, {
+        status: "failed",
+        error: failureReason,
+        failureKind: "blocker",
+        scopedVerification: verification,
+        fixAttempts: currentFixAttempts,
+        fixResult: fixShouldRun ? "failed" : undefined,
+      }, cwd).catch(() => {})
+      await markDependentsBlocked(gid)
     }
   }
 
@@ -3656,12 +3928,12 @@ async function runWorktreeDispatchAndFinalize(
       continue
     }
 
-    const verification = normalizeDispatchVerification(r.verification)
+    let resultToCapture = r
+    let verification = normalizeDispatchVerification(resultToCapture.verification)
 
     // If the bridge explicitly reported failed scoped verification, attempt fix loop.
     // Missing verification (bridge no longer runs it) = deferred to final verification, not a blocker.
     if (verification && verification.status === "fail") {
-      // Attempt fix loop before giving up
       const currentFixAttempts = (await readRun(runId, cwd).catch(() => null))
         ?.metadata?.[GROUP_LEDGER_META_KEY]?.[group.id]?.fixAttempts ?? 0
 
@@ -3677,8 +3949,8 @@ async function runWorktreeDispatchAndFinalize(
           group.id,
           group?.taskPrompt ?? "",
           group?.files ?? [],
-          r.agent ?? "zflow.implement-routine",
-          r,
+          resultToCapture.agent ?? "zflow.implement-routine",
+          resultToCapture,
           dispatchService,
           {
             runId,
@@ -3687,6 +3959,7 @@ async function runWorktreeDispatchAndFinalize(
             changeId,
             planVersion,
             worktreeResultsDir,
+            worktreeSetupHook: worktreeSetupResolution.hook,
             onSubagentUpdate: options?.onSubagentUpdate,
             onWorkflowUpdate: options?.onWorkflowUpdate,
             implementModel,
@@ -3694,107 +3967,111 @@ async function runWorktreeDispatchAndFinalize(
         )
 
         if (fixResult.fixed) {
-          // Fix succeeded — treat group as succeeded and capture normally
+          resultToCapture = mergeSuccessfulFixResult(resultToCapture, fixResult.dispatchResult)
+          verification = normalizeDispatchVerification(resultToCapture.verification)
           options?.onSubagentUpdate?.(group.id, {
-            agent: r.agent ?? tasks[idx]?.agent,
+            agent: resultToCapture.agent ?? tasks[idx]?.agent,
             title: `fix: ${group.id} (attempt ${currentFixAttempts + 1})`,
             status: "completed",
             finishedAt: Date.now(),
-            lastCommand: `fix succeeded via post-dispatch fix`,
+            lastCommand: "fix succeeded via post-dispatch fix",
           })
           await updateGroupLedger(runId, group.id, {
             status: "succeeded",
-            agent: r.agent ?? "zflow.implement-routine",
+            agent: resultToCapture.agent ?? "zflow.implement-routine",
             error: undefined,
             failureKind: undefined,
+            patchPath: fixResult.fixPatchPath ?? resultToCapture.patchPath,
+            changedFiles: resultToCapture.changedFiles ?? group.files,
+            scopedVerification: verification
+              ? {
+                  ...verification,
+                  outputPath: fixResult.verificationOutputPath,
+                }
+              : undefined,
             fixResult: "succeeded",
             fixClassification: fixResult.fixClassification,
             fixPatchPath: fixResult.fixPatchPath,
           }, cwd).catch(() => {})
-          // Replace the result's verification with success so the normal capture path below runs
-          r.verification = { status: "pass", command: verification.command, output: fixResult.verificationOutput }
-          continue // skip to the capture logic below
+        } else {
+          options?.onWorkflowUpdate?.(`Fix attempt ${currentFixAttempts + 1} for ${group.id} failed: ${fixResult.error ?? "unknown"}`)
         }
-
-        // Fix failed
-        options?.onWorkflowUpdate?.(`Fix attempt ${currentFixAttempts + 1} for ${group.id} failed: ${fixResult.error ?? "unknown"}`)
       }
 
-      // Fix exhausted or not attempted — mark as failed
-      const failure = `${group.id}: scoped verification failed`
-      postDispatchFailures.push(failure)
-      options?.onSubagentUpdate?.(group.id, {
-        status: "failed",
-        finishedAt: Date.now(),
-        lastCommand: failure,
-      })
-      await updateGroupLedger(runId, group.id, {
-        status: "failed",
-        error: failure,
-        failureKind: "blocker",
-        scopedVerification: verification,
-        fixAttempts: currentFixAttempts,
-        fixResult: currentFixAttempts > 0 ? "failed" : undefined,
-      }, cwd).catch(() => {})
-      continue
+      if (verification?.status === "fail") {
+        const failure = `${group.id}: scoped verification failed`
+        postDispatchFailures.push(failure)
+        options?.onSubagentUpdate?.(group.id, {
+          status: "failed",
+          finishedAt: Date.now(),
+          lastCommand: failure,
+        })
+        await updateGroupLedger(runId, group.id, {
+          status: "failed",
+          error: failure,
+          failureKind: "blocker",
+          scopedVerification: verification,
+          fixAttempts: currentFixAttempts,
+          fixResult: currentFixAttempts > 0 ? "failed" : undefined,
+        }, cwd).catch(() => {})
+        continue
+      }
     }
 
-    // When the bridge does not provide verification (undefined), treat as
-    // "skipped — deferred to final verification" so group capture/apply-back
-    // can still proceed.
     const scopedVerification = verification ?? {
       status: "skipped" as const,
       command: undefined,
       output: "Scoped verification deferred to the final verification phase.",
     }
 
-    if (r.worktreePath) {
+    if (resultToCapture.worktreePath) {
       groupResults.push(await captureGroupResult({
         groupId: group.id,
         agent: tasks[idx]?.agent ?? group.agent ?? "unknown",
-        worktreePath: r.worktreePath,
+        worktreePath: resultToCapture.worktreePath,
         runId,
         repoRoot,
+        baseCommit: resultToCapture.baseCommit,
+        headCommit: resultToCapture.headCommit,
         scopedFiles: group.files,
         verification: scopedVerification,
         cwd,
       }))
-      // Update ledger: capture patch/changedFiles data
       await updateGroupLedger(runId, group.id, {
-        worktreePath: r.worktreePath,
-        changedFiles: r.changedFiles ?? group.files,
+        worktreePath: resultToCapture.worktreePath,
+        changedFiles: resultToCapture.changedFiles ?? group.files,
         scopedVerification,
       }, cwd).catch(() => {})
       continue
     }
 
-    // Persist verification output to a file alongside the result
-    if (r.verification?.output) {
+    if (resultToCapture.verification?.output) {
       const verPath = path.join(worktreeResultsDir, `${group.id}-verification.txt`)
-      await fs.writeFile(verPath, r.verification.output, "utf-8").catch(() => {})
+      await fs.writeFile(verPath, resultToCapture.verification.output, "utf-8").catch(() => {})
       scopedVerification.outputPath = verPath
     }
 
-    if (r.patchPath) {
+    if (resultToCapture.patchPath) {
       const destPatchPath = path.join(patchesDir, `${group.id}.patch`)
-      if (path.resolve(r.patchPath) !== path.resolve(destPatchPath)) {
-        await fs.copyFile(r.patchPath, destPatchPath)
+      if (path.resolve(resultToCapture.patchPath) !== path.resolve(destPatchPath)) {
+        await fs.copyFile(resultToCapture.patchPath, destPatchPath)
       }
 
       const run = await readRun(runId, cwd)
       const groupMeta = {
         groupId: group.id,
         agent: tasks[idx]?.agent ?? group.agent ?? "unknown",
-        worktreePath: r.worktreePath ?? "(provided patch)",
-        baseCommit: run.head,
-        headCommit: run.head,
-        changedFiles: r.changedFiles ?? group.files,
+        worktreePath: resultToCapture.worktreePath ?? "(provided patch)",
+        baseCommit: resultToCapture.baseCommit ?? run.head,
+        headCommit: resultToCapture.headCommit ?? run.head,
+        changedFiles: resultToCapture.changedFiles ?? group.files,
         uncommittedChanges: [],
         patchPath: destPatchPath,
         scopedVerification: {
           status: scopedVerification.status,
           command: scopedVerification.command,
           output: scopedVerification.output,
+          outputPath: scopedVerification.outputPath,
         },
         retained: false,
       }
@@ -3814,34 +4091,29 @@ async function runWorktreeDispatchAndFinalize(
         verification: scopedVerification,
         retained: false,
       })
-      // Update ledger: capture patch/changedFiles data
       await updateGroupLedger(runId, group.id, {
         patchPath: destPatchPath,
-        changedFiles: r.changedFiles ?? group.files,
+        changedFiles: resultToCapture.changedFiles ?? group.files,
         scopedVerification,
       }, cwd).catch(() => {})
       continue
     }
 
-    // Fallback: dispatch ran without worktree isolation (e.g. because the
-    // backend's worktree path is broken). The agent made changes directly in
-    // the working directory. Record the group as completed in-place — the
-    // apply-back step will skip it (no patch file to apply) and verification
-    // will run against the working directory.
     const run = await readRun(runId, cwd)
     const groupMeta = {
       groupId: group.id,
       agent: tasks[idx]?.agent ?? group.agent ?? "unknown",
       worktreePath: "(in-place — no worktree isolation)",
-      baseCommit: run.head,
-      headCommit: run.head,
-      changedFiles: r.changedFiles ?? group.files,
+      baseCommit: resultToCapture.baseCommit ?? run.head,
+      headCommit: resultToCapture.headCommit ?? run.head,
+      changedFiles: resultToCapture.changedFiles ?? group.files,
       uncommittedChanges: [],
       patchPath: undefined as string | undefined,
       scopedVerification: {
         status: scopedVerification.status,
         command: scopedVerification.command,
         output: scopedVerification.output,
+        outputPath: scopedVerification.outputPath,
       },
       retained: false,
     }
@@ -3849,9 +4121,8 @@ async function runWorktreeDispatchAndFinalize(
     if (existingIndex >= 0) run.groups[existingIndex] = groupMeta
     else run.groups.push(groupMeta)
     await updateRun(runId, { groups: run.groups }, cwd)
-    // Update ledger: capture changedFiles data for fallback path
     await updateGroupLedger(runId, group.id, {
-      changedFiles: r.changedFiles ?? group.files,
+      changedFiles: resultToCapture.changedFiles ?? group.files,
       scopedVerification,
     }, cwd).catch(() => {})
     groupResults.push({

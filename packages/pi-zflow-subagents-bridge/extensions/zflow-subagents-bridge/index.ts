@@ -28,6 +28,7 @@
  */
 
 import * as crypto from "node:crypto"
+import { execFileSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
@@ -37,14 +38,19 @@ import { getZflowRegistry } from "pi-zflow-core/registry"
 import type { CapabilityClaim } from "pi-zflow-core/registry"
 import {
   DISPATCH_SERVICE_CAPABILITY,
+  LEGACY_DISPATCH_CAPABILITIES,
+  type DispatchCapabilities,
   type DispatchService,
   type AgentDispatchInput,
   type AgentDispatchResult,
   type ParallelDispatchInput,
   type ParallelDispatchResult,
+  type ParallelTaskInput,
   type ParallelTaskResult,
+  type DispatchWorktreeSetupHook,
+  type TaskWorktreeStrategy,
 } from "pi-zflow-core/dispatch-service"
-import { PI_ZFLOW_SUBAGENTS_BRIDGE_VERSION } from "pi-zflow-core"
+import { PI_ZFLOW_SUBAGENTS_BRIDGE_VERSION, runWorktreeSetupHook, type WorktreeSetupHookConfig } from "pi-zflow-core"
 
 /**
  * Well-known capability name for the dispatch service.
@@ -66,6 +72,10 @@ const UNAVAILABLE_GUIDANCE =
 
 class UnavailableDispatchService implements DispatchService {
   readonly name = "pi-zflow-subagents-bridge:unavailable"
+  readonly capabilities: DispatchCapabilities = {
+    ...LEGACY_DISPATCH_CAPABILITIES,
+    isolatedWorktrees: false,
+  }
   private readonly reason?: string
 
   constructor(reason?: string) {
@@ -101,8 +111,25 @@ class UnavailableDispatchService implements DispatchService {
 
 type BackendVerification = NonNullable<ParallelTaskResult["verification"]>
 
+type BackendParallelTaskInput = {
+  agent: string
+  groupId?: string
+  task: string
+  cwd?: string
+  model?: string
+  output?: string | false
+  outputMode?: "inline" | "file-only"
+  maxOutput?: { lines?: number; bytes?: number }
+  onUpdate?: (progress: unknown) => void
+  scopedVerification?: string
+  claimedFiles?: string[]
+  dependencies?: string[]
+  worktreeStrategy?: TaskWorktreeStrategy
+}
+
 interface BackendDispatchService {
   readonly name?: string
+  readonly capabilities?: Partial<DispatchCapabilities>
   runAgent(input: {
     agent: string
     task: string
@@ -121,35 +148,73 @@ interface BackendDispatchService {
     savedOutputPath?: string
   }>
   runParallel(input: {
-    tasks: Array<{
-      agent: string
-      task: string
-      cwd?: string
-      model?: string
-      output?: string | false
-      outputMode?: "inline" | "file-only"
-      maxOutput?: { lines?: number; bytes?: number }
-      onUpdate?: (progress: unknown) => void
-    }>
+    tasks: BackendParallelTaskInput[]
     cwd?: string
     concurrency?: number
     worktree?: boolean
+    worktreeSetupHook?: DispatchWorktreeSetupHook
     maxOutput?: { lines?: number; bytes?: number }
   }): Promise<{
     ok: boolean
     results: Array<{
       agent: string
+      groupId?: string
       ok: boolean
       error?: string
       rawOutput: string
       outputPath?: string
       savedOutputPath?: string
       worktreePath?: string
+      workspaceId?: string
+      baseCommit?: string
+      headCommit?: string
       patchPath?: string
       changedFiles?: string[]
       verification?: BackendVerification
     }>
   }>
+}
+
+function normalizeBackendCapabilities(
+  capabilities?: Partial<DispatchCapabilities>,
+): DispatchCapabilities {
+  return {
+    ...LEGACY_DISPATCH_CAPABILITIES,
+    ...(capabilities ?? {}),
+  }
+}
+
+function requiresSharedSerialized(task: ParallelTaskInput): boolean {
+  return task.worktreeStrategy?.mode === "shared-staging" &&
+    (task.worktreeStrategy.workspaceConcurrency ?? "serialized") === "serialized"
+}
+
+function requiresSharedConcurrent(task: ParallelTaskInput): boolean {
+  return task.worktreeStrategy?.mode === "shared-staging" &&
+    (task.worktreeStrategy.workspaceConcurrency ?? "serialized") === "concurrent"
+}
+
+function requiresBaseRef(task: ParallelTaskInput): boolean {
+  return Boolean(task.worktreeStrategy?.baseRef) || task.worktreeStrategy?.baseStrategy === "dependency-lineage"
+}
+
+function describeMissingCapabilities(
+  input: ParallelDispatchInput,
+  capabilities: DispatchCapabilities,
+): string | null {
+  if (input.worktreeSetupHook && !capabilities.worktreeSetupHooks) {
+    return "worktree setup hooks"
+  }
+  if (input.tasks.some(requiresSharedConcurrent) && !capabilities.sharedWorkspaceConcurrent) {
+    return "shared concurrent worktree clusters"
+  }
+  if (input.tasks.some(requiresSharedSerialized) && !capabilities.sharedWorkspaceSerialized) {
+    return "shared serialized worktree clusters"
+  }
+  if (input.tasks.some(requiresBaseRef) && !capabilities.baseRefWorktrees) {
+    return "dependency-lineage/base-ref worktrees"
+  }
+  return null
 }
 
 /**
@@ -161,10 +226,33 @@ interface BackendDispatchService {
  */
 class SubagentsDispatchService implements DispatchService {
   readonly name: string
+  readonly capabilities: DispatchCapabilities
   private backend: BackendDispatchService
+  private advancedFallback?: BackendDispatchService
+  private primaryCapabilities: DispatchCapabilities
+  private fallbackCapabilities?: DispatchCapabilities
 
-  constructor(backend: BackendDispatchService) {
+  constructor(
+    backend: BackendDispatchService,
+    options?: { fallback?: BackendDispatchService; capabilities?: Partial<DispatchCapabilities> },
+  ) {
     this.backend = backend
+    this.advancedFallback = options?.fallback
+    const primaryCapabilities = normalizeBackendCapabilities(options?.capabilities ?? backend.capabilities)
+    const fallbackCapabilities = options?.fallback
+      ? normalizeBackendCapabilities(options.fallback.capabilities)
+      : undefined
+    this.primaryCapabilities = primaryCapabilities
+    this.fallbackCapabilities = fallbackCapabilities
+    this.capabilities = fallbackCapabilities
+      ? {
+          isolatedWorktrees: primaryCapabilities.isolatedWorktrees || fallbackCapabilities.isolatedWorktrees,
+          sharedWorkspaceSerialized: primaryCapabilities.sharedWorkspaceSerialized || fallbackCapabilities.sharedWorkspaceSerialized,
+          sharedWorkspaceConcurrent: primaryCapabilities.sharedWorkspaceConcurrent || fallbackCapabilities.sharedWorkspaceConcurrent,
+          baseRefWorktrees: primaryCapabilities.baseRefWorktrees || fallbackCapabilities.baseRefWorktrees,
+          worktreeSetupHooks: primaryCapabilities.worktreeSetupHooks || fallbackCapabilities.worktreeSetupHooks,
+        }
+      : primaryCapabilities
     this.name = `pi-zflow-subagents-bridge:${backend.name ?? "operational"}`
   }
 
@@ -196,10 +284,46 @@ class SubagentsDispatchService implements DispatchService {
   }
 
   async runParallel(input: ParallelDispatchInput): Promise<ParallelDispatchResult> {
+    const requestedUnsupported = describeMissingCapabilities(input, this.primaryCapabilities)
+    if (requestedUnsupported) {
+      if (this.advancedFallback) {
+        const stillUnsupported = describeMissingCapabilities(
+          input,
+          this.fallbackCapabilities ?? normalizeBackendCapabilities(this.advancedFallback.capabilities),
+        )
+        if (!stillUnsupported) {
+          return this.invokeParallel(this.advancedFallback, input)
+        }
+      }
+
+      return {
+        ok: false,
+        results: input.tasks.map((t) => ({
+          agent: t.agent,
+          groupId: t.groupId,
+          rawOutput: "",
+          ok: false,
+          error: `Dispatch backend does not support ${requestedUnsupported}. ` +
+            `Supported by active backend: isolated=${this.capabilities.isolatedWorktrees}, ` +
+            `shared-serialized=${this.capabilities.sharedWorkspaceSerialized}, ` +
+            `shared-concurrent=${this.capabilities.sharedWorkspaceConcurrent}, ` +
+            `base-ref=${this.capabilities.baseRefWorktrees}, hooks=${this.capabilities.worktreeSetupHooks}.`,
+        })),
+      }
+    }
+
+    return this.invokeParallel(this.backend, input)
+  }
+
+  private async invokeParallel(
+    backend: BackendDispatchService,
+    input: ParallelDispatchInput,
+  ): Promise<ParallelDispatchResult> {
     try {
-      const result = await this.backend.runParallel({
+      const result = await backend.runParallel({
         tasks: input.tasks.map((t) => ({
           agent: t.agent,
+          groupId: t.groupId,
           task: t.task,
           cwd: t.cwd,
           model: t.model,
@@ -207,21 +331,30 @@ class SubagentsDispatchService implements DispatchService {
           outputMode: t.outputMode,
           maxOutput: input.maxOutput,
           onUpdate: t.onUpdate,
+          scopedVerification: t.scopedVerification,
+          claimedFiles: t.claimedFiles,
+          dependencies: t.dependencies,
+          worktreeStrategy: t.worktreeStrategy,
         })),
         cwd: input.cwd,
         concurrency: input.concurrency,
         worktree: input.worktree,
+        worktreeSetupHook: input.worktreeSetupHook,
         maxOutput: input.maxOutput,
       })
       return {
         ok: result.ok,
-        results: result.results.map((r) => ({
+        results: result.results.map((r, index) => ({
           agent: r.agent,
+          groupId: r.groupId ?? input.tasks[index]?.groupId,
           rawOutput: r.rawOutput,
           outputPath: r.outputPath ?? r.savedOutputPath,
           ok: r.ok,
           error: r.error,
           worktreePath: r.worktreePath,
+          workspaceId: r.workspaceId,
+          baseCommit: r.baseCommit,
+          headCommit: r.headCommit,
           patchPath: r.patchPath,
           changedFiles: r.changedFiles,
           verification: r.verification,
@@ -232,6 +365,7 @@ class SubagentsDispatchService implements DispatchService {
         ok: false,
         results: input.tasks.map((t) => ({
           agent: t.agent,
+          groupId: t.groupId,
           rawOutput: "",
           ok: false,
           error: `Parallel dispatch error: ${err instanceof Error ? err.message : String(err)}`,
@@ -272,12 +406,26 @@ interface CompatRunSyncOptions {
   onUpdate?: (update: { details?: { progress?: unknown[] } }) => void
 }
 
+interface CompatWorktreeInfo {
+  path: string
+  agentCwd: string
+  branch: string
+  index: number
+  syntheticPaths?: string[]
+}
+
+interface CompatWorktreeSetup {
+  cwd: string
+  baseCommit: string
+  worktrees: CompatWorktreeInfo[]
+}
+
 interface CompatModules {
   discoverAgents: (cwd: string, scope?: "user" | "project" | "both") => { agents: unknown[] }
   runSync: (runtimeCwd: string, agents: unknown[], agentName: string, task: string, options: CompatRunSyncOptions) => Promise<CompatSingleResult>
-  createWorktrees: (cwd: string, runId: string, count: number, options?: { agents?: string[] }) => { worktrees: Array<{ agentCwd: string }> }
-  diffWorktrees: (setup: unknown, agents: string[], diffsDir: string) => Array<{ index: number; patchPath: string; filesChanged: number }>
-  cleanupWorktrees: (setup: unknown) => void
+  createWorktrees: (cwd: string, runId: string, count: number, options?: { agents?: string[] }) => CompatWorktreeSetup
+  diffWorktrees: (setup: CompatWorktreeSetup, agents: string[], diffsDir: string) => Array<{ index: number; patchPath: string; filesChanged: number }>
+  cleanupWorktrees: (setup: CompatWorktreeSetup) => void
 }
 
 function generateRunId(): string {
@@ -336,6 +484,94 @@ function safeGetCwd(override?: string): string {
     }
   }
   return process.cwd()
+}
+
+function normalizeWorktreeStrategy(
+  strategy?: TaskWorktreeStrategy,
+): Required<Pick<TaskWorktreeStrategy, "mode" | "workspaceConcurrency" | "baseStrategy">> & Omit<TaskWorktreeStrategy, "mode" | "workspaceConcurrency" | "baseStrategy"> {
+  return {
+    mode: strategy?.mode ?? "isolated",
+    workspaceConcurrency: strategy?.workspaceConcurrency ?? "serialized",
+    baseStrategy: strategy?.baseStrategy ?? "head",
+    workspaceId: strategy?.workspaceId,
+    baseRef: strategy?.baseRef,
+    executionRationale: strategy?.executionRationale,
+  }
+}
+
+function gitOutput(cwd: string, args: string[]): string {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 10 * 1024 * 1024,
+  }).trimEnd()
+}
+
+function gitOutputSafe(cwd: string, args: string[]): string {
+  try {
+    return gitOutput(cwd, args)
+  } catch {
+    return ""
+  }
+}
+
+function resetWorktreeToBaseRef(worktreePath: string, baseRef: string): string {
+  execFileSync("git", ["reset", "--hard", baseRef], {
+    cwd: worktreePath,
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 10 * 1024 * 1024,
+  })
+  return gitOutput(worktreePath, ["rev-parse", "HEAD"])
+}
+
+function writePatchFromRange(worktreePath: string, patchPath: string, baseRef: string): { changedFiles: string[]; headCommit: string } {
+  const headCommit = gitOutput(worktreePath, ["rev-parse", "HEAD"])
+  const patch = gitOutputSafe(worktreePath, ["diff", "--binary", baseRef, "HEAD"])
+  fs.mkdirSync(path.dirname(patchPath), { recursive: true })
+  fs.writeFileSync(patchPath, patch ? `${patch}${patch.endsWith("\n") ? "" : "\n"}` : "", "utf-8")
+  const changedFilesOut = gitOutputSafe(worktreePath, ["diff", "--name-only", baseRef, "HEAD"])
+  const changedFiles = changedFilesOut ? changedFilesOut.split("\n").filter(Boolean) : []
+  return { changedFiles, headCommit }
+}
+
+function checkpointSharedWorkspace(worktreePath: string, message: string): string {
+  execFileSync("git", ["add", "-A"], {
+    cwd: worktreePath,
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 10 * 1024 * 1024,
+  })
+  execFileSync("git", ["commit", "--allow-empty", "-m", message], {
+    cwd: worktreePath,
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 10 * 1024 * 1024,
+  })
+  return gitOutput(worktreePath, ["rev-parse", "HEAD"])
+}
+
+async function maybeRunCompatWorktreeSetupHook(
+  hookConfig: DispatchWorktreeSetupHook | undefined,
+  repoRoot: string,
+  worktree: CompatWorktreeInfo,
+  runId: string,
+  agent: string | undefined,
+  baseCommit: string,
+): Promise<void> {
+  if (!hookConfig) return
+  const result = await runWorktreeSetupHook(hookConfig as WorktreeSetupHookConfig, {
+    worktreeRoot: worktree.path,
+    repoRoot,
+    ref: worktree.branch,
+    meta: {
+      runId,
+      agent: agent ?? "unknown",
+      index: String(worktree.index),
+      baseCommit,
+    },
+  })
+  if (!result.success) {
+    throw new Error(result.message)
+  }
 }
 
 function findAgent(agents: unknown[], name: string): { name: string } | undefined {
@@ -495,7 +731,7 @@ async function createCompatZflowDispatchService(): Promise<BackendDispatchServic
     if (discoveryError || agents.length === 0) {
       return {
         ok: false,
-        results: input.tasks.map((task) => ({ agent: task.agent, ok: false, error: discoveryError ?? "No agents discovered", rawOutput: "" })),
+        results: input.tasks.map((task) => ({ agent: task.agent, groupId: task.groupId, ok: false, error: discoveryError ?? "No agents discovered", rawOutput: "" })),
       }
     }
     for (const task of input.tasks) {
@@ -505,6 +741,7 @@ async function createCompatZflowDispatchService(): Promise<BackendDispatchServic
           ok: false,
           results: input.tasks.map((t) => ({
             agent: t.agent,
+            groupId: t.groupId,
             ok: false,
             error: t.agent === task.agent
               ? `Unknown agent "${task.agent}". Available: ${available}`
@@ -523,8 +760,238 @@ async function createCompatZflowDispatchService(): Promise<BackendDispatchServic
 
   return {
     name: "pi-subagents-compat:operational",
+    capabilities: {
+      isolatedWorktrees: true,
+      sharedWorkspaceSerialized: true,
+      sharedWorkspaceConcurrent: false,
+      baseRefWorktrees: true,
+      worktreeSetupHooks: true,
+    },
     runAgent,
     runParallel,
+  }
+}
+
+const COMPAT_EXCLUDED_STAGE_PATHS = ["node_modules", ".wrangler"]
+
+interface CompatWorkspacePlan {
+  workspaceId: string
+  mode: "isolated" | "shared-staging"
+  workspaceConcurrency: "serialized" | "concurrent"
+  baseRef?: string
+  taskIndexes: number[]
+}
+
+function buildCompatWorkspacePlans(tasks: BackendParallelTaskInput[]): CompatWorkspacePlan[] {
+  const plans = new Map<string, CompatWorkspacePlan>()
+
+  for (let index = 0; index < tasks.length; index++) {
+    const task = tasks[index]!
+    const strategy = normalizeWorktreeStrategy(task.worktreeStrategy)
+    if (strategy.mode === "shared-staging" && !strategy.workspaceId) {
+      throw new Error(
+        `Task ${task.groupId ?? index} requested shared-staging without a workspaceId.`,
+      )
+    }
+    const workspaceId = strategy.mode === "shared-staging"
+      ? strategy.workspaceId!
+      : (task.groupId ?? `task-${index}`)
+
+    const existing = plans.get(workspaceId)
+    if (existing) {
+      existing.taskIndexes.push(index)
+      if (strategy.baseRef && existing.baseRef && existing.baseRef !== strategy.baseRef) {
+        throw new Error(
+          `Shared workspace \"${workspaceId}\" received conflicting base refs (${existing.baseRef} vs ${strategy.baseRef}). ` +
+          `Shared workspaces must agree on a single base ref.`,
+        )
+      }
+      if (strategy.baseRef && !existing.baseRef) existing.baseRef = strategy.baseRef
+      continue
+    }
+
+    plans.set(workspaceId, {
+      workspaceId,
+      mode: strategy.mode,
+      workspaceConcurrency: strategy.workspaceConcurrency,
+      baseRef: strategy.baseRef,
+      taskIndexes: [index],
+    })
+  }
+
+  return [...plans.values()]
+}
+
+function topoSortWorkspaceTaskIndexes(
+  tasks: BackendParallelTaskInput[],
+  taskIndexes: number[],
+): number[] {
+  if (taskIndexes.length <= 1) return [...taskIndexes]
+  const idToIndex = new Map<string, number>()
+  for (const index of taskIndexes) {
+    const groupId = tasks[index]?.groupId
+    if (groupId) idToIndex.set(groupId, index)
+  }
+
+  const inDegree = new Map<number, number>()
+  const adjacency = new Map<number, number[]>()
+  for (const index of taskIndexes) {
+    inDegree.set(index, 0)
+    adjacency.set(index, [])
+  }
+
+  for (const index of taskIndexes) {
+    const deps = tasks[index]?.dependencies ?? []
+    for (const dep of deps) {
+      const depIndex = idToIndex.get(dep)
+      if (depIndex === undefined) continue
+      adjacency.get(depIndex)?.push(index)
+      inDegree.set(index, (inDegree.get(index) ?? 0) + 1)
+    }
+  }
+
+  const ready = taskIndexes.filter((index) => (inDegree.get(index) ?? 0) === 0)
+  const ordered: number[] = []
+  while (ready.length > 0) {
+    ready.sort((a, b) => a - b)
+    const next = ready.shift()!
+    ordered.push(next)
+    for (const neighbor of adjacency.get(next) ?? []) {
+      const degree = (inDegree.get(neighbor) ?? 1) - 1
+      inDegree.set(neighbor, degree)
+      if (degree === 0) ready.push(neighbor)
+    }
+  }
+
+  return ordered.length === taskIndexes.length ? ordered : [...taskIndexes]
+}
+
+function stageAllCompatChanges(worktreePath: string): void {
+  execFileSync("git", ["add", "-A"], {
+    cwd: worktreePath,
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 10 * 1024 * 1024,
+  })
+  for (const excludedPath of COMPAT_EXCLUDED_STAGE_PATHS) {
+    try {
+      execFileSync("git", ["reset", "HEAD", "--", excludedPath], {
+        cwd: worktreePath,
+        stdio: ["ignore", "pipe", "pipe"],
+        maxBuffer: 10 * 1024 * 1024,
+      })
+    } catch {
+      // Ignore absent excluded paths.
+    }
+  }
+}
+
+function captureCompatPatchAgainstBase(
+  worktreePath: string,
+  baseCommit: string,
+  patchPath: string,
+): { changedFiles: string[]; headCommit: string } {
+  stageAllCompatChanges(worktreePath)
+  const patch = gitOutputSafe(worktreePath, ["diff", "--cached", "--binary", baseCommit])
+  fs.mkdirSync(path.dirname(patchPath), { recursive: true })
+  fs.writeFileSync(patchPath, patch ? `${patch}${patch.endsWith("\n") ? "" : "\n"}` : "", "utf-8")
+  const changedFilesOut = gitOutputSafe(worktreePath, ["diff", "--cached", "--name-only", baseCommit])
+  const changedFiles = changedFilesOut ? changedFilesOut.split("\n").filter(Boolean) : []
+  const headCommit = gitOutput(worktreePath, ["rev-parse", "HEAD"])
+  return { changedFiles, headCommit }
+}
+
+function runCompatScopedVerification(
+  command: string | undefined,
+  cwd: string,
+): { status: "pass" | "fail" | "skipped"; command?: string; output?: string } | undefined {
+  if (!command || !command.trim()) return undefined
+  try {
+    const output = execFileSync("bash", ["-c", command.trim()], {
+      cwd,
+      encoding: "utf-8",
+      maxBuffer: 50 * 1024,
+      timeout: 300_000,
+    })
+    return {
+      status: "pass",
+      command: command.trim(),
+      output: output.substring(0, 50 * 1024),
+    }
+  } catch (err: unknown) {
+    const execErr = err as {
+      stdout?: Buffer | string
+      stderr?: Buffer | string
+      message?: string
+    }
+    const parts: string[] = []
+    if (execErr.stdout) parts.push(execErr.stdout.toString().trim())
+    if (execErr.stderr) parts.push(execErr.stderr.toString().trim())
+    if (!parts.length && execErr.message) parts.push(execErr.message)
+    return {
+      status: "fail",
+      command: command.trim(),
+      output: parts.join("\n---stderr---\n").substring(0, 50 * 1024),
+    }
+  }
+}
+
+async function runCompatTaskInWorkspace(
+  task: BackendParallelTaskInput,
+  taskIndex: number,
+  workspaceId: string,
+  worktree: CompatWorktreeInfo,
+  runId: string,
+  agents: unknown[],
+  modules: CompatModules,
+  baseCommit: string,
+  patchPath: string,
+): Promise<ParallelTaskResult> {
+  task.onUpdate?.({
+    agent: task.agent,
+    status: "running",
+    recentOutput: [`starting ${workspaceId} dispatch...`],
+    lastActivityAt: Date.now(),
+  })
+
+  try {
+    const resolvedAgent = findAgent(agents, task.agent)!
+    const result = await modules.runSync(worktree.agentCwd, agents, resolvedAgent.name, task.task, {
+      runId: `${runId}-${taskIndex}`,
+      cwd: worktree.agentCwd,
+      modelOverride: task.model,
+      outputPath: task.output === false ? undefined : (typeof task.output === "string" ? task.output : undefined),
+      outputMode: task.outputMode === "file-only" ? "file-only" : undefined,
+      maxOutput: task.maxOutput,
+      onUpdate: forwardCompatProgress(task.agent, task.onUpdate),
+    })
+
+    const verification = runCompatScopedVerification(task.scopedVerification, worktree.agentCwd)
+    const { changedFiles, headCommit } = captureCompatPatchAgainstBase(worktree.agentCwd, baseCommit, patchPath)
+
+    return {
+      agent: task.agent,
+      groupId: task.groupId,
+      rawOutput: result.finalOutput ?? "",
+      outputPath: result.savedOutputPath,
+      ok: result.exitCode === 0 && !result.error,
+      error: result.error,
+      workspaceId,
+      baseCommit,
+      headCommit,
+      patchPath,
+      changedFiles,
+      verification,
+    }
+  } catch (err) {
+    return {
+      agent: task.agent,
+      groupId: task.groupId,
+      rawOutput: "",
+      ok: false,
+      error: `Worktree dispatch error: ${err instanceof Error ? err.message : String(err)}`,
+      workspaceId,
+      baseCommit,
+    }
   }
 }
 
@@ -535,111 +1002,104 @@ async function runParallelWithCompatWorktrees(
   modules: CompatModules,
 ): Promise<Awaited<ReturnType<BackendDispatchService["runParallel"]>>> {
   const runId = generateRunId()
-  const count = input.tasks.length
-  let worktreeSetup: unknown | undefined
+  const workspacePlans = buildCompatWorkspacePlans(input.tasks)
+  const clusterCount = workspacePlans.length
+  let worktreeSetup: CompatWorktreeSetup | undefined
+
   try {
-    worktreeSetup = modules.createWorktrees(cwd, runId, count, { agents: input.tasks.map((task) => task.agent) })
-    const setup = worktreeSetup as { worktrees: Array<{ agentCwd: string }> }
-    const concurrencyLimit = Math.max(1, Math.min(input.concurrency ?? count, count))
-    const runQueue = input.tasks.map((task, index) => async () => {
-      const agentCwd = setup.worktrees[index]!.agentCwd
-      // Emit starting progress before the agent run so the UI transitions
-      // from "queued" to "running" immediately, even before runSync emits
-      // its first progress event.
-      task.onUpdate?.({
-        agent: task.agent,
-        status: "running",
-        recentOutput: ["starting worktree dispatch..."],
-        lastActivityAt: Date.now(),
-      })
-      try {
-        const resolvedAgent = findAgent(agents, task.agent)!
-        const result = await modules.runSync(agentCwd, agents, resolvedAgent.name, task.task, {
-          runId: `${runId}-${index}`,
-          cwd: agentCwd,
-          modelOverride: task.model,
-          outputPath: task.output === false ? undefined : (typeof task.output === "string" ? task.output : undefined),
-          outputMode: task.outputMode === "file-only" ? "file-only" : undefined,
-          maxOutput: task.maxOutput,
-          onUpdate: forwardCompatProgress(task.agent, task.onUpdate),
-        })
+    worktreeSetup = modules.createWorktrees(cwd, runId, clusterCount, {
+      agents: workspacePlans.map((plan) => input.tasks[plan.taskIndexes[0]!]!.agent),
+    })
 
-        // Run scoped verification if specified
-        const scopedVerification = (task as { scopedVerification?: string }).scopedVerification
-        let verificationResult: {
-          status: "pass" | "fail" | "skipped"
-          command?: string
-          output?: string
-        } | undefined
+    for (let clusterIndex = 0; clusterIndex < workspacePlans.length; clusterIndex++) {
+      const plan = workspacePlans[clusterIndex]!
+      const worktree = worktreeSetup.worktrees[clusterIndex]!
+      const representativeTask = input.tasks[plan.taskIndexes[0]!]!
+      await maybeRunCompatWorktreeSetupHook(
+        input.worktreeSetupHook,
+        worktreeSetup.cwd,
+        worktree,
+        runId,
+        representativeTask.agent,
+        worktreeSetup.baseCommit,
+      )
+      if (plan.baseRef) {
+        resetWorktreeToBaseRef(worktree.path, plan.baseRef)
+      }
+    }
 
-        if (scopedVerification && scopedVerification.trim()) {
-          try {
-            const { execFileSync } = await import("node:child_process")
-            const verOut = execFileSync("bash", ["-c", scopedVerification.trim()], {
-              cwd: agentCwd,
-              encoding: "utf-8",
-              maxBuffer: 50 * 1024,   // 50KB
-              timeout: 300_000,        // 5 minutes
-            })
-            verificationResult = {
-              status: "pass",
-              command: scopedVerification.trim(),
-              output: verOut.substring(0, 50 * 1024),
-            }
-          } catch (verErr: unknown) {
-            const execErr = verErr as {
-              stdout?: Buffer | string
-              stderr?: Buffer | string
-              status?: number
-              message?: string
-            }
-            const parts: string[] = []
-            if (execErr.stdout) parts.push(execErr.stdout.toString().trim())
-            if (execErr.stderr) parts.push(execErr.stderr.toString().trim())
-            if (!parts.length && execErr.message) parts.push(execErr.message)
-            const verOutput = parts.join("\n---stderr---\n").substring(0, 50 * 1024)
-            verificationResult = {
-              status: "fail",
-              command: scopedVerification.trim(),
-              output: verOutput,
-            }
+    const results: Array<ParallelTaskResult | undefined> = new Array(input.tasks.length)
+    const concurrencyLimit = Math.max(1, Math.min(input.concurrency ?? clusterCount, clusterCount))
+    const diffsDir = path.join(cwd, ".zflow", "worktree-diffs", runId)
+    fs.mkdirSync(diffsDir, { recursive: true })
+
+    const clusterRuns = workspacePlans.map((plan, clusterIndex) => async () => {
+      const worktree = worktreeSetup!.worktrees[clusterIndex]!
+      const orderedTaskIndexes = topoSortWorkspaceTaskIndexes(input.tasks, plan.taskIndexes)
+      let currentBaseCommit = plan.baseRef ? gitOutput(worktree.path, ["rev-parse", "HEAD"]) : worktreeSetup!.baseCommit
+      let blockedByFailure: string | undefined
+
+      for (const taskIndex of orderedTaskIndexes) {
+        const task = input.tasks[taskIndex]!
+        if (blockedByFailure) {
+          results[taskIndex] = {
+            agent: task.agent,
+            groupId: task.groupId,
+            rawOutput: "",
+            ok: false,
+            error: `Shared workspace cluster \"${plan.workspaceId}\" halted because ${blockedByFailure} failed.`,
+            workspaceId: plan.workspaceId,
+            baseCommit: currentBaseCommit,
           }
+          continue
         }
 
-        return {
-          agent: task.agent,
-          ok: result.exitCode === 0 && !result.error,
-          error: result.error,
-          rawOutput: result.finalOutput ?? "",
-          savedOutputPath: result.savedOutputPath,
-          outputPath: result.savedOutputPath,
-          verification: verificationResult,
+        const patchPath = path.join(diffsDir, `${task.groupId ?? `task-${taskIndex}`}.patch`)
+        const taskResult = await runCompatTaskInWorkspace(
+          task,
+          taskIndex,
+          plan.workspaceId,
+          worktree,
+          runId,
+          agents,
+          modules,
+          currentBaseCommit,
+          patchPath,
+        )
+        results[taskIndex] = taskResult
+
+        if (!taskResult.ok) {
+          blockedByFailure = task.groupId ?? `task-${taskIndex}`
+          continue
         }
-      } catch (err) {
-        return {
-          agent: task.agent,
-          ok: false,
-          error: `Worktree dispatch error: ${err instanceof Error ? err.message : String(err)}`,
-          rawOutput: "",
+
+        if (plan.mode === "shared-staging") {
+          currentBaseCommit = checkpointSharedWorkspace(
+            worktree.agentCwd,
+            `[zflow-shared] ${plan.workspaceId}: ${task.groupId ?? `task-${taskIndex}`}`,
+          )
+          results[taskIndex] = {
+            ...taskResult,
+            headCommit: currentBaseCommit,
+          }
         }
       }
     })
 
-    const taskResults: Awaited<ReturnType<BackendDispatchService["runParallel"]>>["results"] =
-      await runTasksWithRollingConcurrency(runQueue, concurrencyLimit)
+    await runTasksWithRollingConcurrency(clusterRuns, concurrencyLimit)
 
-    const diffsDir = `${cwd}/.zflow/worktree-diffs/${runId}`
-    try {
-      fs.mkdirSync(diffsDir, { recursive: true })
-      const diffs = modules.diffWorktrees(worktreeSetup, input.tasks.map((task) => task.agent), diffsDir)
-      for (const diff of diffs) {
-        if (diff.index < taskResults.length) taskResults[diff.index]!.patchPath = diff.patchPath
-      }
-    } catch {
-      // Best-effort diff capture.
+    const finalizedResults = input.tasks.map((task, index) => results[index] ?? ({
+      agent: task.agent,
+      groupId: task.groupId,
+      rawOutput: "",
+      ok: false,
+      error: "Task did not produce a result.",
+    }))
+
+    return {
+      ok: finalizedResults.every((result) => result.ok),
+      results: finalizedResults,
     }
-
-    return { ok: taskResults.every((result) => result.ok), results: taskResults }
   } finally {
     if (worktreeSetup) {
       try {
@@ -679,11 +1139,13 @@ async function runParallelCompatConcurrent(
       })
       return {
         agent: task.agent,
+        groupId: task.groupId,
         ...mapCompatSingleResult(result),
       }
     } catch (err) {
       return {
         agent: task.agent,
+        groupId: task.groupId,
         ok: false,
         error: `Dispatch error: ${err instanceof Error ? err.message : String(err)}`,
         rawOutput: "",
@@ -732,23 +1194,38 @@ export default async function activateZflowSubagentsBridgeExtension(_pi: Extensi
   // ── Provide the service ─────────────────────────────────────────
 
   let service: DispatchService
+  let compatBackend: BackendDispatchService | undefined
+  let compatError: unknown | undefined
 
-  // Prefer the fork-provided backend when available. Pi git installs may load
-  // this package without its npm dependencies, so fall back to a compatibility
-  // backend built from the installed pi-subagents internals before reporting
-  // dispatch as unavailable.
+  try {
+    compatBackend = await createCompatZflowDispatchService()
+  } catch (err) {
+    compatError = err
+  }
+
+  // Prefer the fork-provided backend for legacy isolated dispatches, while
+  // keeping the compat backend available as a fallback for richer zflow-owned
+  // worktree features (hooks, shared serialized staging, base-ref worktrees).
   try {
     const { createZflowDispatchService } = await import("pi-subagents/zflow-bridge")
     const backend = createZflowDispatchService()
-    service = new SubagentsDispatchService(backend)
+    service = new SubagentsDispatchService(backend, {
+      fallback: compatBackend,
+      capabilities: {
+        isolatedWorktrees: true,
+        sharedWorkspaceSerialized: false,
+        sharedWorkspaceConcurrent: false,
+        baseRefWorktrees: false,
+        worktreeSetupHooks: false,
+      },
+    })
   } catch (forkErr) {
-    try {
-      const backend = await createCompatZflowDispatchService()
-      service = new SubagentsDispatchService(backend)
-    } catch (compatErr) {
+    if (compatBackend) {
+      service = new SubagentsDispatchService(compatBackend)
+    } else {
       service = new UnavailableDispatchService(
         `fork import failed: ${forkErr instanceof Error ? forkErr.message : String(forkErr)}; ` +
-        `compat import failed: ${compatErr instanceof Error ? compatErr.message : String(compatErr)}`,
+        `compat import failed: ${compatError instanceof Error ? compatError.message : String(compatError)}`,
       )
     }
   }

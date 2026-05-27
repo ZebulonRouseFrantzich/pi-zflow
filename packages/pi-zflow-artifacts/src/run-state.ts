@@ -106,6 +106,7 @@ export interface GroupRunMetadata {
     status: "pass" | "fail" | "skipped" | "missing"
     command?: string
     output?: string
+    outputPath?: string
   }
   /** Whether this group's artifacts should be retained. */
   retained: boolean
@@ -123,6 +124,39 @@ export interface RetainedArtifact {
   reason: string
   /** ISO timestamp when the artifact expires. */
   expiresAt: string
+}
+
+/**
+ * Planned or active shared workspace cluster metadata.
+ *
+ * This is durable run-state scaffolding for richer orchestration strategies.
+ */
+export interface WorkspaceClusterMetadata {
+  workspaceId: string
+  mode: "isolated" | "shared-staging"
+  workspaceConcurrency: "serialized" | "concurrent"
+  groupIds: string[]
+  status: "planned" | "running" | "completed" | "failed"
+  worktreePath?: string
+  baseRef?: string
+  createdAt: string
+  updatedAt: string
+}
+
+/**
+ * Durable metadata for a materialized dependency-lineage ref.
+ */
+export interface LineageRefMetadata {
+  id: string
+  groupId: string
+  dependencyGroupIds: string[]
+  ref: string
+  baseCommit: string
+  headCommit?: string
+  worktreePath?: string
+  status: "planned" | "materialized" | "stale"
+  createdAt: string
+  updatedAt: string
 }
 
 /**
@@ -153,6 +187,10 @@ export interface RunJson {
   verification: VerificationStatus
   /** Retained artifact entries. */
   retainedArtifacts: RetainedArtifact[]
+  /** Planned or active workspace clusters for this run. */
+  workspaceClusters: WorkspaceClusterMetadata[]
+  /** Materialized dependency-lineage refs for this run. */
+  lineageRefs: LineageRefMetadata[]
   /** ISO timestamp when the run was created. */
   createdAt: string
   /** ISO timestamp when the run was last updated. */
@@ -235,6 +273,8 @@ export async function createRun(
     applyBack: { status: "pending" },
     verification: { status: "pending" },
     retainedArtifacts: [],
+    workspaceClusters: [],
+    lineageRefs: [],
     createdAt: now,
     updatedAt: now,
   }

@@ -126,6 +126,21 @@ const DEPENDENCIES_RE = /\*{0,2}Dependencies\*{0,2}:\s*(.+)$/im
  */
 const PARALLELIZABLE_RE = /\*{0,2}Parallelizable\*{0,2}:\s*(.+)$/im
 
+/** Pattern to detect execution mode field. */
+const EXECUTION_MODE_RE = /\*{0,2}Execution\s+mode\*{0,2}:\s*(.+)$/im
+
+/** Pattern to detect workspace id field. */
+const WORKSPACE_ID_RE = /\*{0,2}Workspace\s+ID\*{0,2}:\s*(.+)$/im
+
+/** Pattern to detect workspace concurrency field. */
+const WORKSPACE_CONCURRENCY_RE = /\*{0,2}Workspace\s+concurrency\*{0,2}:\s*(.+)$/im
+
+/** Pattern to detect base strategy field. */
+const BASE_STRATEGY_RE = /\*{0,2}Base\s+strategy\*{0,2}:\s*(.+)$/im
+
+/** Pattern to detect execution rationale field. */
+const EXECUTION_RATIONALE_RE = /\*{0,2}Execution\s+rationale\*{0,2}:\s*(.+)$/im
+
 // ── Helpers ──────────────────────────────────────────────────────
 
 /**
@@ -286,6 +301,66 @@ async function validateExecutionGroups(
       issues.push(
         `Group "${groupId}" (section ${i + 1}): missing "Parallelizable:" field. ` +
         "Each group must specify true or false.",
+      )
+    }
+
+    // Check optional advanced execution strategy fields
+    const executionModeValue = section.match(EXECUTION_MODE_RE)?.[1]?.trim().toLowerCase() ?? "isolated"
+    const workspaceIdValue = section.match(WORKSPACE_ID_RE)?.[1]?.trim().replace(/^`|`$/g, "")
+    const workspaceConcurrencyValue = section.match(WORKSPACE_CONCURRENCY_RE)?.[1]?.trim().toLowerCase() ?? "serialized"
+    const baseStrategyValue = section.match(BASE_STRATEGY_RE)?.[1]?.trim().toLowerCase() ?? "head"
+    const executionRationaleValue = section.match(EXECUTION_RATIONALE_RE)?.[1]?.trim() ?? ""
+
+    if (!["isolated", "shared-staging"].includes(executionModeValue)) {
+      issues.push(
+        `Group "${groupId}" (section ${i + 1}): invalid execution mode "${executionModeValue}". ` +
+        "Use isolated or shared-staging.",
+      )
+    }
+
+    if (!["serialized", "concurrent"].includes(workspaceConcurrencyValue)) {
+      issues.push(
+        `Group "${groupId}" (section ${i + 1}): invalid workspace concurrency "${workspaceConcurrencyValue}". ` +
+        "Use serialized or concurrent.",
+      )
+    }
+
+    if (!["head", "dependency-lineage"].includes(baseStrategyValue)) {
+      issues.push(
+        `Group "${groupId}" (section ${i + 1}): invalid base strategy "${baseStrategyValue}". ` +
+        "Use head or dependency-lineage.",
+      )
+    }
+
+    if (executionModeValue === "shared-staging" && !workspaceIdValue) {
+      issues.push(
+        `Group "${groupId}" (section ${i + 1}): shared-staging groups must declare "Workspace ID:".`,
+      )
+    }
+
+    if (workspaceConcurrencyValue === "concurrent" && executionModeValue !== "shared-staging") {
+      issues.push(
+        `Group "${groupId}" (section ${i + 1}): workspace concurrency "concurrent" requires "Execution mode: shared-staging".`,
+      )
+    }
+
+    if (baseStrategyValue === "dependency-lineage") {
+      const depsValue = depMatch?.[1]?.trim().toLowerCase() ?? ""
+      if (!depsValue || depsValue === "none") {
+        issues.push(
+          `Group "${groupId}" (section ${i + 1}): base strategy "dependency-lineage" requires at least one dependency.`,
+        )
+      }
+    }
+
+    const usesNonDefaultExecution =
+      executionModeValue !== "isolated" ||
+      workspaceConcurrencyValue !== "serialized" ||
+      baseStrategyValue !== "head"
+
+    if (usesNonDefaultExecution && isPlaceholderOrEmpty(executionRationaleValue)) {
+      issues.push(
+        `Group "${groupId}" (section ${i + 1}): non-default execution strategy requires a concrete "Execution rationale:" field.`,
       )
     }
   }

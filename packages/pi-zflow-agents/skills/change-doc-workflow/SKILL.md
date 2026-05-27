@@ -30,7 +30,7 @@ files under `<runtime-state-dir>/plans/{changeId}/{planVersion}/`:
 | Artifact                  | Purpose                                                                                                                                                                                                       |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `design.md`               | Problem statement, solution approach, architecture decisions, affected modules, open questions resolved during planning                                                                                       |
-| `execution-groups.md`     | Ordered groups of file operations, each with: owner agent, task description, files touched, dependencies, `reviewTags`, scoped verification steps, and expected verification outcome                          |
+| `execution-groups.md`     | Ordered groups of file operations, each with: owner agent, task description, files touched, dependencies, `reviewTags`, scoped verification steps, expected verification outcome, and optional explicit execution strategy fields for advanced orchestration |
 | `standards.md`            | Project conventions, patterns to follow/examples to match, linting/testing expectations, and any non-negotiable quality gates                                                                                 |
 | `verification.md`         | How each group is verified: commands to run, manual checks, expected output, failure criteria                                                                                                                 |
 | `implementation-tasks.md` | Per-group detailed implementation task specs: likely files touched, context to read, implementation checklist, pseudocode/examples, acceptance criteria, scoped verification, self-checks, and drift triggers |
@@ -43,6 +43,18 @@ files under `<runtime-state-dir>/plans/{changeId}/{planVersion}/`:
 - Every group must list its **dependencies** (groups that must complete first).
 - Every group must specify a **scoped verification** step — not a vague
   "run tests" but concrete commands and expected results.
+- Default execution is **isolated** worktree per group. Advanced execution
+  strategy fields are optional and should be used sparingly:
+  - `Execution mode: isolated | shared-staging`
+  - `Workspace ID: <id>` (required for `shared-staging`)
+  - `Workspace concurrency: serialized | concurrent` (default `serialized`)
+  - `Base strategy: head | dependency-lineage` (default `head`)
+  - `Execution rationale: <reason>` (required for any non-default strategy)
+- `dependency-lineage` should only be used when a downstream group genuinely
+  needs dependency changes present before final apply-back.
+- `shared-staging` should only be used when multiple groups need shared
+  filesystem/type feedback and should usually start with `serialized`
+  concurrency rather than `concurrent`.
 
 ## Decision-Completeness
 

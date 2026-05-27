@@ -35,6 +35,12 @@ export interface ExecutionGroup {
   readonly dependencies: string[]
   /** Whether this group can run in parallel with others. */
   readonly parallelizable: boolean
+  /** Optional richer execution mode from execution-groups.md. */
+  readonly executionMode?: "isolated" | "shared-staging"
+  /** Optional shared workspace identifier for shared-staging groups. */
+  readonly workspaceId?: string
+  /** Optional shared workspace concurrency mode. */
+  readonly workspaceConcurrency?: "serialized" | "concurrent"
 }
 
 /**
@@ -156,18 +162,29 @@ export function validateOwnershipAndDependencies(
     return false
   }
 
+  const groupMap = new Map(groups.map((group) => [group.id, group]))
+
+  const shareExplicitWorkspace = (a: string, b: string): boolean => {
+    const groupA = groupMap.get(a)
+    const groupB = groupMap.get(b)
+    if (!groupA || !groupB) return false
+    return groupA.executionMode === "shared-staging" &&
+      groupB.executionMode === "shared-staging" &&
+      Boolean(groupA.workspaceId) &&
+      groupA.workspaceId === groupB.workspaceId
+  }
+
   // For each conflict, verify that EVERY pair of conflicting groups has
   // explicit dependency ordering (one depends on the other directly or
-  // transitively). This ensures a deterministic execution order.
+  // transitively), OR that the conflicting groups were explicitly placed in
+  // the same shared-staging workspace by the planner.
   const unresolvedConflicts: OwnershipConflict[] = []
 
   for (const conflict of conflicts) {
     const groupsInConflict = conflict.groups
-    // Check that for every pair (a,b) with a!==b, at least one direction
-    // of dependency exists.
     const allPairsOrdered = groupsInConflict.every((a) =>
       groupsInConflict.every(
-        (b) => a === b || dependsOn(a, b) || dependsOn(b, a),
+        (b) => a === b || dependsOn(a, b) || dependsOn(b, a) || shareExplicitWorkspace(a, b),
       ),
     )
 
@@ -186,7 +203,7 @@ export function validateOwnershipAndDependencies(
         conflictingGroupIds.size > 0
           ? [[...conflictingGroupIds]]
           : [],
-      summary: `Ownership conflicts detected but dependency order is explicit. Conflicting groups will run sequentially: ${[...conflictingGroupIds].sort().join(", ")}.`,
+      summary: `Ownership conflicts detected but dependency order/shared workspace declarations are explicit. Conflicting groups will run with deterministic orchestration: ${[...conflictingGroupIds].sort().join(", ")}.`,
     }
   }
 

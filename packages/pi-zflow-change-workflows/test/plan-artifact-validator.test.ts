@@ -277,6 +277,75 @@ describe("validateAllPlanArtifacts", () => {
     }
   })
 
+  test("execution-groups requiring shared-staging without workspace id fail", async () => {
+    const invalidEG = `# Execution Groups
+
+## Group 1: Shared auth route
+
+**Files:** src/auth.ts
+**Agent:** zflow.implement-routine
+**Dependencies:** none
+**Scoped verification:** npm test -- auth
+**Parallelizable:** false
+**Execution mode:** shared-staging
+**Execution rationale:** needs shared filesystem context
+`
+    const artifacts = {
+      "design": VALID_DESIGN,
+      "execution-groups": invalidEG,
+      "standards": VALID_STANDARDS,
+      "verification": VALID_VERIFICATION,
+      "implementation-tasks": VALID_IMPLEMENTATION_TASKS,
+    }
+
+    const { baseDir } = await createTestDirWithArtifacts(artifacts)
+    try {
+      const result = await validateAllPlanArtifacts("test-change", "v1", baseDir)
+      assert.strictEqual(result.valid, false)
+      const egResult = result.results.find((r) => r.artifact === "execution-groups")
+      assert.ok(egResult)
+      assert.ok(
+        egResult!.issues.some((issue) => /workspace|shared-staging/i.test(issue)),
+        `expected a workspace/shared-staging issue, got: ${egResult!.issues.join("; ")}`,
+      )
+    } finally {
+      await fs.rm(baseDir, { recursive: true, force: true })
+    }
+  })
+
+  test("dependency-lineage without dependencies fails", async () => {
+    const invalidEG = `# Execution Groups
+
+## Group 1: Downstream API task
+
+**Files:** src/api.ts
+**Agent:** zflow.implement-hard
+**Dependencies:** none
+**Scoped verification:** npm test -- api
+**Parallelizable:** false
+**Base strategy:** dependency-lineage
+**Execution rationale:** wants pending dependency changes visible
+`
+    const artifacts = {
+      "design": VALID_DESIGN,
+      "execution-groups": invalidEG,
+      "standards": VALID_STANDARDS,
+      "verification": VALID_VERIFICATION,
+      "implementation-tasks": VALID_IMPLEMENTATION_TASKS,
+    }
+
+    const { baseDir } = await createTestDirWithArtifacts(artifacts)
+    try {
+      const result = await validateAllPlanArtifacts("test-change", "v1", baseDir)
+      assert.strictEqual(result.valid, false)
+      const egResult = result.results.find((r) => r.artifact === "execution-groups")
+      assert.ok(egResult)
+      assert.ok(egResult!.issues.some((issue) => issue.includes("dependency-lineage")))
+    } finally {
+      await fs.rm(baseDir, { recursive: true, force: true })
+    }
+  })
+
   test("execution-groups missing Files section fails", async () => {
     // Remove the files lines from group 1
     const invalidEG = VALID_EXECUTION_GROUPS.replace(

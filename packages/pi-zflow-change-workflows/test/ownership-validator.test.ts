@@ -29,8 +29,9 @@ function group(
   files: string[],
   deps: string[] = [],
   parallelizable = true,
+  extras: Partial<ExecutionGroup> = {},
 ): ExecutionGroup {
-  return { id, files, dependencies: deps, parallelizable }
+  return { id, files, dependencies: deps, parallelizable, ...extras }
 }
 
 // ---------------------------------------------------------------------------
@@ -123,7 +124,7 @@ describe("validateOwnershipAndDependencies", () => {
     const result = validateOwnershipAndDependencies(groups)
     assert.strictEqual(result.valid, true)
     assert.strictEqual(result.conflicts.length, 0)
-    assert.ok(result.summary.includes("dependency order is explicit"))
+    assert.match(result.summary, /dependency order|deterministic orchestration/i)
   })
 
   test("passes for transitive dependency resolving overlap", () => {
@@ -131,6 +132,24 @@ describe("validateOwnershipAndDependencies", () => {
       group("g1", ["src/a.ts"]),
       group("g2", ["src/b.ts"], ["g1"]),
       group("g3", ["src/a.ts"], ["g2"]), // g3 depends on g2, which depends on g1
+    ]
+    const result = validateOwnershipAndDependencies(groups)
+    assert.strictEqual(result.valid, true)
+    assert.strictEqual(result.conflicts.length, 0)
+  })
+
+  test("passes for overlapping files in the same planner-declared shared workspace", () => {
+    const groups: ExecutionGroup[] = [
+      group("g1", ["src/shared.ts"], [], false, {
+        executionMode: "shared-staging",
+        workspaceId: "auth-cluster",
+        workspaceConcurrency: "serialized",
+      }),
+      group("g2", ["src/shared.ts"], [], false, {
+        executionMode: "shared-staging",
+        workspaceId: "auth-cluster",
+        workspaceConcurrency: "serialized",
+      }),
     ]
     const result = validateOwnershipAndDependencies(groups)
     assert.strictEqual(result.valid, true)

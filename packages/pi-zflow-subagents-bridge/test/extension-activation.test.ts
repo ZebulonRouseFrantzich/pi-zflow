@@ -59,6 +59,10 @@ describe("pi-zflow-subagents-bridge extension activation", () => {
     )
     assert.equal(typeof service.runAgent, "function")
     assert.equal(typeof service.runParallel, "function")
+    assert.ok(service.capabilities, "dispatch capabilities should be exposed")
+    assert.equal(typeof service.capabilities?.isolatedWorktrees, "boolean")
+    assert.equal(typeof service.capabilities?.sharedWorkspaceSerialized, "boolean")
+    assert.equal(typeof service.capabilities?.baseRefWorktrees, "boolean")
   })
 
   it("does not register commands", async () => {
@@ -179,5 +183,27 @@ describe("pi-zflow-subagents-bridge dispatch service behavior", () => {
 
     assert.equal(result.ok, false)
     assert.equal(result.results.length, 0)
+  })
+
+  it("fails fast for unsupported shared-concurrent worktree requests", async () => {
+    const service = await getService()
+
+    const result = await service.runParallel({
+      worktree: true,
+      tasks: [{
+        groupId: "group-1",
+        agent: "nonexistent-agent-xyz",
+        task: "Task 1",
+        worktreeStrategy: {
+          mode: "shared-staging",
+          workspaceId: "shared-auth",
+          workspaceConcurrency: "concurrent",
+        },
+      }],
+    })
+
+    assert.equal(result.ok, false)
+    assert.equal(result.results.length, 1)
+    assert.match(result.results[0]?.error ?? "", /shared concurrent worktree clusters/)
   })
 })

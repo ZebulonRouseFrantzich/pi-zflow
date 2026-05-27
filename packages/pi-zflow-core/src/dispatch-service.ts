@@ -84,12 +84,79 @@ export interface AgentDispatchResult {
 
 // ── Parallel run input/output ───────────────────────────────────
 
+/** Supported worktree execution modes for dispatched tasks. */
+export type WorktreeExecutionMode = "isolated" | "shared-staging"
+
+/** Supported shared workspace concurrency modes. */
+export type WorkspaceConcurrencyMode = "serialized" | "concurrent"
+
+/** Supported strategies for choosing a task's base commit/ref. */
+export type WorktreeBaseStrategy = "head" | "dependency-lineage"
+
+/**
+ * Optional per-task worktree strategy metadata.
+ *
+ * This lets zflow orchestration express richer execution intent while keeping
+ * backwards compatibility with simple `worktree: true` dispatches.
+ */
+export interface TaskWorktreeStrategy {
+  /** Default: isolated worktree per task. */
+  mode?: WorktreeExecutionMode
+  /** Shared staging workspace identifier when `mode` is `shared-staging`. */
+  workspaceId?: string
+  /** Default: serialized execution inside a shared workspace. */
+  workspaceConcurrency?: WorkspaceConcurrencyMode
+  /** Default: branch/reset from the repo's current HEAD. */
+  baseStrategy?: WorktreeBaseStrategy
+  /** Resolved git ref/commit to use as the task's base when supported. */
+  baseRef?: string
+  /** Optional planner-authored rationale for non-default execution strategy. */
+  executionRationale?: string
+}
+
+/**
+ * Worktree setup hook configuration passed through the typed dispatch layer.
+ *
+ * The bridge/backend is responsible for executing this hook inside each
+ * created worktree before the worker agent starts.
+ */
+export interface DispatchWorktreeSetupHook {
+  script: string
+  runtime?: "shell" | "node" | "module"
+  timeoutMs?: number
+  description?: string
+}
+
+/**
+ * Dispatch capability flags advertised by the active backend.
+ *
+ * Missing/undefined capabilities should be treated conservatively by callers.
+ */
+export interface DispatchCapabilities {
+  isolatedWorktrees: boolean
+  sharedWorkspaceSerialized: boolean
+  sharedWorkspaceConcurrent: boolean
+  baseRefWorktrees: boolean
+  worktreeSetupHooks: boolean
+}
+
+/** Baseline conservative capability set for legacy backends. */
+export const LEGACY_DISPATCH_CAPABILITIES: DispatchCapabilities = {
+  isolatedWorktrees: true,
+  sharedWorkspaceSerialized: false,
+  sharedWorkspaceConcurrent: false,
+  baseRefWorktrees: false,
+  worktreeSetupHooks: false,
+}
+
 /**
  * A single task within a parallel dispatch.
  */
 export interface ParallelTaskInput {
   /** Agent runtime name. */
   agent: string
+  /** Optional stable group/task identifier from orchestration. */
+  groupId?: string
   /** Task description for the agent. */
   task: string
   /** Working directory or other options. */
@@ -102,6 +169,12 @@ export interface ParallelTaskInput {
   outputMode?: "inline" | "file-only"
   /** Optional live progress callback from the dispatch backend. */
   onUpdate?: (progress: AgentDispatchProgress) => void
+  /** Files the task expects to change. */
+  claimedFiles?: string[]
+  /** Execution-plan dependencies for this task. */
+  dependencies?: string[]
+  /** Optional richer worktree strategy metadata. */
+  worktreeStrategy?: TaskWorktreeStrategy
   /**
    * Scoped verification command to run after the agent completes.
    * The dispatch backend should execute this command in the worktree
@@ -117,12 +190,20 @@ export interface ParallelTaskInput {
 export interface ParallelTaskResult {
   /** Agent runtime name. */
   agent: string
+  /** Optional stable group/task identifier from orchestration. */
+  groupId?: string
   /** Raw text output. */
   rawOutput: string
   /** Path to persisted output file, if applicable. */
   outputPath?: string
   /** Worktree path used by the worker, when the dispatcher can expose it. */
   worktreePath?: string
+  /** Shared workspace identifier when the task ran in shared-staging mode. */
+  workspaceId?: string
+  /** Base commit/ref actually used for the task. */
+  baseCommit?: string
+  /** Head commit after the task completed, when known. */
+  headCommit?: string
   /** Patch path produced by the dispatcher, when it captures patches itself. */
   patchPath?: string
   /** Files changed by this task, if reported by the dispatcher. */
@@ -151,6 +232,8 @@ export interface ParallelDispatchInput {
   concurrency?: number
   /** Create isolated git worktrees for each task. */
   worktree?: boolean
+  /** Optional repo-defined hook to run inside created worktrees. */
+  worktreeSetupHook?: DispatchWorktreeSetupHook
   /** Context mode. */
   context?: "fresh" | "fork"
   /** Output truncation limits. */
@@ -184,6 +267,9 @@ export interface DispatchService {
 
   /** Human-readable name for diagnostics. */
   readonly name: string
+
+  /** Optional capability flags advertised by the active backend. */
+  readonly capabilities?: DispatchCapabilities
 }
 
 // ─── Registry key ──────────────────────────────────────────────

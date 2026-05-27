@@ -111,6 +111,12 @@ export type {
 // Re-export dispatch service types (Phase 9 — subagent dispatch contract)
 export type {
   DispatchService,
+  DispatchCapabilities,
+  DispatchWorktreeSetupHook,
+  TaskWorktreeStrategy,
+  WorktreeExecutionMode,
+  WorkspaceConcurrencyMode,
+  WorktreeBaseStrategy,
   AgentDispatchInput,
   AgentDispatchResult,
   ParallelTaskInput,
@@ -118,7 +124,7 @@ export type {
   ParallelDispatchInput,
   ParallelDispatchResult,
 } from "./dispatch-service.js"
-export { DISPATCH_SERVICE_CAPABILITY } from "./dispatch-service.js"
+export { DISPATCH_SERVICE_CAPABILITY, LEGACY_DISPATCH_CAPABILITIES } from "./dispatch-service.js"
 
 // Re-export diagnostic helpers
 // Also importable directly from "pi-zflow-core/diagnostics"

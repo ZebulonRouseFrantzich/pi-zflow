@@ -98,6 +98,8 @@ describe("createRun", () => {
     assert.equal(run.verification.status, "pending")
     assert.equal(run.groups.length, 0)
     assert.equal(run.retainedArtifacts.length, 0)
+    assert.equal(run.workspaceClusters.length, 0)
+    assert.equal(run.lineageRefs.length, 0)
     assert.ok(run.branch.length > 0)
     assert.equal(run.head.length, 40)
     assert.ok(run.createdAt)
@@ -166,6 +168,35 @@ describe("readRun and updateRun", () => {
     assert.equal(updated.runId, runId)
     assert.equal(updated.changeId, "ch42")
     assert.equal(updated.phase, "completed")
+  })
+
+  test("updateRun persists workspace and lineage metadata", async () => {
+    const updated = await updateRun(runId, {
+      workspaceClusters: [{
+        workspaceId: "shared-auth",
+        mode: "shared-staging",
+        workspaceConcurrency: "serialized",
+        groupIds: ["group-1", "group-2"],
+        status: "planned",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }],
+      lineageRefs: [{
+        id: "lineage-group-2",
+        groupId: "group-2",
+        dependencyGroupIds: ["group-1"],
+        ref: "refs/zflow/lineage/test/group-2",
+        baseCommit: "abc123",
+        status: "planned",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }],
+    }, repoRoot)
+
+    assert.equal(updated.workspaceClusters.length, 1)
+    assert.equal(updated.workspaceClusters[0]?.workspaceId, "shared-auth")
+    assert.equal(updated.lineageRefs.length, 1)
+    assert.equal(updated.lineageRefs[0]?.groupId, "group-2")
   })
 
   test("updateRun updates timestamp", async () => {

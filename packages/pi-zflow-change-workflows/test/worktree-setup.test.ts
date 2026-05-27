@@ -11,6 +11,7 @@ import * as os from "node:os"
 import {
   repoNeedsWorktreeSetup,
   getRepoWorktreeSetupConfig,
+  resolveDispatchWorktreeSetup,
 } from "../extensions/zflow-change-workflows/worktree-setup.js"
 
 // ---------------------------------------------------------------------------
@@ -82,6 +83,50 @@ describe("repoNeedsWorktreeSetup", () => {
 // ---------------------------------------------------------------------------
 // getRepoWorktreeSetupConfig
 // ---------------------------------------------------------------------------
+
+describe("resolveDispatchWorktreeSetup", () => {
+  let repoRoot: string
+
+  before(async () => {
+    repoRoot = await createTempRepo()
+  })
+
+  after(async () => {
+    await fs.rm(repoRoot, { recursive: true, force: true })
+  })
+
+  test("returns ok=false with actionable message when setup is required but no hook exists", async () => {
+    await fs.writeFile(path.join(repoRoot, "pnpm-workspace.yaml"), "packages:\n  - packages/*\n", "utf-8")
+    const resolution = await resolveDispatchWorktreeSetup(repoRoot)
+    assert.equal(resolution.ok, false)
+    assert.equal(resolution.required, true)
+    assert.match(resolution.message ?? "", /worktreeSetupHook required but not configured/)
+    await fs.rm(path.join(repoRoot, "pnpm-workspace.yaml"), { force: true })
+  })
+
+  test("returns dispatch hook config when a repo-local hook is configured", async () => {
+    await fs.writeFile(path.join(repoRoot, "pnpm-workspace.yaml"), "packages:\n  - packages/*\n", "utf-8")
+    await fs.mkdir(path.join(repoRoot, ".pi", "zflow"), { recursive: true })
+    await fs.writeFile(
+      path.join(repoRoot, ".pi", "zflow", "config.json"),
+      JSON.stringify({
+        worktreeSetupHook: {
+          script: ".pi/zflow/worktree-setup-hook.sh",
+          runtime: "shell",
+          timeoutMs: 45000,
+          description: "Prepare isolated worktrees",
+        },
+      }),
+      "utf-8",
+    )
+
+    const resolution = await resolveDispatchWorktreeSetup(repoRoot)
+    assert.equal(resolution.ok, true)
+    assert.equal(resolution.required, true)
+    assert.equal(resolution.hook?.script, ".pi/zflow/worktree-setup-hook.sh")
+    assert.equal(resolution.hook?.timeoutMs, 45000)
+  })
+})
 
 describe("getRepoWorktreeSetupConfig", () => {
   let repoRoot: string
