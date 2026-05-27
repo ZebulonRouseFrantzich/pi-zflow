@@ -14,7 +14,7 @@ pi-zflow is a monorepo of individually installable Pi packages:
 | `pi-zflow-plan-mode`        | Pi extension        | Ad-hoc read-only planning mode, `/zflow-plan` commands                                                     |
 | `pi-zflow-agents`           | Pi extension        | Custom agent markdown, chains, skills, prompts, setup/update commands                                      |
 | `pi-zflow-review`           | Pi extension        | Plan/code/PR review workflows, `/zflow-review-code`, `/zflow-review-pr`                                    |
-| `pi-zflow-change-workflows` | Pi extension        | Formal prepare/implement orchestration, `/zflow-change-prepare`, `/zflow-change-implement`, `/zflow-clean` |
+| `pi-zflow-change-workflows` | Pi extension        | Formal plan/prepare/implement orchestration, `/zflow-change-plan`, `/zflow-change-prepare`, `/zflow-change-implement`, `/zflow-clean` |
 | `pi-zflow-runecontext`      | Pi extension        | RuneContext integration                                                                                    |
 | `pi-zflow-compaction`       | Pi extension        | Proactive compaction hooks                                                                                 |
 | `pi-zflow-subagents-bridge` | Pi extension        | Dispatch adapter capability and diagnostics for subagent/worktree execution                                |
@@ -362,12 +362,16 @@ Runtime state lives outside the working tree. See `docs/foundation-versions.md` 
 
 ### Durable vs runtime artifact distinction
 
-`/zflow-change-prepare` produces two categories of output:
+The change workflow now has a durable plan entrypoint plus versioned prepared docs:
 
-- **Durable change documents** — the five canonical plan artifacts
+- **Durable plan entrypoint** — `/zflow-change-plan` creates or updates
+  `docs/zflow-changes/<change-id>/plan.md`. This single file is intended for
+  human review and refinement before full change preparation.
+
+- **Durable change documents** — `/zflow-change-prepare` reads the draft
+  `plan.md` when present, then publishes the five canonical plan artifacts
   (`design.md`, `execution-groups.md`, `standards.md`, `verification.md`, `implementation-tasks.md`)
-  are copied into the working tree after validation and review, under
-  `docs/zflow-changes/<change-id>/<version>/`. These files are intended
+  under `docs/zflow-changes/<change-id>/<version>/`. These files are intended
   for review, commit, and PR discussion — they survive session restarts
   and can be shared with collaborators.
 
@@ -734,7 +738,7 @@ Each layer is delivered by a different mechanism and serves a distinct purpose.
 | ----------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
 | Pi default        | Built into Pi                                                 | Dynamic tool listings, guidelines, documentation paths, global rules                                                                                                                               | Every session                                         |
 | Root constitution | `APPEND_SYSTEM.md` (not `SYSTEM.md`)                          | Compact orchestrator constitution: tool discipline, truthfulness taxonomy, safety rules, workflow boundaries, context discipline, engineering judgment, platform-documentation-awareness invariant | Orchestrator and subagents that inherit system prompt |
-| Mode fragments    | Injected by extension at mode entry                           | Role-specific behaviour for `/zflow-plan`, `/zflow-change-prepare`, `/zflow-change-implement`, `/zflow-review-pr`, `/zflow-clean`                                                                  | Active during specific modes                          |
+| Mode fragments    | Injected by extension at mode entry                           | Role-specific behaviour for `/zflow-plan`, `/zflow-change-plan`, `/zflow-change-prepare`, `/zflow-change-implement`, `/zflow-review-pr`, `/zflow-clean`                                           | Active during specific modes                          |
 | Runtime reminders | Injected by extension on events                               | Short factual reminders for active plan mode, approved plan loaded, drift detected, compaction handoff, tool denied, external file change, verification status                                     | On specific state transitions                         |
 | Agent prompts     | Agent markdown body (frontmatter `systemPromptMode: replace`) | Narrow role contract for each `zflow.*` agent; replaces rather than appends                                                                                                                        | The specific agent only                               |
 

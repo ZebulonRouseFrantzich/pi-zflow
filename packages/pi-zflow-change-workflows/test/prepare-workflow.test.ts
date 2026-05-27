@@ -13,6 +13,7 @@ import {
   updatePlanState,
   bumpPlanVersion,
   markPlanVersionState,
+  writeDurablePlanDoc,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
 import type {
@@ -181,6 +182,58 @@ describe("runChangePrepareWorkflow", () => {
       })
 
       assert.strictEqual(result.changeId, "unfinished-test")
+    } finally {
+      await removeTestRepo(repoRoot)
+    }
+  })
+
+  test("records durable plan path in runtime metadata when plan.md exists", async () => {
+    const repoRoot = await createTestRepo()
+    try {
+      const planDocPath = await writeDurablePlanDoc("durable-plan-metadata", {
+        changeId: "durable-plan-metadata",
+      }, {
+        repoRoot,
+        draftNotes: "Use the durable plan entrypoint during prepare",
+      })
+
+      const result = await runChangePrepareWorkflow({
+        cwd: repoRoot,
+        changeId: "durable-plan-metadata",
+      })
+
+      const planState = JSON.parse(await fs.readFile(result.planStatePath, "utf-8"))
+      assert.strictEqual(planState.runtimeMetadata.durablePlanDocPath, planDocPath)
+      assert.strictEqual(result.initialPlanState.runtimeMetadata?.durablePlanDocPath, planDocPath)
+    } finally {
+      await removeTestRepo(repoRoot)
+    }
+  })
+
+  test("rejects invalid durable plan frontmatter before prepare proceeds", async () => {
+    const repoRoot = await createTestRepo()
+    try {
+      const planDocPath = path.join(repoRoot, "docs", "zflow-changes", "invalid-frontmatter", "plan.md")
+      await fs.mkdir(path.dirname(planDocPath), { recursive: true })
+      await fs.writeFile(planDocPath, [
+        "---",
+        "schemaVersion: 2",
+        "changeId: invalid-frontmatter",
+        "status: draft",
+        "sourceMode: adhoc",
+        "currentVersion: not-a-version",
+        "approvedVersion: null",
+        "---",
+        "# Plan",
+      ].join("\n"), "utf-8")
+
+      await assert.rejects(
+        runChangePrepareWorkflow({
+          cwd: repoRoot,
+          changeId: "invalid-frontmatter",
+        }),
+        /Durable draft plan frontmatter is invalid/,
+      )
     } finally {
       await removeTestRepo(repoRoot)
     }

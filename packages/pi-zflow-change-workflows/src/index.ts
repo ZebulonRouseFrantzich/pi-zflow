@@ -95,7 +95,7 @@ export {
   promptResumeChoices,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
-// Formal prepare workflow (Phase 7 — /zflow-change-prepare orchestration)
+// Formal plan/prepare workflow helpers (Phase 7 — /zflow-change-plan + /zflow-change-prepare)
 export {
   runChangePrepareWorkflow,
   ensureImplementationTasksArtifact,
@@ -156,6 +156,26 @@ export {
 
 export type {
   PublishPlanArtifactsResult,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
+// Durable draft-plan doc (plan.md) helpers
+export {
+  resolveDurablePlanDocPath,
+  parsePlanDocFrontmatter,
+  serializePlanDoc,
+  scaffoldDurablePlanDocBody,
+  extractPlanDocSections,
+  buildPlanDocVersionIndexSection,
+  writeDurablePlanDoc,
+  readDurablePlanDoc,
+  validateDurablePlanDocFrontmatter,
+  listPublishedDurablePlanVersions,
+  buildPrepareNotesFromDurablePlanDoc,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
+export type {
+  DurablePlanDocFrontmatter,
+  DurablePlanDoc,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
 // Verification and failure log (Phase 7 — verification command resolution)

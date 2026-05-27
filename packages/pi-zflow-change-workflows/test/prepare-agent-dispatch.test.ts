@@ -18,6 +18,7 @@ import { execFileSync } from "node:child_process"
 import {
   runChangePrepareWorkflow,
   runPrepareAgentsIfAvailable,
+  writeDurablePlanDoc,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 import type {
   PrepareAgentDispatchResult,
@@ -383,6 +384,114 @@ describe("runChangePrepareWorkflow — agent dispatch wiring", () => {
       // The returned object still has repoMapPath/reconnaissancePath
       assert.ok(result.initialPlanState.runtimeMetadata!.repoMapPath, "repoMapPath should still exist in returned object")
       assert.ok(result.initialPlanState.runtimeMetadata!.reconnaissancePath, "reconnaissancePath should still exist in returned object")
+    } finally {
+      await removeTestRepo(repoRoot)
+    }
+  })
+
+  test("includes durable plan.md context in planner dispatch tasks", async () => {
+    resetZflowRegistry()
+
+    const repoRoot = await createTestRepo()
+    let receivedInput: any = null
+    try {
+      const registry = getZflowRegistry()
+      registry.claim({
+        capability: DISPATCH_SERVICE_CAPABILITY,
+        version: "0.1.0",
+        provider: "test-dispatch",
+        sourcePath: import.meta.url,
+      })
+      registry.provide(DISPATCH_SERVICE_CAPABILITY, {
+        name: "test-dispatch",
+        runAgent: async (input: any) => {
+          receivedInput ??= input
+          const versionDir = resolvePlanVersionDir("durable-plan-dispatch", "v1", repoRoot)
+          await fs.mkdir(versionDir, { recursive: true })
+          await fs.writeFile(
+            path.join(versionDir, "design.md"),
+            "# Design\n\nThis design preserves the durable plan entrypoint and keeps immutable version directories for prepared artifacts.",
+            "utf-8",
+          )
+          await fs.writeFile(
+            path.join(versionDir, "execution-groups.md"),
+            [
+              "# Execution Groups",
+              "",
+              "## Group 1: Durable plan plumbing",
+              "",
+              "- **Files:** docs/zflow-changes/durable-plan-dispatch/plan.md, packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts",
+              "- **Scoped verification:** npx tsx --test packages/pi-zflow-change-workflows/test/draft-plan-doc.test.ts",
+              "- **Agent:** zflow.implement-routine",
+              "- **Dependencies:** none",
+              "- **Parallelizable:** false",
+              "",
+              "Update prepare to consume durable plan.md context while preserving immutable versioned outputs.",
+            ].join("\n"),
+            "utf-8",
+          )
+          await fs.writeFile(
+            path.join(versionDir, "standards.md"),
+            "# Standards\n\nKeep plan.md human-reviewable, keep .zflow runtime-only, and keep prepared versions immutable.",
+            "utf-8",
+          )
+          await fs.writeFile(
+            path.join(versionDir, "verification.md"),
+            "# Verification\n\n```bash\nnpx tsx --test packages/pi-zflow-change-workflows/test/draft-plan-doc.test.ts\n```",
+            "utf-8",
+          )
+          await fs.writeFile(
+            path.join(versionDir, "implementation-tasks.md"),
+            [
+              "# Implementation Tasks",
+              "",
+              "## Group 1: Durable plan plumbing",
+              "",
+              "### Objective",
+              "Consume plan.md during prepare without replacing immutable version directories.",
+              "",
+              "### Checklist",
+              "1. Read durable plan.md.",
+              "2. Feed its content into planner dispatch.",
+              "3. Preserve versioned prepared docs.",
+            ].join("\n"),
+            "utf-8",
+          )
+          return { ok: true, rawOutput: "done" }
+        },
+        runParallel: async () => ({ ok: true, results: [] }),
+      })
+      registry.claim({
+        capability: "profiles",
+        version: "0.1.0",
+        provider: "test-profiles",
+        sourcePath: import.meta.url,
+      })
+      registry.provide("profiles", {
+        getResolvedAgentBinding: async (agentName: string) => ({
+          agent: agentName,
+          resolvedModel: "openai-codex/gpt-5.4",
+        }),
+      })
+
+      const durablePlanPath = await writeDurablePlanDoc("durable-plan-dispatch", {
+        changeId: "durable-plan-dispatch",
+      }, {
+        repoRoot,
+        draftNotes: "Use the durable plan entrypoint and preserve immutable version directories.",
+      })
+
+      const result = await runChangePrepareWorkflow({
+        cwd: repoRoot,
+        changeId: "durable-plan-dispatch",
+        prepareNotes: "manual note",
+      })
+
+      const planState = JSON.parse(await fs.readFile(result.planStatePath, "utf-8"))
+      assert.strictEqual(planState.runtimeMetadata.durablePlanDocPath, durablePlanPath)
+      assert.match(receivedInput.task, /Durable draft plan.md path:/)
+      assert.match(receivedInput.task, /Use the durable plan entrypoint and preserve immutable version directories\./)
+      assert.match(receivedInput.task, /manual note/)
     } finally {
       await removeTestRepo(repoRoot)
     }

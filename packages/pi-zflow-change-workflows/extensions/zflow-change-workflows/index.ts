@@ -4,8 +4,8 @@
  * Phase 7 implementation:
  * - Path resolution helpers integrated from pi-zflow-artifacts
  * - `resolveAllPaths` convenience helper for workflow commands
- * - Registers `/zflow-change-prepare`, `/zflow-change-implement`,
- *   `/zflow-change-audit`, `/zflow-change-fix`, and `/zflow-clean`
+ * - Registers `/zflow-change-plan`, `/zflow-change-prepare`,
+ *   `/zflow-change-implement`, `/zflow-change-audit`, `/zflow-change-fix`, and `/zflow-clean`
  * - Wires state-driven resume, HITL gates, handoff, prompt reminders,
  *   verification/review sequencing, cleanup, and path-guard enforcement
  */
@@ -211,6 +211,9 @@ import {
   buildCodeReviewInputFromContext,
   publishPlanArtifacts,
   deriveSemanticChangeId,
+  writeDurablePlanDoc,
+  readDurablePlanDoc,
+  listPublishedDurablePlanVersions,
   resolveChangeImplementTarget,
   applyPatchesWithLedger,
   buildSubagentResolutionPrompt,
@@ -1770,6 +1773,20 @@ export function isAdHocPlanModeActive(): boolean {
  */
 export function shouldForkImplementationSessionAfterPrepare(): boolean {
   return false
+}
+
+/** Parsed arguments for `/zflow-change-plan`. */
+export interface ParsedChangePlanArgs {
+  changePath: string
+  notes: string
+}
+
+export function parseChangePlanArgs(args: string): ParsedChangePlanArgs {
+  const parts = args.trim().split(/\s+/).filter(Boolean)
+  return {
+    changePath: parts[0] ?? "",
+    notes: parts.slice(1).join(" "),
+  }
 }
 
 /** Parsed arguments for `/zflow-change-prepare`. */
@@ -5708,6 +5725,65 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
     },
   })
 
+  // ── Command: /zflow-change-plan ───────────────────────────────
+
+  pi.registerCommand("zflow-change-plan", {
+    description: "Create or update the durable plan.md entrypoint for a change",
+    handler: async (args: string, ctx: InterviewableContext): Promise<void> => {
+      const parsedArgs = parseChangePlanArgs(args)
+      if (!parsedArgs.changePath) {
+        ctx.ui.notify("Usage: /zflow-change-plan <change-path-or-id> [notes]", "warning")
+        return
+      }
+
+      const changeId = deriveSemanticChangeId(parsedArgs.changePath)
+      if (!changeId) {
+        ctx.ui.notify(
+          `Could not derive a semantic changeId from: ${parsedArgs.changePath}`,
+          "warning",
+        )
+        return
+      }
+
+      const existing = await readDurablePlanDoc(changeId, { cwd: ctx.cwd })
+      if (existing?.validationErrors.length) {
+        ctx.ui.notify(
+          `Repairing durable plan frontmatter for \"${changeId}\": ${existing.validationErrors.join("; ")}`,
+          "warning",
+        )
+      }
+      const planDocPath = await writeDurablePlanDoc(
+        changeId,
+        {
+          changeId,
+          status: existing?.frontmatter.status ?? "draft",
+          sourceMode: existing?.frontmatter.sourceMode ?? (
+            parsedArgs.changePath.includes("/context/") || parsedArgs.changePath.startsWith("@")
+              ? "runecontext"
+              : "adhoc"
+          ),
+          currentVersion: existing?.frontmatter.currentVersion ?? null,
+          approvedVersion: existing?.frontmatter.approvedVersion ?? null,
+        },
+        {
+          cwd: ctx.cwd,
+          draftNotes: parsedArgs.notes,
+          publishedVersions: await listPublishedDurablePlanVersions(changeId, { cwd: ctx.cwd }),
+        },
+      )
+
+      ctx.ui.notify(
+        `${existing ? "📝 Updated" : "📝 Created"} durable plan entrypoint for \"${changeId}\".`,
+        "info",
+      )
+      ctx.ui.notify(`Draft entrypoint: ${planDocPath}`, "info")
+      ctx.ui.notify(
+        `Review and refine ${planDocPath}, then run /zflow-change-prepare ${changeId} to generate versioned change docs.`,
+        "info",
+      )
+    },
+  })
+
   // ── Command: /zflow-change-prepare ────────────────────────────
 
   pi.registerCommand("zflow-change-prepare", {
@@ -5906,6 +5982,19 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           return
         }
 
+        const durableVersions = await listPublishedDurablePlanVersions(result.changeId, { cwd: ctx.cwd })
+        await writeDurablePlanDoc(
+          result.changeId,
+          {
+            status: reviewResult.pass ? "reviewed" : "validated",
+            currentVersion: result.planVersion,
+          },
+          {
+            cwd: ctx.cwd,
+            publishedVersions: durableVersions,
+          },
+        )
+
         ctx.ui.notify(
           `✅ Durable plan artifacts published to: ${publishResult.durableDir}`,
           "info",
@@ -5967,6 +6056,18 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         switch (interviewResult.decision) {
           case "approve": {
             await approvePlanVersion(result.changeId, result.planVersion, ctx.cwd)
+            await writeDurablePlanDoc(
+              result.changeId,
+              {
+                status: "approved",
+                currentVersion: result.planVersion,
+                approvedVersion: result.planVersion,
+              },
+              {
+                cwd: ctx.cwd,
+                publishedVersions: await listPublishedDurablePlanVersions(result.changeId, { cwd: ctx.cwd }),
+              },
+            )
             ctx.ui.notify(
               `✅ Plan "${result.changeId}" version ${result.planVersion} approved.`,
               "info",
@@ -5989,6 +6090,17 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           case "revise": {
             await bumpPlanVersion(result.changeId, ctx.cwd)
             await advancePlanLifecycle(result.changeId, "draft", ctx.cwd)
+            await writeDurablePlanDoc(
+              result.changeId,
+              {
+                status: "draft",
+                currentVersion: result.planVersion,
+              },
+              {
+                cwd: ctx.cwd,
+                publishedVersions: await listPublishedDurablePlanVersions(result.changeId, { cwd: ctx.cwd }),
+              },
+            )
             ctx.ui.notify(
               `📝 Revision requested for "${result.changeId}". ` +
               (interviewResult.revisionNotes
@@ -6002,6 +6114,17 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             await updatePlanState(result.changeId, {
               lifecycleState: "cancelled",
             }, ctx.cwd)
+            await writeDurablePlanDoc(
+              result.changeId,
+              {
+                status: "cancelled",
+                currentVersion: result.planVersion,
+              },
+              {
+                cwd: ctx.cwd,
+                publishedVersions: await listPublishedDurablePlanVersions(result.changeId, { cwd: ctx.cwd }),
+              },
+            )
             ctx.ui.notify(
               `🛑 Plan "${result.changeId}" version ${result.planVersion} cancelled by user.`,
               "warning",

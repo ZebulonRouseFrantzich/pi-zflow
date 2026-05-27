@@ -18,12 +18,11 @@ export const CHANGE_HELP_TOPIC: ZflowHelpTopic = {
   id: "change",
   title: "Change Workflows",
   summary:
-    "Formal artifact-first change orchestration: prepare plans, " +
-    "implement changes in isolated worktrees, audit results against " +
-    "plans, apply fixes, and clean up temporary artifacts. " +
-    "Durable plan documents are published to the repo under " +
-    "docs/zflow-changes/ for review and commit; runtime/review " +
-    "logs remain under .zflow/.",
+    "Formal artifact-first change orchestration: create durable change plan " +
+    "entrypoints, prepare versioned change docs, implement changes in " +
+    "isolated worktrees, audit results against plans, apply fixes, and " +
+    "clean up temporary artifacts. Durable plan drafts and prepared docs " +
+    "live under docs/zflow-changes/; runtime/review logs remain under .zflow/.",
   flowOrder: 30,
   flowGuidance:
     "Core workflow: prepare a change plan, review it, implement it " +
@@ -32,15 +31,23 @@ export const CHANGE_HELP_TOPIC: ZflowHelpTopic = {
     "prepare \u2192 review \u2192 implement \u2192 audit \u2192 fix \u2192 review \u2192 clean.",
   commands: [
     {
+      name: "zflow-change-plan",
+      usage: "/zflow-change-plan <change-path-or-id> [notes]",
+      description:
+        "Create or update the durable docs/zflow-changes/<id>/plan.md " +
+        "entrypoint for a change. This single draft file is intended for " +
+        "human review and refinement before generating versioned plan artifacts.",
+    },
+    {
       name: "zflow-change-prepare",
       usage: "/zflow-change-prepare <change-path>",
       description:
-        "Prepare a formal change plan from a change request document. " +
-        "Generates four plan artifacts (design, execution-groups, " +
-        "standards, verification), validates them, runs plan review, " +
-        "and publishes durable copies to docs/zflow-changes/<id>/<version>/ " +
-        "for review and commit. Runtime state and review logs remain " +
-        "under .zflow/.",
+        "Prepare a formal change plan from a change request document or " +
+        "existing docs/zflow-changes/<id>/plan.md draft. Generates versioned " +
+        "plan artifacts (design, execution-groups, standards, verification, " +
+        "implementation-tasks), validates them, runs plan review, and publishes " +
+        "durable copies to docs/zflow-changes/<id>/<version>/ for review and commit. " +
+        "Runtime state and review logs remain under .zflow/.",
     },
     {
       name: "zflow-change-implement",
