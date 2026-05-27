@@ -9,6 +9,7 @@ import { describe, it, afterEach } from "node:test"
 import * as assert from "node:assert/strict"
 
 import activateZflowChangeWorkflowsExtension, {
+  deriveChangePlanId,
   parseChangePlanArgs,
   parseChangePrepareArgs,
   shouldForkImplementationSessionAfterPrepare,
@@ -133,6 +134,21 @@ describe("zflow-change-workflows extension activation", () => {
     assert.equal(parsed.changeSeed, "oracle-mssql-entitlements-readonly")
     assert.equal(parsed.notes, "initial read-only Oracle draft")
     assert.equal(parsed.explicitReference, true)
+  })
+
+  it("derives compact change ids from freeform descriptions", () => {
+    const changeId = deriveChangePlanId(
+      "oracle mssql entitlements readonly or in its subfolders",
+      false,
+    )
+
+    assert.equal(changeId, "oracle-mssql-entitlements-readonly")
+  })
+
+  it("preserves explicit change ids when provided", () => {
+    const changeId = deriveChangePlanId("oracle-mssql-entitlements-readonly", true)
+
+    assert.equal(changeId, "oracle-mssql-entitlements-readonly")
   })
 
   it("parses change-prepare notes and --no-runecontext opt-out", () => {

@@ -20,9 +20,58 @@ import {
   resolveDurablePlanDocPath,
   resolveChangeImplementTarget,
   validateDurablePlanDocFrontmatter,
+  validateDurablePlanDocBody,
   listPublishedDurablePlanVersions,
   buildPrepareNotesFromDurablePlanDoc,
 } from "../extensions/zflow-change-workflows/orchestration.js"
+
+const COMPLETE_PLAN_BODY = [
+  "## Summary",
+  "",
+  "Draft a durable plan.md that captures a read-only Oracle and MSSQL entitlements change.",
+  "",
+  "## Goals / Success Criteria",
+  "",
+  "- Keep one reviewed durable plan.md.",
+  "- Compile versioned docs during prepare.",
+  "",
+  "## Scope In",
+  "",
+  "- Durable planning workflow changes.",
+  "",
+  "## Scope Out",
+  "",
+  "- Source implementation for the target product change.",
+  "",
+  "## Relevant codebase areas",
+  "",
+  "- packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts",
+  "- packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/index.ts",
+  "",
+  "## Constraints",
+  "",
+  "- Keep .zflow runtime-only.",
+  "",
+  "## Decisions",
+  "",
+  "- plan.md is the reviewed intake doc.",
+  "",
+  "## Risks / Unknowns",
+  "",
+  "- The drafter must emit stable headings and concrete file references.",
+  "",
+  "## Proposed execution outline",
+  "",
+  "1. Explore the repo.\n2. Draft plan.md.\n3. Review plan.md.\n4. Prepare versioned docs.",
+  "",
+  "## Verification approach",
+  "",
+  "- Run targeted durable-plan and prepare tests.",
+  "",
+  "## Open questions",
+  "",
+  "- None.",
+].join("\n")
 
 async function createTestRepo(): Promise<string> {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-draft-plan-"))
@@ -264,6 +313,18 @@ describe("validateDurablePlanDocFrontmatter", () => {
   })
 })
 
+describe("validateDurablePlanDocBody", () => {
+  test("rejects scaffold placeholder bodies", () => {
+    const errors = validateDurablePlanDocBody(scaffoldDurablePlanDocBody("scaffold-test"))
+    assert.ok(errors.some((error) => error.includes("placeholder")))
+  })
+
+  test("accepts detailed plan bodies", () => {
+    const errors = validateDurablePlanDocBody(COMPLETE_PLAN_BODY)
+    assert.deepEqual(errors, [])
+  })
+})
+
 describe("buildPrepareNotesFromDurablePlanDoc", () => {
   test("combines durable draft context with existing notes", async () => {
     const repoRoot = await createTestRepo()
@@ -271,13 +332,14 @@ describe("buildPrepareNotesFromDurablePlanDoc", () => {
       await writeDurablePlanDoc("prepare-notes", {
         changeId: "prepare-notes",
         status: "draft",
-      }, { repoRoot, draftNotes: "Use a single durable draft plan entrypoint" })
+      }, { repoRoot, bodyContent: COMPLETE_PLAN_BODY })
       const doc = await readDurablePlanDoc("prepare-notes", { repoRoot })
       const notes = buildPrepareNotesFromDurablePlanDoc(doc, "manual note")
       assert.ok(notes.includes("manual note"))
       assert.ok(notes.includes("Durable draft plan.md path:"))
-      assert.ok(notes.includes("Use a single durable draft plan entrypoint"))
+      assert.ok(notes.includes("Draft a durable plan.md that captures a read-only Oracle and MSSQL entitlements change."))
       assert.ok(!notes.includes("Durable draft frontmatter validation errors:"))
+      assert.ok(!notes.includes("Durable draft body validation errors:"))
     } finally {
       await fs.rm(repoRoot, { recursive: true, force: true })
     }

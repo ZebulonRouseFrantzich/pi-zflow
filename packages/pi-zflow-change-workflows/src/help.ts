@@ -34,17 +34,19 @@ export const CHANGE_HELP_TOPIC: ZflowHelpTopic = {
       name: "zflow-change-plan",
       usage: "/zflow-change-plan <description|change-id|path> [-- notes]",
       description:
-        "Create or update the durable docs/zflow-changes/<id>/plan.md " +
-        "entrypoint for a change. You can provide a freeform change description, " +
-        "an explicit change id, or a change path. This single plan file is intended " +
-        "for human review and refinement before generating versioned plan artifacts.",
+        "Draft a detailed durable docs/zflow-changes/<id>/plan.md file for a change. " +
+        "You can provide a freeform change description, an explicit change id, or a " +
+        "change path; if no description is supplied, the workflow prompts for one. " +
+        "The command explores repo context, drafts a decision-rich single plan.md, and " +
+        "shows progress while it runs.",
     },
     {
       name: "zflow-change-prepare",
-      usage: "/zflow-change-prepare <change-path>",
+      usage: "/zflow-change-prepare <change-id|change-folder|plan-file>",
       description:
-        "Prepare a formal change plan from a change request document or " +
-        "existing docs/zflow-changes/<id>/plan.md draft. Generates versioned " +
+        "Prepare formal versioned change docs from a reviewed durable plan.md " +
+        "or other change request input. Accepts a change id, change folder, or " +
+        "direct plan.md path. Generates versioned " +
         "plan artifacts (design, execution-groups, standards, verification, " +
         "implementation-tasks), validates them, runs plan review, and publishes " +
         "durable copies to docs/zflow-changes/<id>/<version>/ for review and commit. " +

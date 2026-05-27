@@ -97,6 +97,7 @@ export {
 
 // Formal plan/prepare workflow helpers (Phase 7 — /zflow-change-plan + /zflow-change-prepare)
 export {
+  runChangePlanWorkflow,
   runChangePrepareWorkflow,
   ensureImplementationTasksArtifact,
   updatePlanState,
@@ -114,6 +115,8 @@ export {
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
 export type {
+  ChangePlanWorkflowOptions,
+  ChangePlanWorkflowResult,
   PrepareWorkflowOptions,
   PrepareWorkflowResult,
 } from "../extensions/zflow-change-workflows/orchestration.js"
@@ -169,6 +172,8 @@ export {
   writeDurablePlanDoc,
   readDurablePlanDoc,
   validateDurablePlanDocFrontmatter,
+  validateDurablePlanDocBody,
+  normalizeDurablePlanDocBody,
   listPublishedDurablePlanVersions,
   buildPrepareNotesFromDurablePlanDoc,
 } from "../extensions/zflow-change-workflows/orchestration.js"

@@ -4060,6 +4060,41 @@ export async function checkUnfinishedOnEntry(
 // ═══════════════════════════════════════════════════════════════════
 
 /**
+ * Options for the `/zflow-change-plan` workflow orchestration.
+ */
+export interface ChangePlanWorkflowOptions {
+  /** Working directory for runtime state dir resolution. */
+  cwd?: string
+  /** Final resolved durable change identifier. */
+  changeId: string
+  /** Human description of the requested change. */
+  changeDescription: string
+  /** Original user input seed (description, path, or explicit id). */
+  changeSeed: string
+  /** Whether the change seed was an explicit path/id reference. */
+  explicitReference?: boolean
+  /** Durable plan source mode. */
+  sourceMode?: DurablePlanDocFrontmatter["sourceMode"]
+  /** Optional progress callback for command UIs. */
+  onProgress?: (message: string, type?: "info" | "warning" | "error") => void
+  /** Optional live agent-progress callback. */
+  onAgentProgress?: (progress: AgentDispatchProgress) => void
+}
+
+/**
+ * Result of the `/zflow-change-plan` workflow orchestration.
+ */
+export interface ChangePlanWorkflowResult {
+  changeId: string
+  planDocPath: string
+  repoMapPath: string
+  reconnaissancePath: string
+  draftOutputPath?: string
+  dispatchService?: string
+  existingPlanUpdated: boolean
+}
+
+/**
  * Options for the `/zflow-change-prepare` workflow orchestration.
  */
 export interface PrepareWorkflowOptions {
@@ -5571,6 +5606,174 @@ async function resolveProfileModelForAgent(agentName: string): Promise<string | 
   }
 }
 
+function formatChangePlanAgentProgress(progress: AgentDispatchProgress): string {
+  const elapsed = formatDispatchElapsed(progress.durationMs)
+  const toolCount = progress.toolCount ?? 0
+  if (progress.currentTool) {
+    const args = progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""
+    return `planner running — child elapsed ${elapsed} — ${toolCount} tools — current: ${progress.currentTool}${args}`
+  }
+  const recent = progress.recentTools?.at(-1)
+  if (recent?.tool) {
+    const args = recent.args ? ` ${recent.args}` : ""
+    return `planner running — child elapsed ${elapsed} — ${toolCount} tools — last: ${recent.tool}${args}`
+  }
+  return `planner running — child elapsed ${elapsed} — ${toolCount} tools observed`
+}
+
+function buildChangePlanDraftTaskPrompt(input: {
+  changeId: string
+  changeDescription: string
+  sourceMode: DurablePlanDocFrontmatter["sourceMode"]
+  planDocPath: string
+  repoMapPath: string
+  reconnaissancePath: string
+  existingPlanBody?: string
+}): string {
+  return [
+    `Draft a complete durable change plan body for changeId \`${input.changeId}\`.`,
+    `Change description: ${input.changeDescription}`,
+    `Source mode: ${input.sourceMode}`,
+    `Target durable plan path: ${input.planDocPath}`,
+    `Repository map path: ${input.repoMapPath}`,
+    `Reconnaissance path: ${input.reconnaissancePath}`,
+    input.existingPlanBody
+      ? [
+        "Existing durable plan body to refine:",
+        input.existingPlanBody,
+      ].join("\n")
+      : "No existing durable plan body was found; create a fresh, detailed draft.",
+    "",
+    "You are drafting the human-reviewed durable `plan.md` intake document.",
+    "Explore the repository before writing. Use the repo map and reconnaissance as anchors, then read the most relevant files.",
+    "Ask clarifying questions ONLY if the plan would otherwise be materially blocked. If not blocked, produce the strongest plan you can and capture remaining uncertainty under Open questions.",
+    "",
+    "Return ONLY markdown for the `plan.md` body. Do NOT include YAML frontmatter. Do NOT wrap the result in code fences. Do NOT include the managed zflow header or version-index sections.",
+    "",
+    "Use these exact headings and fill each with concrete detail:",
+    "- `## Summary`",
+    "- `## Goals / Success Criteria`",
+    "- `## Scope In`",
+    "- `## Scope Out`",
+    "- `## Relevant codebase areas`",
+    "- `## Constraints`",
+    "- `## Decisions`",
+    "- `## Risks / Unknowns`",
+    "- `## Proposed execution outline`",
+    "- `## Verification approach`",
+    "- `## Open questions`",
+    "",
+    "Quality requirements:",
+    "- No placeholder text, no TODO-only sections, and no empty headings.",
+    "- Mention concrete files, modules, services, or directories in Relevant codebase areas whenever they can be inferred.",
+    "- Proposed execution outline should describe logical work groups, likely ordering, and coordination concerns, but it does NOT need the final machine-readable execution-groups format.",
+    "- Verification approach should include concrete commands or focused validation methods whenever the repo suggests them.",
+    "- Open questions should be empty of fluff; only include unresolved decisions that could materially affect planning.",
+    "",
+    "If the change is RuneContext-backed, treat RuneContext documents as canonical and describe how this durable plan summarizes or stages that work without competing with canonical docs.",
+  ].filter(Boolean).join("\n")
+}
+
+export async function runChangePlanWorkflow(
+  options: ChangePlanWorkflowOptions,
+): Promise<ChangePlanWorkflowResult> {
+  const cwd = options.cwd
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+  const { resolveRuntimeStateDir } = await import("pi-zflow-core/runtime-paths")
+
+  const sourceMode = options.sourceMode ?? "adhoc"
+  const planDocPath = await resolveDurablePlanDocPath(options.changeId, await resolveDurablePlanRepoRoot({ cwd }))
+  const existingPlan = await readDurablePlanDoc(options.changeId, { cwd })
+  const existingPlanBody = existingPlan
+    ? normalizeDurablePlanDocBody(existingPlan.body)
+    : ""
+
+  options.onProgress?.("🗺️ Building repository map for change planning...", "info")
+  const repoMapResult = await buildRepoMap(cwd)
+  options.onProgress?.("🔎 Building reconnaissance context for change planning...", "info")
+  const reconResult = await buildReconnaissance(
+    cwd,
+    options.explicitReference ? options.changeSeed : undefined,
+  )
+
+  const registry = getZflowRegistry()
+  const zflowDispatch = registry.optional<DispatchService>(DISPATCH_SERVICE_CAPABILITY)
+  if (!zflowDispatch || typeof zflowDispatch.runAgent !== "function") {
+    throw new Error(
+      "No dispatch service available for /zflow-change-plan. Ensure pi-zflow-subagents-bridge is installed and active.",
+    )
+  }
+
+  const runtimeStateDir = resolveRuntimeStateDir(cwd)
+  const outputDir = path.join(runtimeStateDir, "change-plan-drafts")
+  await fs.mkdir(outputDir, { recursive: true })
+  const draftOutputPath = path.join(outputDir, `${options.changeId}-plan-draft.md`)
+
+  const dispatchResult = await zflowDispatch.runAgent({
+    agent: "planner",
+    cwd,
+    model: await resolveProfileModelForAgent("zflow.planner-frontier"),
+    output: draftOutputPath,
+    outputMode: "inline",
+    task: buildChangePlanDraftTaskPrompt({
+      changeId: options.changeId,
+      changeDescription: options.changeDescription,
+      sourceMode,
+      planDocPath,
+      repoMapPath: repoMapResult.path,
+      reconnaissancePath: reconResult.path,
+      existingPlanBody: existingPlanBody || undefined,
+    }),
+    onUpdate: (progress) => {
+      options.onAgentProgress?.(progress)
+      options.onProgress?.(formatChangePlanAgentProgress(progress), "info")
+    },
+  })
+
+  if (!dispatchResult.ok) {
+    throw new Error(dispatchResult.error ?? "Change-plan drafting agent failed without an error message")
+  }
+
+  let draftedBody = dispatchResult.rawOutput?.trim() ?? ""
+  if (!draftedBody && dispatchResult.outputPath && await fileExists(dispatchResult.outputPath)) {
+    draftedBody = await fs.readFile(dispatchResult.outputPath, "utf-8")
+  }
+  draftedBody = normalizeDurablePlanDocBody(draftedBody)
+  const bodyErrors = validateDurablePlanDocBody(draftedBody)
+  if (bodyErrors.length > 0) {
+    throw new Error(`Drafted durable plan body did not meet the contract: ${bodyErrors.join("; ")}`)
+  }
+
+  const publishedVersions = await listPublishedDurablePlanVersions(options.changeId, { cwd })
+  const existingPlanUpdated = Boolean(existingPlan)
+  await writeDurablePlanDoc(
+    options.changeId,
+    {
+      changeId: options.changeId,
+      status: existingPlan?.frontmatter.status ?? "draft",
+      sourceMode: existingPlan?.frontmatter.sourceMode ?? sourceMode,
+      currentVersion: existingPlan?.frontmatter.currentVersion ?? null,
+      approvedVersion: existingPlan?.frontmatter.approvedVersion ?? null,
+    },
+    {
+      cwd,
+      bodyContent: draftedBody,
+      publishedVersions,
+    },
+  )
+
+  return {
+    changeId: options.changeId,
+    planDocPath,
+    repoMapPath: repoMapResult.path,
+    reconnaissancePath: reconResult.path,
+    draftOutputPath: dispatchResult.outputPath ?? draftOutputPath,
+    dispatchService: zflowDispatch.name,
+    existingPlanUpdated,
+  }
+}
+
 /**
  * Detect transport-level dispatch errors that are safe to retry.
  * Defined locally to avoid circular dependency with index.ts.
@@ -6150,6 +6353,11 @@ export async function runChangePrepareWorkflow(
   if (durableDraftPlan?.validationErrors.length) {
     throw new Error(
       `Durable draft plan frontmatter is invalid for "${changeId}": ${durableDraftPlan.validationErrors.join("; ")}`,
+    )
+  }
+  if (durableDraftPlan?.bodyValidationErrors.length) {
+    throw new Error(
+      `Durable draft plan body is incomplete for "${changeId}": ${durableDraftPlan.bodyValidationErrors.join("; ")}`,
     )
   }
   const effectivePrepareNotes = buildPrepareNotesFromDurablePlanDoc(durableDraftPlan, options.prepareNotes)
@@ -8893,6 +9101,7 @@ export interface DurablePlanDoc {
   body: string
   path: string
   validationErrors: string[]
+  bodyValidationErrors: string[]
 }
 
 const DURABLE_PLAN_DOC_SCHEMA_VERSION = 1
@@ -8927,6 +9136,32 @@ const DURABLE_PLAN_DOC_CORE_FRONTMATTER_KEYS = new Set([
 const MANAGED_OPEN_PREFIX = "<!-- zflow-managed:"
 const MANAGED_CLOSE = "<!-- /zflow-managed -->"
 const MANAGED_SECTION_RE = /<!--\s*zflow-managed:\s*([^\n]*?)\s*-->([\s\S]*?)<!--\s*\/zflow-managed\s*-->/g
+const DURABLE_PLAN_DOC_REQUIRED_HEADINGS = [
+  "Summary",
+  "Goals / Success Criteria",
+  "Scope In",
+  "Scope Out",
+  "Relevant codebase areas",
+  "Constraints",
+  "Decisions",
+  "Risks / Unknowns",
+  "Proposed execution outline",
+  "Verification approach",
+  "Open questions",
+] as const
+const DURABLE_PLAN_DOC_PLACEHOLDER_LINES = [
+  "_Describe the change, why it is needed, and what it accomplishes._",
+  "_List the desired outcomes, user-visible success criteria, and technical completion checks._",
+  "_What is included in this change._",
+  "_What is explicitly excluded._",
+  "_Files, modules, services, docs, and neighboring systems that should be inspected or are likely to change._",
+  "_Technical, architectural, or process constraints._",
+  "_Key decisions and trade-offs made during planning._",
+  "_Known risks, open questions, and dependencies._",
+  "_High-level execution approach, groups, and order._",
+  "_Concrete commands, focused tests, manual checks, and pass/fail expectations._",
+  "_Any remaining user decisions or unresolved assumptions that could materially change the plan._",
+] as const
 
 interface DurablePlanDocOptions {
   cwd?: string
@@ -9045,6 +9280,50 @@ function buildSerializedDurablePlanDocFrontmatter(
   }
 
   return serialized
+}
+
+export function normalizeDurablePlanDocBody(body: string): string {
+  let normalized = body.trim()
+  const fenced = normalized.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```$/i)
+  if (fenced) {
+    normalized = fenced[1]!.trim()
+  }
+
+  normalized = parsePlanDocFrontmatter(normalized).body.trim()
+  normalized = normalized.replace(/^#\s+Plan\s*\n+/i, "")
+  const freeContent = extractPlanDocSections(normalized).get("__free__")?.trim()
+  return freeContent?.trim() || normalized
+}
+
+export function validateDurablePlanDocBody(body: string): string[] {
+  const normalized = normalizeDurablePlanDocBody(body)
+  const errors: string[] = []
+
+  for (const heading of DURABLE_PLAN_DOC_REQUIRED_HEADINGS) {
+    const headingRe = new RegExp(`^##\\s+${heading.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\s*$`, "mi")
+    if (!headingRe.test(normalized)) {
+      errors.push(`missing \"## ${heading}\" section`)
+    }
+  }
+
+  for (const placeholder of DURABLE_PLAN_DOC_PLACEHOLDER_LINES) {
+    if (normalized.includes(placeholder)) {
+      errors.push(`contains scaffold placeholder text: ${placeholder}`)
+    }
+  }
+
+  const nonEmptyLines = normalized.split("\n").map((line) => line.trim()).filter(Boolean)
+  if (normalized.length < 400 || nonEmptyLines.length < 18) {
+    errors.push("plan body is too short; expected a decision-complete plan draft")
+  }
+
+  return errors
+}
+
+export function isPlaceholderDurablePlanDocBody(body: string): boolean {
+  return validateDurablePlanDocBody(body).some(
+    (error) => error.startsWith("contains scaffold placeholder text") || error.startsWith("missing \"##"),
+  )
 }
 
 function buildPlanDocHeaderSection(
@@ -9223,6 +9502,10 @@ export function scaffoldDurablePlanDocBody(changeId: string, draftNotes?: string
     "",
     "_Describe the change, why it is needed, and what it accomplishes._",
     "",
+    "## Goals / Success Criteria",
+    "",
+    "_List the desired outcomes, user-visible success criteria, and technical completion checks._",
+    "",
     "## Scope In",
     "",
     "_What is included in this change._",
@@ -9230,6 +9513,10 @@ export function scaffoldDurablePlanDocBody(changeId: string, draftNotes?: string
     "## Scope Out",
     "",
     "_What is explicitly excluded._",
+    "",
+    "## Relevant codebase areas",
+    "",
+    "_Files, modules, services, docs, and neighboring systems that should be inspected or are likely to change._",
     "",
     "## Constraints",
     "",
@@ -9246,6 +9533,14 @@ export function scaffoldDurablePlanDocBody(changeId: string, draftNotes?: string
     "## Proposed execution outline",
     "",
     "_High-level execution approach, groups, and order._",
+    "",
+    "## Verification approach",
+    "",
+    "_Concrete commands, focused tests, manual checks, and pass/fail expectations._",
+    "",
+    "## Open questions",
+    "",
+    "_Any remaining user decisions or unresolved assumptions that could materially change the plan._",
     "",
     buildPlanDocVersionIndexSection([]),
   ].join("\n"), draftNotes)
@@ -9331,6 +9626,7 @@ export async function writeDurablePlanDoc(
   options?: DurablePlanDocOptions & {
     publishedVersions?: string[]
     draftNotes?: string
+    bodyContent?: string
   },
 ): Promise<string> {
   const { default: fs } = await import("node:fs/promises")
@@ -9368,7 +9664,9 @@ export async function writeDurablePlanDoc(
     const versionIndexSection = options?.publishedVersions
       ? buildPlanDocVersionIndexSection(options.publishedVersions)
       : (sections.get("version-index") ?? buildPlanDocVersionIndexSection([]))
-    const freeContent = sections.get("__free__") ?? ""
+    const freeContent = options?.bodyContent !== undefined
+      ? normalizeDurablePlanDocBody(options.bodyContent)
+      : (sections.get("__free__") ?? "")
     const newBody = [headerSection, freeContent, versionIndexSection]
       .filter((part) => part.trim())
       .join("\n\n")
@@ -9392,12 +9690,14 @@ export async function writeDurablePlanDoc(
 
   const normalizedFrontmatter = normalizeDurablePlanDocFrontmatter(changeId, serializedFrontmatter)
   const publishedVersions = options?.publishedVersions ?? []
-  const body = scaffoldDurablePlanDocBody(changeId, options?.draftNotes)
-    .replace(buildPlanDocVersionIndexSection([]), buildPlanDocVersionIndexSection(publishedVersions))
-    .replace(
-      buildPlanDocHeaderSection(changeId, null),
-      buildPlanDocHeaderSection(changeId, normalizedFrontmatter.currentVersion, normalizedFrontmatter.sourceMode),
-    )
+  const baseBody = options?.bodyContent !== undefined
+    ? normalizeDurablePlanDocBody(options.bodyContent)
+    : (extractPlanDocSections(scaffoldDurablePlanDocBody(changeId, options?.draftNotes)).get("__free__") ?? "")
+  const body = [
+    buildPlanDocHeaderSection(changeId, normalizedFrontmatter.currentVersion, normalizedFrontmatter.sourceMode),
+    baseBody,
+    buildPlanDocVersionIndexSection(publishedVersions),
+  ].filter((part) => part.trim()).join("\n\n")
 
   await fs.writeFile(planDocPath, serializePlanDoc(serializedFrontmatter, body), "utf-8")
   return planDocPath
@@ -9427,8 +9727,9 @@ export async function readDurablePlanDoc(
     const content = await fs.readFile(planDocPath, "utf-8")
     const { frontmatter: rawFM, body } = parsePlanDocFrontmatter(content)
     const validationErrors = validateDurablePlanDocFrontmatter(rawFM, changeId)
+    const bodyValidationErrors = validateDurablePlanDocBody(body)
     const frontmatter = normalizeDurablePlanDocFrontmatter(changeId, rawFM)
-    return { frontmatter, body, path: planDocPath, validationErrors }
+    return { frontmatter, body, path: planDocPath, validationErrors, bodyValidationErrors }
   } catch {
     return null
   }
@@ -9457,6 +9758,9 @@ export function buildPrepareNotesFromDurablePlanDoc(
       : []),
     draftPlan.validationErrors.length > 0
       ? `Durable draft frontmatter validation errors: ${draftPlan.validationErrors.join("; ")}`
+      : "",
+    draftPlan.bodyValidationErrors.length > 0
+      ? `Durable draft body validation errors: ${draftPlan.bodyValidationErrors.join("; ")}`
       : "",
     "Durable draft plan.md body:",
     draftPlan.body,

@@ -4,7 +4,7 @@
 
 Use this prompt helper to brainstorm or manually refine a change request before you commit it to the formal workflow.
 
-This is a **drafting helper**, not the canonical automation flow. The formal workflow now uses `/zflow-change-plan` to create or update `docs/zflow-changes/<changeId>/plan.md`, then `/zflow-change-prepare` to generate versioned plan artifacts. Use this helper for early-stage exploration, brainstorming, or when working in an environment where the extension is not installed.
+This is a **drafting helper**, not the canonical automation flow. The formal workflow now uses `/zflow-change-plan` to draft a detailed `docs/zflow-changes/<changeId>/plan.md`, then `/zflow-change-prepare` to generate versioned plan artifacts from that reviewed plan. Use this helper for early-stage exploration, brainstorming, or when working in an environment where the extension is not installed.
 
 ## Usage
 
@@ -32,6 +32,6 @@ A well-formed change plan should include:
 
 ## Related
 
-- Formal workflow: `/zflow-change-plan <description|change-id|path> [-- notes]` then `/zflow-change-prepare <change-path>`
+- Formal workflow: `/zflow-change-plan <description|change-id|path> [-- notes]` then `/zflow-change-prepare <change-id|change-folder|plan-file>`
 - Capture decisions: `/zflow-draft-change-capture-decisions`
 - Standards template: `/zflow-standards-template`

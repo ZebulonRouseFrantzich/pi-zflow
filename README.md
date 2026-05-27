@@ -366,11 +366,12 @@ The change workflow now has a durable plan entrypoint plus versioned prepared do
 
 - **Durable plan entrypoint** — `/zflow-change-plan` creates or updates
   `docs/zflow-changes/<change-id>/plan.md`. It accepts a freeform change
-  description, an explicit change id, or a change path, then derives the
-  durable change id when needed. This single file is intended for human review
-  and refinement before full change preparation.
+  description, an explicit change id, or a change path, prompts for a
+  description when needed, explores the repository, and drafts a detailed
+  single `plan.md` for human review before full change preparation.
 
-- **Durable change documents** — `/zflow-change-prepare` reads the draft
+- **Durable change documents** — `/zflow-change-prepare` accepts a change id,
+  change folder, or direct `plan.md` path. It reads the reviewed draft
   `plan.md` when present, then publishes the five canonical plan artifacts
   (`design.md`, `execution-groups.md`, `standards.md`, `verification.md`, `implementation-tasks.md`)
   under `docs/zflow-changes/<change-id>/<version>/`. These files are intended

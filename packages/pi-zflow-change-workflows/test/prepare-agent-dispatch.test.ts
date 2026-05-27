@@ -28,6 +28,54 @@ import { resolvePlanStatePath, resolvePlanVersionDir, resolveRepoMapPath, resolv
 import { getZflowRegistry, resetZflowRegistry } from "pi-zflow-core/registry"
 import { DISPATCH_SERVICE_CAPABILITY } from "pi-zflow-core/dispatch-service"
 
+const COMPLETE_PLAN_BODY = [
+  "## Summary",
+  "",
+  "Use a durable plan entrypoint and preserve immutable version directories for prepared artifacts.",
+  "",
+  "## Goals / Success Criteria",
+  "",
+  "- Prepare consumes plan.md context.",
+  "- Versioned docs remain immutable.",
+  "",
+  "## Scope In",
+  "",
+  "- Durable plan.md loading during prepare.",
+  "",
+  "## Scope Out",
+  "",
+  "- Source implementation for the target business change.",
+  "",
+  "## Relevant codebase areas",
+  "",
+  "- packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts",
+  "- docs/zflow-changes/durable-plan-dispatch/plan.md",
+  "",
+  "## Constraints",
+  "",
+  "- Keep .zflow runtime-only.",
+  "",
+  "## Decisions",
+  "",
+  "- plan.md is the durable intake doc.",
+  "",
+  "## Risks / Unknowns",
+  "",
+  "- Planner dispatch must receive durable plan context explicitly.",
+  "",
+  "## Proposed execution outline",
+  "",
+  "1. Read durable plan.md.\n2. Feed it into planner dispatch.\n3. Generate versioned docs.",
+  "",
+  "## Verification approach",
+  "",
+  "- Run targeted prepare-agent dispatch tests.",
+  "",
+  "## Open questions",
+  "",
+  "- None.",
+].join("\n")
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
@@ -478,7 +526,7 @@ describe("runChangePrepareWorkflow — agent dispatch wiring", () => {
         changeId: "durable-plan-dispatch",
       }, {
         repoRoot,
-        draftNotes: "Use the durable plan entrypoint and preserve immutable version directories.",
+        bodyContent: COMPLETE_PLAN_BODY,
       })
 
       const result = await runChangePrepareWorkflow({
@@ -490,7 +538,7 @@ describe("runChangePrepareWorkflow — agent dispatch wiring", () => {
       const planState = JSON.parse(await fs.readFile(result.planStatePath, "utf-8"))
       assert.strictEqual(planState.runtimeMetadata.durablePlanDocPath, durablePlanPath)
       assert.match(receivedInput.task, /Durable draft plan.md path:/)
-      assert.match(receivedInput.task, /Use the durable plan entrypoint and preserve immutable version directories\./)
+      assert.match(receivedInput.task, /Use a durable plan entrypoint and preserve immutable version directories for prepared artifacts\./)
       assert.match(receivedInput.task, /manual note/)
     } finally {
       await removeTestRepo(repoRoot)
