@@ -74,7 +74,12 @@ import { writeDeviationSummary, readDeviationReports } from "./deviations.js"
 import { getCurrentBranch } from "./git-preflight.js"
 import { getZflowRegistry } from "pi-zflow-core/registry"
 import { assertSafeChangeId } from "pi-zflow-core/ids"
-import { DISPATCH_SERVICE_CAPABILITY, type DispatchService, type AgentDispatchProgress } from "pi-zflow-core/dispatch-service"
+import {
+  DISPATCH_SERVICE_CAPABILITY,
+  type DispatchService,
+  type AgentDispatchProgress,
+  type TaskWorktreeStrategy,
+} from "pi-zflow-core/dispatch-service"
 import {
   isRepoMapFresh,
   writeRepoMapCache,
@@ -112,10 +117,10 @@ import type { VerificationResult, FixLoopResult, FixLoopOptions } from "./verifi
  * - **Scoped verification:** optional scoped verification text
  * ```
  */
-export function parseExecutionGroupsMd(mdContent: string): import("./ownership-validator.js").ExecutionGroup[] {
-  const groups: import("./ownership-validator.js").ExecutionGroup[] = []
+export function parseExecutionGroupsMd(mdContent: string): DispatchExecutionGroup[] {
+  const groups: DispatchExecutionGroup[] = []
   const lines = mdContent.split("\n")
-  let currentGroup: Partial<import("./ownership-validator.js").ExecutionGroup> | null = null
+  let currentGroup: Partial<DispatchExecutionGroup> | null = null
   let collectingFiles = false
   let collectingDependencies = false
   let collectingVerification = false
@@ -209,6 +214,11 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
       parallelizable: currentGroup.parallelizable ?? true,
       taskPrompt: currentGroup.taskPrompt ?? "",
       scopedVerification: currentGroup.scopedVerification,
+      executionMode: currentGroup.executionMode ?? "isolated",
+      workspaceConcurrency: currentGroup.workspaceConcurrency ?? "serialized",
+      baseStrategy: currentGroup.baseStrategy ?? "head",
+      workspaceId: currentGroup.workspaceId,
+      executionRationale: currentGroup.executionRationale,
     })
   }
 
@@ -228,6 +238,9 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
         agent: "zflow.implement-routine",
         taskPrompt: groupMatch[2],
         parallelizable: true,
+        executionMode: "isolated",
+        workspaceConcurrency: "serialized",
+        baseStrategy: "head",
       }
       collectingFiles = false
       collectingDependencies = false
@@ -381,6 +394,49 @@ export function parseExecutionGroupsMd(mdContent: string): import("./ownership-v
     if (parallelMatch) {
       currentGroup.parallelizable = parallelMatch[1].trim().toLowerCase() === "yes" ||
         parallelMatch[1].trim().toLowerCase() === "true"
+      continue
+    }
+
+    const executionModeMatch = line.match(/-\s+\*\*Execution\s+mode:\*\*\s+(.+)/i) ??
+      line.match(/^\*\*Execution\s+mode:\*\*\s+(.+)/i) ??
+      line.match(/^Execution\s+mode:\s+(.+)/i)
+    if (executionModeMatch) {
+      const mode = executionModeMatch[1].trim().toLowerCase()
+      currentGroup.executionMode = mode === "shared-staging" ? "shared-staging" : "isolated"
+      continue
+    }
+
+    const workspaceIdMatch = line.match(/-\s+\*\*Workspace\s+ID:\*\*\s+(.+)/i) ??
+      line.match(/^\*\*Workspace\s+ID:\*\*\s+(.+)/i) ??
+      line.match(/^Workspace\s+ID:\s+(.+)/i)
+    if (workspaceIdMatch) {
+      currentGroup.workspaceId = workspaceIdMatch[1].trim().replace(/^`|`$/g, "").trim()
+      continue
+    }
+
+    const workspaceConcurrencyMatch = line.match(/-\s+\*\*Workspace\s+concurrency:\*\*\s+(.+)/i) ??
+      line.match(/^\*\*Workspace\s+concurrency:\*\*\s+(.+)/i) ??
+      line.match(/^Workspace\s+concurrency:\s+(.+)/i)
+    if (workspaceConcurrencyMatch) {
+      const concurrency = workspaceConcurrencyMatch[1].trim().toLowerCase()
+      currentGroup.workspaceConcurrency = concurrency === "concurrent" ? "concurrent" : "serialized"
+      continue
+    }
+
+    const baseStrategyMatch = line.match(/-\s+\*\*Base\s+strategy:\*\*\s+(.+)/i) ??
+      line.match(/^\*\*Base\s+strategy:\*\*\s+(.+)/i) ??
+      line.match(/^Base\s+strategy:\s+(.+)/i)
+    if (baseStrategyMatch) {
+      const baseStrategy = baseStrategyMatch[1].trim().toLowerCase()
+      currentGroup.baseStrategy = baseStrategy === "dependency-lineage" ? "dependency-lineage" : "head"
+      continue
+    }
+
+    const executionRationaleMatch = line.match(/-\s+\*\*Execution\s+rationale:\*\*\s+(.+)/i) ??
+      line.match(/^\*\*Execution\s+rationale:\*\*\s+(.+)/i) ??
+      line.match(/^Execution\s+rationale:\s+(.+)/i)
+    if (executionRationaleMatch) {
+      currentGroup.executionRationale = executionRationaleMatch[1].trim()
       continue
     }
   }
@@ -999,6 +1055,10 @@ export interface WorktreeGroupTask {
   task: string
   /** Files this group is expected to write (for preflight overlap check). */
   claimedFiles: string[]
+  /** Plan dependencies for this task/group. */
+  dependencies: string[]
+  /** Optional richer worktree execution strategy for this task. */
+  worktreeStrategy?: TaskWorktreeStrategy
   /** Optional scoped verification command from the plan. */
   scopedVerification?: string
   /** Output path for the worktree result manifest (relative to run dir). */
@@ -1029,6 +1089,12 @@ export interface DispatchExecutionGroup {
   dependencies: string[]
   taskPrompt: string
   scopedVerification?: string
+  parallelizable?: boolean
+  executionMode?: "isolated" | "shared-staging"
+  workspaceId?: string
+  workspaceConcurrency?: "serialized" | "concurrent"
+  baseStrategy?: "head" | "dependency-lineage"
+  executionRationale?: string
   /** When set, this is a coalesced group that merges multiple original groups. */
   coalescedFrom?: string[]
 }
@@ -1089,6 +1155,14 @@ export function coalesceConnectedGroups(
     for (let j = i + 1; j < groups.length; j++) {
       const a = groups[i]!
       const b = groups[j]!
+      const aExplicitShared = a.executionMode === "shared-staging"
+      const bExplicitShared = b.executionMode === "shared-staging"
+      if (aExplicitShared || bExplicitShared) {
+        // Planner-declared shared workspaces are first-class orchestration
+        // units. Do not implicitly coalesce them here; the dispatch layer
+        // will honor their shared workspace strategy explicitly.
+        continue
+      }
       const shareFiles = a.files.some(f => b.files.includes(f))
       const independent = !(transitiveDeps.get(a.id)?.has(b.id) || transitiveDeps.get(b.id)?.has(a.id))
 
@@ -1196,6 +1270,9 @@ export function coalesceConnectedGroups(
       dependencies: mergedDeps,
       taskPrompt: mergedPrompt,
       scopedVerification: mergedVerification,
+      executionMode: "isolated",
+      workspaceConcurrency: "serialized",
+      baseStrategy: "head",
       coalescedFrom: [...component],
     })
   }
@@ -1285,7 +1362,7 @@ export function buildWorkerTask(
     lines.push(
       `# Task: ${group.id}`,
       "",
-      `Execute the approved plan for group **${group.id}** in this isolated worktree.`,
+      `Execute the approved plan for group **${group.id}** using the configured worktree orchestration for this group.`,
       "",
     )
   }
@@ -1304,6 +1381,34 @@ export function buildWorkerTask(
     `## Scope`,
     scopeDesc,
     `- Agent: ${group.agent}`,
+  )
+
+  if (group.executionMode === "shared-staging") {
+    lines.push(
+      `- Execution mode: shared-staging`,
+      `- Workspace ID: ${group.workspaceId ?? "(missing)"}`,
+      `- Workspace concurrency: ${group.workspaceConcurrency ?? "serialized"}`,
+    )
+    if (group.executionRationale) {
+      lines.push(`- Execution rationale: ${group.executionRationale}`)
+    }
+    lines.push(
+      "",
+      "This task runs in a planner-declared shared staging workspace.",
+      "Preserve sibling workspace changes. Do not revert or overwrite unrelated",
+      "changes already present in the shared workspace.",
+    )
+  }
+
+  if (group.baseStrategy === "dependency-lineage") {
+    lines.push(
+      `- Base strategy: dependency-lineage`,
+      "- This task may start from a dependency lineage ref that already contains",
+      "  approved dependency changes not yet applied back to the primary worktree.",
+    )
+  }
+
+  lines.push(
     "",
     `## Rules`,
     `1. ONLY modify files listed in your scope above. Do NOT touch files outside this list.`,
@@ -2729,11 +2834,19 @@ export function buildWorktreeDispatchPlan(
   config: WorktreeDispatchConfig,
   planArtifactPaths?: Record<string, string>,
 ): WorktreeGroupTask[] {
-  return groups.map((group, index) => ({
+  return groups.map((group) => ({
     groupId: group.id,
     agent: group.agent,
     task: buildWorkerTask(group, config, planArtifactPaths),
     claimedFiles: group.files,
+    dependencies: group.dependencies,
+    worktreeStrategy: {
+      mode: group.executionMode ?? "isolated",
+      workspaceId: group.workspaceId,
+      workspaceConcurrency: group.workspaceConcurrency ?? "serialized",
+      baseStrategy: group.baseStrategy ?? "head",
+      executionRationale: group.executionRationale,
+    },
     scopedVerification: group.scopedVerification,
     outputRelativePath: `worktree-results/${group.id}-result.md`,
   }))
@@ -3112,9 +3225,16 @@ export async function prepareWorktreeImplementationRun(
     dependencies: g.dependencies,
     taskPrompt: g.taskPrompt,
     scopedVerification: g.scopedVerification,
+    parallelizable: g.parallelizable,
+    executionMode: (g as DispatchExecutionGroup).executionMode ?? "isolated",
+    workspaceId: (g as DispatchExecutionGroup).workspaceId,
+    workspaceConcurrency: (g as DispatchExecutionGroup).workspaceConcurrency ?? "serialized",
+    baseStrategy: (g as DispatchExecutionGroup).baseStrategy ?? "head",
+    executionRationale: (g as DispatchExecutionGroup).executionRationale,
   }))
-  // Coalesce groups that share files so overlapping file edits happen in one
-  // worktree instead of producing incompatible patches from the same base.
+  // Coalesce only implicitly-coupled isolated groups. Planner-declared shared
+  // workspaces remain first-class orchestration units and are handled by the
+  // dispatch layer via explicit worktreeStrategy metadata.
   const coalescedGroups = coalesceConnectedGroups(dispatchGroups)
   const tasks = buildWorktreeDispatchPlan(coalescedGroups, dispatchConfig, planArtifactPaths)
   const planGroups = coalescedGroups.map((g) => ({
@@ -3126,7 +3246,37 @@ export async function prepareWorktreeImplementationRun(
     scopedVerification: g.scopedVerification,
     agent: g.agent,
     coalescedFrom: g.coalescedFrom,
+    executionMode: g.executionMode,
+    workspaceId: g.workspaceId,
+    workspaceConcurrency: g.workspaceConcurrency,
+    baseStrategy: g.baseStrategy,
+    executionRationale: g.executionRationale,
   })) as unknown as ExecutionGroup[]
+
+  const workspaceClusters = coalescedGroups
+    .filter((group) => group.executionMode === "shared-staging" && group.workspaceId)
+    .reduce<Array<RunJson["workspaceClusters"][number]>>((clusters, group) => {
+      const existing = clusters.find((cluster) => cluster.workspaceId === group.workspaceId)
+      if (existing) {
+        existing.groupIds.push(group.id)
+        existing.updatedAt = new Date().toISOString()
+        return clusters
+      }
+      clusters.push({
+        workspaceId: group.workspaceId!,
+        mode: "shared-staging",
+        workspaceConcurrency: group.workspaceConcurrency ?? "serialized",
+        groupIds: [group.id],
+        status: "planned",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      })
+      return clusters
+    }, [])
+
+  if (workspaceClusters.length > 0) {
+    run = await updateRun(runId, { workspaceClusters }, cwd)
+  }
 
   return {
     runId,
@@ -5527,6 +5677,19 @@ export async function runPrepareAgentsIfAvailable(
         "- `**Agent:**` — required (e.g. `zflow.implement-routine` or `zflow.implement-hard`).",
         "- `**Dependencies:**` — required (group IDs or `none`).",
         "- `**Parallelizable:**` — required (`true` or `false`).",
+        "",
+        "Optional advanced execution fields (default to simple isolated execution unless justified):",
+        "- `**Execution mode:** isolated | shared-staging`",
+        "- `**Workspace ID:** <kebab-id>` (required when execution mode is `shared-staging`)",
+        "- `**Workspace concurrency:** serialized | concurrent` (default `serialized`)",
+        "- `**Base strategy:** head | dependency-lineage` (default `head`)",
+        "- `**Execution rationale:** <concrete reason>` (required for any non-default execution mode or base strategy)",
+        "",
+        "Use advanced execution fields sparingly:",
+        "- Default to isolated worktrees.",
+        "- Use shared-staging only when two or more groups genuinely need shared filesystem/type feedback.",
+        "- Use `Workspace concurrency: concurrent` only when the backend explicitly supports it; otherwise prefer `serialized`.",
+        "- Use `Base strategy: dependency-lineage` only when downstream groups truly need their dependencies' pending changes present before final apply-back.",
         "",
         "### CRITICAL: File ownership and cross-group dependencies",
         "",

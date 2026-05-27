@@ -364,8 +364,8 @@ Runtime state lives outside the working tree. See `docs/foundation-versions.md` 
 
 `/zflow-change-prepare` produces two categories of output:
 
-- **Durable change documents** — the four canonical plan artifacts
-  (`design.md`, `execution-groups.md`, `standards.md`, `verification.md`)
+- **Durable change documents** — the five canonical plan artifacts
+  (`design.md`, `execution-groups.md`, `standards.md`, `verification.md`, `implementation-tasks.md`)
   are copied into the working tree after validation and review, under
   `docs/zflow-changes/<change-id>/<version>/`. These files are intended
   for review, commit, and PR discussion — they survive session restarts
@@ -457,7 +457,7 @@ planner agents — they cannot use `edit`, `write`, or mutation-capable `bash`.
 | ------------- | ------ | ----------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | `changeId`    | string | `assertSafeChangeId()` — kebab-case, alphanumeric + hyphens only  | Uniquely identifies the change (e.g. `add-auth-flow` or `fix-cache-race`) |
 | `planVersion` | string | Must match `/^v\d+$/` (e.g. `v1`, `v2`)                           | Plans start at `v1`; replanning increments                                |
-| `artifact`    | string | One of: `design`, `execution-groups`, `standards`, `verification` | The four mandatory plan artifact types                                    |
+| `artifact`    | string | One of: `design`, `execution-groups`, `standards`, `verification`, `implementation-tasks` | The five mandatory plan artifact types                                    |
 | `content`     | string | Markdown body (no additional validation beyond size limits)       | Full markdown content of the artifact                                     |
 
 ### Destination path
@@ -477,7 +477,7 @@ Example:
 | Rule                        | Enforcement                                                                                                                                                                                          |
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Path confinement**        | The destination must normalise under `<runtime-state-dir>/plans/{changeId}/{planVersion}/`. Path separators in `changeId`, `..` traversal, and arbitrary directory names in `artifact` are rejected. |
-| **Artifact type allowlist** | Only the four approved artifact kinds (`design`, `execution-groups`, `standards`, `verification`) are accepted. Any other value is rejected.                                                         |
+| **Artifact type allowlist** | Only the five approved artifact kinds (`design`, `execution-groups`, `standards`, `verification`, `implementation-tasks`) are accepted. Any other value is rejected.                                 |
 | **Overwrite policy**        | Only approved plan artifacts may be overwritten. Non-artifact files under `<runtime-state-dir>/plans/` are protected.                                                                                |
 | **Atomic write**            | Content is written to a `.tmp` file first, then renamed to the target path. Partial writes are never visible.                                                                                        |
 | **Metadata recording**      | After a successful write, the artifact hash (SHA-256) and mtime are recorded in the plan's runtime metadata (`plan-state.json`).                                                                     |
@@ -490,7 +490,7 @@ function writePlanArtifact({ changeId, planVersion, artifact, content }) {
   assertSafeChangeId(changeId); // kebab-case only
   assert(/^v\d+$/.test(planVersion)); // v1, v2, ...
   assert(
-    ["design", "execution-groups", "standards", "verification"].includes(
+    ["design", "execution-groups", "standards", "verification", "implementation-tasks"].includes(
       artifact,
     ),
   );
@@ -513,6 +513,28 @@ function writePlanArtifact({ changeId, planVersion, artifact, content }) {
   mode is active, by `pi.setActiveTools()`.
 - Implementers must never write to plan artifact paths. This is enforced by
   the path guard (`path-guard.ts`) with `canWrite()` intent distinction.
+
+### `execution-groups.md` advanced execution fields
+
+`execution-groups.md` supports explicit, planner-authored execution strategy
+metadata for non-default orchestration cases. The safe defaults are:
+
+- `Execution mode: isolated`
+- `Workspace concurrency: serialized`
+- `Base strategy: head`
+
+Advanced fields are optional and should be used sparingly:
+
+- `Execution mode: isolated | shared-staging`
+- `Workspace ID: <id>` — required when using `shared-staging`
+- `Workspace concurrency: serialized | concurrent`
+- `Base strategy: head | dependency-lineage`
+- `Execution rationale: <reason>` — required for any non-default strategy
+
+The current zflow backend supports isolated worktrees, shared serialized staging,
+and dependency-lineage/base-ref worktrees. `shared-staging` with `concurrent`
+workspace execution is parsed and validated, but remains capability-gated and
+fails fast unless the active backend explicitly supports it.
 
 ## Worktree setup hooks
 

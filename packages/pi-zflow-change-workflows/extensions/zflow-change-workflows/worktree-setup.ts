@@ -26,6 +26,7 @@ import {
   type WorktreeSetupHookContext,
   type WorktreeSetupHookResult,
 } from "pi-zflow-core/worktree-setup-hook"
+import type { DispatchWorktreeSetupHook } from "pi-zflow-core/dispatch-service"
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -125,6 +126,68 @@ export async function getRepoWorktreeSetupConfig(
   }
 
   return null
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch-facing resolution helpers
+// ---------------------------------------------------------------------------
+
+export interface DispatchWorktreeSetupResolution {
+  ok: boolean
+  required: boolean
+  hook?: DispatchWorktreeSetupHook
+  message?: string
+}
+
+/**
+ * Resolve the repo's worktree setup requirements into a dispatch-layer shape.
+ *
+ * This is the preflight helper used by the real worktree dispatch path:
+ * - repos that do not need setup return `{ ok: true, required: false }`
+ * - repos that need setup but have no config return `{ ok: false, required: true, ... }`
+ * - repos with a valid hook return `{ ok: true, required: true, hook: ... }`
+ */
+export async function resolveDispatchWorktreeSetup(
+  repoRoot: string,
+): Promise<DispatchWorktreeSetupResolution> {
+  const needsSetup = await repoNeedsWorktreeSetup(repoRoot)
+  if (!needsSetup) {
+    return { ok: true, required: false }
+  }
+
+  const hookConfig = await getRepoWorktreeSetupConfig(repoRoot)
+  if (!hookConfig) {
+    const templatesDir = path.join(
+      path.dirname(fileURLToPath(import.meta.resolve("pi-zflow-change-workflows/package.json"))),
+      "templates", "worktree-setup-hooks",
+    )
+
+    return {
+      ok: false,
+      required: true,
+      message: [
+        "worktreeSetupHook required but not configured.",
+        "",
+        `Repo: ${repoRoot}`,
+        "This repo appears to require setup inside isolated worktrees.",
+        "Configure a repo-local hook before dispatching workers.",
+        "",
+        `Templates: ${templatesDir}`,
+        `Example config: { \"worktreeSetupHook\": { \"script\": \".pi/zflow/worktree-setup-hook.sh\" } }`,
+      ].join("\n"),
+    }
+  }
+
+  return {
+    ok: true,
+    required: true,
+    hook: {
+      script: hookConfig.script,
+      runtime: hookConfig.runtime,
+      timeoutMs: hookConfig.timeoutMs,
+      description: hookConfig.description,
+    },
+  }
 }
 
 // ---------------------------------------------------------------------------

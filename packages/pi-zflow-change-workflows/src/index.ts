@@ -194,10 +194,12 @@ export type {
 export {
   repoNeedsWorktreeSetup,
   getRepoWorktreeSetupConfig,
+  resolveDispatchWorktreeSetup,
   assertWorktreeSetupReady,
 } from "../extensions/zflow-change-workflows/worktree-setup.js"
 
 export type {
+  DispatchWorktreeSetupResolution,
   WorktreeSetupResult,
 } from "../extensions/zflow-change-workflows/worktree-setup.js"
 

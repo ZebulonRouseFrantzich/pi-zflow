@@ -26,6 +26,12 @@ export { PI_ZFLOW_SUBAGENTS_BRIDGE_VERSION } from "pi-zflow-core"
 
 export type {
   DispatchService,
+  DispatchCapabilities,
+  DispatchWorktreeSetupHook,
+  TaskWorktreeStrategy,
+  WorktreeExecutionMode,
+  WorkspaceConcurrencyMode,
+  WorktreeBaseStrategy,
   AgentDispatchInput,
   AgentDispatchResult,
   ParallelTaskInput,
@@ -34,7 +40,7 @@ export type {
   ParallelDispatchResult,
 } from "pi-zflow-core/dispatch-service"
 
-export { DISPATCH_SERVICE_CAPABILITY } from "pi-zflow-core/dispatch-service"
+export { DISPATCH_SERVICE_CAPABILITY, LEGACY_DISPATCH_CAPABILITIES } from "pi-zflow-core/dispatch-service"
 
 // Help topic metadata for suite-level /zflow-help display
 export { ZFLOW_HELP_TOPICS, DISPATCH_HELP_TOPIC } from "./help.js"

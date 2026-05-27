@@ -231,6 +231,27 @@ describe("coalesceConnectedGroups", () => {
 
     assert.deepEqual(coalesced.map(g => g.id), ["group-1", "group-2", "group-3", "group-4"])
   })
+
+  test("does not implicitly coalesce planner-declared shared-staging groups", () => {
+    const groups = [
+      {
+        ...makeGroup("group-a", ["src/shared.ts"], [], "zflow.implement-routine", "Shared task A", "pnpm test -- a"),
+        executionMode: "shared-staging" as const,
+        workspaceId: "auth-cluster",
+        workspaceConcurrency: "serialized" as const,
+      },
+      {
+        ...makeGroup("group-b", ["src/shared.ts"], [], "zflow.implement-routine", "Shared task B", "pnpm test -- b"),
+        executionMode: "shared-staging" as const,
+        workspaceId: "auth-cluster",
+        workspaceConcurrency: "serialized" as const,
+      },
+    ]
+
+    const coalesced = coalesceConnectedGroups(groups)
+
+    assert.deepEqual(coalesced.map(g => g.id), ["group-a", "group-b"])
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -273,6 +294,25 @@ describe("buildWorktreeDispatchPlan", () => {
 
     assert.deepEqual(tasks[0].claimedFiles, ["src/a.ts", "src/b.ts"])
     assert.deepEqual(tasks[1].claimedFiles, ["src/c.ts"])
+  })
+
+  test("propagates dependencies and worktree strategy metadata", () => {
+    const groups = [{
+      ...makeGroup("group-1", ["src/a.ts"], ["group-0"], "zflow.implement-routine", "Shared staged task", "npm test"),
+      executionMode: "shared-staging" as const,
+      workspaceId: "auth-cluster",
+      workspaceConcurrency: "serialized" as const,
+      baseStrategy: "dependency-lineage" as const,
+      executionRationale: "needs shared type context",
+    }]
+    const config = makeConfig()
+    const tasks = buildWorktreeDispatchPlan(groups, config)
+
+    assert.deepEqual(tasks[0].dependencies, ["group-0"])
+    assert.equal(tasks[0].worktreeStrategy?.mode, "shared-staging")
+    assert.equal(tasks[0].worktreeStrategy?.workspaceId, "auth-cluster")
+    assert.equal(tasks[0].worktreeStrategy?.workspaceConcurrency, "serialized")
+    assert.equal(tasks[0].worktreeStrategy?.baseStrategy, "dependency-lineage")
   })
 
   test("each task has a scopedVerification when provided", () => {
@@ -355,6 +395,36 @@ describe("parseExecutionGroupsMd", () => {
     assert.deepStrictEqual(groups[0].dependencies, ["group-0"])
     assert.equal(groups[0].scopedVerification, "npm test -- src/auth/")
     assert.equal(groups[0].parallelizable, true)
+    assert.equal(groups[0].executionMode, "isolated")
+    assert.equal(groups[0].workspaceConcurrency, "serialized")
+    assert.equal(groups[0].baseStrategy, "head")
+  })
+
+  test("parses advanced execution strategy fields", () => {
+    const content = [
+      "## Group 2: Shared route + handler work",
+      "",
+      "- **Files:** src/routes.ts, src/handler.ts",
+      "- **Agent:** zflow.implement-hard",
+      "- **Dependencies:** group-1",
+      "- **Scoped verification:** npm test -- route-handler",
+      "- **Parallelizable:** false",
+      "- **Execution mode:** shared-staging",
+      "- **Workspace ID:** auth-route-cluster",
+      "- **Workspace concurrency:** concurrent",
+      "- **Base strategy:** dependency-lineage",
+      "- **Execution rationale:** backend route and frontend handler need shared type feedback before apply-back",
+      "",
+    ].join("\n")
+
+    const groups = parseExecutionGroupsMd(content)
+
+    assert.equal(groups.length, 1)
+    assert.equal(groups[0].executionMode, "shared-staging")
+    assert.equal(groups[0].workspaceId, "auth-route-cluster")
+    assert.equal(groups[0].workspaceConcurrency, "concurrent")
+    assert.equal(groups[0].baseStrategy, "dependency-lineage")
+    assert.match(groups[0].executionRationale ?? "", /shared type feedback/)
   })
 
   test("parses multiple groups", () => {
