@@ -480,6 +480,13 @@ interface AgentModelInfo {
   thinking?: string
 }
 
+function isUsableResolvedModel(model: string | null | undefined): model is string {
+  if (!model) return false
+  const normalized = model.trim().toLowerCase()
+  if (!normalized) return false
+  return normalized !== "placeholder" && !normalized.startsWith("placeholder:")
+}
+
 async function resolveProfileModelForAgent(agentName: string): Promise<string | undefined> {
   const info = await resolveAgentModelInfo(agentName)
   return info.model
@@ -491,17 +498,32 @@ async function resolveAgentModelInfo(agentName: string): Promise<AgentModelInfo>
       getResolvedAgentBinding?: (agentName: string) => Promise<{ resolvedModel?: string | null; lane?: string } | null>
       getResolvedLane?: (laneName: string) => Promise<{ thinking?: string } | null>
     }>("profiles")
-    if (!profileService) return {}
-    const binding = await profileService.getResolvedAgentBinding?.(agentName)
-    if (!binding) return {}
-    let thinking: string | undefined
-    if (binding.lane && profileService.getResolvedLane) {
-      const lane = await profileService.getResolvedLane(binding.lane)
-      if (lane) thinking = lane.thinking
+
+    const bindingFromRegistry = await profileService?.getResolvedAgentBinding?.(agentName)
+    const registryThinking = bindingFromRegistry?.lane && profileService?.getResolvedLane
+      ? (await profileService.getResolvedLane(bindingFromRegistry.lane))?.thinking
+      : undefined
+
+    if (bindingFromRegistry && isUsableResolvedModel(bindingFromRegistry.resolvedModel)) {
+      return {
+        model: bindingFromRegistry.resolvedModel,
+        thinking: registryThinking,
+      }
     }
+
+    // Fallback to the file-backed active profile cache API.
+    const { getResolvedAgentBinding, getResolvedLane } = await import("pi-zflow-profiles")
+    const binding = await getResolvedAgentBinding(agentName)
+    if (!binding || !isUsableResolvedModel(binding.resolvedModel)) {
+      return {
+        thinking: registryThinking,
+      }
+    }
+
+    const lane = binding.lane ? await getResolvedLane(binding.lane) : null
     return {
-      model: binding.resolvedModel ?? undefined,
-      thinking,
+      model: binding.resolvedModel,
+      thinking: lane?.thinking ?? registryThinking,
     }
   } catch {
     return {}
@@ -712,12 +734,21 @@ export async function runCodeReview(
           let output: ReviewerOutput
           let dispatchOk = true
           let dispatchError: string | undefined
+
+          if (!agentInfo.model) {
+            dispatchOk = false
+            dispatchError = `No usable resolved model found for reviewer agent "${agentName}". ` +
+              `The active zflow profile may be missing this lane or still unresolved.`
+            output = { findings: [], rawOutput: `dispatch error: ${dispatchError}` }
+            return { name, agentName, agentInfo, prompt, output, ok: dispatchOk, error: dispatchError }
+          }
+
           try {
             const raw = await dispatchService.runAgent({
               agent: agentName,
               task: prompt,
               cwd,
-              ...(agentInfo.model ? { model: agentInfo.model } : {}),
+              model: agentInfo.model,
               onUpdate: (progress) => {
                 if (!input.onReviewUpdate) return
                 const currentTool = progress.currentTool

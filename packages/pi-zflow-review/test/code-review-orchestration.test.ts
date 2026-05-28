@@ -6,7 +6,7 @@
  *   - Falls back to skipped behavior when no dispatch service is available
  *   - Parses JSON findings from dispatch output and populates severity/recommendation
  */
-import { describe, it, before, after, afterEach } from "node:test"
+import { describe, it, before, beforeEach, after, afterEach } from "node:test"
 import assert from "node:assert/strict"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
@@ -18,13 +18,15 @@ import {
   DISPATCH_SERVICE_CAPABILITY,
   type DispatchService,
 } from "pi-zflow-core/dispatch-service"
-import { resetZflowRegistry } from "pi-zflow-core"
+import { ACTIVE_PROFILE_PATH, resetZflowRegistry } from "pi-zflow-core"
 
 import { runCodeReview, type CodeReviewInput } from "../extensions/zflow-review/orchestration.js"
 
 // ── Temp directory for artifact persistence ────────────────────
 
 let tmpDir: string
+let activeProfileBackup: string | null = null
+let activeProfileExisted = false
 
 before(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "code-review-dispatch-"))
@@ -43,8 +45,24 @@ after(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
 })
 
-afterEach(() => {
+beforeEach(async () => {
+  await writeActiveProfileCache(buildDefaultReviewProfileCache())
+})
+
+afterEach(async () => {
   resetZflowRegistry()
+  try {
+    if (activeProfileExisted && activeProfileBackup !== null) {
+      await fs.mkdir(path.dirname(ACTIVE_PROFILE_PATH), { recursive: true })
+      await fs.writeFile(ACTIVE_PROFILE_PATH, activeProfileBackup, "utf-8")
+    } else {
+      await fs.rm(ACTIVE_PROFILE_PATH, { force: true })
+    }
+  } catch {
+    // Best-effort cleanup/restore for profile cache tests.
+  }
+  activeProfileBackup = null
+  activeProfileExisted = false
 })
 
 // ── Helper: write planning artifact files ──────────────────────
@@ -90,6 +108,41 @@ function makeInput(
     verificationStatus: "unknown",
     cwd: tmpDir,
     ...overrides,
+  }
+}
+
+async function writeActiveProfileCache(cache: Record<string, unknown>): Promise<void> {
+  try {
+    activeProfileBackup = await fs.readFile(ACTIVE_PROFILE_PATH, "utf-8")
+    activeProfileExisted = true
+  } catch {
+    activeProfileBackup = null
+    activeProfileExisted = false
+  }
+  await fs.mkdir(path.dirname(ACTIVE_PROFILE_PATH), { recursive: true })
+  await fs.writeFile(ACTIVE_PROFILE_PATH, JSON.stringify(cache, null, 2), "utf-8")
+}
+
+function buildDefaultReviewProfileCache(): Record<string, unknown> {
+  return {
+    profileName: "default",
+    sourcePath: "/tmp/test-profile.json",
+    resolvedAt: new Date().toISOString(),
+    ttlMinutes: 15,
+    definitionHash: "hash",
+    environmentFingerprint: "env",
+    resolvedLanes: {
+      "review-correctness": { model: "model-correctness", thinking: "medium", required: true, optional: false, status: "resolved" },
+      "review-integration": { model: "model-integration", thinking: "medium", required: true, optional: false, status: "resolved" },
+      "review-security": { model: "model-security", thinking: "high", required: true, optional: false, status: "resolved" },
+      "synthesis-frontier": { model: "model-synth", thinking: "high", required: true, optional: false, status: "resolved" },
+    },
+    agentBindings: {
+      "zflow.review-correctness": { lane: "review-correctness", resolvedModel: "model-correctness", tools: "read", maxOutput: 1000, maxSubagentDepth: 0 },
+      "zflow.review-integration": { lane: "review-integration", resolvedModel: "model-integration", tools: "read", maxOutput: 1000, maxSubagentDepth: 0 },
+      "zflow.review-security": { lane: "review-security", resolvedModel: "model-security", tools: "read", maxOutput: 1000, maxSubagentDepth: 0 },
+      "zflow.synthesizer": { lane: "synthesis-frontier", resolvedModel: "model-synth", tools: "read", maxOutput: 1000, maxSubagentDepth: 0 },
+    },
   }
 }
 
@@ -412,6 +465,98 @@ void describe("runCodeReview with DispatchService", () => {
     assert.equal(result.severity.major, 0)
     assert.equal(result.severity.minor, 0)
     assert.equal(result.severity.nit, 0)
+    assert.equal(result.recommendation, "NO-GO")
+  })
+
+  it("uses file-backed active profile cache when registry profiles service is absent", async () => {
+    const planningArtifacts = await writeArtifacts(tmpDir, "ch-profile-fallback", "v1")
+    await writeActiveProfileCache({
+      profileName: "default",
+      sourcePath: "/tmp/test-profile.json",
+      resolvedAt: new Date().toISOString(),
+      ttlMinutes: 15,
+      definitionHash: "hash",
+      environmentFingerprint: "env",
+      resolvedLanes: {
+        "review-correctness": { model: "model-correctness", thinking: "medium", required: true, optional: false, status: "resolved" },
+        "review-integration": { model: "model-integration", thinking: "medium", required: true, optional: false, status: "resolved" },
+        "review-security": { model: "model-security", thinking: "high", required: true, optional: false, status: "resolved" },
+      },
+      agentBindings: {
+        "zflow.review-correctness": { lane: "review-correctness", resolvedModel: "model-correctness", tools: "read", maxOutput: 1000, maxSubagentDepth: 0 },
+        "zflow.review-integration": { lane: "review-integration", resolvedModel: "model-integration", tools: "read", maxOutput: 1000, maxSubagentDepth: 0 },
+        "zflow.review-security": { lane: "review-security", resolvedModel: "model-security", tools: "read", maxOutput: 1000, maxSubagentDepth: 0 },
+      },
+    })
+
+    const jsonOutput = JSON.stringify({ findings: [] })
+    const fakeService = makeFakeDispatchService(jsonOutput)
+    const registry = getZflowRegistry()
+    registry.claim({
+      capability: DISPATCH_SERVICE_CAPABILITY,
+      version: "0.1.0",
+      provider: "test",
+      sourcePath: import.meta.url,
+      compatibilityMode: "compatible",
+    })
+    registry.provide(DISPATCH_SERVICE_CAPABILITY, fakeService)
+
+    const result = await runCodeReview(makeInput(planningArtifacts))
+    assert.ok(fakeService.callLog.length > 0, "reviewers should be dispatched")
+
+    const reviewerCalls = fakeService.callLog.filter((c) => String(c.agent).startsWith("zflow.review-"))
+    assert.ok(reviewerCalls.length >= 3, `expected >=3 reviewer calls, got ${reviewerCalls.length}`)
+    for (const call of reviewerCalls) {
+      assert.ok(typeof call.model === "string" && call.model.length > 0, `reviewer call missing model override: ${JSON.stringify(call)}`)
+      assert.ok(!String(call.model).startsWith("placeholder"), `reviewer call should not use placeholder model: ${JSON.stringify(call)}`)
+    }
+    assert.equal(result.manifest.reviewers.filter((r) => r.status === "failed").length, 0)
+  })
+
+  it("treats placeholder models as unusable and fails reviewer before dispatch", async () => {
+    const planningArtifacts = await writeArtifacts(tmpDir, "ch-placeholder-filter", "v1")
+    await writeActiveProfileCache({
+      profileName: "default",
+      sourcePath: "/tmp/test-profile.json",
+      resolvedAt: new Date().toISOString(),
+      ttlMinutes: 15,
+      definitionHash: "hash",
+      environmentFingerprint: "env",
+      resolvedLanes: {
+        "review-correctness": { model: "placeholder:high", thinking: "medium", required: true, optional: false, status: "resolved" },
+        "review-integration": { model: "model-integration", thinking: "medium", required: true, optional: false, status: "resolved" },
+        "review-security": { model: "model-security", thinking: "high", required: true, optional: false, status: "resolved" },
+      },
+      agentBindings: {
+        "zflow.review-correctness": { lane: "review-correctness", resolvedModel: "placeholder:high", tools: "read", maxOutput: 1000, maxSubagentDepth: 0 },
+        "zflow.review-integration": { lane: "review-integration", resolvedModel: "model-integration", tools: "read", maxOutput: 1000, maxSubagentDepth: 0 },
+        "zflow.review-security": { lane: "review-security", resolvedModel: "model-security", tools: "read", maxOutput: 1000, maxSubagentDepth: 0 },
+      },
+    })
+
+    const jsonOutput = JSON.stringify({ findings: [] })
+    const fakeService = makeFakeDispatchService(jsonOutput)
+    const registry = getZflowRegistry()
+    registry.claim({
+      capability: DISPATCH_SERVICE_CAPABILITY,
+      version: "0.1.0",
+      provider: "test",
+      sourcePath: import.meta.url,
+      compatibilityMode: "compatible",
+    })
+    registry.provide(DISPATCH_SERVICE_CAPABILITY, fakeService)
+
+    const result = await runCodeReview(makeInput(planningArtifacts))
+
+    const reviewerCalls = fakeService.callLog.filter((c) => String(c.agent).startsWith("zflow.review-"))
+    assert.ok(
+      reviewerCalls.every((c) => String(c.agent) !== "zflow.review-correctness"),
+      "correctness reviewer should not be dispatched with placeholder model",
+    )
+    const correctness = result.manifest.reviewers.find((r) => r.name === "correctness")
+    assert.ok(correctness)
+    assert.equal(correctness!.status, "failed")
+    assert.match(String(correctness!.detail), /No usable resolved model/i)
     assert.equal(result.recommendation, "NO-GO")
   })
 })

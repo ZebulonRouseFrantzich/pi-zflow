@@ -11,6 +11,9 @@
  */
 import { describe, it } from "node:test"
 import * as assert from "node:assert/strict"
+import * as fs from "node:fs/promises"
+import * as os from "node:os"
+import * as path from "node:path"
 
 import {
   resolveProviderModels,
@@ -28,6 +31,11 @@ import {
   type WizardEditState,
   type ThinkingLevel,
 } from "../extensions/zflow-profiles/tui-components.js"
+import {
+  resolveConfigureWizardPaths,
+  buildProfilesForWizardWrite,
+  persistWizardProfileDraft,
+} from "../extensions/zflow-profiles/configure-wizard.js"
 
 import type {
   NormalizedProfileDefinition,
@@ -415,6 +423,131 @@ describe("buildProfileDefinition", () => {
     const profile = buildProfileDefinition(state)
     assert.equal(profile.agentBindings["scout"].tools, undefined)
     assert.equal(profile.agentBindings["scout"].maxOutput, undefined)
+  })
+})
+
+// ── configure wizard file targeting / draft persistence ─────────
+
+describe("configure wizard write targeting", () => {
+  it("defaults to the global user profile path", () => {
+    const paths = resolveConfigureWizardPaths()
+    assert.equal(
+      paths.finalWritePath,
+      path.join(os.homedir(), ".pi", "agent", "zflow-profiles.json"),
+    )
+    assert.equal(
+      paths.wipPath,
+      path.join(os.homedir(), ".pi", "agent", ".zflow-profile-configure-wip.json"),
+    )
+  })
+
+  it("merges the edited profile into existing profiles for write-back", () => {
+    const state: WizardEditState = {
+      profileName: "default",
+      lanes: [
+        {
+          laneName: "worker-cheap",
+          description: "Worker lane",
+          selectedModels: ["github-copilot/gpt-5-mini"],
+          thinking: "high",
+          required: true,
+          optional: false,
+          multiProvider: false,
+        },
+      ],
+      agentBindings: [
+        {
+          agentName: "zflow.implement-routine",
+          description: "Routine implementer",
+          lane: "worker-cheap",
+          thinking: "high",
+          tools: "read, bash, edit, write",
+          maxOutput: 8000,
+          maxSubagentDepth: 0,
+          optional: false,
+        },
+      ],
+    }
+
+    const profiles = buildProfilesForWizardWrite(state, {
+      other: {
+        description: "keep me",
+        lanes: {},
+        agentBindings: {},
+      },
+    } as unknown as ProfileDefinition)
+
+    assert.ok(profiles.default)
+    assert.ok(profiles.other)
+    assert.deepEqual(
+      profiles.default.lanes["worker-cheap"].preferredModels,
+      ["github-copilot/gpt-5-mini"],
+    )
+  })
+
+  it("creates and updates the target profile file as draft progress is saved", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zflow-profile-wizard-"))
+    const writePath = path.join(tmpDir, "zflow-profiles.json")
+    const wipPath = path.join(tmpDir, ".zflow-profile-configure-wip.json")
+
+    const state: WizardEditState = {
+      profileName: "default",
+      lanes: [
+        {
+          laneName: "review-correctness",
+          description: "Correctness review",
+          selectedModels: ["github-copilot/claude-sonnet-4.6"],
+          thinking: "medium",
+          required: true,
+          optional: false,
+          multiProvider: true,
+        },
+      ],
+      agentBindings: [
+        {
+          agentName: "zflow.review-correctness",
+          description: "Correctness reviewer",
+          lane: "review-correctness",
+          thinking: "medium",
+          tools: "read, grep, find, ls",
+          maxOutput: 10000,
+          maxSubagentDepth: 0,
+          optional: false,
+        },
+      ],
+    }
+
+    await persistWizardProfileDraft(state, {
+      writePath,
+      wipPath,
+      existingProfiles: {},
+      existingProfile: null,
+    })
+
+    const firstWrite = JSON.parse(await fs.readFile(writePath, "utf8"))
+    const firstWip = JSON.parse(await fs.readFile(wipPath, "utf8"))
+    assert.deepEqual(
+      firstWrite.default.lanes["review-correctness"].preferredModels,
+      ["github-copilot/claude-sonnet-4.6"],
+    )
+    assert.deepEqual(firstWip.lanes[0].selectedModels, ["github-copilot/claude-sonnet-4.6"])
+
+    state.lanes[0]!.selectedModels = ["github-copilot/gpt-5.4"]
+    state.agentBindings[0]!.thinking = "high"
+
+    await persistWizardProfileDraft(state, {
+      writePath,
+      wipPath,
+      existingProfiles: {},
+      existingProfile: null,
+    })
+
+    const secondWrite = JSON.parse(await fs.readFile(writePath, "utf8"))
+    assert.deepEqual(
+      secondWrite.default.lanes["review-correctness"].preferredModels,
+      ["github-copilot/gpt-5.4"],
+    )
+    assert.equal(secondWrite.default.agentBindings["zflow.review-correctness"].lane, "review-correctness")
   })
 })
 
