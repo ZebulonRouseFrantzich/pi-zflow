@@ -408,12 +408,28 @@ export async function classifyRepo(repoRoot: string): Promise<RepoClass> {
   // pnpm workspace
   if (has("pnpm-workspace.yaml") || has("pnpm-lock.yaml")) return "pnpm-workspace"
 
-  // npm workspace monorepo
+  // npm workspace monorepo / workspace package.json
+  if (has("package.json")) {
+    try {
+      const packageJsonRaw = await fs.readFile(path.join(repoRoot, "package.json"), "utf-8")
+      const packageJson = JSON.parse(packageJsonRaw) as { workspaces?: unknown }
+      if (packageJson.workspaces) return "npm-workspace"
+    } catch {
+      // ignore malformed package.json here — later code can surface it elsewhere
+    }
+  }
+
+  // npm/lerna style monorepo bootstrap
   if (has("package.json") && has("lerna.json")) return "monorepo-generated-links"
 
   // env-stub markers
   if (has(".env.example") && !has(".env")) return "env-stub-required"
   if (has(".env.example")) return "env-stub-needed"
+
+  // custom build bootstrap markers
+  if (has("CMakeLists.txt") || has("meson.build") || has("WORKSPACE") || has("WORKSPACE.bazel")) {
+    return "custom-build-bootstrap"
+  }
 
   // plain TS/JS
   if (has("package.json") && has("tsconfig.json")) return "plain-ts-js"

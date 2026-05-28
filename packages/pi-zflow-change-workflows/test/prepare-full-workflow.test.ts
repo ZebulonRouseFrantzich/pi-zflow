@@ -275,6 +275,7 @@ describe("ensureImplementationTasksArtifact", () => {
       assert.strictEqual(created, true)
       const content = await fs.readFile(result.artifactPaths.implementationTasks, "utf-8")
       assert.ok(content.includes("# Implementation Tasks"))
+      assert.ok(content.includes("zflow-synthesized-artifact: implementation-tasks"))
       assert.ok(content.includes("## Group 1: Update authentication service"))
       assert.ok(content.includes("src/auth/service.ts"))
       assert.ok(content.includes("npm test -- src/auth/service.test.ts"))
@@ -371,6 +372,7 @@ describe("ensureImplementationTasksArtifact", () => {
 
       assert.strictEqual(created, true)
       const content = await fs.readFile(result.artifactPaths.implementationTasks, "utf-8")
+      assert.ok(content.includes("zflow-synthesized-artifact: implementation-tasks"))
       assert.ok(content.includes("## Group 1a: harden Worker ZITADEL environment parsing"))
       assert.ok(content.includes("apps/cloudflare-api/src/api/env.ts"))
       assert.ok(content.includes("pnpm --dir apps/cloudflare-api typecheck"))

@@ -2057,6 +2057,17 @@ export function getActiveWorkflowMode(): ModeFragment | null {
 }
 
 /**
+ * Whether workflow-scoped tool guards should currently be active.
+ *
+ * The change-workflows path guard is intentionally scoped to active zflow
+ * workflow modes so ordinary non-zflow conversations keep the normal Pi bash
+ * experience.
+ */
+export function isWorkflowToolGuardActive(): boolean {
+  return _activeWorkflowMode !== null
+}
+
+/**
  * Activate a runtime reminder. Duplicates are ignored.
  */
 export function addReminder(reminder: ReminderId): void {
@@ -5724,6 +5735,10 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
   pi.on("tool_call", async (event, ctx) => {
     const { isToolCallEventType } = await import("@earendil-works/pi-coding-agent")
 
+    if (!isWorkflowToolGuardActive()) {
+      return {}
+    }
+
     // ── Guard "write" and "edit" tool calls ───────────────────
     if (isToolCallEventType("write", event) || isToolCallEventType("edit", event)) {
       // Determine the target path from the tool input
@@ -5749,9 +5764,12 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         // Not in a git repo — use cwd as project root
       }
 
+      const { loadRepoZflowConfig } = await import("./repo-config.js")
+      const repoConfig = await loadRepoZflowConfig(projectRoot)
       const options: GuardOptions = {
         projectRoot,
         runtimeStateDir: resolveRuntimeStateDir(process.cwd()),
+        bashPolicy: repoConfig.config.bashGuard,
       }
 
       const result = guardWrite(targetPath, { ...options, intent: currentGuardIntent })
@@ -5779,9 +5797,12 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         // Not in a git repo — use cwd as project root
       }
 
+      const { loadRepoZflowConfig } = await import("./repo-config.js")
+      const repoConfig = await loadRepoZflowConfig(projectRoot)
       const options: GuardOptions = {
         projectRoot,
         runtimeStateDir: resolveRuntimeStateDir(process.cwd()),
+        bashPolicy: repoConfig.config.bashGuard,
       }
 
       const result = guardBashCommand(command, { ...options, intent: currentGuardIntent })
@@ -6469,6 +6490,9 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
   pi.registerCommand("zflow-resolve-apply-back", {
     description: "Resolve a failed apply-back using a subagent and preserved integration worktree",
     handler: async (args: string, ctx: InterviewableContext): Promise<void> => {
+      setActiveWorkflowMode("change-implement")
+      const cleanupMode = (): void => { resetWorkflowState() }
+
       const runId = args.trim().split(/\s+/).filter(Boolean)[0]
       if (!runId) {
         ctx.ui?.notify?.(
@@ -6477,6 +6501,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           "and applies the verified consolidated patch to the primary worktree.",
           "warning",
         )
+        cleanupMode()
         return
       }
 
@@ -6507,6 +6532,8 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           `Apply-back subagent resolution failed: ${message}`,
           "error",
         )
+      } finally {
+        cleanupMode()
       }
     },
   })
@@ -7473,6 +7500,9 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
   pi.registerCommand("zflow-change-fix", {
     description: "Apply fixes for code-review or verification failures. Loads findings, selects fixes, applies them, and verifies.",
     handler: async (args: string, ctx: InterviewableContext): Promise<void> => {
+      setActiveWorkflowMode("change-implement")
+      const cleanupMode = (): void => { resetWorkflowState() }
+
       const parts = args.trim().split(/\s+/)
       const applyMode = parts.includes("--apply")
       const planOnly = parts.includes("--plan-only")
@@ -7484,6 +7514,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           "  Loads review findings, presents fix options, applies fixes, and verifies.",
           "warning",
         )
+        cleanupMode()
         return
       }
 
@@ -7756,6 +7787,8 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           `Fix workflow failed: ${err instanceof Error ? err.message : String(err)}`,
           "failed",
         )
+      } finally {
+        cleanupMode()
       }
     },
   })

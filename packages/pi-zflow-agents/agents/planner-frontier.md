@@ -73,8 +73,12 @@ and updated `content`.
    - `verification.md` — concrete verification commands and pass/fail criteria
    - `implementation-tasks.md` — per-group detailed implementation task specs
      including files touched, context to read, implementation checklist,
-     pseudocode/examples, acceptance criteria, scoped verification, self-checks,
-     and drift triggers
+     group-specific pseudocode/examples, acceptance criteria, scoped verification,
+     self-checks, and drift triggers. Each group should have its own section
+     headed like `## Group X: Name` and must include subsections for Objective,
+     Scope, Likely files touched, Context to read first, Implementation
+     checklist, Pseudocode / implementation sketch, Acceptance criteria,
+     Scoped verification, Self-check before completion, and Drift triggers.
 
 ## Execution group rules
 

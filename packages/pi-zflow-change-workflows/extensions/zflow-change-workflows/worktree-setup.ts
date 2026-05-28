@@ -7,186 +7,232 @@
  *
  * ## Policy
  *
- * 1. Only repos that need setup declare a `worktreeSetupHook`.
- * 2. If setup is required but no hook is configured, worker dispatch fails
- *    immediately with actionable guidance and a pointer to the templates.
- * 3. The hook is always per-repo configuration — never baked into the package.
- * 4. Generic templates ship with this package for common repo classes.
+ * 1. Use built-in automatic setup for common dependency-managed repos when possible.
+ * 2. Reserve `worktreeSetupHook` for repo-specific bootstrap that zflow cannot infer.
+ * 3. If a repo needs custom setup and no hook is configured, fail fast with guidance.
+ * 4. The hook is always per-repo configuration — never baked into the package.
  *
  * @module pi-zflow-change-workflows/worktree-setup
  */
 
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
-import * as fs from "node:fs/promises"
 import {
   runWorktreeSetupHook,
   classifyRepo,
+  type RepoClass,
   type WorktreeSetupHookConfig,
   type WorktreeSetupHookContext,
   type WorktreeSetupHookResult,
 } from "pi-zflow-core/worktree-setup-hook"
 import type { DispatchWorktreeSetupHook } from "pi-zflow-core/dispatch-service"
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/**
- * Well-known config file names to search for worktree setup hook configuration.
- * Order matters — first match wins.
- */
-const CONFIG_FILE_CANDIDATES = [
-  ".pi/zflow/config.json",
-  "pi-zflow.config.json",
-  ".pi-zflow.config.json",
-]
+import { loadRepoZflowConfig } from "./repo-config.js"
+import { detectAutoWorktreeSetup } from "./worktree-auto-setup.js"
 
 /**
  * Default timeout for worktree setup hooks: 60 seconds.
  */
 const DEFAULT_TIMEOUT_MS = 60_000
 
-// ---------------------------------------------------------------------------
-// Repo needs check
-// ---------------------------------------------------------------------------
+const CUSTOM_HOOK_REQUIRED_REPO_CLASSES = new Set<RepoClass>([
+  "env-stub-required",
+  "custom-build-bootstrap",
+])
 
-/**
- * Check whether a repo is known to require a worktree setup hook.
- *
- * Uses the `classifyRepo` heuristics from pi-zflow-core and an allowlist of
- * repo classes that are known to need setup.
- *
- * @param repoRoot - Absolute path to the repo root.
- * @returns `true` if the repo likely needs a hook, `false` otherwise.
- */
-export async function repoNeedsWorktreeSetup(repoRoot: string): Promise<boolean> {
-  const repoClass = await classifyRepo(repoRoot)
+const AUTO_SETUP_PREFERRED_REPO_CLASSES = new Set<RepoClass>([
+  "plain-ts-js",
+  "pnpm-workspace",
+  "npm-workspace",
+  "monorepo-generated-links",
+])
 
-  // Repo classes that typically need setup
-  const needsSetup: Record<string, boolean> = {
-    "pnpm-workspace": true,
-    "npm-workspace": true,
-    "monorepo-generated-links": true,
-    "env-stub-required": true,
-    "env-stub-needed": false, // nice-to-have but not required
-    "custom-build-bootstrap": true,
-    "plain-ts-js": false,
-    "unknown": false,
-  }
-
-  return needsSetup[repoClass] ?? false
+export interface RepoWorktreeSetupPreference {
+  state: "configured" | "disabled" | "absent"
+  hook?: WorktreeSetupHookConfig
+  configPath?: string
 }
-
-// ---------------------------------------------------------------------------
-// Config loader
-// ---------------------------------------------------------------------------
-
-/**
- * Load the worktree setup hook configuration from a repo's config files.
- *
- * Searches well-known config file locations and returns the first
- * `worktreeSetupHook` config found, or `null` if none is configured.
- *
- * @param repoRoot - Absolute path to the repo root.
- * @returns The hook configuration, or `null` if not configured.
- */
-export async function getRepoWorktreeSetupConfig(
-  repoRoot: string,
-): Promise<WorktreeSetupHookConfig | null> {
-  for (const candidate of CONFIG_FILE_CANDIDATES) {
-    const configPath = path.join(repoRoot, candidate)
-    try {
-      const content = await fs.readFile(configPath, "utf-8")
-      const config = JSON.parse(content)
-
-      if (config.worktreeSetupHook) {
-        // Merge with defaults
-        const hookConfig: WorktreeSetupHookConfig = {
-          script: config.worktreeSetupHook.script,
-          runtime: config.worktreeSetupHook.runtime ?? "shell",
-          timeoutMs: config.worktreeSetupHook.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-          description: config.worktreeSetupHook.description ?? `worktreeSetupHook (${configPath})`,
-        }
-        return hookConfig
-      }
-    } catch (err: unknown) {
-      // ENOENT: file doesn't exist — skip silently and try next candidate
-      if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
-        continue
-      }
-      // File exists but cannot be read or parsed — warn and continue
-      if (err instanceof Error) {
-        console.warn(
-          `[zflow] Worktree setup config file exists but cannot be parsed: ${configPath} — ${err.message}`,
-        )
-      }
-      continue
-    }
-  }
-
-  return null
-}
-
-// ---------------------------------------------------------------------------
-// Dispatch-facing resolution helpers
-// ---------------------------------------------------------------------------
 
 export interface DispatchWorktreeSetupResolution {
   ok: boolean
   required: boolean
   hook?: DispatchWorktreeSetupHook
   message?: string
+  disabled?: boolean
+  autoSetupCommand?: string
+  strategy?: "none" | "auto" | "hook" | "disabled"
+  repoClass?: RepoClass
+}
+
+function withHookDefaults(
+  hook: WorktreeSetupHookConfig,
+  configPath?: string,
+): WorktreeSetupHookConfig {
+  return {
+    script: hook.script,
+    runtime: hook.runtime ?? "shell",
+    timeoutMs: hook.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    description: hook.description ?? (configPath ? `worktreeSetupHook (${configPath})` : "worktreeSetupHook"),
+  }
+}
+
+function getTemplatesDir(): string {
+  return path.join(
+    path.dirname(fileURLToPath(import.meta.resolve("pi-zflow-change-workflows/package.json"))),
+    "templates",
+    "worktree-setup-hooks",
+  )
+}
+
+function buildMissingHookMessage(repoRoot: string, repoClass: RepoClass, autoSetupCommand: string | null): string {
+  const templatesDir = getTemplatesDir()
+  const autoSetupNote = autoSetupCommand
+    ? [
+        "Built-in automatic setup was detected, but this repo class still needs additional custom bootstrap.",
+        `Detected auto setup command: ${autoSetupCommand}`,
+        "",
+      ]
+    : []
+
+  return [
+    "worktreeSetupHook required but not configured.",
+    "",
+    `Repo: ${repoRoot}`,
+    `Detected repo class: ${repoClass}`,
+    ...autoSetupNote,
+    "This repo appears to need custom setup inside isolated worktrees that zflow cannot safely infer.",
+    "Configure a repo-local hook before dispatching workers.",
+    "",
+    `Templates: ${templatesDir}`,
+    `Example config: { "worktreeSetupHook": { "script": ".pi/zflow/worktree-setup-hook.sh" } }`,
+    "If this repo does NOT need a custom hook, set:",
+    '  { "worktreeSetupHook": null }',
+    "to suppress hook enforcement while still allowing built-in automatic setup.",
+  ].join("\n")
+}
+
+/**
+ * Check whether a repo likely needs some kind of worktree setup.
+ *
+ * This is broader than hook enforcement. A repo may need setup but still be
+ * satisfied by a built-in automatic setup command instead of a custom hook.
+ */
+export async function repoNeedsWorktreeSetup(repoRoot: string): Promise<boolean> {
+  const repoClass = await classifyRepo(repoRoot)
+  if (CUSTOM_HOOK_REQUIRED_REPO_CLASSES.has(repoClass)) {
+    return true
+  }
+
+  const autoSetup = await detectAutoWorktreeSetup(repoRoot)
+  return autoSetup !== null
+}
+
+/**
+ * Load the repo's explicit worktree-setup preference.
+ */
+export async function getRepoWorktreeSetupPreference(
+  repoRoot: string,
+): Promise<RepoWorktreeSetupPreference> {
+  const { config, configPath } = await loadRepoZflowConfig(repoRoot)
+
+  if (!("worktreeSetupHook" in config)) {
+    return { state: "absent", configPath }
+  }
+
+  if (config.worktreeSetupHook === null) {
+    return { state: "disabled", configPath }
+  }
+
+  if (config.worktreeSetupHook) {
+    return {
+      state: "configured",
+      hook: withHookDefaults(config.worktreeSetupHook, configPath),
+      configPath,
+    }
+  }
+
+  return { state: "absent", configPath }
+}
+
+/**
+ * Load the worktree setup hook configuration from a repo's config files.
+ *
+ * Returns the configured hook, or null when the hook is absent or explicitly
+ * disabled via `worktreeSetupHook: null`.
+ */
+export async function getRepoWorktreeSetupConfig(
+  repoRoot: string,
+): Promise<WorktreeSetupHookConfig | null> {
+  const preference = await getRepoWorktreeSetupPreference(repoRoot)
+  return preference.state === "configured" ? preference.hook ?? null : null
 }
 
 /**
  * Resolve the repo's worktree setup requirements into a dispatch-layer shape.
- *
- * This is the preflight helper used by the real worktree dispatch path:
- * - repos that do not need setup return `{ ok: true, required: false }`
- * - repos that need setup but have no config return `{ ok: false, required: true, ... }`
- * - repos with a valid hook return `{ ok: true, required: true, hook: ... }`
  */
 export async function resolveDispatchWorktreeSetup(
   repoRoot: string,
 ): Promise<DispatchWorktreeSetupResolution> {
-  const needsSetup = await repoNeedsWorktreeSetup(repoRoot)
-  if (!needsSetup) {
-    return { ok: true, required: false }
+  const repoClass = await classifyRepo(repoRoot)
+  const preference = await getRepoWorktreeSetupPreference(repoRoot)
+  const autoSetup = await detectAutoWorktreeSetup(repoRoot)
+
+  if (preference.state === "disabled") {
+    return {
+      ok: true,
+      required: false,
+      disabled: true,
+      strategy: "disabled",
+      autoSetupCommand: autoSetup?.command,
+      repoClass,
+      message: "Custom worktree hook enforcement disabled by repo config.",
+    }
   }
 
-  const hookConfig = await getRepoWorktreeSetupConfig(repoRoot)
-  if (!hookConfig) {
-    const templatesDir = path.join(
-      path.dirname(fileURLToPath(import.meta.resolve("pi-zflow-change-workflows/package.json"))),
-      "templates", "worktree-setup-hooks",
-    )
+  if (preference.state === "configured") {
+    return {
+      ok: true,
+      required: true,
+      strategy: "hook",
+      repoClass,
+      autoSetupCommand: autoSetup?.command,
+      hook: {
+        script: preference.hook!.script,
+        runtime: preference.hook!.runtime,
+        timeoutMs: preference.hook!.timeoutMs,
+        description: preference.hook!.description,
+      },
+      message: `Using repo-configured worktree setup hook (${preference.hook!.script}).`,
+    }
+  }
 
+  if (CUSTOM_HOOK_REQUIRED_REPO_CLASSES.has(repoClass)) {
     return {
       ok: false,
       required: true,
-      message: [
-        "worktreeSetupHook required but not configured.",
-        "",
-        `Repo: ${repoRoot}`,
-        "This repo appears to require setup inside isolated worktrees.",
-        "Configure a repo-local hook before dispatching workers.",
-        "",
-        `Templates: ${templatesDir}`,
-        `Example config: { \"worktreeSetupHook\": { \"script\": \".pi/zflow/worktree-setup-hook.sh\" } }`,
-      ].join("\n"),
+      strategy: "hook",
+      repoClass,
+      autoSetupCommand: autoSetup?.command,
+      message: buildMissingHookMessage(repoRoot, repoClass, autoSetup?.command ?? null),
+    }
+  }
+
+  if (autoSetup) {
+    return {
+      ok: true,
+      required: AUTO_SETUP_PREFERRED_REPO_CLASSES.has(repoClass),
+      strategy: "auto",
+      repoClass,
+      autoSetupCommand: autoSetup.command,
+      message: `Using built-in automatic worktree setup (${autoSetup.strategyId}).`,
     }
   }
 
   return {
     ok: true,
-    required: true,
-    hook: {
-      script: hookConfig.script,
-      runtime: hookConfig.runtime,
-      timeoutMs: hookConfig.timeoutMs,
-      description: hookConfig.description,
-    },
+    required: false,
+    strategy: "none",
+    repoClass,
+    message: "No custom worktree setup hook required.",
   }
 }
 
@@ -213,18 +259,8 @@ export interface WorktreeSetupResult {
 /**
  * Assert that the worktree setup precondition is met for a repo.
  *
- * This is the main entry point the orchestrator calls before creating worktrees.
- *
- * Behavior:
- * - If the repo needs a hook and one is configured, runs it and returns the result.
- * - If the repo needs a hook and none is configured, fails with actionable guidance.
- * - If the repo does not need a hook, silently succeeds.
- *
- * @param repoRoot - Absolute path to the repo root.
- * @param worktreeRoot - Absolute path to the worktree (for hook context).
- * @param ref - The git ref the worktree was checked out from.
- * @param meta - Optional metadata (run ID, lane name, etc.).
- * @returns WorktreeSetupResult with success/failure and hook details.
+ * Built-in automatic setup is handled by the dispatch layer via
+ * `worktreeSetupCommand`; this function only enforces/runs custom hooks.
  */
 export async function assertWorktreeSetupReady(
   repoRoot: string,
@@ -232,58 +268,33 @@ export async function assertWorktreeSetupReady(
   ref: string,
   meta?: Record<string, string>,
 ): Promise<WorktreeSetupResult> {
-  // Step 1: Check if the repo needs setup
-  const needsSetup = await repoNeedsWorktreeSetup(repoRoot)
+  const resolution = await resolveDispatchWorktreeSetup(repoRoot)
 
-  if (!needsSetup) {
-    return {
-      success: true,
-      hookExecuted: false,
-      message: "Repo does not require worktree setup. Proceeding without hook.",
-      hookCreatedPaths: [],
-    }
-  }
-
-  // Step 2: Look for a hook configuration
-  const hookConfig = await getRepoWorktreeSetupConfig(repoRoot)
-
-  if (!hookConfig) {
-    // Fail fast with actionable guidance
-    const templatesDir = path.join(
-      path.dirname(fileURLToPath(import.meta.resolve("pi-zflow-change-workflows/package.json"))),
-      "templates", "worktree-setup-hooks",
-    )
-
+  if (!resolution.ok) {
     return {
       success: false,
       hookExecuted: false,
-      message: [
-        `Repo at ${repoRoot} requires a worktreeSetupHook, but none is configured.`,
-        "",
-        "This repo was classified as needing setup to be buildable/lintable",
-        "inside an isolated git worktree.",
-        "",
-        "To fix this:",
-        `  1. Choose a template from ${templatesDir}`,
-        "     Available templates:",
-        "       - generic-node-ci.sh (plain TS/JS repos)",
-        "       - generic-pnpm-workspace.mjs (pnpm monorepos)",
-        "       - generic-env-stub.sh (repos needing .env)",
-        "       - generic-codegen.sh (repos needing code generation)",
-        `  2. Copy the template to your repo:`,
-        `     cp ${templatesDir}/generic-node-ci.sh ${repoRoot}/.pi/zflow/worktree-setup-hook.sh`,
-        `  3. Make it executable: chmod +x ${repoRoot}/.pi/zflow/worktree-setup-hook.sh`,
-        "  4. Configure it in .pi/zflow/config.json:",
-        `     { "worktreeSetupHook": { "script": ".pi/zflow/worktree-setup-hook.sh" } }`,
-        "  5. Commit the hook and config.",
-        "",
-        "See docs/worktree-setup-hook-policy.md for the full contract.",
-      ].join("\n"),
+      message: resolution.message ?? "worktree setup requirements were not satisfied",
       hookCreatedPaths: [],
     }
   }
 
-  // Step 3: Run the hook
+  if (!resolution.hook) {
+    return {
+      success: true,
+      hookExecuted: false,
+      message: resolution.message ?? "No custom worktree setup hook required.",
+      hookCreatedPaths: [],
+    }
+  }
+
+  const hookConfig: WorktreeSetupHookConfig = withHookDefaults({
+    script: resolution.hook.script,
+    runtime: resolution.hook.runtime,
+    timeoutMs: resolution.hook.timeoutMs,
+    description: resolution.hook.description,
+  })
+
   const context: WorktreeSetupHookContext = {
     worktreeRoot,
     repoRoot,
@@ -303,14 +314,11 @@ export async function assertWorktreeSetupReady(
     }
   }
 
-  // Collect paths that the hook may have created (from the hook result notes)
-  const hookCreatedPaths: string[] = []
-
   return {
     success: true,
     hookExecuted: true,
     hookResult,
     message: `Worktree setup hook completed: ${hookResult.message}`,
-    hookCreatedPaths,
+    hookCreatedPaths: [],
   }
 }

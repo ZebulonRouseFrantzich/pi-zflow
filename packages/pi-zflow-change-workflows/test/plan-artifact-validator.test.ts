@@ -145,14 +145,97 @@ This file contains implementation task specs for each execution group.
 ### Objective
 Implement the login handler per the design doc.
 
+### Scope
+Included:
+- Login handler behavior and related auth types.
+
+Excluded:
+- Unrelated auth refactors.
+
 ### Likely files touched
 - src/auth/login.ts
 - src/auth/types.ts
 
+### Context to read first
+- design.md authentication section
+- existing auth tests around src/auth/login.ts
+
 ### Implementation checklist
-1. Review design
-2. Implement changes
-3. Run scoped verification
+1. Review design and nearby auth tests.
+2. Update src/auth/login.ts to validate the request payload and issue the login flow.
+3. Update src/auth/types.ts if the handler requires new type shape.
+4. Run scoped verification.
+
+### Pseudocode / implementation sketch
+- Update src/auth/login.ts to parse the login request and delegate to the existing auth service.
+- Keep src/auth/types.ts aligned with the request/response shape used by the handler.
+- Preserve existing auth error handling rather than introducing a parallel flow.
+
+### Acceptance criteria
+- Login handler follows the approved request/response design.
+- Auth types remain consistent with the handler implementation.
+
+### Scoped verification
+\`\`\`bash
+npm test -- src/auth/login.test.ts
+\`\`\`
+
+### Self-check before completion
+- [ ] Only login-handler files changed.
+- [ ] Scoped verification was run.
+
+### Drift triggers
+- Required auth flow changes extend outside src/auth/login.ts and src/auth/types.ts.
+- The approved verification command no longer matches the repo test layout.
+
+## Group 2: Implement logout handler
+
+### Objective
+Implement the logout handler and session cleanup path.
+
+### Scope
+Included:
+- Logout handler behavior.
+- Session invalidation updates.
+
+Excluded:
+- Login flow changes.
+
+### Likely files touched
+- src/auth/logout.ts
+- src/auth/session.ts
+
+### Context to read first
+- design.md session-management section
+- existing logout and session tests
+
+### Implementation checklist
+1. Inspect existing logout/session flow.
+2. Update src/auth/logout.ts to trigger the approved logout behavior.
+3. Update src/auth/session.ts to invalidate the active session state cleanly.
+4. Run scoped verification.
+
+### Pseudocode / implementation sketch
+- Update src/auth/logout.ts to call the shared session invalidation path instead of duplicating cleanup logic.
+- Keep src/auth/session.ts as the single owner of session teardown semantics.
+- Preserve the current response contract for logout callers.
+
+### Acceptance criteria
+- Logout handler clears the approved session state.
+- Session helper behavior stays consistent for downstream callers.
+
+### Scoped verification
+\`\`\`bash
+npm test -- src/auth/logout.test.ts
+\`\`\`
+
+### Self-check before completion
+- [ ] Only logout/session files changed.
+- [ ] Scoped verification was run.
+
+### Drift triggers
+- Session invalidation requires changes outside src/auth/logout.ts and src/auth/session.ts.
+- Logout semantics in the approved design no longer match the codebase.
 `
 
 const LEGACY_EXECUTION_GROUPS_VARIANT = `# test-change — Execution Groups (v1)
@@ -529,12 +612,108 @@ Some text but no proper group headings.
   })
 
   test("execution-groups with legacy planner labels and omitted parallelizable pass", async () => {
+    const legacyImplementationTasks = `# Implementation Tasks
+
+## Group G1: Backend logic
+
+### Objective
+Add backend read/query methods and DTO definitions.
+
+### Scope
+Included:
+- src/backend/licenseManager.ts
+- src/backend/interfaces.ts
+
+Excluded:
+- Endpoint wrappers.
+
+### Likely files touched
+- src/backend/licenseManager.ts
+- src/backend/interfaces.ts
+
+### Context to read first
+- Existing backend query code
+- DTO conventions in src/backend/interfaces.ts
+
+### Implementation checklist
+1. Extend src/backend/licenseManager.ts with the new read/query methods.
+2. Update src/backend/interfaces.ts with the DTO definitions those methods require.
+3. Run backend verification.
+
+### Pseudocode / implementation sketch
+- Update src/backend/licenseManager.ts so the read/query methods reuse existing backend data access instead of adding a parallel path.
+- Keep src/backend/interfaces.ts as the source of truth for the DTO shapes used by the new methods.
+
+### Acceptance criteria
+- Backend logic compiles.
+- DTOs line up with the new backend methods.
+
+### Scoped verification
+\`\`\`bash
+npm test -- backend
+npm run build
+\`\`\`
+
+### Self-check before completion
+- [ ] Backend files only.
+- [ ] Verification ran.
+
+### Drift triggers
+- A required DTO change spills into endpoint wrappers.
+
+## Group G2: Endpoint wrappers
+
+### Objective
+Add the read-only endpoint wrappers for the backend methods.
+
+### Scope
+Included:
+- src/api/get-oracle.ts
+- src/api/function.json
+
+Excluded:
+- Backend method redesign.
+
+### Likely files touched
+- src/api/get-oracle.ts
+- src/api/function.json
+
+### Context to read first
+- Backend logic from G1
+- Existing endpoint wrapper patterns
+
+### Implementation checklist
+1. Read the backend changes from G1.
+2. Update src/api/get-oracle.ts to call the new backend read path.
+3. Keep src/api/function.json aligned with the endpoint contract.
+4. Run API verification.
+
+### Pseudocode / implementation sketch
+- Update src/api/get-oracle.ts so the endpoint wrapper delegates to the backend logic added in G1.
+- Keep src/api/function.json synchronized with the wrapper's route/function metadata.
+
+### Acceptance criteria
+- Endpoint wrappers compile.
+- Wrapper metadata matches the backend route.
+
+### Scoped verification
+\`\`\`bash
+npm test -- api
+\`\`\`
+
+### Self-check before completion
+- [ ] API wrapper files only.
+- [ ] Verification ran.
+
+### Drift triggers
+- Wrapper changes require backend API redesign.
+`
     const artifacts = {
       "design": VALID_DESIGN,
       "execution-groups": LEGACY_EXECUTION_GROUPS_VARIANT,
       "standards": VALID_STANDARDS,
       "verification": VALID_VERIFICATION,
-      "implementation-tasks": VALID_IMPLEMENTATION_TASKS,
+      "implementation-tasks": legacyImplementationTasks,
     }
 
     const { baseDir } = await createTestDirWithArtifacts(artifacts)
@@ -627,12 +806,94 @@ Some text but no proper group headings.
 **Scoped verification:** npm test
 **Parallelizable:** true
 `
+    const letterFirstTasks = `# Implementation Tasks
+
+## Group A1: Auth module
+
+### Objective
+Update the auth module entrypoint.
+
+### Scope
+Included:
+- src/auth/login.ts
+
+Excluded:
+- User profile work.
+
+### Likely files touched
+- src/auth/login.ts
+
+### Context to read first
+- Existing auth module behavior.
+
+### Implementation checklist
+1. Inspect src/auth/login.ts.
+2. Apply the auth module change.
+3. Run npm test.
+
+### Pseudocode / implementation sketch
+- Update src/auth/login.ts to implement the auth-module behavior described in Group A1.
+
+### Acceptance criteria
+- Auth module behavior passes verification.
+
+### Scoped verification
+\`\`\`bash
+npm test
+\`\`\`
+
+### Self-check before completion
+- [ ] Auth file only.
+
+### Drift triggers
+- Auth change expands beyond src/auth/login.ts.
+
+## Group B2: User module
+
+### Objective
+Update the user module entrypoint.
+
+### Scope
+Included:
+- src/user/profile.ts
+
+Excluded:
+- Auth module work.
+
+### Likely files touched
+- src/user/profile.ts
+
+### Context to read first
+- Existing user profile behavior.
+
+### Implementation checklist
+1. Inspect src/user/profile.ts.
+2. Apply the user module change.
+3. Run npm test.
+
+### Pseudocode / implementation sketch
+- Update src/user/profile.ts so the user-module change depends on A1 without duplicating auth logic.
+
+### Acceptance criteria
+- User module behavior passes verification.
+
+### Scoped verification
+\`\`\`bash
+npm test
+\`\`\`
+
+### Self-check before completion
+- [ ] User profile file only.
+
+### Drift triggers
+- User module change expands beyond src/user/profile.ts.
+`
     const artifacts = {
       "design": VALID_DESIGN,
       "execution-groups": letterFirstEG,
       "standards": VALID_STANDARDS,
       "verification": VALID_VERIFICATION,
-      "implementation-tasks": VALID_IMPLEMENTATION_TASKS,
+      "implementation-tasks": letterFirstTasks,
     }
 
     const { baseDir } = await createTestDirWithArtifacts(artifacts)
@@ -658,6 +919,68 @@ Some text but no proper group headings.
     try {
       const result = await validateAllPlanArtifacts("test-change", "v1", baseDir)
       assert.strictEqual(result.valid, false, "Should fail with short implementation-tasks")
+    } finally {
+      await fs.rm(baseDir, { recursive: true, force: true })
+    }
+  })
+
+  test("synthesized implementation-tasks fails validation", async () => {
+    const synthesizedTasks = `# Implementation Tasks
+
+<!-- zflow-synthesized-artifact: implementation-tasks -->
+
+## Group 1: Implement login handler
+
+### Objective
+Implement the login handler.
+
+### Scope
+Included only the planned files.
+
+### Likely files touched
+- src/auth/login.ts
+- src/auth/types.ts
+
+### Context to read first
+- design.md
+
+### Implementation checklist
+1. Read files.
+2. Make changes.
+
+### Pseudocode / implementation sketch
+read design.md, standards.md, verification.md, and execution-groups.md for group-1
+for each likely touched file:
+  make the smallest change that satisfies the group objective
+
+### Acceptance criteria
+- Objective implemented.
+
+### Scoped verification
+\`\`\`bash
+npm test -- src/auth/login.test.ts
+\`\`\`
+
+### Self-check before completion
+- [ ] Done
+
+### Drift triggers
+- Scope changes
+`
+
+    const artifacts = {
+      "design": VALID_DESIGN,
+      "execution-groups": VALID_EXECUTION_GROUPS,
+      "standards": VALID_STANDARDS,
+      "verification": VALID_VERIFICATION,
+      "implementation-tasks": synthesizedTasks,
+    }
+
+    const { baseDir } = await createTestDirWithArtifacts(artifacts)
+    try {
+      const result = await validateSingleArtifact("test-change", "v1", "implementation-tasks", baseDir)
+      assert.strictEqual(result.valid, false)
+      assert.ok(result.issues.some((issue) => issue.includes("synthesized recovery artifact")))
     } finally {
       await fs.rm(baseDir, { recursive: true, force: true })
     }

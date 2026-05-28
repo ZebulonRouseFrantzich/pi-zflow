@@ -28,6 +28,7 @@ import * as path from "node:path"
 import * as fs from "node:fs"
 import { realpathSafe } from "pi-zflow-core/path-guard"
 import { resolveRuntimeStateDir } from "pi-zflow-core/runtime-paths"
+import type { RepoBashGuardConfig } from "./repo-config.js"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -69,6 +70,8 @@ export interface GuardOptions {
   worktreePaths?: string[]
   /** Whether planner artifact path tracking is enabled. */
   plannerMode?: boolean
+  /** Optional repo-local bash guard overrides. */
+  bashPolicy?: RepoBashGuardConfig
 }
 
 // ---------------------------------------------------------------------------
@@ -373,238 +376,65 @@ export function guardWrite(
 }
 
 /**
- * Check whether a bash command includes destructive operations that
- * should be blocked by the path guard.
- *
- * Uses a deny-by-default blocklist for obvious destructive/mutating
- * commands (rm, git rm, sed -i, etc.) and chained/subshell shell syntax
- * that could hide destructive operations.
- *
- * All multi-command shell syntax is blocked: `;`, `|`, `&&`, `||`,
- * backticks, `$()`, and process substitution.  Simple redirection (`>`)
- * is allowed but checked against the path guard.
- *
- * Known read-only commands (ls, git status/diff/log, cat, grep,
- * head, tail, wc, etc.) pass through to the existing path-based checks.
- *
- * All other commands that are not read-only and have no path-checked write
- * operation are blocked by default ("deny-by-default").
- *
- * @param command - The full bash command string.
- * @param options - Guard options.
- * @returns A `GuardResult` indicating whether the command is allowed.
+ * Fully-normalized bash guard policy used while evaluating commands.
  */
-export function guardBashCommand(
-  command: string,
-  options: GuardOptions & { intent?: GuardIntent },
-): GuardResult {
-  const intent = options.intent ?? "bash-mutation"
-  const projectRoot = options.projectRoot
-  const trimmed = command.trim()
-
-  // Normalise: collapse repeated spaces and strip leading "sudo " for pattern matching
-  const normalised = trimmed.replace(/\s+/g, " ").replace(/^sudo\s+/i, "")
-
-  // ── 1. Detect shell chaining / subshell syntax ────────────────
-  // Block all top-level multi-command syntax: `;`, `|`, `&&`, `||`,
-  // backticks, `$(...)` command substitution, and `<(...)`/`>(...)`
-  // process substitution.  This is deny-by-default: no form of chaining
-  // or piping is allowed inside a single guardBashCommand call, even if
-  // every individual command looks read-only, because later segments
-  // could contain destructive operations.
-  //
-  // The only exception is redirection (`>` / `>>`) which is allowed but
-  // separately checked against path guard.
-  const hasTopLevelChaining = ((): boolean => {
-    let inSingle = false
-    let inDouble = false
-    for (let i = 0; i < trimmed.length; i++) {
-      const c = trimmed[i]
-      if (c === "'" && !inDouble) inSingle = !inSingle
-      else if (c === '"' && !inSingle) inDouble = !inDouble
-      else if (!inSingle && !inDouble) {
-        // Semicolon chaining
-        if (c === ";") return true
-        // Pipe chaining
-        if (c === "|") return true
-        // Backtick command substitution
-        if (c === "`") return true
-        // $(...) command substitution
-        if (c === "$" && trimmed[i + 1] === "(") return true
-        // Process substitution <(...) or >(...)
-        if ((c === "<" || c === ">") && trimmed[i + 1] === "(") return true
-      }
-    }
-    // Check for && and || outside quotes (character-pair scan above
-    // can't easily express two-char operators, so use a simple
-    // regex on the unquoted portions).
-    const stripped = trimmed.replace(/['"][^'"]*['"]/g, "")
-    if (/&&|\|\|/.test(stripped)) return true
-    return false
-  })()
-
-  if (hasTopLevelChaining) {
-    return {
-      allowed: false,
-      message:
-        "Bash command blocked: shell chaining or piping detected (`;`, `|`, `&&`, `||`, " +
-        "backticks, `$()`, or process substitution). " +
-        "This guard does not allow chained or multi-command shell forms. " +
-        "Run each command separately or use the edit/write tools for file changes.",
-      resolvedPath: projectRoot,
-    }
-  }
-
-  // ── 2. Block obvious destructive/mutating commands ────────────
-  const destructivePatterns: RegExp[] = [
-    // File removal
-    /\brm\s+(?:-[rfv]*\s+)?/,
-    /\brmdir\b/,
-    /\bunlink\b/,
-    // Git destructive commands
-    /\bgit\s+clean\b/,
-    /\bgit\s+rm\b/,
-    /\bgit\s+checkout\s+--\s+/,
-    /\bgit\s+reset\s+--hard\b/,
-    // In-place editors
-    /\bsed\s+(?:-[^\s]*i|--in-place)\b/,
-    /\bperl\s+-i\b/,
-    /\bruby\s+-i\b/,
-    /\bpython\s+-i\b/,
-    // Raw device / truncation
-    /\bdd\s+if=/,
-    /\btruncate\b/,
-    /\bmkfs\.\w+/,
-    /\bfdisk\b/,
-    // Permission / ownership mutation
-    /\bchmod\b/,
-    /\bchown\b/,
-    /\bchgrp\b/,
-    // Package manager updates (destructive at filesystem level)
-    /\bnpm\s+(?:install|update|uninstall|publish|add)\b/,
-    /\bpip\s+(?:install|uninstall)\b/,
-    // File / directory creation that modifies the filesystem
-    /\bmkdir\b/,
-    /\btouch\b/,
-    /^install\b/,
-  ]
-
-  // Check if the command STARTS WITH a known read-only command.
-  // If it does, skip destructive-pattern matching for the whole command
-  // (the read-only prefix check below is tighter and already safe).
-  // For commands that are NOT read-only, check destructive patterns.
-  const isReadOnly = READ_ONLY_PREFIXES.some((re) => re.test(normalised))
-
-  // Fix orchestrator is trusted to restructure files per the fix plan.
-  // Allow rm, rmdir, mkdir, mv, touch so it can delete legacy dirs and
-  // restructure repositories as directed by review findings.
-  const isOrchFileRestructure = intent === "fix-orchestrator" && (
-    /\brm\s+(?:-[rfv]*\s+)?/.test(normalised) ||
-    /\brmdir\b/.test(normalised) ||
-    /\bmkdir\b/.test(normalised) ||
-    /\btouch\b/.test(normalised) ||
-    /^mv\b/.test(normalised)
-  )
-
-  if (!isReadOnly && !isOrchFileRestructure) {
-    for (const pattern of destructivePatterns) {
-      if (pattern.test(normalised)) {
-        return {
-          allowed: false,
-          message:
-            `Bash command blocked by path guard: pattern \`${pattern.source}\` ` +
-            "matches a destructive/mutating command. " +
-            "Use the edit/write tools for file changes, or use a known read-only command " +
-            "(git status/diff/log, cat, ls, grep, find, head, tail, etc.).",
-          resolvedPath: projectRoot,
-        }
-      }
-    }
-  }
-
-  // ── 3. Track whether a write form was checked and passed ────
-  // We store this alongside redirection/tee/mv-cp checks below.
-  let hasVerifiedWriteForm = false
-
-  // ── 4. Extract file write targets from redirections ──────────
-  const redirMatches = command.matchAll(/[>]{1,2}\s*(\S+)/g)
-  for (const match of redirMatches) {
-    const fileTarget = match[1]
-    if (fileTarget) {
-      hasVerifiedWriteForm = true
-      const resolvedTarget = path.isAbsolute(fileTarget)
-        ? fileTarget
-        : path.resolve(projectRoot, fileTarget)
-      const result = guardWrite(resolvedTarget, { ...options, intent })
-      if (!result.allowed) return result
-    }
-  }
-
-  // ── 5. Check for tee writes ──────────────────────────────────
-  const teeMatch = command.match(/\btee\s+(-[aA]?\s+)?(\S+)/)
-  if (teeMatch) {
-    const fileTarget = teeMatch[2]
-    if (fileTarget) {
-      hasVerifiedWriteForm = true
-      const resolvedTarget = path.isAbsolute(fileTarget)
-        ? fileTarget
-        : path.resolve(projectRoot, fileTarget)
-      const result = guardWrite(resolvedTarget, { ...options, intent })
-      if (!result.allowed) return result
-    }
-  }
-
-  // ── 6. Check for mv/cp to protected locations ────────────────
-  const mvCpMatch = command.match(/\b(mv|cp)\s+(\S+)\s+(\S+)/)
-  if (mvCpMatch) {
-    const destTarget = mvCpMatch[3]
-    if (destTarget && !destTarget.startsWith("-")) {
-      hasVerifiedWriteForm = true
-      const resolvedTarget = path.isAbsolute(destTarget)
-        ? destTarget
-        : path.resolve(projectRoot, destTarget)
-      const result = guardWrite(resolvedTarget, { ...options, intent })
-      if (!result.allowed) return result
-    }
-  }
-
-  // ── 7. Deny-by-default for unknown commands ──────────────────
-  // If the command did not start with a known read-only prefix and also
-  // did not contain any path-checked write operation (redirection, tee,
-  // mv/cp), block it as unknown/untrusted.
-  if (!isReadOnly && !hasVerifiedWriteForm) {
-    return {
-      allowed: false,
-      message:
-        "Bash command blocked: not a known read-only command and no " +
-        "path-checked write operation detected. " +
-        "Use a known read-only command (git status/diff/log, cat, ls, grep, " +
-        "head, tail, etc.) or the edit/write tools for file changes.",
-      resolvedPath: projectRoot,
-    }
-  }
-
-  return {
-    allowed: true,
-    message: "Bash command passed path guard checks.",
-    resolvedPath: projectRoot,
-  }
+interface NormalizedBashPolicy {
+  allowCommandPrefixes: string[]
+  denyCommandPrefixes: string[]
+  allowExecutables: string[]
+  denyExecutables: string[]
+  allowReadOnlyChaining: boolean
 }
 
-// ── Known read-only command prefixes ─────────────────────────────
+interface SplitCommandResult {
+  segments: string[]
+  operators: string[]
+}
+
+interface SingleCommandGuardResult extends GuardResult {
+  nextCwd?: string
+  hasVerifiedWriteForm: boolean
+  isReadOnly: boolean
+}
+
+const DEFAULT_BASH_POLICY: NormalizedBashPolicy = {
+  allowCommandPrefixes: [],
+  denyCommandPrefixes: [],
+  allowExecutables: [],
+  denyExecutables: [],
+  allowReadOnlyChaining: true,
+}
+
+const DESTRUCTIVE_PATTERNS: RegExp[] = [
+  /\brm\s+(?:-[rfv]*\s+)?/,
+  /\brmdir\b/,
+  /\bunlink\b/,
+  /\bgit\s+clean\b/,
+  /\bgit\s+rm\b/,
+  /\bgit\s+checkout\s+--\s+/,
+  /\bgit\s+reset\s+--hard\b/,
+  /\bsed\s+(?:-[^\s]*i|--in-place)\b/,
+  /\bperl\s+-i\b/,
+  /\bruby\s+-i\b/,
+  /\bpython\s+-i\b/,
+  /\bdd\s+if=/,
+  /\btruncate\b/,
+  /\bmkfs\.\w+/,
+  /\bfdisk\b/,
+  /\bchmod\b/,
+  /\bchown\b/,
+  /\bchgrp\b/,
+  /\bnpm\s+(?:install|update|uninstall|publish|add)\b/,
+  /\bpip\s+(?:install|uninstall)\b/,
+  /\bmkdir\b/,
+  /\btouch\b/,
+  /^install\b/,
+]
 
 /**
- * Commands that are known safe / read-only.  A command matching one of
- * these prefixes skips the destructive-pattern blocklist and proceeds
- * to normal path-based checks.
- *
- * This list is intentionally conservative: it covers only well-known
- * inspection commands and clearly read-only git subcommands.  Any
- * command not in this list and not containing a path-checked write form
- * is blocked by default.
+ * Commands that are known safe / read-only.
  */
-const READ_ONLY_PREFIXES: RegExp[] = [
-  // Generic read-only commands
+const DEFAULT_READ_ONLY_PREFIXES: RegExp[] = [
   /^ls\b/,
   /^pwd\b/,
   /^cat\b/,
@@ -650,33 +480,564 @@ const READ_ONLY_PREFIXES: RegExp[] = [
   /^test\b/,
   /^\[\[?\s/,
   /^exit\b/,
-
-  // Git read-only subcommands — only truly read-only inspection commands
+  /^cd\b/,
   /^git\s+(?:status|diff|log|show|grep|rev-parse|rev-list|ls-files|ls-tree|ls-remote|for-each-ref|shortlog|name-rev|check-ignore|check-attr|check-mailmap|count-objects|describe|help|merge-base|whatchanged|show-ref|show-branch|verify-commit|verify-pack|verify-tag|diff-files|diff-index|diff-tree|archive|worktree\s+list|stash\s+(?:list|show)|tag\s+(?:\-l|\-\-list)|config\s+(?:\-\-get\b|\-\-list\b|\-\-get-all\b)|branch\s+(?:\-l|\-\-list))\b/,
-
-  // Web / network — read-only
+  /^git\s+-C\s+\S+\s+(?:status|diff|log|show|grep|rev-parse|rev-list|ls-files|ls-tree|ls-remote|for-each-ref|shortlog|name-rev|check-ignore|check-attr|check-mailmap|count-objects|describe|help|merge-base|whatchanged|show-ref|show-branch|verify-commit|verify-pack|verify-tag|diff-files|diff-index|diff-tree|archive|worktree\s+list|stash\s+(?:list|show)|tag\s+(?:\-l|\-\-list)|config\s+(?:\-\-get\b|\-\-list\b|\-\-get-all\b)|branch\s+(?:\-l|\-\-list))\b/,
   /^ping\s/,
   /^nslookup\s/,
   /^dig\s/,
   /^host\s/,
   /^nc\s+-[z]/,
-
-  // Data format tools — read-only
   /^jq\b/,
   /^yq\b/,
-
-  // Verification/build tools — allowed for scoped verification in
-  // implement/fix workers.  These tools typecheck, test, lint, or
-  // generate code without mutating source-controlled files.
-  /^npm\s+(?:test|run\s+test|run\s+test:core|run\s+test:all)\b/,
+  /^npm\s+(?:--prefix\s+\S+\s+)?(?:test|run\s+test|run\s+test:core|run\s+test:all)\b/,
   /^npx\s+tsx\s+(?:--test|--eval)/,
   /^tsx\s+(?:--test|--eval)/,
-  /^pnpm\s+(?:--[a-z-]+\s+\S+\s+)*(?:typecheck|test|lint|run\s+(?:typecheck|test|lint|check|ci)(?:\s|$))/,
+  /^pnpm\s+(?:(?:--dir\s+\S+|--[a-z-]+\s+\S+)\s+)*(?:typecheck|test|lint|run\s+(?:typecheck|test|lint|check|ci)(?:\s|$))/,
+  /^make\s+(?:-C\s+\S+\s+)?(?:check|test|lint|ci|verify)(?:\s|$)/,
   /^just\s+(?:--list|--summary|codegen|smoke\b)/,
   /^tsc\s/,
   /^npx\s+tsc\s/,
   /^nix\s+(?:develop|shell|run)\b/,
 ]
+
+function normalizeBashPolicy(policy?: RepoBashGuardConfig): NormalizedBashPolicy {
+  return {
+    allowCommandPrefixes: (policy?.allowCommandPrefixes ?? []).map((entry) => entry.trim().toLowerCase()).filter(Boolean),
+    denyCommandPrefixes: (policy?.denyCommandPrefixes ?? []).map((entry) => entry.trim().toLowerCase()).filter(Boolean),
+    allowExecutables: (policy?.allowExecutables ?? []).map((entry) => entry.trim().toLowerCase()).filter(Boolean),
+    denyExecutables: (policy?.denyExecutables ?? []).map((entry) => entry.trim().toLowerCase()).filter(Boolean),
+    allowReadOnlyChaining: policy?.allowReadOnlyChaining ?? DEFAULT_BASH_POLICY.allowReadOnlyChaining,
+  }
+}
+
+function tokenizeShellWords(command: string): string[] {
+  const tokens: string[] = []
+  let current = ""
+  let inSingle = false
+  let inDouble = false
+
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i]
+
+    if (char === "\\" && !inSingle) {
+      if (i + 1 < command.length) {
+        current += command[i + 1]
+        i++
+      }
+      continue
+    }
+
+    if (char === "'" && !inDouble) {
+      inSingle = !inSingle
+      continue
+    }
+
+    if (char === '"' && !inSingle) {
+      inDouble = !inDouble
+      continue
+    }
+
+    if (!inSingle && !inDouble && /\s/.test(char)) {
+      if (current) {
+        tokens.push(current)
+        current = ""
+      }
+      continue
+    }
+
+    current += char
+  }
+
+  if (current) tokens.push(current)
+  return tokens
+}
+
+function splitTopLevelCommandSegments(command: string): SplitCommandResult | null {
+  const segments: string[] = []
+  const operators: string[] = []
+  let current = ""
+  let inSingle = false
+  let inDouble = false
+
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i]
+
+    if (char === "`" && !inSingle && !inDouble) return null
+    if (char === "$" && command[i + 1] === "(" && !inSingle && !inDouble) return null
+    if ((char === "<" || char === ">") && command[i + 1] === "(" && !inSingle && !inDouble) return null
+
+    if (char === "\\" && !inSingle) {
+      current += char
+      if (i + 1 < command.length) {
+        current += command[i + 1]
+        i++
+      }
+      continue
+    }
+
+    if (char === "'" && !inDouble) {
+      inSingle = !inSingle
+      current += char
+      continue
+    }
+
+    if (char === '"' && !inSingle) {
+      inDouble = !inDouble
+      current += char
+      continue
+    }
+
+    if (!inSingle && !inDouble) {
+      if (char === ";") {
+        if (current.trim()) segments.push(current.trim())
+        operators.push(";")
+        current = ""
+        continue
+      }
+      if (char === "&" && command[i + 1] === "&") {
+        if (current.trim()) segments.push(current.trim())
+        operators.push("&&")
+        current = ""
+        i++
+        continue
+      }
+      if (char === "|" && command[i + 1] === "|") {
+        if (current.trim()) segments.push(current.trim())
+        operators.push("||")
+        current = ""
+        i++
+        continue
+      }
+      if (char === "|") {
+        if (current.trim()) segments.push(current.trim())
+        operators.push("|")
+        current = ""
+        continue
+      }
+    }
+
+    current += char
+  }
+
+  if (current.trim()) segments.push(current.trim())
+  return { segments, operators }
+}
+
+function looksLikePathToken(token: string): boolean {
+  return token === "." || token === ".." || token.startsWith("/") || token.startsWith("./") || token.startsWith("../") || token.startsWith("~/") || token.includes("/")
+}
+
+function guardRepoPathAccess(
+  targetPath: string,
+  options: GuardOptions,
+  baseDir: string,
+): GuardResult | null {
+  const projectRoot = options.projectRoot
+  const runtimeStateDir = options.runtimeStateDir ?? resolveRuntimeStateDir(projectRoot)
+  const expanded = targetPath.startsWith("~/")
+    ? path.join(process.env.HOME ?? "~", targetPath.slice(2))
+    : targetPath
+  const absolutePath = path.isAbsolute(expanded)
+    ? expanded
+    : path.resolve(baseDir, expanded)
+  const resolvedPath = resolveAncestorSafe(absolutePath, projectRoot)
+
+  if (resolvedPath === null) {
+    return {
+      allowed: false,
+      message: `Bash command blocked: path "${absolutePath}" could not be safely resolved within the repo/worktree roots.`,
+      resolvedPath: absolutePath,
+    }
+  }
+
+  for (const pattern of BLOCKED_PATH_PATTERNS) {
+    if (pattern.test(resolvedPath)) {
+      return {
+        allowed: false,
+        message: `Bash command blocked: path "${resolvedPath}" matches blocked pattern ${pattern}.`,
+        resolvedPath,
+      }
+    }
+  }
+
+  const allowedRoots = [
+    ...buildAllowedRoots(projectRoot, options.worktreePaths),
+    runtimeStateDir,
+  ]
+  const withinAllowed = allowedRoots.some((root) => isPathWithinOrEqual(root, resolvedPath))
+  if (!withinAllowed) {
+    return {
+      allowed: false,
+      message: `Bash command blocked: path "${resolvedPath}" is outside allowed roots (${allowedRoots.join(", ")}).`,
+      resolvedPath,
+    }
+  }
+
+  return null
+}
+
+function matchesConfiguredPrefix(command: string, prefixes: string[]): boolean {
+  const lower = command.trim().toLowerCase()
+  return prefixes.some((prefix) => lower.startsWith(prefix))
+}
+
+function extractExecutable(tokens: string[]): string | null {
+  if (tokens.length === 0) return null
+  return tokens[0]!.toLowerCase()
+}
+
+function isConfiguredReadOnly(
+  normalizedCommand: string,
+  executable: string | null,
+  policy: NormalizedBashPolicy,
+): boolean {
+  if (matchesConfiguredPrefix(normalizedCommand, policy.denyCommandPrefixes)) return false
+  if (executable && policy.denyExecutables.includes(executable)) return false
+  if (matchesConfiguredPrefix(normalizedCommand, policy.allowCommandPrefixes)) return true
+  if (executable && policy.allowExecutables.includes(executable)) return true
+  return false
+}
+
+function extractDirectoryTargets(tokens: string[]): string[] {
+  const executable = extractExecutable(tokens)
+  if (!executable) return []
+
+  const results: string[] = []
+  for (let i = 1; i < tokens.length; i++) {
+    const token = tokens[i]!
+    const next = tokens[i + 1]
+    if (executable === "git" && token === "-C" && next) results.push(next)
+    if (executable === "pnpm" && token === "--dir" && next) results.push(next)
+    if (executable === "npm" && token === "--prefix" && next) results.push(next)
+    if (executable === "make" && token === "-C" && next) results.push(next)
+    if (token.startsWith("--dir=")) results.push(token.slice("--dir=".length))
+    if (token.startsWith("--prefix=")) results.push(token.slice("--prefix=".length))
+  }
+  return results
+}
+
+function extractReadOnlyPathTokens(tokens: string[]): string[] {
+  const executable = extractExecutable(tokens)
+  if (!executable) return []
+
+  const nonOptionArgs = tokens.slice(1).filter((token) => !token.startsWith("-"))
+  switch (executable) {
+    case "ls":
+    case "cat":
+    case "head":
+    case "tail":
+    case "wc":
+    case "stat":
+    case "file":
+    case "readlink":
+    case "realpath":
+    case "tree":
+    case "du":
+    case "diff":
+    case "cmp":
+    case "comm":
+      return nonOptionArgs.filter(looksLikePathToken)
+    case "grep":
+    case "rg":
+      return nonOptionArgs.slice(1).filter(looksLikePathToken)
+    case "find":
+      return (nonOptionArgs.length > 0 ? [nonOptionArgs[0]!] : []).filter(looksLikePathToken)
+    default:
+      return []
+  }
+}
+
+function validateReadOnlyCommandPaths(
+  tokens: string[],
+  currentDir: string,
+  options: GuardOptions,
+): GuardResult | null {
+  for (const dirTarget of extractDirectoryTargets(tokens)) {
+    const dirCheck = guardRepoPathAccess(dirTarget, options, currentDir)
+    if (dirCheck) return dirCheck
+  }
+
+  for (const pathToken of extractReadOnlyPathTokens(tokens)) {
+    const pathCheck = guardRepoPathAccess(pathToken, options, currentDir)
+    if (pathCheck) return pathCheck
+  }
+
+  return null
+}
+
+function guardSingleBashCommand(
+  command: string,
+  options: GuardOptions & { intent?: GuardIntent },
+  currentDir: string,
+  allowWriteForms: boolean,
+): SingleCommandGuardResult {
+  const intent = options.intent ?? "bash-mutation"
+  const projectRoot = options.projectRoot
+  const trimmed = command.trim()
+  const normalised = trimmed.replace(/\s+/g, " ").replace(/^sudo\s+/i, "")
+  const policy = normalizeBashPolicy(options.bashPolicy)
+  const tokens = tokenizeShellWords(normalised)
+  const executable = extractExecutable(tokens)
+
+  if (!trimmed) {
+    return {
+      allowed: true,
+      message: "Empty bash segment ignored.",
+      resolvedPath: currentDir,
+      hasVerifiedWriteForm: false,
+      isReadOnly: true,
+      nextCwd: currentDir,
+    }
+  }
+
+  if (trimmed.includes("`") || /\$\(/.test(trimmed) || /[<>]\(/.test(trimmed)) {
+    return {
+      allowed: false,
+      message:
+        "Bash command blocked: command substitution or process substitution detected. " +
+        "Use plain commands or the dedicated tools instead.",
+      resolvedPath: projectRoot,
+      hasVerifiedWriteForm: false,
+      isReadOnly: false,
+    }
+  }
+
+  if (matchesConfiguredPrefix(normalised, policy.denyCommandPrefixes) || (executable && policy.denyExecutables.includes(executable))) {
+    return {
+      allowed: false,
+      message: `Bash command blocked by repo bashGuard deny rule: ${normalised}`,
+      resolvedPath: projectRoot,
+      hasVerifiedWriteForm: false,
+      isReadOnly: false,
+    }
+  }
+
+  const isOrchFileRestructure = intent === "fix-orchestrator" && (
+    /\brm\s+(?:-[rfv]*\s+)?/.test(normalised) ||
+    /\brmdir\b/.test(normalised) ||
+    /\bmkdir\b/.test(normalised) ||
+    /\btouch\b/.test(normalised) ||
+    /^mv\b/.test(normalised)
+  )
+
+  const configuredReadOnly = isConfiguredReadOnly(normalised, executable, policy)
+  const builtinReadOnly = DEFAULT_READ_ONLY_PREFIXES.some((re) => re.test(normalised))
+  const isReadOnly = configuredReadOnly || builtinReadOnly
+
+  if (!isReadOnly && !isOrchFileRestructure) {
+    for (const pattern of DESTRUCTIVE_PATTERNS) {
+      if (pattern.test(normalised)) {
+        return {
+          allowed: false,
+          message:
+            `Bash command blocked by path guard: pattern \`${pattern.source}\` matches a destructive/mutating command. ` +
+            "Use the edit/write tools for file changes, or use a known read-only command.",
+          resolvedPath: projectRoot,
+          hasVerifiedWriteForm: false,
+          isReadOnly: false,
+        }
+      }
+    }
+  }
+
+  if (executable === "cd") {
+    const target = tokens[1]
+    if (!target) {
+      return {
+        allowed: false,
+        message: "Bash command blocked: `cd` without a target is not permitted.",
+        resolvedPath: projectRoot,
+        hasVerifiedWriteForm: false,
+        isReadOnly: true,
+      }
+    }
+    const dirCheck = guardRepoPathAccess(target, options, currentDir)
+    if (dirCheck) {
+      return { ...dirCheck, hasVerifiedWriteForm: false, isReadOnly: true }
+    }
+    return {
+      allowed: true,
+      message: `Bash command passed path guard checks for directory change to ${target}.`,
+      resolvedPath: path.resolve(currentDir, target),
+      hasVerifiedWriteForm: false,
+      isReadOnly: true,
+      nextCwd: path.resolve(currentDir, target),
+    }
+  }
+
+  const containsWriteForm = allowWriteForms && (
+    /[>]{1,2}\s*\S/.test(trimmed) ||
+    /\btee\b/.test(trimmed) ||
+    /\b(?:mv|cp)\s+\S+\s+\S+/.test(trimmed) ||
+    /\bcurl\b[^\n]*\s-o\s+\S+/.test(trimmed) ||
+    /\bwget\b[^\n]*\s-O\s+\S+/.test(trimmed)
+  )
+
+  if (isReadOnly && !containsWriteForm) {
+    const pathCheck = validateReadOnlyCommandPaths(tokens, currentDir, options)
+    if (pathCheck) {
+      return { ...pathCheck, hasVerifiedWriteForm: false, isReadOnly: true }
+    }
+    return {
+      allowed: true,
+      message: "Bash command passed path guard checks.",
+      resolvedPath: currentDir,
+      hasVerifiedWriteForm: false,
+      isReadOnly: true,
+      nextCwd: currentDir,
+    }
+  }
+
+  let hasVerifiedWriteForm = false
+
+  if (allowWriteForms) {
+    const redirMatches = trimmed.matchAll(/[>]{1,2}\s*(\S+)/g)
+    for (const match of redirMatches) {
+      const fileTarget = match[1]
+      if (!fileTarget) continue
+      hasVerifiedWriteForm = true
+      const resolvedTarget = path.isAbsolute(fileTarget)
+        ? fileTarget
+        : path.resolve(currentDir, fileTarget)
+      const result = guardWrite(resolvedTarget, { ...options, intent })
+      if (!result.allowed) {
+        return { ...result, hasVerifiedWriteForm, isReadOnly: false }
+      }
+    }
+
+    const teeMatch = trimmed.match(/\btee\s+(-[aA]?\s+)?(\S+)/)
+    if (teeMatch?.[2]) {
+      hasVerifiedWriteForm = true
+      const resolvedTarget = path.isAbsolute(teeMatch[2])
+        ? teeMatch[2]
+        : path.resolve(currentDir, teeMatch[2])
+      const result = guardWrite(resolvedTarget, { ...options, intent })
+      if (!result.allowed) {
+        return { ...result, hasVerifiedWriteForm, isReadOnly: false }
+      }
+    }
+
+    const mvCpMatch = trimmed.match(/\b(mv|cp)\s+(\S+)\s+(\S+)/)
+    if (mvCpMatch?.[3] && !mvCpMatch[3].startsWith("-")) {
+      hasVerifiedWriteForm = true
+      const resolvedTarget = path.isAbsolute(mvCpMatch[3])
+        ? mvCpMatch[3]
+        : path.resolve(currentDir, mvCpMatch[3])
+      const result = guardWrite(resolvedTarget, { ...options, intent })
+      if (!result.allowed) {
+        return { ...result, hasVerifiedWriteForm, isReadOnly: false }
+      }
+    }
+
+    const curlOutputMatch = trimmed.match(/\bcurl\b[^\n]*\s-o\s+(\S+)/)
+    if (curlOutputMatch?.[1]) {
+      hasVerifiedWriteForm = true
+      const resolvedTarget = path.isAbsolute(curlOutputMatch[1])
+        ? curlOutputMatch[1]
+        : path.resolve(currentDir, curlOutputMatch[1])
+      const result = guardWrite(resolvedTarget, { ...options, intent })
+      if (!result.allowed) {
+        return { ...result, hasVerifiedWriteForm, isReadOnly: false }
+      }
+    }
+
+    const wgetOutputMatch = trimmed.match(/\bwget\b[^\n]*\s-O\s+(\S+)/)
+    if (wgetOutputMatch?.[1]) {
+      hasVerifiedWriteForm = true
+      const resolvedTarget = path.isAbsolute(wgetOutputMatch[1])
+        ? wgetOutputMatch[1]
+        : path.resolve(currentDir, wgetOutputMatch[1])
+      const result = guardWrite(resolvedTarget, { ...options, intent })
+      if (!result.allowed) {
+        return { ...result, hasVerifiedWriteForm, isReadOnly: false }
+      }
+    }
+  }
+
+  if (!hasVerifiedWriteForm) {
+    return {
+      allowed: false,
+      message:
+        "Bash command blocked: not a known read-only command and no path-checked write operation detected. " +
+        "Use a known read-only command, add a repo bashGuard allowlist entry, or use the edit/write tools for file changes.",
+      resolvedPath: projectRoot,
+      hasVerifiedWriteForm: false,
+      isReadOnly: false,
+    }
+  }
+
+  return {
+    allowed: true,
+    message: "Bash command passed path guard checks.",
+    resolvedPath: currentDir,
+    hasVerifiedWriteForm,
+    isReadOnly: false,
+    nextCwd: currentDir,
+  }
+}
+
+/**
+ * Check whether a bash command includes destructive operations that
+ * should be blocked by the path guard.
+ */
+export function guardBashCommand(
+  command: string,
+  options: GuardOptions & { intent?: GuardIntent },
+): GuardResult {
+  const policy = normalizeBashPolicy(options.bashPolicy)
+  const split = splitTopLevelCommandSegments(command.trim())
+
+  if (!split) {
+    return {
+      allowed: false,
+      message:
+        "Bash command blocked: shell substitution detected (backticks, `$()`, or process substitution). " +
+        "Use plain commands or the dedicated tools instead.",
+      resolvedPath: options.projectRoot,
+    }
+  }
+
+  if (split.segments.length > 1) {
+    if (!policy.allowReadOnlyChaining) {
+      return {
+        allowed: false,
+        message:
+          "Bash command blocked: top-level chaining/piping is disabled by repo bashGuard policy. " +
+          "Run each command separately or enable allowReadOnlyChaining.",
+        resolvedPath: options.projectRoot,
+      }
+    }
+
+    let currentDir = options.projectRoot
+    for (const segment of split.segments) {
+      const result = guardSingleBashCommand(segment, options, currentDir, false)
+      if (!result.allowed) return result
+      if (!result.isReadOnly) {
+        return {
+          allowed: false,
+          message:
+            "Bash command blocked: chained/piped commands are only allowed when every segment is read-only and repo-safe.",
+          resolvedPath: options.projectRoot,
+        }
+      }
+      currentDir = result.nextCwd ?? currentDir
+    }
+
+    return {
+      allowed: true,
+      message: "Bash command passed path guard checks.",
+      resolvedPath: currentDir,
+    }
+  }
+
+  const result = guardSingleBashCommand(split.segments[0] ?? command, options, options.projectRoot, true)
+  return {
+    allowed: result.allowed,
+    message: result.message,
+    resolvedPath: result.resolvedPath,
+  }
+}
 
 /**
  * Check whether a git write command (commit, add, checkout, push, etc.)

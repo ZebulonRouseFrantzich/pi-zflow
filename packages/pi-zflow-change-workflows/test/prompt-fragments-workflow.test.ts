@@ -15,6 +15,7 @@ import * as assert from "node:assert/strict"
 import {
   setActiveWorkflowMode,
   getActiveWorkflowMode,
+  isWorkflowToolGuardActive,
   addReminder,
   getActiveReminders,
   removeReminder,
@@ -96,12 +97,14 @@ describe("workflow mode state management", () => {
 
   it("starts with null mode and no reminders", () => {
     assert.equal(getActiveWorkflowMode(), null)
+    assert.equal(isWorkflowToolGuardActive(), false)
     assert.deepEqual(getActiveReminders(), [])
   })
 
   it("setActiveWorkflowMode sets and returns the mode", () => {
     setActiveWorkflowMode("change-prepare")
     assert.equal(getActiveWorkflowMode(), "change-prepare")
+    assert.equal(isWorkflowToolGuardActive(), true)
   })
 
   it("setActiveWorkflowMode(null) clears the mode", () => {
@@ -109,6 +112,7 @@ describe("workflow mode state management", () => {
     assert.equal(getActiveWorkflowMode(), "change-implement")
     setActiveWorkflowMode(null)
     assert.equal(getActiveWorkflowMode(), null)
+    assert.equal(isWorkflowToolGuardActive(), false)
   })
 
   it("addReminder adds a reminder", () => {

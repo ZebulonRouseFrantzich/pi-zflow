@@ -36,9 +36,10 @@ Check each of the following against the plan artifacts under
    `standards.md`, `verification.md`, `implementation-tasks.md`.
 2. **Implementation-task completeness:** Each group in `execution-groups.md`
    must have a corresponding task spec section in `implementation-tasks.md`
-   (matching by group number or name). Each task spec should cover likely files,
-   context to read, implementation checklist, pseudocode/examples, acceptance
-   criteria, scoped verification steps, self-checks, and drift triggers.
+   (matching by group number or name). Each task spec should cover Objective,
+   Scope, likely files, context to read, implementation checklist,
+   group-specific pseudocode/examples, acceptance criteria, scoped verification
+   steps, self-checks, and drift triggers.
 3. **Execution-group structural rules:**
    - Every group touches ≤7 files.
    - The plan has ≤3 phases (milestones).

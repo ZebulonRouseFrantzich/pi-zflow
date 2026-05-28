@@ -455,12 +455,197 @@ async function validateExecutionGroups(
   return { valid: false, artifact: "execution-groups", issues, path }
 }
 
+const SYNTHESIZED_IMPLEMENTATION_TASKS_RE = /zflow-synthesized-artifact:\s*implementation-tasks/i
+const FALLBACK_PSEUDOCODE_PATTERNS: RegExp[] = [
+  /read design\.md, standards\.md, verification\.md, and execution-groups\.md/i,
+  /for each likely touched file:/i,
+  /make the smallest change that satisfies the group objective/i,
+  /No files listed in execution-groups\.md/i,
+]
+
+const IMPLEMENTATION_TASK_REQUIRED_SECTIONS: Array<{ label: string; patterns: RegExp[] }> = [
+  { label: "Objective", patterns: [/^#{3,6}\s+Objective\b/im] },
+  { label: "Scope", patterns: [/^#{3,6}\s+Scope\b/im] },
+  { label: "Likely files touched", patterns: [/^#{3,6}\s+Likely files touched\b/im] },
+  { label: "Context to read first", patterns: [/^#{3,6}\s+Context to read first\b/im] },
+  { label: "Implementation checklist", patterns: [/^#{3,6}\s+Implementation checklist\b/im] },
+  { label: "Pseudocode / implementation sketch", patterns: [/^#{3,6}\s+Pseudocode(?:\s*\/\s*implementation sketch|\s*\/\s*examples)?\b/im] },
+  { label: "Acceptance criteria", patterns: [/^#{3,6}\s+Acceptance criteria\b/im] },
+  { label: "Scoped verification", patterns: [/^#{3,6}\s+Scoped verification\b/im] },
+  { label: "Self-check before completion", patterns: [/^#{3,6}\s+Self-check(?:s)?(?: before completion)?\b/im] },
+  { label: "Drift triggers", patterns: [/^#{3,6}\s+Drift triggers?\b/im] },
+]
+
+const TASK_PROMPT_STOP_WORDS = new Set([
+  "the", "and", "with", "from", "that", "this", "into", "only", "then", "when",
+  "must", "will", "have", "has", "for", "your", "group", "update", "implement",
+  "change", "task", "scope", "read", "write", "tests", "test",
+])
+
+function normalizeImplementationTaskGroupKey(value: string): string {
+  const lower = value.toLowerCase()
+  return /^g\d/.test(lower) ? lower.slice(1) : lower
+}
+
+function parseImplementationTaskSections(content: string): Map<string, string> {
+  const sections = new Map<string, string>()
+  const chunks = content.split(/(?=^#{2,4}\s+Group\s+(?:[A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)\s*(?::|[—-])\s+)/m).filter(Boolean)
+
+  for (const chunk of chunks) {
+    const match = chunk.match(/^#{2,4}\s+Group\s+([A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)\s*(?::|[—-])\s+.+$/im)
+    if (!match) continue
+    sections.set(normalizeImplementationTaskGroupKey(match[1]!), chunk)
+  }
+
+  return sections
+}
+
+function extractSubsectionBody(section: string, patterns: RegExp[]): string {
+  for (const pattern of patterns) {
+    const match = section.match(pattern)
+    if (!match || match.index === undefined) continue
+    const start = match.index + match[0].length
+    const rest = section.slice(start)
+    const nextHeadingIndex = rest.search(/^#{3,6}\s+/m)
+    return (nextHeadingIndex >= 0 ? rest.slice(0, nextHeadingIndex) : rest).trim()
+  }
+  return ""
+}
+
+function collectTaskPromptKeywords(taskPrompt: string): string[] {
+  return taskPrompt
+    .toLowerCase()
+    .split(/[^a-z0-9_/-]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 4 && !TASK_PROMPT_STOP_WORDS.has(token))
+}
+
+async function validateImplementationTasks(
+  changeId: string,
+  planVersion: string,
+  minLength: number,
+  cwd?: string,
+): Promise<ArtifactValidationResult> {
+  const issues: string[] = []
+  const artifactId = "implementation-tasks"
+  const artifactFile = await readArtifact(changeId, planVersion, artifactId, cwd)
+  const filePath = resolvePlanArtifactPath(changeId, planVersion, artifactId, cwd)
+
+  if (!artifactFile) {
+    return {
+      valid: false,
+      artifact: artifactId,
+      issues: [`${artifactId}.md not found at expected path: ${filePath}`],
+      path: filePath,
+    }
+  }
+
+  const { content } = artifactFile
+
+  if (content.trim().length < minLength) {
+    issues.push(
+      `Content too short (${content.trim().length} chars, minimum ${minLength}). ` +
+      "Artifact may contain only placeholder text.",
+    )
+  }
+
+  for (const pattern of PLACEHOLDER_PATTERNS) {
+    if (pattern.test(content)) {
+      issues.push(`Contains placeholder marker (matched: ${pattern.source}). Replace with concrete content.`)
+    }
+  }
+
+  if (SYNTHESIZED_IMPLEMENTATION_TASKS_RE.test(content)) {
+    issues.push(
+      "implementation-tasks.md is marked as a synthesized recovery artifact. " +
+      "Planner-authored implementation tasks are required before approval.",
+    )
+  }
+
+  const { parseExecutionGroupsMd } = await import("./orchestration.js")
+  const executionGroupsArtifact = await readArtifact(changeId, planVersion, "execution-groups", cwd)
+  const executionGroups = executionGroupsArtifact
+    ? parseExecutionGroupsMd(executionGroupsArtifact.content)
+    : []
+
+  const taskSections = parseImplementationTaskSections(content)
+  if (executionGroups.length > 0 && taskSections.size === 0) {
+    issues.push(
+      "implementation-tasks.md has no parseable group sections. Use headings like `## Group 1: Name`.",
+    )
+  }
+
+  const pseudocodeFingerprints: string[] = []
+
+  for (const group of executionGroups) {
+    const groupKey = normalizeImplementationTaskGroupKey(group.id.replace(/^group-/, ""))
+    const section = taskSections.get(groupKey)
+    if (!section) {
+      issues.push(`Missing implementation task section for ${group.id}. Add a heading like \`## Group ${groupKey}: ...\`.`)
+      continue
+    }
+
+    for (const requirement of IMPLEMENTATION_TASK_REQUIRED_SECTIONS) {
+      const present = requirement.patterns.some((pattern) => pattern.test(section))
+      if (!present) {
+        issues.push(`Group \"${groupKey}\": missing section heading \"${requirement.label}\".`)
+      }
+    }
+
+    if (group.files.length > 0 && !group.files.some((file) => section.includes(file))) {
+      issues.push(
+        `Group \"${groupKey}\": task spec does not mention any of the execution-group file paths (${group.files.join(", ")}).`,
+      )
+    }
+
+    const pseudocode = extractSubsectionBody(
+      section,
+      IMPLEMENTATION_TASK_REQUIRED_SECTIONS.find((entry) => entry.label === "Pseudocode / implementation sketch")?.patterns ?? [],
+    )
+
+    if (!pseudocode) {
+      issues.push(`Group \"${groupKey}\": pseudocode / implementation sketch is empty.`)
+      continue
+    }
+
+    if (FALLBACK_PSEUDOCODE_PATTERNS.some((pattern) => pattern.test(pseudocode))) {
+      issues.push(
+        `Group \"${groupKey}\": pseudocode matches fallback boilerplate. Replace it with group-specific implementation logic.`,
+      )
+    }
+
+    const taskKeywords = collectTaskPromptKeywords(group.taskPrompt ?? "")
+    const mentionsConcreteFile = group.files.some((file) => pseudocode.includes(file))
+    const mentionsTaskKeyword = taskKeywords.some((keyword) => pseudocode.toLowerCase().includes(keyword))
+    if (!mentionsConcreteFile && !mentionsTaskKeyword) {
+      issues.push(
+        `Group \"${groupKey}\": pseudocode is too generic. Mention concrete files, symbols, or group-specific flow details.`,
+      )
+    }
+
+    pseudocodeFingerprints.push(
+      pseudocode
+        .toLowerCase()
+        .replace(/\s+/g, " ")
+        .trim(),
+    )
+  }
+
+  if (pseudocodeFingerprints.length > 1 && new Set(pseudocodeFingerprints).size === 1) {
+    issues.push(
+      "All implementation-task pseudocode sections are identical. Each group needs its own concrete implementation sketch.",
+    )
+  }
+
+  if (issues.length === 0) {
+    return { valid: true, artifact: artifactId, issues: [], path: filePath }
+  }
+
+  return { valid: false, artifact: artifactId, issues, path: filePath }
+}
+
 /**
- * Validate a simple (non-execution-groups) artifact.
- *
- * Checks:
- * - File exists and has content above minimum length
- * - No placeholder markers
+ * Validate a simple (non-execution-groups / non-implementation-tasks) artifact.
  */
 async function validateSimpleArtifact(
   changeId: string,
@@ -498,7 +683,6 @@ async function validateSimpleArtifact(
     }
   }
 
-  // Additional checks for verification.md
   if (artifactId === "verification") {
     const hasCodeFence = /```/.test(content)
     if (!hasCodeFence) {
@@ -540,6 +724,10 @@ export async function validateAllPlanArtifacts(
   for (const artifactId of CANONICAL_ARTIFACT_IDS) {
     if (artifactId === "execution-groups") continue // already done
     const minLen = MIN_CONTENT_LENGTHS[artifactId] ?? 50
+    if (artifactId === "implementation-tasks") {
+      results.push(await validateImplementationTasks(changeId, planVersion, minLen, cwd))
+      continue
+    }
     results.push(await validateSimpleArtifact(changeId, planVersion, artifactId, minLen, cwd))
   }
 
@@ -602,6 +790,9 @@ export async function validateSingleArtifact(
   }
 
   const minLen = MIN_CONTENT_LENGTHS[artifactId] ?? 50
+  if (artifactId === "implementation-tasks") {
+    return validateImplementationTasks(changeId, planVersion, minLen, cwd)
+  }
   return validateSimpleArtifact(changeId, planVersion, artifactId, minLen, cwd)
 }
 
@@ -732,6 +923,23 @@ export async function buildRepairPrompt(
   }
 
   sections.push(
+    "### implementation-tasks.md",
+    "",
+    "Required per group:",
+    "- Heading: `## Group X: Name` matching the execution-group ID",
+    "- `### Objective`",
+    "- `### Scope`",
+    "- `### Likely files touched`",
+    "- `### Context to read first`",
+    "- `### Implementation checklist`",
+    "- `### Pseudocode / implementation sketch`",
+    "- `### Acceptance criteria`",
+    "- `### Scoped verification`",
+    "- `### Self-check before completion`",
+    "- `### Drift triggers`",
+    "- No synthesized-marker comments like `zflow-synthesized-artifact`",
+    "- Pseudocode must be group-specific, not identical boilerplate reused for every group",
+    "",
     "### Other artifacts",
     "",
     "- Must contain real content, not placeholders or TODOs.",
