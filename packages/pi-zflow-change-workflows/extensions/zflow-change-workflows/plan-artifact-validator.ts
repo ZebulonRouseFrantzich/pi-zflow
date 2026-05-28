@@ -119,21 +119,22 @@ const GROUP_EXEC_HEADING_RE = /^#{1,4}\s+Execution\s+Group\s+([A-Za-z]?\d+[A-Za-
  * "FieldName:" patterns without worrying about bold variants.
  */
 function normalizeFieldBold(section: string): string {
-  // Match lines starting with optional ** or *, a field name (word chars,
-  // spaces, slashes, hyphens), then ** or * before/after the colon.
-  // Rewrite to clean "FieldName: " form.
+  // Match optional bullet prefixes plus bolded field labels such as:
+  //   - **Execution mode:** isolated
+  //   **Files touched (≤7):**
+  // and rewrite them to plain `FieldName: ` form while preserving the bullet.
   // Uses [^\S\n] (non-newline whitespace) instead of \s to avoid
   // consuming newlines and collapsing adjacent field lines together.
   return section.replace(
-    /^(\*{1,2})([A-Za-z][\w\s/-]+?)[^\S\n]*(\*{0,2}):[^\S\n]*(\*{0,2})[^\S\n]*/gm,
-    (_, _open, fieldName, _closeBefore, _closeAfter) => `${fieldName}: `
+    /^(\s*(?:[-*+]|\d+\.)\s+)?\*{1,2}([^*\n:][^:\n]*?)\*{0,2}:[^\S\n]*(\*{0,2})[^\S\n]*/gm,
+    (_, prefix = "", fieldName) => `${prefix}${fieldName.trim()}: `,
   )
 }
 
 /**
  * Patterns to detect the files section heading.
  */
-const FILES_HEADER_RE = /^Files?(?:\/paths)?:|^Primary\s+files?(?:\/paths)?\s+touched:/im
+const FILES_HEADER_RE = /^(?:\s*(?:[-*+]|\d+\.)\s+)?(?:Files?(?:\s+touched)?(?:\/paths)?(?:\s*\([^)]*\))?|Primary\s+files?(?:\/paths)?\s+touched):/im
 
 /**
  * Pattern to detect scoped verification with a concrete value (not TBD/empty).
@@ -145,7 +146,7 @@ const SCOPED_VERIFICATION_RE = /Scoped\s+verification:[^\S\n]*(.*)$/im
 /**
  * Pattern to detect agent field.
  */
-const AGENT_RE = /Agent:[^\S\n]*(.+)$/im
+const AGENT_RE = /(?:Owner\s+agent|Agent|Owner):[^\S\n]*(.+)$/im
 
 /**
  * Pattern to detect dependencies field.
@@ -274,6 +275,11 @@ async function validateExecutionGroups(
     issues.push(`Content too short (${content.trim().length} chars, minimum 100).`)
   }
 
+  const { parseExecutionGroupsMd } = await import("./orchestration.js")
+  const parsedGroupsById = new Map(
+    parseExecutionGroupsMd(content).map((group) => [group.id.replace(/^group-/, "").toLowerCase(), group]),
+  )
+
   // 1. Check for at least one group heading
   const hasStandardHeading = GROUP_HEADING_RE.test(content)
   const hasShortHeading = GROUP_SHORT_HEADING_RE.test(content)
@@ -333,21 +339,22 @@ async function validateExecutionGroups(
       issues.push(`Group "${groupId}" (section ${i + 1}): missing "Files:" or "Primary files/paths touched:" section.`)
     }
 
-    // Check Scoped verification
+    // Check Scoped verification. Use the parser-derived value when present so
+    // multi-line bullet lists and fenced command blocks stay aligned with the
+    // runtime parser rather than being rejected by a narrower regex.
     const verificationMatch = normalizedSection.match(SCOPED_VERIFICATION_RE)
-    if (!verificationMatch) {
+    const parsedGroup = parsedGroupsById.get(groupId)
+    const verificationValue = parsedGroup?.scopedVerification?.trim() ?? verificationMatch?.[1]?.trim() ?? ""
+    if (!verificationMatch && !verificationValue) {
       issues.push(
         `Group "${groupId}" (section ${i + 1}): missing "Scoped verification:" field. ` +
         "Each group must specify a concrete verification command.",
       )
-    } else {
-      const verificationValue = verificationMatch[1].trim()
-      if (isPlaceholderOrEmpty(verificationValue)) {
-        issues.push(
-          `Group "${groupId}" (section ${i + 1}): scoped verification "${verificationValue}" is a placeholder. ` +
-          "Provide a concrete command, not TBD or TODO.",
-        )
-      }
+    } else if (isPlaceholderOrEmpty(verificationValue)) {
+      issues.push(
+        `Group "${groupId}" (section ${i + 1}): scoped verification "${verificationValue}" is a placeholder. ` +
+        "Provide a concrete command, not TBD or TODO.",
+      )
     }
 
     // Check Agent field
@@ -368,21 +375,24 @@ async function validateExecutionGroups(
       )
     }
 
-    // Check Parallelizable field
+    // Check optional Parallelizable field. Legacy/planner output may omit it;
+    // the runtime parser defaults omitted values to true, so validation should
+    // stay aligned with the parser instead of rejecting otherwise-valid groups.
     const parallelMatch = normalizedSection.match(PARALLELIZABLE_RE)
-    if (!parallelMatch || !parallelMatch[1].trim()) {
+    const parallelValue = parallelMatch?.[1]?.trim().toLowerCase()
+    if (parallelValue && !["true", "false", "yes", "no"].includes(parallelValue)) {
       issues.push(
-        `Group "${groupId}" (section ${i + 1}): missing "Parallelizable:" field. ` +
-        "Each group must specify true or false.",
+        `Group "${groupId}" (section ${i + 1}): invalid "Parallelizable:" value "${parallelMatch![1].trim()}". ` +
+        "Use true or false.",
       )
     }
 
     // Check optional advanced execution strategy fields
-    const executionModeValue = normalizedSection.match(EXECUTION_MODE_RE)?.[1]?.trim().toLowerCase() ?? "isolated"
-    const workspaceIdValue = normalizedSection.match(WORKSPACE_ID_RE)?.[1]?.trim().replace(/^`|`$/g, "")
-    const workspaceConcurrencyValue = normalizedSection.match(WORKSPACE_CONCURRENCY_RE)?.[1]?.trim().toLowerCase() ?? "serialized"
-    const baseStrategyValue = normalizedSection.match(BASE_STRATEGY_RE)?.[1]?.trim().toLowerCase() ?? "head"
-    const executionRationaleValue = normalizedSection.match(EXECUTION_RATIONALE_RE)?.[1]?.trim() ?? ""
+    const executionModeValue = parsedGroup?.executionMode ?? normalizedSection.match(EXECUTION_MODE_RE)?.[1]?.trim().toLowerCase() ?? "isolated"
+    const workspaceIdValue = parsedGroup?.workspaceId ?? normalizedSection.match(WORKSPACE_ID_RE)?.[1]?.trim().replace(/^`|`$/g, "")
+    const workspaceConcurrencyValue = parsedGroup?.workspaceConcurrency ?? normalizedSection.match(WORKSPACE_CONCURRENCY_RE)?.[1]?.trim().toLowerCase() ?? "serialized"
+    const baseStrategyValue = parsedGroup?.baseStrategy ?? normalizedSection.match(BASE_STRATEGY_RE)?.[1]?.trim().toLowerCase() ?? "head"
+    const executionRationaleValue = parsedGroup?.executionRationale ?? normalizedSection.match(EXECUTION_RATIONALE_RE)?.[1]?.trim() ?? ""
 
     if (!["isolated", "shared-staging"].includes(executionModeValue)) {
       issues.push(

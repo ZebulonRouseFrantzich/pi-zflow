@@ -155,6 +155,43 @@ Implement the login handler per the design doc.
 3. Run scoped verification
 `
 
+const LEGACY_EXECUTION_GROUPS_VARIANT = `# test-change — Execution Groups (v1)
+
+## Phase 1 — API surface
+
+### Group G1 — Backend logic
+- **Owner agent:** backend-api
+- **Task description:** Add read/query methods and DTO definitions.
+- **Files touched (≤7):**
+  1. \`src/backend/licenseManager.ts\`
+  2. \`src/backend/interfaces.ts\`
+- **Dependencies:** none
+- **Review tags:** \`backend\`, \`oracle\`
+- **Scoped verification:**
+  - \`npm test -- backend\`
+  - \`npm run build\`
+- **Expected verification outcome:**
+  - Backend logic compiles.
+- **Execution mode:** isolated
+- **Base strategy:** head
+
+### Group G2 — Endpoint wrappers
+- **Owner agent:** backend-api
+- **Task description:** Add read-only endpoint wrappers.
+- **Files touched (≤7):**
+  1. \`src/api/get-oracle.ts\`
+  2. \`src/api/function.json\`
+- **Dependencies:** \`G1\`
+- **Review tags:** \`backend\`, \`oracle\`
+- **Scoped verification:**
+  - \`npm test -- api\`
+- **Expected verification outcome:**
+  - Endpoint wrappers compile.
+- **Execution mode:** isolated
+- **Base strategy:** dependency-lineage
+- **Execution rationale:** wrappers depend directly on backend logic from G1.
+`
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -486,6 +523,24 @@ Some text but no proper group headings.
     try {
       const result = await validateAllPlanArtifacts("test-change", "v1", baseDir)
       assert.strictEqual(result.valid, true, `Expected valid: ${result.summary}`)
+    } finally {
+      await fs.rm(baseDir, { recursive: true, force: true })
+    }
+  })
+
+  test("execution-groups with legacy planner labels and omitted parallelizable pass", async () => {
+    const artifacts = {
+      "design": VALID_DESIGN,
+      "execution-groups": LEGACY_EXECUTION_GROUPS_VARIANT,
+      "standards": VALID_STANDARDS,
+      "verification": VALID_VERIFICATION,
+      "implementation-tasks": VALID_IMPLEMENTATION_TASKS,
+    }
+
+    const { baseDir } = await createTestDirWithArtifacts(artifacts)
+    try {
+      const result = await validateAllPlanArtifacts("test-change", "v1", baseDir)
+      assert.strictEqual(result.valid, true, `Expected legacy variant to validate: ${result.summary}`)
     } finally {
       await fs.rm(baseDir, { recursive: true, force: true })
     }
