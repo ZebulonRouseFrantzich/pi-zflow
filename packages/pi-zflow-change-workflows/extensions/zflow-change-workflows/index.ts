@@ -7013,22 +7013,74 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             } else if (reconciliation.reviewNeeded) {
               // ── Review-only continuation ──────────────────────────
               // Verification is already current — skip directly to code review.
-              ctx.ui.notify(
-                "📋 Verification is up-to-date. Running code review...",
-                "info",
-              )
+              // Persist a durable breadcrumb before starting so we don't get
+              // stuck in "executing" if the process exits unexpectedly.
+              try {
+                const { default: startFs } = await import("node:fs/promises")
+                const { readRun, updateRun } = await import("pi-zflow-artifacts")
+                const curRun = await readRun(partialRunId, ctx.cwd)
+                await updateRun(partialRunId, {
+                  metadata: {
+                    ...(curRun.metadata ?? {}),
+                    reviewStartedAt: new Date().toISOString(),
+                  },
+                } as any, ctx.cwd)
+              } catch {
+                // Best-effort — continue anyway
+              }
+
+              const reviewModel = await resolveWorkflowModel("zflow.implement-routine")
+              const reviewProgress = createWorkflowProgressIndicator(pi, ctx, changeInput, {
+                command: "zflow-change-implement",
+                model: reviewModel.model ?? "unavailable",
+                thinking: reviewModel.thinking ?? "unavailable",
+                initialMessage: "Verification is up-to-date. Running code review...",
+                statusId: "zflow-implement",
+                widgetId: "zflow-implement-progress",
+              })
+              const updateReviewCard = (message: string): void => {
+                const normalized = message.toLowerCase()
+                if (normalized.includes("code review passed")) {
+                  reviewProgress.updatePhaseCard("code-review", "Code Review", message, "completed")
+                  reviewProgress.updatePhaseCard("post-code-review", "Post Code Review", "Preparing final workflow completion", "running")
+                  return
+                }
+                if (normalized.includes("code review found") || normalized.includes("review failed")) {
+                  reviewProgress.updatePhaseCard("code-review", "Code Review", message, "failed")
+                  reviewProgress.updatePhaseCard("post-code-review", "Post Code Review", "Review failed; preparing next steps", "failed")
+                  return
+                }
+                if (normalized.includes("persisting completed") || normalized.includes("workflow completion persisted")) {
+                  reviewProgress.updatePhaseCard("post-code-review", "Post Code Review", message, normalized.includes("persisted") ? "completed" : "running")
+                  return
+                }
+                reviewProgress.updatePhaseCard("code-review", "Code Review", message, "running")
+              }
+              updateReviewCard("Starting code review on applied implementation")
+              const onReviewerUpdate = (reviewerUpdate: {
+                reviewerName: string; agentName: string
+                status: "queued" | "running" | "completed" | "failed"
+                model?: string; thinking?: string
+                currentTool?: string; lastCommand?: string
+              }): void => {
+                reviewProgress.updateReviewer(reviewerUpdate.reviewerName, reviewerUpdate)
+              }
 
               try {
-                const reviewResult = await finalizeCodeReview(partialRunId, ctx.cwd)
+                const reviewResult = await finalizeCodeReview(partialRunId, ctx.cwd, onReviewerUpdate)
 
                 if (reviewResult.pass) {
-                  ctx.ui.notify("✅ Code review passed. Completing workflow...", "info")
+                  updateReviewCard("✅ Code review passed. Completing workflow...")
                   await completeWorkflow(resumeChangeId, partialRunId, ctx.cwd)
+                  updateReviewCard("Workflow completion persisted")
                   ctx.ui.notify(
                     `✅ Workflow completed for change "${resumeChangeId}".`,
                     "info",
                   )
+                  reviewProgress.updatePhaseCard("workflow-complete", "Workflow Complete", "Completed", "completed")
+                  reviewProgress.stop("Workflow Complete")
                 } else {
+                  updateReviewCard(`⚠️ Code review found issues`)
                   ctx.ui.notify(
                     `⚠️ Code review found issues: ${reviewResult.summary}\n` +
                     (reviewResult.findingsPath
@@ -7054,12 +7106,17 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
                   } catch {
                     // Best-effort state sync
                   }
+                  reviewProgress.updatePhaseCard("workflow-complete", "Workflow Needs Attention", "Review failed; use /zflow-change-fix", "failed")
+                  reviewProgress.stop("Review found issues")
                 }
               } catch (err: unknown) {
+                updateReviewCard("Code review encountered an error")
                 ctx.ui.notify(
                   `Code review failed: ${err instanceof Error ? err.message : String(err)}`,
                   "error",
                 )
+                reviewProgress.updatePhaseCard("workflow-complete", "Workflow Needs Attention", "Code review error; inspect logs", "failed")
+                reviewProgress.stop("Code review failed")
               }
             }
 
