@@ -35,127 +35,70 @@ import {
   resolveReconnaissancePath,
 } from "pi-zflow-artifacts/artifact-paths"
 
-// ── Path resolution helpers ──────────────────────────────────────
+// ── Extracted activation / command helpers ─────────────────────
 
-/**
- * All workflow-relevant runtime paths resolved once.
- *
- * This is the single authoritative source of runtime path locations
- * for all workflow commands. Every command should call this to get
- * consistent paths throughout the session.
- */
-export interface AllWorkflowPaths {
-  /** Root of all runtime state artifacts (`<git-dir>/pi-zflow/`). */
-  runtimeStateDir: string
-  /** Path to the state index JSON file. */
-  stateIndexPath: string
-  /** Path to the failure log markdown file. */
-  failureLogPath: string
-  /** Path to the review artifacts directory. */
-  reviewDir: string
-  /** Path to the code-review-findings.md file. */
-  codeReviewFindingsPath: string
-  /** Path to the repo-map.md file. */
-  repoMapPath: string
-  /** Path to the reconnaissance.md file. */
-  reconnaissancePath: string
-}
+import { ensureWorkflowIntercomTarget } from "./activation/path-helpers.js"
 
-/**
- * Resolve all workflow-relevant runtime paths.
- *
- * Centralises path resolution so that every workflow command resolves
- * paths the same way. Accepts an optional working directory for context.
- *
- * @param cwd - Working directory (defaults to `process.cwd()`)
- */
-export function resolveAllPaths(cwd?: string): AllWorkflowPaths {
-  return {
-    runtimeStateDir: resolveRuntimeStateDir(cwd),
-    stateIndexPath: resolveStateIndexPath(cwd),
-    failureLogPath: resolveFailureLogPath(cwd),
-    reviewDir: resolveReviewDir(cwd),
-    codeReviewFindingsPath: resolveCodeReviewFindingsPath(cwd),
-    repoMapPath: resolveRepoMapPath(cwd),
-    reconnaissancePath: resolveReconnaissancePath(cwd),
-  }
-}
+export {
+  resolveAllPaths,
+  resolvePlanPaths,
+  resolveRunPaths,
+  buildWorkflowIntercomSessionName,
+  ensureWorkflowIntercomTarget,
+} from "./activation/path-helpers.js"
 
-/**
- * Resolve plan-related paths for a specific change and version.
- *
- * @param changeId - Unique change identifier (kebab-case)
- * @param planVersion - Plan version (e.g. "v1")
- * @param cwd - Working directory (defaults to `process.cwd()`)
- */
-export function resolvePlanPaths(
-  changeId: string,
-  planVersion: string,
-  cwd?: string,
-): {
-  changeDir: string
-  planVersionDir: string
-  planStatePath: string
-} {
-  return {
-    changeDir: resolveChangeDir(changeId, cwd),
-    planVersionDir: resolvePlanVersionDir(changeId, planVersion, cwd),
-    planStatePath: resolvePlanStatePath(changeId, cwd),
-  }
-}
+export type {
+  AllWorkflowPaths,
+} from "./activation/path-helpers.js"
 
-/**
- * Resolve run-related paths for a specific run.
- *
- * @param runId - Unique run identifier
- * @param cwd - Working directory (defaults to `process.cwd()`)
- */
-export function resolveRunPaths(
-  runId: string,
-  cwd?: string,
-): {
-  runStatePath: string
-} {
-  return {
-    runStatePath: resolveRunStatePath(runId, cwd),
-  }
-}
+import {
+  setActiveWorkflowMode,
+  getActiveWorkflowMode,
+  isWorkflowToolGuardActive,
+  addReminder,
+  removeReminder,
+  getActiveReminders,
+  clearReminders,
+  resetWorkflowState,
+} from "./activation/workflow-state.js"
 
-function sanitizeWorkflowSessionToken(token: string, fallback: string): string {
-  const sanitized = token
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-  return sanitized || fallback
-}
+export {
+  setActiveWorkflowMode,
+  getActiveWorkflowMode,
+  isWorkflowToolGuardActive,
+  addReminder,
+  removeReminder,
+  getActiveReminders,
+  clearReminders,
+  resetWorkflowState,
+} from "./activation/workflow-state.js"
 
-export function buildWorkflowIntercomSessionName(
-  workflow: "implement" | "fix",
-  changeId: string,
-  sessionId: string,
-): string {
-  const safeChangeId = sanitizeWorkflowSessionToken(changeId, "change")
-  const safeSessionId = sanitizeWorkflowSessionToken(sessionId, "session").slice(0, 8) || "session"
-  return `zflow-${workflow}-${safeChangeId}-${safeSessionId}`
-}
+import type { InterviewableContext } from "./interview/structured-interview.js"
+import { runStructuredInterview } from "./interview/structured-interview.js"
 
-export function ensureWorkflowIntercomTarget(
-  pi: Pick<ExtensionAPI, "getSessionName" | "setSessionName">,
-  ctx: { sessionManager?: { getSessionId?: () => string } },
-  workflow: "implement" | "fix",
-  changeId: string,
-): string | undefined {
-  const existing = pi.getSessionName()?.trim()
-  if (existing) return existing
+export type { InterviewableContext } from "./interview/structured-interview.js"
 
-  const sessionId = ctx.sessionManager?.getSessionId?.()
-  if (!sessionId) return undefined
+import {
+  promptForChangePlanInput,
+  deriveChangePlanId,
+  parseChangePlanArgs,
+  parseChangePrepareArgs,
+  extractChangePlanReference,
+} from "./commands/args.js"
 
-  const generated = buildWorkflowIntercomSessionName(workflow, changeId, sessionId)
-  pi.setSessionName(generated)
-  return generated
-}
+export {
+  isAdHocPlanModeActive,
+  shouldForkImplementationSessionAfterPrepare,
+  deriveChangePlanId,
+  parseChangePlanArgs,
+  parseChangePrepareArgs,
+  extractChangePlanReference,
+} from "./commands/args.js"
 
+export type {
+  ParsedChangePlanArgs,
+  ParsedChangePrepareArgs,
+} from "./commands/args.js"
 // ── State-index lifecycle helpers ─────────────────────────────────
 
 import { loadStateIndex, listStateIndexEntries } from "pi-zflow-artifacts/state-index"
@@ -318,6 +261,15 @@ import type {
   FixAttempt,
 } from "./verification.js"
 
+import type { AgentDispatchProgress, DispatchService, DispatchWorktreeSetupHook } from "pi-zflow-core/dispatch-service"
+import { DISPATCH_SERVICE_CAPABILITY } from "pi-zflow-core/dispatch-service"
+import {
+  buildFixWorkerWorktreeStrategy,
+  extractFixVerificationCommand,
+  mergeSuccessfulFixResult,
+  selectCanonicalGroupPatchPath,
+} from "./fix-dispatch.js"
+
 export {
   discoverUnfinishedWork,
   promptResumeChoices,
@@ -417,62 +369,6 @@ export type {
 }
 
 // ── Structured interview helper ─────────────────────────────────
-
-/**
- * Minimal type for a context with interview/UI capability.
- *
- * Permissive to avoid depending on concrete Pi internals — any object
- * matching one of the recognised shapes will work.
- */
-export interface InterviewableContext {
-  /** Direct interview function (future Pi API). */
-  interview?: (payload: string) => Promise<string | undefined> | string | undefined
-  /** Nested UI context. */
-  ui?: {
-    interview?: (payload: string) => Promise<string | undefined> | string | undefined
-    /** Single-select from options. */
-    select?: (title: string, options: string[], extra?: Record<string, unknown>) => Promise<string | undefined>
-    /** Confirm dialog (boolean). */
-    confirm?: (title: string, message: string, extra?: Record<string, unknown>) => Promise<boolean>
-    /** Plain text input. */
-    input?: (title: string, placeholder?: string, extra?: Record<string, unknown>) => Promise<string | undefined>
-    /** Non-blocking notification. */
-    notify: (message: string, type?: "info" | "warning" | "error") => void
-    /** Dynamic widget rendered near the editor in interactive TUI mode. */
-    setWidget?: (id: string, content?: string[], options?: { placement?: "aboveEditor" | "belowEditor" }) => void
-    /** Footer status indicator in interactive TUI mode. */
-    setStatus?: (id: string, value?: string) => void
-    /** Request an immediate TUI redraw. */
-    requestRender?: () => void
-  }
-  /**
-   * The Pi runtime model registry, available when the handler runs inside
-   * a Pi extension command context. Provides model discovery and auth checks.
-   *
-   * When present, profile resolution can check lane models against
-   * real model availability. When absent, lane-health checks are skipped
-   * and all resolved lanes are assumed healthy.
-   */
-  modelRegistry?: {
-    getAll(): Array<{
-      provider: string
-      id: string
-      api?: string
-      baseUrl?: string
-      reasoning?: boolean
-      input?: string[]
-      contextWindow?: number
-      maxTokens?: number
-      [key: string]: unknown
-    }>
-    hasConfiguredAuth(model: {
-      provider: string
-      id: string
-      [key: string]: unknown
-    }): boolean
-  }
-}
-
 function formatElapsed(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000))
   const minutes = Math.floor(totalSeconds / 60)
@@ -1567,66 +1463,6 @@ function createWorkflowProgressIndicator(
  * Parse a simplified questions payload to extract the first single-choice
  * question and its options for a fallback `ui.select` or `ui.confirm` call.
  */
-function extractFirstChoice(questionsJson: string): {
-  title: string
-  question: string
-  options: string[]
-} | null {
-  try {
-    const parsed = JSON.parse(questionsJson)
-    const title = parsed.title ?? "Decision Required"
-    const q = parsed.questions?.[0]
-    if (!q) return null
-    if (q.type === "single" && Array.isArray(q.options)) {
-      return {
-        title,
-        question: q.question,
-        options: q.options.map((o: { label: string }) => o.label),
-      }
-    }
-    return { title, question: q.question ?? "Proceed?", options: ["Yes", "No"] }
-  } catch {
-    return null
-  }
-}
-
-/** Map a fallback select choice to a decision string. */
-function selectToDecision(
-  selected: string | undefined,
-  questionsJson: string,
-): { decision: string; revisionNotes?: string } | null {
-  if (!selected) {
-    return { decision: "cancel" }
-  }
-  // Match the selected label against the options in the JSON payload
-  try {
-    const parsed = JSON.parse(questionsJson)
-    const q = parsed.questions?.[0]
-    if (q?.type === "single" && Array.isArray(q.options)) {
-      const matched = q.options.find(
-        (o: { label: string }) => o.label === selected,
-      )
-      if (matched?.label?.startsWith?.("Approve") || matched?.label === "Yes") {
-        return { decision: "approve" }
-      }
-      if (matched?.label?.startsWith?.("Request Revisions")) {
-        return { decision: "revise", revisionNotes: "Revision requested via gate" }
-      }
-      if (matched?.label?.startsWith?.("Cancel") || matched?.label === "No") {
-        return { decision: "cancel" }
-      }
-      if (matched?.label?.startsWith?.("Inspect Artifacts")) {
-        return { decision: "inspect" }
-      }
-      // Other labels map to a "continue" decision
-      return { decision: "continue" }
-    }
-  } catch {
-    // fall through
-  }
-  return { decision: "continue" }
-}
-
 function formatPlanInspectionPaths(input: {
   changeId: string
   planVersion: string
@@ -1678,443 +1514,9 @@ function formatPlanInspectionPaths(input: {
   return sections.join("\n")
 }
 
-/**
- * Run a structured interview with the user, adapting to whatever UI
- * capabilities the context provides.
- *
- * Priority order:
- * 1. `ctx.interview(payload)` — future Pi native interview API
- * 2. `ctx.ui.interview(payload)` — future Pi UI interview API
- * 3. `ctx.ui.select()` / `ctx.ui.confirm()` — fallback for single-choice questions
- * 4. `ctx.ui.notify()` — last-resort notification
- *
- * @param ctx - The extension command context (or any InterviewableContext).
- * @param questionsJson - JSON string produced by buildPlanApprovalQuestions()
- *                        or buildImplementationGateQuestions().
- * @param fallbackMessage - Concise message to show when no interactive UI is
- *                          available.
- * @returns Parsed decision + optional revision notes, or null if the
- *          context had no usable UI at all.
- */
-async function runStructuredInterview(
-  ctx: InterviewableContext,
-  questionsJson: string,
-  fallbackMessage: string,
-): Promise<{ decision: string; revisionNotes?: string; selectedFindings?: string[] } | null> {
-  // 1. Try ctx.interview (native Pi interview API)
-  if (typeof ctx.interview === "function") {
-    const raw = await Promise.resolve(ctx.interview(questionsJson))
-    if (raw !== undefined) {
-      return parseInterviewResponse(raw)
-    }
-  }
-
-  // 2. Try ctx.ui.interview
-  if (typeof ctx.ui?.interview === "function") {
-    const raw = await Promise.resolve(ctx.ui.interview(questionsJson))
-    if (raw !== undefined) {
-      return parseInterviewResponse(raw)
-    }
-  }
-
-  // 3. Fall back to ctx.ui.select / ctx.ui.confirm
-  const choice = extractFirstChoice(questionsJson)
-  if (choice && typeof ctx.ui?.select === "function") {
-    const selected = await ctx.ui.select(
-      `${choice.title}: ${choice.question}`,
-      choice.options,
-    )
-    const result = selectToDecision(selected, questionsJson)
-    if (result) return result
-  }
-
-  // 4. Fall back to ctx.ui.confirm (binary yes/no)
-  if (typeof ctx.ui?.confirm === "function") {
-    const ok = await ctx.ui.confirm(
-      "Approve?",
-      fallbackMessage,
-    )
-    return { decision: ok ? "approve" : "cancel" }
-  }
-
-  // 5. No interactive UI — notify and return a safe default
-  if (typeof ctx.ui?.notify === "function") {
-    ctx.ui.notify(fallbackMessage, "info")
-  }
-  return { decision: "inspect" }
-}
-
-/**
- * Return whether ad-hoc `/zflow-plan` mode is currently active.
- *
- * Formal change preparation may approve a plan while plan mode is active, but
- * it must not immediately fork or hand off to implementation from that
- * read-only planning context.
- */
-export function isAdHocPlanModeActive(): boolean {
-  try {
-    const service = getZflowRegistry().optional<{
-      isPlanModeActive?: () => boolean
-    }>("plan-mode")
-    return service?.isPlanModeActive?.() === true
-  } catch {
-    return false
-  }
-}
-
-/**
- * Decide whether `/zflow-change-prepare` should create an implementation
- * handoff/session fork after plan approval.
- *
- * Always returns false — implementation is only started when the user
- * manually triggers `/zflow-change-implement`. The prepare workflow
- * creates and publishes plan artifacts, runs validation + review + approval,
- * but never launches implementation.
- */
-export function shouldForkImplementationSessionAfterPrepare(): boolean {
-  return false
-}
-
-/** Parsed arguments for `/zflow-change-plan`. */
-export interface ParsedChangePlanArgs {
-  changeSeed: string
-  notes: string
-  explicitReference: boolean
-}
-
-function looksLikeChangePlanReference(value: string): boolean {
-  return value.startsWith("@") ||
-    value.includes("/") ||
-    value.includes("\\") ||
-    value.endsWith(".md") ||
-    /^[a-z0-9][a-z0-9-]*$/.test(value)
-}
-
-function isStandaloneChangePlanReference(value: string): boolean {
-  return !/\s/.test(value.trim()) && looksLikeChangePlanReference(value.trim())
-}
-
-export function extractChangePlanReference(value: string): string | null {
-  const trimmed = value.trim()
-  if (!trimmed) return null
-  if (isStandaloneChangePlanReference(trimmed)) {
-    return trimmed.replace(/[),.;:]+$/g, "")
-  }
-
-  const tokens = trimmed.split(/\s+/)
-  for (const token of tokens) {
-    const normalized = token.replace(/^[('"\[]+|[)'"\],.;:]+$/g, "")
-    if (!normalized) continue
-    const tokenLooksPathLike = normalized.startsWith("@") ||
-      normalized.includes("/") ||
-      normalized.includes("\\") ||
-      normalized.endsWith(".md")
-    if (tokenLooksPathLike) {
-      return normalized
-    }
-  }
-
-  return null
-}
-
-function isRuneContextReference(value: string): boolean {
-  return value.startsWith("@") || value.includes("/context/")
-}
-
-const CHANGE_PLAN_DESCRIPTION_NOISE_TOKENS = new Set([
-  "a",
-  "an",
-  "the",
-  "and",
-  "or",
-  "to",
-  "from",
-  "for",
-  "of",
-  "in",
-  "on",
-  "with",
-  "without",
-  "within",
-  "under",
-  "through",
-  "across",
-  "this",
-  "that",
-  "these",
-  "those",
-  "it",
-  "its",
-  "s",
-  "file",
-  "files",
-  "folder",
-  "folders",
-  "subfolder",
-  "subfolders",
-  "path",
-  "paths",
-  "include",
-  "includes",
-  "including",
-  "add",
-  "adds",
-  "adding",
-  "update",
-  "updates",
-  "updating",
-  "create",
-  "creates",
-  "creating",
-  "enable",
-  "enables",
-  "enabling",
-  "support",
-  "supports",
-  "supporting",
-])
-
-export function deriveChangePlanId(changeSeed: string, explicitReference: boolean): string | null {
-  if (explicitReference) {
-    return deriveSemanticChangeId(changeSeed)
-  }
-
-  const referencedPath = extractChangePlanReference(changeSeed)
-  if (referencedPath) {
-    const fromReference = deriveSemanticChangeId(referencedPath)
-    if (fromReference) return fromReference
-  }
-
-  const tokens = changeSeed
-    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
-    .replace(/[^a-zA-Z0-9]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .toLowerCase()
-    .split("-")
-    .filter(Boolean)
-
-  const semanticTokens = tokens.filter((token) => !CHANGE_PLAN_DESCRIPTION_NOISE_TOKENS.has(token))
-  const chosenTokens = (semanticTokens.length >= 2 ? semanticTokens : tokens).slice(0, 6)
-  const slug = chosenTokens.join("-").slice(0, 72).replace(/-+$/g, "")
-  return slug || deriveSemanticChangeId(changeSeed)
-}
-
-export function parseChangePlanArgs(args: string): ParsedChangePlanArgs {
-  const trimmed = args.trim()
-  if (!trimmed) {
-    return {
-      changeSeed: "",
-      notes: "",
-      explicitReference: false,
-    }
-  }
-
-  const separatorIndex = trimmed.indexOf(" -- ")
-  if (separatorIndex !== -1) {
-    const changeSeed = trimmed.slice(0, separatorIndex).trim()
-    const notes = trimmed.slice(separatorIndex + 4).trim()
-    return {
-      changeSeed,
-      notes,
-      explicitReference: looksLikeChangePlanReference(changeSeed),
-    }
-  }
-
-  const parts = trimmed.split(/\s+/).filter(Boolean)
-  const first = parts[0] ?? ""
-  const rest = parts.slice(1).join(" ")
-  if (first && rest && looksLikeChangePlanReference(first)) {
-    return {
-      changeSeed: first,
-      notes: rest,
-      explicitReference: true,
-    }
-  }
-
-  if (isStandaloneChangePlanReference(trimmed)) {
-    return {
-      changeSeed: trimmed,
-      notes: "",
-      explicitReference: true,
-    }
-  }
-
-  return {
-    changeSeed: trimmed,
-    notes: trimmed,
-    explicitReference: false,
-  }
-}
-
-function buildChangePlanInputQuestions(): string {
-  return JSON.stringify({
-    title: "Create Change Plan",
-    description: "Describe the change you want zflow to plan. The command will explore the repository and draft a detailed durable plan.md file for your review.",
-    questions: [
-      {
-        id: "changeDescription",
-        type: "text",
-        question: "Describe the change you want planned:",
-      },
-      {
-        id: "preferredChangeId",
-        type: "text",
-        question: "Optional: enter a preferred change id / folder name (kebab-case). Leave blank to auto-derive one.",
-      },
-    ],
-  })
-}
-
-async function promptForChangePlanInput(
-  ctx: InterviewableContext,
-): Promise<{ changeDescription: string; preferredChangeId?: string } | null> {
-  const questionsJson = buildChangePlanInputQuestions()
-  let raw: string | undefined
-
-  if (typeof ctx.interview === "function") {
-    raw = await Promise.resolve(ctx.interview(questionsJson))
-  } else if (typeof ctx.ui?.interview === "function") {
-    raw = await Promise.resolve(ctx.ui.interview(questionsJson))
-  } else {
-    ctx.ui?.notify?.(
-      "No interactive interview UI is available. Re-run /zflow-change-plan with a description.",
-      "warning",
-    )
-    return null
-  }
-
-  if (!raw) return null
-  try {
-    const parsed = JSON.parse(raw)
-    return {
-      changeDescription: typeof parsed.changeDescription === "string" ? parsed.changeDescription.trim() : "",
-      preferredChangeId: typeof parsed.preferredChangeId === "string" ? parsed.preferredChangeId.trim() : undefined,
-    }
-  } catch {
-    ctx.ui?.notify?.("Could not parse change-plan interview response. Please try again.", "warning")
-    return null
-  }
-}
-
-/** Parsed arguments for `/zflow-change-prepare`. */
-export interface ParsedChangePrepareArgs {
-  changePath: string
-  forceAdHoc: boolean
-  notes: string
-}
-
-/**
- * Parse `/zflow-change-prepare` arguments.
- *
- * The command's first token is the change document/path. Remaining text is
- * advisory notes. `--no-runecontext` or a note like "not a RuneContext" forces
- * normal ad-hoc change-doc handling.
- */
-export function parseChangePrepareArgs(args: string): ParsedChangePrepareArgs {
-  const parts = args.trim().split(/\s+/).filter(Boolean)
-  const rawPath = parts[0] ?? ""
-  const rest = parts.slice(1)
-  const notes = rest.filter((part) => part !== "--no-runecontext").join(" ")
-  const forceAdHoc =
-    rest.includes("--no-runecontext") ||
-    /\bnot\s+(?:a\s+)?runecontext\b/i.test(notes) ||
-    /\bnormal\s+idea\s+file\b/i.test(notes)
-  const changePath = forceAdHoc && rawPath.startsWith("@")
-    ? rawPath.slice(1)
-    : rawPath
-
-  return { changePath, forceAdHoc, notes }
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// Workflow mode/reminder state management
-// ═══════════════════════════════════════════════════════════════════
-//
-// In-memory state for the current active workflow mode and active
-// runtime reminders. The before_agent_start hook reads this state to
-// inject prompt fragments and reminders into the system prompt.
-//
-// State is set by command handlers and cleared when the mode/state
-// ends. Exported for testability.
-
-let _activeWorkflowMode: ModeFragment | null = null
-let _activeReminders: Set<ReminderId> = new Set()
-
-/**
- * Set the current active workflow mode.
- * The before_agent_start hook will inject the corresponding mode fragment.
- */
-export function setActiveWorkflowMode(mode: ModeFragment | null): void {
-  _activeWorkflowMode = mode
-}
-
-/**
- * Get the current active workflow mode.
- */
-export function getActiveWorkflowMode(): ModeFragment | null {
-  return _activeWorkflowMode
-}
-
-/**
- * Whether workflow-scoped tool guards should currently be active.
- *
- * The change-workflows path guard is intentionally scoped to active zflow
- * workflow modes so ordinary non-zflow conversations keep the normal Pi bash
- * experience.
- */
-export function isWorkflowToolGuardActive(): boolean {
-  return _activeWorkflowMode !== null
-}
-
-/**
- * Activate a runtime reminder. Duplicates are ignored.
- */
-export function addReminder(reminder: ReminderId): void {
-  _activeReminders.add(reminder)
-}
-
-/**
- * Deactivate a runtime reminder.
- */
-export function removeReminder(reminder: ReminderId): void {
-  _activeReminders.delete(reminder)
-}
-
-/**
- * Get all currently active reminders.
- */
-export function getActiveReminders(): ReminderId[] {
-  return [..._activeReminders]
-}
-
-/**
- * Clear all active reminders.
- */
-export function clearReminders(): void {
-  _activeReminders.clear()
-}
-
-/**
- * Reset both mode and reminders (clean slate).
- */
-export function resetWorkflowState(): void {
-  _activeWorkflowMode = null
-  _activeReminders.clear()
-}
-
 // ═══════════════════════════════════════════════════════════════════
 // Dispatch service helpers
 // ═══════════════════════════════════════════════════════════════════
-
-import type { AgentDispatchProgress, DispatchService, DispatchWorktreeSetupHook } from "pi-zflow-core/dispatch-service"
-import { DISPATCH_SERVICE_CAPABILITY } from "pi-zflow-core/dispatch-service"
-import {
-  buildFixWorkerWorktreeStrategy,
-  extractFixVerificationCommand,
-  mergeSuccessfulFixResult,
-  selectCanonicalGroupPatchPath,
-} from "./fix-dispatch.js"
 
 const IMPLEMENT_GROUP_MAX_RETRIES = 1
 const DEFAULT_IMPLEMENT_CONCURRENCY = 2
