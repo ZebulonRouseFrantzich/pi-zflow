@@ -9,6 +9,11 @@ import { describe, it, afterEach, mock } from "node:test"
 import * as assert from "node:assert/strict"
 
 import activateZflowSubagentsBridgeExtension from "../extensions/zflow-subagents-bridge/index.js"
+import {
+  extractUsageLimitWaitTime,
+  isUsageLimitError,
+  resolveMeaningfulSingleError,
+} from "../extensions/zflow-subagents-bridge/index.js"
 import { resetZflowRegistry } from "pi-zflow-core"
 import {
   DISPATCH_SERVICE_CAPABILITY,
@@ -205,5 +210,80 @@ describe("pi-zflow-subagents-bridge dispatch service behavior", () => {
     assert.equal(result.ok, false)
     assert.equal(result.results.length, 1)
     assert.match(result.results[0]?.error ?? "", /shared concurrent worktree clusters/)
+  })
+})
+
+describe("pi-zflow-subagents-bridge usage-limit diagnostics", () => {
+  it("detects provider 429 usage-limit errors", () => {
+    assert.equal(
+      isUsageLimitError("429 Monthly usage limit reached. Resets in 13 days."),
+      true,
+    )
+    assert.equal(
+      isUsageLimitError("Rate limit exceeded for this account."),
+      true,
+    )
+    assert.equal(
+      isUsageLimitError("Model \"placeholder:high\" not found."),
+      false,
+    )
+  })
+
+  it("extracts wait time when provider includes it", () => {
+    assert.equal(
+      extractUsageLimitWaitTime("429 Monthly usage limit reached. Resets in 13 days."),
+      "13 days",
+    )
+    assert.equal(
+      extractUsageLimitWaitTime("Rate limit exceeded. Retry after 45 minutes."),
+      "45 minutes",
+    )
+    assert.equal(
+      extractUsageLimitWaitTime("No wait time here."),
+      undefined,
+    )
+  })
+
+  it("surfaces the first usage-limit attempt instead of placeholder fallback", () => {
+    const error = resolveMeaningfulSingleError({
+      error: 'Error: Model "placeholder:high" not found. Use --list-models to see available models.',
+      modelAttempts: [
+        {
+          model: "opencode-go/deepseek-v4-pro",
+          success: false,
+          exitCode: 1,
+          error: "429 Monthly usage limit reached. Resets in 13 days.",
+        },
+        {
+          model: "placeholder",
+          success: false,
+          exitCode: 1,
+          error: 'Error: Model "placeholder:high" not found. Use --list-models to see available models.',
+        },
+      ],
+    })
+
+    assert.match(error ?? "", /429 usage limit reached/)
+    assert.match(error ?? "", /Wait time: 13 days/)
+    assert.match(error ?? "", /opencode-go\/deepseek-v4-pro/)
+  })
+
+  it("falls back to the original error when no usage-limit attempt exists", () => {
+    const error = resolveMeaningfulSingleError({
+      error: 'Error: Model "placeholder:high" not found. Use --list-models to see available models.',
+      modelAttempts: [
+        {
+          model: "placeholder",
+          success: false,
+          exitCode: 1,
+          error: 'Error: Model "placeholder:high" not found. Use --list-models to see available models.',
+        },
+      ],
+    })
+
+    assert.equal(
+      error,
+      'Error: Model "placeholder:high" not found. Use --list-models to see available models.',
+    )
   })
 })

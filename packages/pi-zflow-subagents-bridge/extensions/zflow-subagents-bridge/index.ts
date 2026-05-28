@@ -147,6 +147,13 @@ interface BackendDispatchService {
     rawOutput: string
     outputPath?: string
     savedOutputPath?: string
+    attemptedModels?: string[]
+    modelAttempts?: Array<{
+      model: string
+      success: boolean
+      exitCode?: number | null
+      error?: string
+    }>
   }>
   runParallel(input: {
     tasks: BackendParallelTaskInput[]
@@ -259,7 +266,12 @@ class SubagentsDispatchService implements DispatchService {
 
   async runAgent(input: AgentDispatchInput): Promise<AgentDispatchResult> {
     try {
-      const result = await this.backend.runAgent({
+      // Prefer the compat backend for single-agent runs when available because
+      // it preserves model-attempt details from pi-subagents foreground
+      // execution. That lets zflow surface provider 429 usage-limit failures
+      // instead of a later placeholder fallback error.
+      const backend = this.advancedFallback ?? this.backend
+      const result = await backend.runAgent({
         agent: input.agent,
         task: input.task,
         cwd: input.cwd,
@@ -273,7 +285,7 @@ class SubagentsDispatchService implements DispatchService {
         ok: result.ok,
         rawOutput: result.rawOutput,
         outputPath: result.outputPath ?? result.savedOutputPath,
-        error: result.error,
+        error: resolveMeaningfulSingleError(result),
       }
     } catch (err) {
       return {
@@ -394,6 +406,14 @@ interface CompatAgentProgress {
 interface CompatSingleResult {
   exitCode: number
   error?: string
+  model?: string
+  attemptedModels?: string[]
+  modelAttempts?: Array<{
+    model: string
+    success: boolean
+    exitCode?: number | null
+    error?: string
+  }>
   finalOutput?: string
   savedOutputPath?: string
 }
@@ -665,6 +685,51 @@ function forwardCompatProgress(
   }
 }
 
+function isUsageLimitError(error: string | undefined): boolean {
+  if (!error) return false
+  return /\b429\b/i.test(error) ||
+    /usage limit reached/i.test(error) ||
+    /rate limit/i.test(error)
+}
+
+function extractUsageLimitWaitTime(error: string | undefined): string | undefined {
+  if (!error) return undefined
+  const patterns = [
+    /resets?\s+in\s+([^.!?\n]+)/i,
+    /retry(?:ing)?\s+after\s+([^.!?\n]+)/i,
+    /retry(?:ing)?\s+in\s+([^.!?\n]+)/i,
+    /try again in\s+([^.!?\n]+)/i,
+    /wait\s+([^.!?\n]+?)\s+before/i,
+  ]
+  for (const pattern of patterns) {
+    const match = error.match(pattern)
+    const wait = match?.[1]?.trim()
+    if (wait) return wait
+  }
+  return undefined
+}
+
+function resolveMeaningfulSingleError(result: {
+  error?: string
+  modelAttempts?: Array<{
+    model: string
+    success: boolean
+    exitCode?: number | null
+    error?: string
+  }>
+}): string | undefined {
+  const usageLimitAttempt = result.modelAttempts?.find((attempt) => !attempt.success && isUsageLimitError(attempt.error))
+  if (!usageLimitAttempt) return result.error
+
+  const providerMessage = usageLimitAttempt.error?.trim() ?? "429 usage limit reached."
+  const waitTime = extractUsageLimitWaitTime(providerMessage)
+  const modelLabel = usageLimitAttempt.model ? ` for model \"${usageLimitAttempt.model}\"` : ""
+  if (waitTime) {
+    return `429 usage limit reached${modelLabel}. Wait time: ${waitTime}. Provider message: ${providerMessage}`
+  }
+  return `429 usage limit reached${modelLabel}. Provider message: ${providerMessage}`
+}
+
 function mapCompatSingleResult(result: CompatSingleResult): {
   ok: boolean
   exitCode: number
@@ -672,14 +737,23 @@ function mapCompatSingleResult(result: CompatSingleResult): {
   rawOutput: string
   outputPath?: string
   savedOutputPath?: string
+  attemptedModels?: string[]
+  modelAttempts?: Array<{
+    model: string
+    success: boolean
+    exitCode?: number | null
+    error?: string
+  }>
 } {
   return {
     ok: result.exitCode === 0 && !result.error,
     exitCode: result.exitCode,
-    error: result.error,
+    error: resolveMeaningfulSingleError(result),
     rawOutput: result.finalOutput ?? "",
     savedOutputPath: result.savedOutputPath,
     outputPath: result.savedOutputPath,
+    attemptedModels: result.attemptedModels,
+    modelAttempts: result.modelAttempts,
   }
 }
 
@@ -1317,4 +1391,11 @@ export default async function activateZflowSubagentsBridgeExtension(_pi: Extensi
 
 // ── Test-only exports ──────────────────────────────────────────────
 /** @internal Exported for unit testing only. */
-export { validatePatchFile, writePatchFromRange, captureCompatPatchAgainstBase }
+export {
+  validatePatchFile,
+  writePatchFromRange,
+  captureCompatPatchAgainstBase,
+  isUsageLimitError,
+  extractUsageLimitWaitTime,
+  resolveMeaningfulSingleError,
+}
