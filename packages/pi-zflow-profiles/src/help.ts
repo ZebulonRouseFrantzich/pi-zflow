@@ -53,12 +53,12 @@ export const PROFILE_HELP_TOPIC: ZflowHelpTopic = {
     {
       name: "zflow-profile configure",
       usage: "/zflow-profile configure",
-      description: "Interactive TUI wizard to configure lanes, models, thinking levels, and agent bindings.",
+      description: "Interactive TUI wizard to configure the user-global profile file with lanes, models, thinking levels, and agent bindings.",
     },
     {
       name: "zflow-profile-configure",
       usage: "/zflow-profile-configure",
-      description: "Launch the profile configuration wizard directly.",
+      description: "Launch the user-global profile configuration wizard directly.",
     },
     {
       name: "zflow-profile sync-project",
