@@ -1,24 +1,19 @@
-import { defineExtension } from "pi"
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
-export default defineExtension({
-  name: "escape-openai-messages",
-  hooks: {
-    async beforeLLMRequest(req, ctx) {
-      // Only for OpenAI-compatible APIs
-      if (
-        ctx.provider?.api === "openai-completions" &&
-        // Allow override/opt-out via compat if set
-        ctx.provider?.compat?.escapeNewlinesInMessages !== false
-      ) {
-        if (Array.isArray(req.body?.messages)) {
-          for (const msg of req.body.messages) {
-            if (typeof msg.content === "string") {
-              msg.content = msg.content.replace(/\n/g, "\\n")
-            }
-          }
+export default function activateEscapeOpenAIMessagesExtension(pi: ExtensionAPI) {
+  pi.on?.("before_agent_start", async (event: any) => {
+    // Patch system and user prompt fields if present
+    if (
+      event?.provider?.api === "openai-completions" &&
+      event?.provider?.compat?.escapeNewlinesInMessages !== false &&
+      event?.options?.messages && Array.isArray(event.options.messages)
+    ) {
+      for (const msg of event.options.messages) {
+        if (typeof msg.content === "string") {
+          msg.content = msg.content.replace(/\n/g, "\\n")
         }
       }
-      return req
     }
-  }
-})
+    // (No return needed; mutation is in-place)
+  })
+}
