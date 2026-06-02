@@ -454,6 +454,8 @@ function formatPlanInspectionPaths(input: {
 // ═══════════════════════════════════════════════════════════════════
 
 const IMPLEMENT_GROUP_MAX_RETRIES = 1
+const IMPLEMENT_RATE_LIMIT_MAX_RETRIES = 3
+const IMPLEMENT_RATE_LIMIT_DEFAULT_WAIT_MS = 60 * 1000
 const DEFAULT_IMPLEMENT_CONCURRENCY = 2
 
 // ── Fix loop bounds ──────────────────────────────────────────────
@@ -542,6 +544,20 @@ export interface GroupStatusEntry {
   changedFiles?: string[]
   /** Number of retry attempts so far. */
   retryCount: number
+  /** Last dispatch command/tool observed for this group. */
+  lastCommand?: string
+  /** Current tool name, when known. */
+  currentTool?: string
+  /** Resolved model used for this group, when known. */
+  model?: string
+  /** Resolved thinking level used for this group, when known. */
+  thinking?: string
+  /** ISO timestamp when this group first entered running state. */
+  startedAt?: string
+  /** ISO timestamp when live progress was last observed. */
+  lastProgressAt?: string
+  /** Number of rate-limit retries consumed so far. */
+  rateLimitRetryCount?: number
   /** Error message if status is "failed". */
   error?: string
   /** Group IDs that caused this group to be blocked (when status is "blocked"). */
@@ -961,6 +977,7 @@ async function writeGroupStatusSummary(
 
   const run = await readRun(runId, cwd)
   const ledger = (run.metadata?.[GROUP_LEDGER_META_KEY] ?? {}) as Record<string, GroupStatusEntry>
+  const dispatchProgress = (run.metadata?.dispatchProgress ?? {}) as Record<string, unknown>
   const entries = Object.values(ledger)
 
   const lines: string[] = []
@@ -981,7 +998,20 @@ async function writeGroupStatusSummary(
   lines.push(`- Failed: ${failed.length}`)
   lines.push(`- Blocked: ${blocked.length}`)
   lines.push(`- In progress: ${running_.length}`)
-  lines.push(`- Pending: ${pending_.length}\n`)
+  lines.push(`- Pending: ${pending_.length}`)
+  if (dispatchProgress["activeWave"] !== undefined) {
+    lines.push(`- Active wave: ${String(dispatchProgress["activeWave"])}`)
+  }
+  if (dispatchProgress["heartbeatCount"] !== undefined) {
+    lines.push(`- Heartbeats: ${String(dispatchProgress["heartbeatCount"])}`)
+  }
+  if (typeof dispatchProgress["elapsedSeconds"] === "number") {
+    lines.push(`- Elapsed seconds: ${dispatchProgress["elapsedSeconds"]}`)
+  }
+  if (typeof dispatchProgress["lastWorkflowUpdate"] === "string" && dispatchProgress["lastWorkflowUpdate"].trim().length > 0) {
+    lines.push(`- Last workflow update: ${dispatchProgress["lastWorkflowUpdate"]}`)
+  }
+  lines.push("")
 
   if (succeeded.length > 0) {
     lines.push(`## Succeeded Groups`)
@@ -989,6 +1019,12 @@ async function writeGroupStatusSummary(
       lines.push(`- **${g.groupId}** — ${g.agent}`)
       lines.push(`  - Files: ${g.files.join(", ")}`)
       lines.push(`  - Patch: ${g.patchPath ?? "(no patch)"}`)
+      if (g.lastCommand) {
+        lines.push(`  - Last command: ${g.lastCommand}`)
+      }
+      if (g.rateLimitRetryCount) {
+        lines.push(`  - Rate-limit retries: ${g.rateLimitRetryCount}`)
+      }
       if (g.semanticCoupling.notes.length > 0) {
         for (const note of g.semanticCoupling.notes) {
           lines.push(`  - Note: ${note}`)
@@ -1024,6 +1060,15 @@ async function writeGroupStatusSummary(
       if (scopedVer?.outputPath) {
         lines.push(`  - Verification output file: ${scopedVer.outputPath}`)
       }
+      if (g.lastCommand) {
+        lines.push(`  - Last command: ${g.lastCommand}`)
+      }
+      if (g.lastProgressAt) {
+        lines.push(`  - Last progress at: ${g.lastProgressAt}`)
+      }
+      if (g.rateLimitRetryCount) {
+        lines.push(`  - Rate-limit retries: ${g.rateLimitRetryCount}`)
+      }
       if (g.semanticCoupling.notes.length > 0) {
         for (const note of g.semanticCoupling.notes) {
           lines.push(`  - Note: ${note}`)
@@ -1048,11 +1093,24 @@ async function writeGroupStatusSummary(
     lines.push("")
   }
 
+  if (running_.length > 0) {
+    lines.push(`## Running Groups`)
+    for (const g of running_) {
+      lines.push(`- **${g.groupId}** — ${g.agent}`)
+      lines.push(`  - Status: ${g.status}`)
+      if (g.lastCommand) lines.push(`  - Last command: ${g.lastCommand}`)
+      if (g.lastProgressAt) lines.push(`  - Last progress at: ${g.lastProgressAt}`)
+      if (g.rateLimitRetryCount) lines.push(`  - Rate-limit retries: ${g.rateLimitRetryCount}`)
+    }
+    lines.push("")
+  }
+
   if (pending_.length > 0) {
     lines.push(`## Pending Groups`)
     for (const g of pending_) {
       lines.push(`- **${g.groupId}** — ${g.agent}`)
       lines.push(`  - Status: ${g.status}`)
+      if (g.lastCommand) lines.push(`  - Last command: ${g.lastCommand}`)
     }
     lines.push("")
   }
@@ -1943,6 +2001,9 @@ async function runWorktreeDispatchAndFinalize(
     orchestratorTarget?: string
     onWorkflowUpdate?: (message: string) => void
     onSubagentUpdate?: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) => void
+    onRateLimitNotice?: (message: string) => void
+    sleep?: (ms: number) => Promise<void>
+    progressPersistIntervalMs?: number
   },
 ): Promise<void> {
   const { default: fs } = await import("node:fs/promises")
@@ -1953,6 +2014,13 @@ async function runWorktreeDispatchAndFinalize(
     finalizeWorktreeImplementationRun,
   } = await import("./orchestration.js")
   const { captureGroupResult } = await import("./group-result.js")
+  const {
+    dispatchParallelWithRateLimitRetries,
+    isRateLimitDispatchError,
+  } = await import("./orchestration/implementation/rate-limit.js")
+  const {
+    persistImplementationDispatchSnapshot,
+  } = await import("./orchestration/implementation/live-progress.js")
   const { readRun, updateRun } = await import("pi-zflow-artifacts")
 
   const cwd = options?.cwd ?? process.cwd()
@@ -2147,6 +2215,67 @@ async function runWorktreeDispatchAndFinalize(
   const worktreeResultsDir = path.join(runDir, "worktree-results")
   await fs.mkdir(worktreeResultsDir, { recursive: true })
   const implementModel = await resolveWorkflowModel("zflow.implement-routine")
+  const sleep = options?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  const progressPersistIntervalMs = Math.max(1000, options?.progressPersistIntervalMs ?? 5000)
+  const dispatchStartedAt = new Date().toISOString()
+  const pendingGroupProgress = new Map<string, Record<string, unknown>>()
+  let pendingDispatchProgress: Record<string, unknown> = {
+    dispatchStartedAt,
+    totalGroups: allGroupIds.length,
+    completedGroups: 0,
+    status: "running",
+  }
+  let liveProgressDirty = false
+  let lastLiveProgressFlushAt = 0
+  let liveProgressFlushPromise: Promise<void> = Promise.resolve()
+
+  const markGroupProgress = (groupId: string, partial: Record<string, unknown>): void => {
+    pendingGroupProgress.set(groupId, {
+      ...(pendingGroupProgress.get(groupId) ?? {}),
+      ...partial,
+    })
+    liveProgressDirty = true
+  }
+
+  const markDispatchProgress = (partial: Record<string, unknown>): void => {
+    pendingDispatchProgress = {
+      ...pendingDispatchProgress,
+      ...partial,
+    }
+    liveProgressDirty = true
+  }
+
+  const flushLiveProgress = async (force = false): Promise<void> => {
+    if (!liveProgressDirty) return liveProgressFlushPromise
+    const now = Date.now()
+    if (!force && now - lastLiveProgressFlushAt < progressPersistIntervalMs) {
+      return liveProgressFlushPromise
+    }
+    lastLiveProgressFlushAt = now
+
+    const groupUpdates = Object.fromEntries(pendingGroupProgress.entries())
+    pendingGroupProgress.clear()
+    const dispatchProgress = { ...pendingDispatchProgress }
+    liveProgressDirty = false
+
+    liveProgressFlushPromise = liveProgressFlushPromise
+      .then(() => persistImplementationDispatchSnapshot(runId, {
+        groupUpdates,
+        dispatchProgress,
+      }, cwd))
+      .catch(() => {})
+
+    return liveProgressFlushPromise
+  }
+
+  const emitWorkflowUpdate = (message: string, partial: Record<string, unknown> = {}): void => {
+    options?.onWorkflowUpdate?.(message)
+    markDispatchProgress({
+      lastWorkflowUpdate: message,
+      ...partial,
+    })
+    void flushLiveProgress()
+  }
 
   // Auto-detect worktree setup command (pnpm install, npm ci, etc.)
   const { detectWorktreeSetupCommand } = await import("./orchestration.js")
@@ -2169,18 +2298,30 @@ async function runWorktreeDispatchAndFinalize(
       const recentTools = Array.isArray(progress.recentTools) ? progress.recentTools : []
       const recentTool = recentTools[recentTools.length - 1]
       const recentOutput = Array.isArray(progress.recentOutput) ? progress.recentOutput : []
+      const lastCommand = progress.currentTool
+        ? `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}`
+        : recentTool?.tool
+          ? `${recentTool.tool}${recentTool.args ? ` ${recentTool.args}` : ""}`
+          : recentOutput[recentOutput.length - 1] ?? "running"
       options?.onSubagentUpdate?.(t.groupId, {
         agent: t.agent,
         title: runPlan.groups[taskIdx]?.taskPrompt ?? undefined,
         model: implementModel.model ?? "unavailable",
         thinking: implementModel.thinking ?? "unavailable",
         status: progress.status ?? "running",
-        lastCommand: progress.currentTool
-          ? `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}`
-          : recentTool?.tool
-            ? `${recentTool.tool}${recentTool.args ? ` ${recentTool.args}` : ""}`
-            : recentOutput[recentOutput.length - 1] ?? "running",
+        lastCommand,
       })
+      markGroupProgress(t.groupId, {
+        status: progress.status ?? "running",
+        agent: t.agent,
+        taskPrompt: runPlan.groups[taskIdx]?.taskPrompt ?? "",
+        model: implementModel.model ?? "unavailable",
+        thinking: implementModel.thinking ?? "unavailable",
+        currentTool: progress.currentTool,
+        lastCommand,
+        lastProgressAt: new Date().toISOString(),
+      })
+      void flushLiveProgress()
     },
   }))
 
@@ -2219,7 +2360,12 @@ async function runWorktreeDispatchAndFinalize(
     if (readyGroupIds.length === 0) break
 
     waveIndex++
-    options?.onWorkflowUpdate?.(`Wave ${waveIndex}: dispatching ${readyGroupIds.length} group(s) (${waveIndex === 1 ? "initial" : "dependency"} wave)`)
+    emitWorkflowUpdate(`Wave ${waveIndex}: dispatching ${readyGroupIds.length} group(s) (${waveIndex === 1 ? "initial" : "dependency"} wave)`, {
+      activeWave: waveIndex,
+      dispatchedGroups: readyGroupIds,
+      completedGroups: allResults.length,
+      elapsedSeconds: Math.round((Date.now() - Date.parse(dispatchStartedAt)) / 1000),
+    })
 
     // Build task subset for this wave
     const waveTaskIndices = readyGroupIds.map(gid => {
@@ -2274,8 +2420,24 @@ async function runWorktreeDispatchAndFinalize(
       await updateGroupLedger(runId, gid, {
         status: "running",
         agent: task.agent,
+        model: implementModel.model ?? "unavailable",
+        thinking: implementModel.thinking ?? "unavailable",
+        startedAt: new Date().toISOString(),
+        lastCommand: "starting worktree dispatch...",
       }, cwd).catch(() => {})
+      markGroupProgress(gid, {
+        status: "running",
+        agent: task.agent,
+        taskPrompt: runPlan.groups[idx]?.taskPrompt ?? "",
+        model: implementModel.model ?? "unavailable",
+        thinking: implementModel.thinking ?? "unavailable",
+        startedAt: new Date().toISOString(),
+        lastCommand: "starting worktree dispatch...",
+        lastProgressAt: new Date().toISOString(),
+      })
     }
+
+    await flushLiveProgress(true)
 
     // Dispatch this wave
     const dispatchStartMs = Date.now()
@@ -2289,29 +2451,80 @@ async function runWorktreeDispatchAndFinalize(
       const ready = readyGroupIds.length
       const done = allResults.length
       const total = allGroupIds.length
-      options?.onWorkflowUpdate?.(
+      emitWorkflowUpdate(
         `Wave ${waveIndex}: ${ready} group(s) dispatched, ${done}/${total} complete, ${waveHeartbeatCount} heartbeat(s), ${elapsed}s elapsed`,
+        {
+          activeWave: waveIndex,
+          heartbeatCount: waveHeartbeatCount,
+          dispatchedGroups: readyGroupIds,
+          completedGroups: done,
+          elapsedSeconds: elapsed,
+          status: "running",
+        },
       )
     }, 10000)
     waveHeartbeat.unref?.()
 
     try {
-      dispatchResult = await dispatchService.runParallel({
-        tasks: waveTasks,
-        cwd,
-        concurrency: Math.min(WORKTREE_DISPATCH_CONCURRENCY, waveTasks.length),
-        worktree: true,
-        worktreeSetupHook: worktreeSetupResolution.hook,
-        maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
+      dispatchResult = await dispatchParallelWithRateLimitRetries({
+        dispatchService,
+        maxRetries: IMPLEMENT_RATE_LIMIT_MAX_RETRIES,
+        defaultWaitMs: IMPLEMENT_RATE_LIMIT_DEFAULT_WAIT_MS,
+        input: {
+          tasks: waveTasks,
+          cwd,
+          concurrency: Math.min(WORKTREE_DISPATCH_CONCURRENCY, waveTasks.length),
+          worktree: true,
+          worktreeSetupHook: worktreeSetupResolution.hook,
+          maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
+        },
+        sleep,
+        onRateLimitNotice: async (notice) => {
+          const retryMessage = `${notice.message} ${notice.error ?? ""}`.trim()
+          emitWorkflowUpdate(retryMessage, {
+            status: "retrying",
+            activeWave: waveIndex,
+            heartbeatCount: waveHeartbeatCount,
+            dispatchedGroups: readyGroupIds,
+            completedGroups: allResults.length,
+            elapsedSeconds: Math.round((Date.now() - Date.parse(dispatchStartedAt)) / 1000),
+          })
+          options?.onRateLimitNotice?.(retryMessage)
+          options?.onSubagentUpdate?.(notice.groupId, {
+            agent: notice.task.agent,
+            title: runPlan.groups[groupIdToTaskIndex.get(notice.groupId) ?? 0]?.taskPrompt ?? undefined,
+            model: implementModel.model ?? "unavailable",
+            thinking: implementModel.thinking ?? "unavailable",
+            status: "running",
+            lastCommand: retryMessage,
+          })
+          markGroupProgress(notice.groupId, {
+            status: "retrying",
+            agent: notice.task.agent,
+            model: implementModel.model ?? "unavailable",
+            thinking: implementModel.thinking ?? "unavailable",
+            lastCommand: retryMessage,
+            lastProgressAt: new Date().toISOString(),
+            retryCount: notice.attempt,
+            rateLimitRetryCount: notice.attempt,
+            failureKind: "retryable",
+          })
+          await flushLiveProgress(true)
+        },
       })
     } finally {
       clearInterval(waveHeartbeat)
       waveHeartbeat = undefined
+      await flushLiveProgress(true)
     }
 
     // Process wave results
     const waveElapsed = Math.round((Date.now() - dispatchStartMs) / 1000)
-    options?.onWorkflowUpdate?.(`Wave ${waveIndex} completed in ${waveElapsed}s: ${dispatchResult.results.filter(r => r.ok).length} succeeded, ${dispatchResult.results.filter(r => !r.ok).length} failed`)
+    emitWorkflowUpdate(`Wave ${waveIndex} completed in ${waveElapsed}s: ${dispatchResult.results.filter(r => r.ok).length} succeeded, ${dispatchResult.results.filter(r => !r.ok).length} failed`, {
+      activeWave: waveIndex,
+      completedGroups: allResults.length,
+      elapsedSeconds: Math.round((Date.now() - Date.parse(dispatchStartedAt)) / 1000),
+    })
 
     for (let i = 0; i < dispatchResult.results.length; i++) {
       const r = dispatchResult.results[i]!
@@ -2322,6 +2535,7 @@ async function runWorktreeDispatchAndFinalize(
 
       const verification = normalizeDispatchVerification(r.verification)
       const dispatchFailed = !r.ok || verification?.status === "fail"
+      const rateLimitRetryCount = dispatchResult.retryCounts?.[gid] ?? 0
       allResults.push({ groupId: gid, result: r, index: idx })
 
       if (!dispatchFailed) {
@@ -2342,6 +2556,12 @@ async function runWorktreeDispatchAndFinalize(
           patchPath: r.patchPath,
           changedFiles: r.changedFiles ?? group?.files,
           scopedVerification: verification,
+          retryCount: rateLimitRetryCount,
+          rateLimitRetryCount,
+          lastCommand: verification?.status === "pass"
+            ? "agent complete; scoped verification passed"
+            : "agent complete; scoped verification deferred to final verification",
+          lastProgressAt: new Date().toISOString(),
         }, cwd).catch(() => {})
         continue
       }
@@ -2353,7 +2573,7 @@ async function runWorktreeDispatchAndFinalize(
         group && group.files && group.files.length > 0
 
       if (fixShouldRun) {
-        options?.onWorkflowUpdate?.(`Attempting fix for ${gid} (attempt ${currentFixAttempts + 1}/${MAX_FIX_ATTEMPTS_PER_GROUP})`)
+        emitWorkflowUpdate(`Attempting fix for ${gid} (attempt ${currentFixAttempts + 1}/${MAX_FIX_ATTEMPTS_PER_GROUP})`)
         await updateGroupLedger(runId, gid, {
           status: "retrying",
           fixAttempts: currentFixAttempts + 1,
@@ -2414,12 +2634,13 @@ async function runWorktreeDispatchAndFinalize(
           continue
         }
 
-        options?.onWorkflowUpdate?.(`Fix attempt ${currentFixAttempts + 1} for ${gid} failed: ${fixResult.error ?? "unknown fix failure"}`)
+        emitWorkflowUpdate(`Fix attempt ${currentFixAttempts + 1} for ${gid} failed: ${fixResult.error ?? "unknown fix failure"}`)
       }
 
       const failureReason = verification?.status === "fail"
         ? `${gid}: scoped verification failed`
         : r.error ?? "Group dispatch failed"
+      const failureKind = isRateLimitDispatchError(failureReason) ? "retryable" : "blocker"
       decisions.push({
         groupId: gid,
         agent: r.agent ?? "zflow.implement-routine",
@@ -2438,16 +2659,24 @@ async function runWorktreeDispatchAndFinalize(
       await updateGroupLedger(runId, gid, {
         status: "failed",
         error: failureReason,
-        failureKind: "blocker",
+        failureKind,
         scopedVerification: verification,
         fixAttempts: currentFixAttempts,
         fixResult: fixShouldRun ? "failed" : undefined,
+        retryCount: rateLimitRetryCount,
+        rateLimitRetryCount,
+        lastCommand: failureReason,
+        lastProgressAt: new Date().toISOString(),
       }, cwd).catch(() => {})
       await markDependentsBlocked(gid)
     }
   }
 
-  options?.onWorkflowUpdate?.(`All waves complete. ${allResults.filter(r => r.result.ok).length}/${allGroupIds.length} groups succeeded. Checking for blockers...`)
+  emitWorkflowUpdate(`All waves complete. ${allResults.filter(r => r.result.ok).length}/${allGroupIds.length} groups succeeded. Checking for blockers...`, {
+    activeWave: waveIndex,
+    completedGroups: allResults.filter((entry) => entry.result.ok).length,
+    elapsedSeconds: Math.round((Date.now() - Date.parse(dispatchStartedAt)) / 1000),
+  })
 
   // ── Check for blocked/failed groups after all waves ─────────
   const finalRun = await readRun(runId, cwd).catch(() => null)
@@ -2469,6 +2698,12 @@ async function runWorktreeDispatchAndFinalize(
 
   // If there are blockers, write failure report and throw
   if (finalFailed.length > 0 || finalBlocked.length > 0) {
+    markDispatchProgress({
+      status: "failed",
+      completedGroups: allResults.filter((entry) => entry.result.ok).length,
+      elapsedSeconds: Math.round((Date.now() - Date.parse(dispatchStartedAt)) / 1000),
+    })
+    await flushLiveProgress(true)
     const reportPath = path.join(worktreeResultsDir, "failure-report.json")
     await fs.writeFile(reportPath, JSON.stringify({
       decisions,
@@ -2513,7 +2748,9 @@ async function runWorktreeDispatchAndFinalize(
   }
 
   // ── All groups succeeded — collect worktree results ────────
-  options?.onWorkflowUpdate?.("All subagents finished; collecting worker results. Scoped verification is deferred to the final verification phase.")
+  emitWorkflowUpdate("All subagents finished; collecting worker results. Scoped verification is deferred to the final verification phase.", {
+    status: "running",
+  })
 
   // Collect group results from dispatch outputs
   const groupResults = []
@@ -2541,7 +2778,7 @@ async function runWorktreeDispatchAndFinalize(
 
       const fixShouldRun = currentFixAttempts < MAX_FIX_ATTEMPTS_PER_GROUP
       if (fixShouldRun) {
-        options?.onWorkflowUpdate?.(`Attempting fix for ${group.id} (attempt ${currentFixAttempts + 1}/${MAX_FIX_ATTEMPTS_PER_GROUP})`)
+        emitWorkflowUpdate(`Attempting fix for ${group.id} (attempt ${currentFixAttempts + 1}/${MAX_FIX_ATTEMPTS_PER_GROUP})`)
         await updateGroupLedger(runId, group.id, {
           status: "retrying",
           fixAttempts: currentFixAttempts + 1,
@@ -2596,7 +2833,7 @@ async function runWorktreeDispatchAndFinalize(
             fixPatchPath: fixResult.fixPatchPath,
           }, cwd).catch(() => {})
         } else {
-          options?.onWorkflowUpdate?.(`Fix attempt ${currentFixAttempts + 1} for ${group.id} failed: ${fixResult.error ?? "unknown"}`)
+          emitWorkflowUpdate(`Fix attempt ${currentFixAttempts + 1} for ${group.id} failed: ${fixResult.error ?? "unknown"}`)
         }
       }
 
@@ -2770,7 +3007,9 @@ async function runWorktreeDispatchAndFinalize(
     )
   }
 
-  options?.onWorkflowUpdate?.("Applying completed group patches back to the primary worktree")
+  emitWorkflowUpdate("Applying completed group patches back to the primary worktree", {
+    status: "running",
+  })
 
   // Finalize: apply patches back, check deviations
   await finalizeWorktreeImplementationRun(
@@ -2800,7 +3039,18 @@ async function runWorktreeDispatchAndFinalize(
   }
   await writeGroupStatusSummary(runId, changeId, cwd).catch(() => "")
 
-  options?.onWorkflowUpdate?.("Apply-back complete; dispatch artifacts are ready for final verification")
+  emitWorkflowUpdate("Apply-back complete; dispatch artifacts are ready for final verification", {
+    status: "completed",
+    completedGroups: allGroupIds.length,
+    elapsedSeconds: Math.round((Date.now() - Date.parse(dispatchStartedAt)) / 1000),
+  })
+
+  markDispatchProgress({
+    status: "completed",
+    completedGroups: allGroupIds.length,
+    elapsedSeconds: Math.round((Date.now() - Date.parse(dispatchStartedAt)) / 1000),
+  })
+  await flushLiveProgress(true)
 
   console.info(
     `[zflow] Worktree dispatch completed via "${dispatchService.name}". ` +
@@ -5678,6 +5928,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             orchestratorTarget: workflowIntercomTarget,
             onWorkflowUpdate: updatePostImplementationCard,
             onSubagentUpdate: (id, update) => implProgress.updateSubagent(id, update),
+            onRateLimitNotice: (message) => ctx.ui.notify(message, "warning"),
           })
 
           // 3a. Check apply-back status after dispatch. If apply-back conflicted
