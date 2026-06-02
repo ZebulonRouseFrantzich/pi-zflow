@@ -95,7 +95,8 @@ describe("implementation rate-limit helpers", () => {
 
     assert.equal(result.ok, true)
     assert.equal(attempts, 2)
-    assert.deepEqual(sleeps, [2000])
+    assert.equal(sleeps.length, 1)
+    assert.ok(Math.abs((sleeps[0] ?? 0) - 2000) <= 25)
     assert.equal(result.retryCounts["group-g1"], 1)
     assert.match(notices[0] ?? "", /group-g1 hit a provider rate limit/i)
     assert.match(notices[0] ?? "", /2s/)

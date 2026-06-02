@@ -1755,10 +1755,13 @@ async function resumeWorktreeDispatch(
 
     const rateLimitRetryCount = dispatchResult.retryCounts?.[group.id] ?? 0
     const verification = normalizeDispatchVerification(r.verification)
+    const rawOutput = (!r.rawOutput || !r.rawOutput.trim()) && r.outputPath
+      ? await fs.readFile(r.outputPath, "utf-8").catch(() => r.rawOutput)
+      : r.rawOutput
     const acceptedNoop = acceptImplementationNoopResult({
       ok: r.ok,
       error: r.error,
-      rawOutput: r.rawOutput,
+      rawOutput,
       verification,
     })
     const resultForWorkflow = acceptedNoop.accepted
@@ -2848,10 +2851,13 @@ async function runWorktreeDispatchAndFinalize(
       if (!gid || idx === undefined) continue
 
       const verification = normalizeDispatchVerification(r.verification)
+      const rawOutput = (!r.rawOutput || !r.rawOutput.trim()) && r.outputPath
+        ? await fs.readFile(r.outputPath, "utf-8").catch(() => r.rawOutput)
+        : r.rawOutput
       const acceptedNoop = acceptImplementationNoopResult({
         ok: r.ok,
         error: r.error,
-        rawOutput: r.rawOutput,
+        rawOutput,
         verification,
       })
       const resultForWorkflow = acceptedNoop.accepted

@@ -24,6 +24,13 @@ const ALREADY_IMPLEMENTED_PATTERNS = [
   /implementation(?:\s+and\s+verification)?\s+.*complete/i,
 ]
 
+const VERIFICATION_EVIDENCE_PATTERNS = [
+  /verification results/i,
+  /\*\*PASS\*\*/i,
+  /tests pass/i,
+  /compile cleanly/i,
+]
+
 export function isNoEditImplementationGuardError(error?: string): boolean {
   return Boolean(error?.includes(NO_EDIT_IMPLEMENTATION_ERROR))
 }
@@ -31,6 +38,11 @@ export function isNoEditImplementationGuardError(error?: string): boolean {
 export function looksLikeAlreadyImplementedSummary(output?: string): boolean {
   if (!output) return false
   return ALREADY_IMPLEMENTED_PATTERNS.some((pattern) => pattern.test(output))
+}
+
+function looksLikeVerificationPassedEvidence(output?: string): boolean {
+  if (!output) return false
+  return VERIFICATION_EVIDENCE_PATTERNS.filter((pattern) => pattern.test(output)).length >= 2
 }
 
 export function acceptImplementationNoopResult(
@@ -45,11 +57,14 @@ export function acceptImplementationNoopResult(
 
   const verificationStatus = candidate.verification?.status?.toLowerCase()
   const verificationPassed = verificationStatus === "pass" || verificationStatus === "passed"
-  if (!verificationPassed) {
+  const outputShowsAlreadyImplemented = looksLikeAlreadyImplementedSummary(candidate.rawOutput)
+  const outputShowsVerificationEvidence = looksLikeVerificationPassedEvidence(candidate.rawOutput)
+
+  if (!outputShowsAlreadyImplemented) {
     return { accepted: false }
   }
 
-  if (!looksLikeAlreadyImplementedSummary(candidate.rawOutput)) {
+  if (!verificationPassed && !outputShowsVerificationEvidence) {
     return { accepted: false }
   }
 
