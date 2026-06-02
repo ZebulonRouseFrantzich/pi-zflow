@@ -226,6 +226,20 @@ describe("pi-zflow-subagents-bridge scoped verification helpers", () => {
     )
   })
 
+  it("strips repo-prefix cd commands when compat worktrees use synthetic temp directories", () => {
+    assert.equal(
+      normalizeScopedVerificationLineForCwd(
+        "cd opscompass-api-client && npm test -- --runInBand license-manager-oracle-entitlements",
+        "/tmp/pi-worktree-e84d7553-0",
+        [
+          "opscompass-api-client/api/license-manager/license-manager.ts",
+          "opscompass-api-client/api/license-manager/oracle-entitlements.ts",
+        ],
+      ),
+      "npm test -- --runInBand license-manager-oracle-entitlements",
+    )
+  })
+
   it("keeps only executable scoped verification lines", () => {
     assert.deepEqual(
       extractExecutableScopedVerificationCommands(
@@ -240,6 +254,27 @@ describe("pi-zflow-subagents-bridge scoped verification helpers", () => {
       [
         "yarn tsc-all",
         "npm test -- --runInBand api/license-manager",
+      ],
+    )
+  })
+
+  it("normalizes temp-root compat verification commands using claimed file prefixes", () => {
+    assert.deepEqual(
+      extractExecutableScopedVerificationCommands(
+        [
+          "cd opscompass-api-client && npm test -- --runInBand license-manager-oracle-entitlements",
+          "manual audit to confirm existing MSSQL names remain unchanged",
+          "cd opscompass-api-client && npm test -- --runInBand license-manager-mssql-parity",
+        ].join("\n"),
+        "/tmp/pi-worktree-e84d7553-0",
+        [
+          "opscompass-api-client/api/license-manager/license-manager.ts",
+          "opscompass-api-client/tests/api/license-manager-oracle-entitlements.test.ts",
+        ],
+      ),
+      [
+        "npm test -- --runInBand license-manager-oracle-entitlements",
+        "npm test -- --runInBand license-manager-mssql-parity",
       ],
     )
   })

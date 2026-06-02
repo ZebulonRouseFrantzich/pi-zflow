@@ -1061,38 +1061,64 @@ function looksLikeExecutableScopedVerificationLine(command: string): boolean {
     trimmed.includes("||")
 }
 
-function normalizeScopedVerificationLineForCwd(command: string, cwd: string): string {
+function inferScopedVerificationRepoPrefix(claimedFiles?: string[]): string | undefined {
+  if (!claimedFiles || claimedFiles.length === 0) return undefined
+  const prefixes = claimedFiles
+    .map((file) => file.split(/[\\/]+/).filter(Boolean)[0])
+    .filter((prefix): prefix is string => Boolean(prefix))
+  if (prefixes.length === 0) return undefined
+  const [first] = prefixes
+  if (!first) return undefined
+  return prefixes.every((prefix) => prefix === first) ? first : undefined
+}
+
+function normalizeScopedVerificationLineForCwd(
+  command: string,
+  cwd: string,
+  claimedFiles?: string[],
+): string {
   const trimmed = command.trim()
   const cdMatch = trimmed.match(/^cd\s+([^;&]+?)\s*&&\s*(.+)$/)
   if (!cdMatch) return trimmed
 
-  const rawTarget = cdMatch[1]!.trim().replace(/^['"]|['"]$/g, "")
+  const rawTarget = cdMatch[1]!.trim().replace(/^['"]|['"]$/g, "").replace(/[\\/]+$/, "")
   const remainder = cdMatch[2]!.trim()
   const cwdBase = path.basename(cwd)
   if (rawTarget === cwdBase || rawTarget === `./${cwdBase}`) {
     return remainder
   }
+
+  const repoPrefix = inferScopedVerificationRepoPrefix(claimedFiles)
+  if (repoPrefix && (rawTarget === repoPrefix || rawTarget === `./${repoPrefix}`)) {
+    const targetFromCwd = path.resolve(cwd, rawTarget)
+    if (!fs.existsSync(targetFromCwd)) {
+      return remainder
+    }
+  }
+
   return trimmed
 }
 
 function extractExecutableScopedVerificationCommands(
   command: string | undefined,
   cwd: string,
+  claimedFiles?: string[],
 ): string[] {
   if (!command || !command.trim()) return []
   return command
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => looksLikeExecutableScopedVerificationLine(line))
-    .map((line) => normalizeScopedVerificationLineForCwd(line, cwd))
+    .map((line) => normalizeScopedVerificationLineForCwd(line, cwd, claimedFiles))
     .filter(Boolean)
 }
 
 function runCompatScopedVerification(
   command: string | undefined,
   cwd: string,
+  claimedFiles?: string[],
 ): { status: "pass" | "fail" | "skipped"; command?: string; output?: string } | undefined {
-  const commands = extractExecutableScopedVerificationCommands(command, cwd)
+  const commands = extractExecutableScopedVerificationCommands(command, cwd, claimedFiles)
   if (commands.length === 0) return undefined
 
   const outputs: string[] = []
@@ -1189,7 +1215,7 @@ async function runCompatTaskInWorkspace(
       onUpdate: forwardCompatProgress(task.agent, task.onUpdate),
     })
 
-    const verification = runCompatScopedVerification(task.scopedVerification, worktree.agentCwd)
+    const verification = runCompatScopedVerification(task.scopedVerification, worktree.agentCwd, task.claimedFiles)
     const { changedFiles, headCommit } = captureCompatPatchAgainstBase(worktree.agentCwd, baseCommit, patchPath)
 
     return {
