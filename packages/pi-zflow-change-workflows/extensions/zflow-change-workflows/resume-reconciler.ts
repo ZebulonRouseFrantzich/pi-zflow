@@ -247,6 +247,7 @@ export async function reconcileResumeState(
   const reusableGroups: GroupResumeStatus[] = []
   const groupsNeedingRerun: GroupResumeStatus[] = []
   const alreadyAppliedGroups: GroupResumeStatus[] = []
+  const waitingOnDependencies: GroupResumeStatus[] = []
 
   for (const group of currentGroups) {
     const state = await buildGroupState(runId, group.id, cwd)
@@ -300,7 +301,8 @@ export async function reconcileResumeState(
         alreadyApplied: false,
       })
     } else {
-      // Cannot reuse — needs rerun
+      // Cannot reuse — either this exact group must rerun, or it is simply
+      // waiting behind an upstream dependency rerun and should stay queued.
       let reason: string
       if (!state.patchPath) {
         reason = "No patch artifact path recorded."
@@ -312,14 +314,25 @@ export async function reconcileResumeState(
         reason = "Cannot reuse — state does not meet reuse criteria."
       }
 
-      groupsNeedingRerun.push({
-        groupId: group.id,
-        canReuse: false,
-        reason,
-        patchPath: state.patchPath,
-        patchVerified: state.scopedVerificationPassed,
-        alreadyApplied: false,
-      })
+      if ((state.status === "ready" || state.status === "queued" || state.status === "pending") && group.dependencies.length > 0) {
+        waitingOnDependencies.push({
+          groupId: group.id,
+          canReuse: false,
+          reason: `Waiting on dependency groups (${group.dependencies.join(", ")}) before it can run.`,
+          patchPath: state.patchPath,
+          patchVerified: state.scopedVerificationPassed,
+          alreadyApplied: false,
+        })
+      } else {
+        groupsNeedingRerun.push({
+          groupId: group.id,
+          canReuse: false,
+          reason,
+          patchPath: state.patchPath,
+          patchVerified: state.scopedVerificationPassed,
+          alreadyApplied: false,
+        })
+      }
     }
   }
 
@@ -428,6 +441,7 @@ export async function reconcileResumeState(
   const totalGroups = currentGroups.length
   const reusableCount = reusableGroups.length
   const rerunCount = groupsNeedingRerun.length
+  const waitingCount = waitingOnDependencies.length
   const appliedCount = alreadyAppliedGroups.length
 
   const parts: string[] = [
@@ -435,6 +449,7 @@ export async function reconcileResumeState(
     "",
     `- ${reusableCount}/${totalGroups} group(s) reusable (patches available).`,
     `- ${rerunCount}/${totalGroups} group(s) need rerun.`,
+    `- ${waitingCount}/${totalGroups} group(s) are still waiting on dependency reruns.`,
     `- ${appliedCount}/${totalGroups} group(s) already applied.`,
     "",
   ]
@@ -450,6 +465,14 @@ export async function reconcileResumeState(
   if (rerunCount > 0) {
     parts.push("Groups needing rerun:")
     for (const g of groupsNeedingRerun) {
+      parts.push(`  - ${g.groupId}: ${g.reason}`)
+    }
+    parts.push("")
+  }
+
+  if (waitingCount > 0) {
+    parts.push("Groups waiting on dependencies:")
+    for (const g of waitingOnDependencies) {
       parts.push(`  - ${g.groupId}: ${g.reason}`)
     }
     parts.push("")

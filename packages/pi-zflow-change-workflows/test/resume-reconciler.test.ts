@@ -245,6 +245,79 @@ describe("reconcileResumeState", () => {
     await fs.rm(repo, { recursive: true, force: true })
   })
 
+  test("downstream queued groups waiting on failed dependencies are not counted as rerun groups", async () => {
+    const repo = await createTempRepo()
+    writeFile(repo, "README.md", "# Test\n")
+    gitAddCommit(repo, "initial")
+
+    const runId = "test-run-dependency-wait"
+    const changeId = "test-change"
+    const runDir = repo
+
+    const groupLedger: Record<string, Record<string, unknown>> = {
+      "group-1": {
+        groupId: "group-1",
+        status: "failed",
+        agent: "zflow.implement-routine",
+        taskPrompt: "Do work on a.ts",
+        files: ["a.ts"],
+        dependencies: [],
+        semanticCoupling: { dependsOnGroups: [], blocksGroups: ["group-2"], sharedFiles: [], notes: [] },
+        appliedToPrimary: false,
+        retryCount: 1,
+        error: "429 rate limit exceeded",
+        updatedAt: new Date().toISOString(),
+      },
+      "group-2": {
+        groupId: "group-2",
+        status: "queued",
+        agent: "zflow.implement-routine",
+        taskPrompt: "Do work on b.ts",
+        files: ["b.ts"],
+        dependencies: ["group-1"],
+        semanticCoupling: { dependsOnGroups: ["group-1"], blocksGroups: [], sharedFiles: [], notes: [] },
+        appliedToPrimary: false,
+        retryCount: 0,
+        updatedAt: new Date().toISOString(),
+      },
+    }
+
+    await createRunJson(
+      runDir, runId, repo, changeId, "partial",
+      [
+        { groupId: "group-1", changedFiles: ["a.ts"] },
+        { groupId: "group-2", changedFiles: ["b.ts"] },
+      ],
+      groupLedger,
+    )
+
+    writeFile(repo, ".zflow/plans/test-change/v1/execution-groups.md", [
+      "# Execution Groups",
+      "",
+      "## Group 1: test",
+      "",
+      "- **Files:** a.ts",
+      "- **Agent:** zflow.implement-routine",
+      "- **Dependencies:** none",
+      "",
+      "## Group 2: test",
+      "",
+      "- **Files:** b.ts",
+      "- **Agent:** zflow.implement-routine",
+      "- **Dependencies:** group-1",
+      "",
+    ].join("\n"))
+
+    const result = await reconcileResumeState(runId, changeId, "v1", repo)
+    assert.equal(result.groupsNeedingRerun.length, 1)
+    assert.equal(result.groupsNeedingRerun[0].groupId, "group-1")
+    assert.equal(result.recommendedNextStep, "rerun-groups")
+    assert.match(result.summary, /1\/2 group\(s\) need rerun\./)
+    assert.match(result.summary, /1\/2 group\(s\) are still waiting on dependency reruns\./)
+
+    await fs.rm(repo, { recursive: true, force: true })
+  })
+
   test("all groups already applied → applyBackNeeded = false", async () => {
     const repo = await createTempRepo()
     writeFile(repo, "README.md", "# Test\n")
