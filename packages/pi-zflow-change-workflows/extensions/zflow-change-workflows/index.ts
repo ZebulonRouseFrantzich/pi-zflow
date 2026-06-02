@@ -1373,6 +1373,7 @@ async function resumeWorktreeDispatch(
     cwd?: string
     force?: boolean
     orchestratorTarget?: string
+    targetGroupIds?: string[]
     onWorkflowUpdate?: (message: string) => void
     onSubagentUpdate?: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) => void
     onRateLimitNotice?: (message: string) => void
@@ -1423,8 +1424,11 @@ async function resumeWorktreeDispatch(
   const run = await readRun(runId, cwd)
   const existingLedger = (run.metadata?.[GROUP_LEDGER_META_KEY] ?? {}) as Record<string, GroupStatusEntry>
 
-  // Filter groups to only those needing resume
-  const resumableGroupIds = new Set(getResumableGroupIds(existingLedger))
+  // Filter groups to only those explicitly targeted for rerun, falling back
+  // to the ledger-derived resumable set when no target override is supplied.
+  const resumableGroupIds = new Set(options?.targetGroupIds?.length
+    ? options.targetGroupIds
+    : getResumableGroupIds(existingLedger))
   if (resumableGroupIds.size === 0) {
     throw new Error("No groups found to resume. All groups are already succeeded/applied/skipped.")
   }
@@ -5626,6 +5630,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
                     cwd: ctx.cwd,
                     force,
                     orchestratorTarget: workflowIntercomTarget,
+                    targetGroupIds: reconciliation.groupsNeedingRerun.map((group) => group.groupId),
                     onWorkflowUpdate: (message) => implProgress.update(message),
                     onSubagentUpdate: (id, update) => implProgress.updateSubagent(id, update),
                     onRateLimitNotice: (message) => ctx.ui.notify(message, "warning"),

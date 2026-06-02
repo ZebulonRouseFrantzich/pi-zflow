@@ -230,4 +230,20 @@ describe("dispatch loop accepts missing verification", () => {
       `expected at least 2 occurrences of the new guard (dispatch + resume), found ${matches.length}`,
     )
   })
+
+  test("resume rerun path dispatches only explicitly targeted groups", async () => {
+    const content = fs.readFileSync(indexFilePath, "utf-8")
+
+    assert.match(
+      content,
+      /targetGroupIds:\s*reconciliation\.groupsNeedingRerun\.map\(\(group\) => group\.groupId\)/,
+      "resume command must pass only reconciliation.groupsNeedingRerun into resumeWorktreeDispatch",
+    )
+
+    assert.match(
+      content,
+      /const resumableGroupIds = new Set\(options\?\.targetGroupIds\?\.length\s*\?\s*options\.targetGroupIds\s*:\s*getResumableGroupIds\(existingLedger\)\)/,
+      "resumeWorktreeDispatch must prefer explicit targetGroupIds over the broader ledger-derived resumable set",
+    )
+  })
 })
