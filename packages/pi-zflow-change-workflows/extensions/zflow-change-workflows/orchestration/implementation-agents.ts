@@ -1,6 +1,8 @@
 import { DISPATCH_SERVICE_CAPABILITY, type DispatchService } from "pi-zflow-core/dispatch-service"
 import { getZflowRegistry } from "pi-zflow-core/registry"
 
+import { parseExecutionGroupsMd } from "./execution-groups.js"
+
 export const CANONICAL_ROLE_LABELS = [
   "backend-api",
   "sdk-client",
@@ -265,4 +267,53 @@ export function canonicalizeImplementationTasksAgentFields(
   )
 
   return { content, changed }
+}
+
+export function backfillImplementationTasksLikelyFiles(
+  markdown: string,
+  executionGroupsMarkdown: string,
+): { content: string; changed: boolean } {
+  const executionGroups = parseExecutionGroupsMd(executionGroupsMarkdown)
+  if (executionGroups.length === 0) {
+    return { content: markdown, changed: false }
+  }
+
+  const filesByGroupId = new Map(
+    executionGroups.map((group) => [group.id, group.files.filter(Boolean)]),
+  )
+
+  let changed = false
+  const sections = markdown.split(/(?=^##\s+Group\s+)/m)
+  const nextSections = sections.map((section, index) => {
+    if (index === 0) return section
+
+    const groupIdMatch = section.match(/^Group ID:\s*`([^`]+)`/m)
+    const groupId = groupIdMatch?.[1]?.trim()
+    if (!groupId) return section
+
+    const files = filesByGroupId.get(groupId) ?? []
+    if (files.length === 0) return section
+
+    const blockPattern = /(### Likely files touched\s*\n\s*\n\| File \| Operation \| Reason \| Notes \|\n\| --- \| --- \| --- \| --- \|\n)([\s\S]*?)(?=\n### Context to read first)/m
+    const blockMatch = section.match(blockPattern)
+    if (!blockMatch) return section
+
+    const existingRows = blockMatch[2] ?? ""
+    const hasPlaceholder = existingRows.includes("No files listed in execution-groups.md; stop and report a plan-quality gap before editing.")
+    const hasConcreteFile = files.some((file) => existingRows.includes(`\`${file}\``))
+    if (!hasPlaceholder && hasConcreteFile) return section
+
+    const replacementRows = files
+      .map((file) => `| \`${file}\` | modify | Required by ${groupId} scope | Follow existing local patterns before editing |`)
+      .join("\n") + "\n"
+
+    const nextSection = section.replace(blockPattern, `$1${replacementRows}`)
+    if (nextSection !== section) changed = true
+    return nextSection
+  })
+
+  return {
+    content: nextSections.join(""),
+    changed,
+  }
 }

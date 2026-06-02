@@ -455,6 +455,34 @@ describe("parseExecutionGroupsMd", () => {
     assert.deepStrictEqual(groups[1].dependencies, ["group-1"])
   })
 
+  test("preserves G-prefixed dependency ids for Group G headings", () => {
+    const content = [
+      "# Execution Groups",
+      "",
+      "### Group G1 — Backend logic",
+      "",
+      "- **Files:** src/backend.ts",
+      "- **Agent:** worker",
+      "- **Dependencies:** none",
+      "- **Verification:** npm test -- backend",
+      "",
+      "### Group G2 — Endpoint wrapper",
+      "",
+      "- **Files:** src/wrapper.ts",
+      "- **Agent:** worker",
+      "- **Dependencies:** G1",
+      "- **Verification:** npm test -- wrapper",
+      "",
+    ].join("\n")
+
+    const groups = parseExecutionGroupsMd(content)
+
+    assert.equal(groups.length, 2)
+    assert.equal(groups[0].id, "group-g1")
+    assert.equal(groups[1].id, "group-g2")
+    assert.deepStrictEqual(groups[1].dependencies, ["group-g1"])
+  })
+
   test("returns empty array for empty content", () => {
     const groups = parseExecutionGroupsMd("")
     assert.equal(groups.length, 0)

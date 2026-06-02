@@ -108,6 +108,7 @@ import {
   createWorkflowProgressIndicator,
   buildWorkflowFinalNextStepsLine,
 } from "./activation/progress-renderer.js"
+import { acceptImplementationNoopResult } from "./orchestration/implementation/noop-success.js"
 import type {
   WorkflowSubagentSnapshot,
   SessionMessageLike,
@@ -1753,9 +1754,26 @@ async function resumeWorktreeDispatch(
     if (!group) continue
 
     const rateLimitRetryCount = dispatchResult.retryCounts?.[group.id] ?? 0
+    const verification = normalizeDispatchVerification(r.verification)
+    const acceptedNoop = acceptImplementationNoopResult({
+      ok: r.ok,
+      error: r.error,
+      rawOutput: r.rawOutput,
+      verification,
+    })
+    const resultForWorkflow = acceptedNoop.accepted
+      ? {
+          ...r,
+          ok: true,
+          error: undefined,
+          patchPath: undefined,
+          worktreePath: undefined,
+          changedFiles: group.files,
+        }
+      : r
 
-    if (!r.ok) {
-      const failureMessage = r.error ?? "unknown error"
+    if (!resultForWorkflow.ok) {
+      const failureMessage = resultForWorkflow.error ?? "unknown error"
       resumeFailures.push(`${group.id}: ${failureMessage}`)
       await updateGroupLedger(runId, group.id, {
         status: "failed",
@@ -1767,7 +1785,7 @@ async function resumeWorktreeDispatch(
         lastProgressAt: new Date().toISOString(),
       }, cwd).catch(() => {})
       options?.onSubagentUpdate?.(group.id, {
-        agent: r.agent ?? group.agent,
+        agent: resultForWorkflow.agent ?? group.agent,
         title: group.taskPrompt ?? undefined,
         model: implementModel.model ?? "unavailable",
         thinking: implementModel.thinking ?? "unavailable",
@@ -1777,7 +1795,7 @@ async function resumeWorktreeDispatch(
       })
       markGroupProgress(group.id, {
         status: "failed",
-        agent: r.agent ?? group.agent,
+        agent: resultForWorkflow.agent ?? group.agent,
         taskPrompt: group.taskPrompt ?? "",
         model: implementModel.model ?? "unavailable",
         thinking: implementModel.thinking ?? "unavailable",
@@ -1788,8 +1806,6 @@ async function resumeWorktreeDispatch(
       })
       continue
     }
-
-    const verification = normalizeDispatchVerification(r.verification)
 
     // If the bridge explicitly reported failed scoped verification, fail the group.
     // Missing verification (bridge no longer runs it) = deferred to final verification.
@@ -1831,53 +1847,93 @@ async function resumeWorktreeDispatch(
       command: undefined,
       output: "Scoped verification deferred to the final verification phase.",
     }
+    const successMessage = acceptedNoop.accepted
+      ? (acceptedNoop.reason ?? "Implementation already present; scoped verification passed without additional edits.")
+      : "agent complete; scoped verification deferred to final verification"
+
+    if (acceptedNoop.accepted) {
+      await updateGroupLedger(runId, group.id, {
+        status: "applied",
+        appliedToPrimary: true,
+        agent: resultForWorkflow.agent ?? "zflow.implement-routine",
+        error: undefined,
+        failureKind: undefined,
+        patchPath: undefined,
+        changedFiles: resultForWorkflow.changedFiles ?? group.files,
+        scopedVerification: { status: scopedVerification.status, command: scopedVerification.command, output: scopedVerification.output },
+        rateLimitRetryCount,
+        lastCommand: successMessage,
+        lastProgressAt: new Date().toISOString(),
+      }, cwd).catch(() => {})
+      options?.onSubagentUpdate?.(group.id, {
+        agent: resultForWorkflow.agent ?? group.agent,
+        title: group.taskPrompt ?? undefined,
+        model: implementModel.model ?? "unavailable",
+        thinking: implementModel.thinking ?? "unavailable",
+        status: "completed",
+        finishedAt: Date.now(),
+        lastCommand: successMessage,
+      })
+      markGroupProgress(group.id, {
+        status: "applied",
+        agent: resultForWorkflow.agent ?? group.agent,
+        taskPrompt: group.taskPrompt ?? "",
+        model: implementModel.model ?? "unavailable",
+        thinking: implementModel.thinking ?? "unavailable",
+        lastCommand: successMessage,
+        lastProgressAt: new Date().toISOString(),
+        rateLimitRetryCount,
+      })
+      continue
+    }
+
     await updateGroupLedger(runId, group.id, {
       status: "succeeded",
-      agent: r.agent ?? "zflow.implement-routine",
+      agent: resultForWorkflow.agent ?? "zflow.implement-routine",
       error: undefined,
       failureKind: undefined,
-      patchPath: r.patchPath,
-      changedFiles: r.changedFiles ?? group.files,
+      patchPath: resultForWorkflow.patchPath,
+      changedFiles: resultForWorkflow.changedFiles ?? group.files,
       scopedVerification: { status: scopedVerification.status, command: scopedVerification.command, output: scopedVerification.output },
       rateLimitRetryCount,
-      lastCommand: "agent complete; scoped verification deferred to final verification",
+      lastCommand: successMessage,
       lastProgressAt: new Date().toISOString(),
     }, cwd).catch(() => {})
     options?.onSubagentUpdate?.(group.id, {
-      agent: r.agent ?? group.agent,
+      agent: resultForWorkflow.agent ?? group.agent,
       title: group.taskPrompt ?? undefined,
       model: implementModel.model ?? "unavailable",
       thinking: implementModel.thinking ?? "unavailable",
       status: "completed",
       finishedAt: Date.now(),
-      lastCommand: "agent complete; scoped verification deferred to final verification",
+      lastCommand: successMessage,
     })
     markGroupProgress(group.id, {
       status: "succeeded",
-      agent: r.agent ?? group.agent,
+      agent: resultForWorkflow.agent ?? group.agent,
       taskPrompt: group.taskPrompt ?? "",
       model: implementModel.model ?? "unavailable",
       thinking: implementModel.thinking ?? "unavailable",
-      lastCommand: "agent complete; scoped verification deferred to final verification",
+      lastCommand: successMessage,
       lastProgressAt: new Date().toISOString(),
       rateLimitRetryCount,
     })
 
     // Collect group result for apply-back later
-    if (r.patchPath) {
+    if (resultForWorkflow.patchPath) {
       const patchesDir = path.join(runDir, "patches")
       await fs.mkdir(patchesDir, { recursive: true })
       const destPatchPath = path.join(patchesDir, `${group.id}.patch`)
-      if (path.resolve(r.patchPath) !== path.resolve(destPatchPath)) {
-        await fs.copyFile(r.patchPath, destPatchPath)
+      if (path.resolve(resultForWorkflow.patchPath) !== path.resolve(destPatchPath)) {
+        await fs.copyFile(resultForWorkflow.patchPath, destPatchPath)
       }
       groupResults.push({
         groupId: group.id,
-        agent: r.agent ?? "zflow.implement-routine",
-        worktreePath: r.worktreePath ?? "(patch-based)",
-        baseCommit: r.baseCommit ?? run.head as string,
-        headCommit: r.headCommit ?? run.head as string,
-        changedFiles: r.changedFiles ?? group.files,
+        agent: resultForWorkflow.agent ?? "zflow.implement-routine",
+        worktreePath: resultForWorkflow.worktreePath ?? "(patch-based)",
+        baseCommit: resultForWorkflow.baseCommit ?? run.head as string,
+        headCommit: resultForWorkflow.headCommit ?? run.head as string,
+        changedFiles: resultForWorkflow.changedFiles ?? group.files,
         uncommittedChanges: [],
         patchPath: destPatchPath,
         verification: scopedVerification,
@@ -1885,17 +1941,17 @@ async function resumeWorktreeDispatch(
       })
       await updateGroupLedger(runId, group.id, {
         patchPath: destPatchPath,
-        changedFiles: r.changedFiles ?? group.files,
+        changedFiles: resultForWorkflow.changedFiles ?? group.files,
       }, cwd).catch(() => {})
-    } else if (r.worktreePath) {
+    } else if (resultForWorkflow.worktreePath) {
       const captured = await captureGroupResult({
         groupId: group.id,
-        agent: r.agent ?? group.agent ?? "zflow.implement-routine",
-        worktreePath: r.worktreePath,
+        agent: resultForWorkflow.agent ?? group.agent ?? "zflow.implement-routine",
+        worktreePath: resultForWorkflow.worktreePath,
         runId,
         repoRoot,
-        baseCommit: r.baseCommit,
-        headCommit: r.headCommit,
+        baseCommit: resultForWorkflow.baseCommit,
+        headCommit: resultForWorkflow.headCommit,
         scopedFiles: group.files,
         verification: scopedVerification,
         cwd,
@@ -2792,33 +2848,50 @@ async function runWorktreeDispatchAndFinalize(
       if (!gid || idx === undefined) continue
 
       const verification = normalizeDispatchVerification(r.verification)
-      const dispatchFailed = !r.ok || verification?.status === "fail"
+      const acceptedNoop = acceptImplementationNoopResult({
+        ok: r.ok,
+        error: r.error,
+        rawOutput: r.rawOutput,
+        verification,
+      })
+      const resultForWorkflow = acceptedNoop.accepted
+        ? {
+            ...r,
+            ok: true,
+            error: undefined,
+            patchPath: undefined,
+            worktreePath: undefined,
+            changedFiles: group?.files ?? r.changedFiles,
+          }
+        : r
+      const dispatchFailed = !resultForWorkflow.ok || verification?.status === "fail"
       const rateLimitRetryCount = dispatchResult.retryCounts?.[gid] ?? 0
-      allResults.push({ groupId: gid, result: r, index: idx })
+      allResults.push({ groupId: gid, result: resultForWorkflow, index: idx })
 
       if (!dispatchFailed) {
+        const successMessage = acceptedNoop.accepted
+          ? (acceptedNoop.reason ?? "implementation already present; verification passed")
+          : verification?.status === "pass"
+            ? "agent complete; scoped verification passed"
+            : "agent complete; scoped verification deferred to final verification"
         options?.onSubagentUpdate?.(gid, {
-          agent: r.agent ?? tasks[idx]?.agent,
+          agent: resultForWorkflow.agent ?? tasks[idx]?.agent,
           title: group?.taskPrompt ?? undefined,
           status: "completed",
           finishedAt: Date.now(),
-          lastCommand: verification?.status === "pass"
-            ? "agent complete; scoped verification passed"
-            : "agent complete; scoped verification deferred to final verification",
+          lastCommand: successMessage,
         })
         await updateGroupLedger(runId, gid, {
           status: "succeeded",
-          agent: r.agent ?? "zflow.implement-routine",
+          agent: resultForWorkflow.agent ?? "zflow.implement-routine",
           error: undefined,
           failureKind: undefined,
-          patchPath: r.patchPath,
-          changedFiles: r.changedFiles ?? group?.files,
+          patchPath: resultForWorkflow.patchPath,
+          changedFiles: resultForWorkflow.changedFiles ?? group?.files,
           scopedVerification: verification,
           retryCount: rateLimitRetryCount,
           rateLimitRetryCount,
-          lastCommand: verification?.status === "pass"
-            ? "agent complete; scoped verification passed"
-            : "agent complete; scoped verification deferred to final verification",
+          lastCommand: successMessage,
           lastProgressAt: new Date().toISOString(),
         }, cwd).catch(() => {})
         continue

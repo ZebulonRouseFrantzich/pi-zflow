@@ -38,11 +38,14 @@ export function parseExecutionGroupsMd(mdContent: string): DispatchExecutionGrou
   const normalizeDependency = (dependency: string): string => {
     const trimmed = dependency.trim().replace(/^`|`$/g, "").replace(/^\[|\]$/g, "").trim()
     if (!trimmed) return ""
-    // With explicit G/Group prefix: "Group 1A", "G 2"
-    const gMatch = trimmed.match(/^(?:G|Groups?\s+)([A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)$/i)
-    if (gMatch) return `group-${gMatch[1].toLowerCase()}`
+
+    const withoutGroupWord = trimmed.replace(/^Groups?\s+/i, "").trim()
+    if (/^G[A-Za-z]?\d+[A-Za-z]?$/i.test(withoutGroupWord)) {
+      return `group-${withoutGroupWord.toLowerCase()}`
+    }
+
     // Bare alphanumeric group ID: "1A", "A1", "2", "b3"
-    const bareMatch = trimmed.match(/^([A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)$/i)
+    const bareMatch = withoutGroupWord.match(/^([A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)$/i)
     if (bareMatch) return `group-${bareMatch[1].toLowerCase()}`
     return trimmed
   }
@@ -71,10 +74,15 @@ export function parseExecutionGroupsMd(mdContent: string): DispatchExecutionGrou
       }
     }
 
-    const groupRefPattern = /\b(?:G|Groups?)\s*([A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)\b/gi
+    const gRefPattern = /\bG([A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)\b/gi
     let match: RegExpExecArray | null
-    while ((match = groupRefPattern.exec(value)) !== null) {
-      dependencies.push(`group-${match[1]!.toLowerCase()}`)
+    while ((match = gRefPattern.exec(value)) !== null) {
+      dependencies.push(`group-g${match[1]!.toLowerCase()}`)
+    }
+
+    const groupWordPattern = /\bGroups?\s+([A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)\b/gi
+    while ((match = groupWordPattern.exec(value)) !== null) {
+      dependencies.push(normalizeDependency(match[1]!))
     }
 
     // Dependency prose often uses a single plural prefix followed by a list,

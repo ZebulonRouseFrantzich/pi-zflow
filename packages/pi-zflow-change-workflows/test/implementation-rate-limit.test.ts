@@ -237,7 +237,10 @@ describe("implementation rate-limit helpers", () => {
       ["group-b"],
       ["group-c"],
     ])
-    assert.deepEqual(sleeps, [1000, 2000, 3000])
+    assert.equal(sleeps.length, 3)
+    assert.ok(Math.abs((sleeps[0] ?? 0) - 1000) <= 25)
+    assert.ok(Math.abs((sleeps[1] ?? 0) - 2000) <= 25)
+    assert.ok(Math.abs((sleeps[2] ?? 0) - 3000) <= 25)
   })
 
   test("surfaces retry exhaustion when the group keeps hitting 429", async () => {

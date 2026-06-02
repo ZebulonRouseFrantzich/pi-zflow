@@ -11,6 +11,7 @@ import {
 } from "pi-zflow-core/dispatch-service"
 
 import {
+  backfillImplementationTasksLikelyFiles,
   buildImplementationAgentPromptLines,
   canonicalizeExecutionGroupsAgentFields,
   canonicalizeImplementationTasksAgentFields,
@@ -153,12 +154,15 @@ export async function runPrepareAgentsIfAvailable(
   }
 
   const canonicalizePreparedArtifacts = async (implementationAgentGuidance: Awaited<ReturnType<typeof resolveImplementationAgentGuidance>>): Promise<void> => {
+    let canonicalExecutionGroupsContent: string | undefined
+
     try {
       const executionGroupsRaw = await fs.readFile(artifactPaths.executionGroups, "utf-8")
       const canonicalExecutionGroups = canonicalizeExecutionGroupsAgentFields(
         executionGroupsRaw,
         implementationAgentGuidance,
       )
+      canonicalExecutionGroupsContent = canonicalExecutionGroups.content
       if (canonicalExecutionGroups.changed) {
         await fs.writeFile(artifactPaths.executionGroups, canonicalExecutionGroups.content, "utf-8")
       }
@@ -172,8 +176,15 @@ export async function runPrepareAgentsIfAvailable(
         implementationTasksRaw,
         implementationAgentGuidance,
       )
-      if (canonicalImplementationTasks.changed) {
-        await fs.writeFile(artifactPaths.implementationTasks, canonicalImplementationTasks.content, "utf-8")
+      const backfilledImplementationTasks = canonicalExecutionGroupsContent
+        ? backfillImplementationTasksLikelyFiles(
+            canonicalImplementationTasks.content,
+            canonicalExecutionGroupsContent,
+          )
+        : { content: canonicalImplementationTasks.content, changed: false }
+
+      if (canonicalImplementationTasks.changed || backfilledImplementationTasks.changed) {
+        await fs.writeFile(artifactPaths.implementationTasks, backfilledImplementationTasks.content, "utf-8")
       }
     } catch {
       // implementation-tasks.md may be absent or still unwritten
