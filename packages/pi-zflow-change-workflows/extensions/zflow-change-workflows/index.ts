@@ -1980,8 +1980,26 @@ async function runWorktreeDispatchAndFinalize(
   }
 
   const groups = parseExecutionGroupsMd(executionGroupsMd)
+  const {
+    normalizeImplementationAgentName,
+    resolveImplementationAgentGuidance,
+  } = await import("./orchestration/implementation-agents.js")
+  const implementationAgentGuidance = await resolveImplementationAgentGuidance(cwd)
+  const normalizedGroups = groups.map((group) => {
+    const resolution = normalizeImplementationAgentName(group.agent, implementationAgentGuidance)
+    if (resolution.reason === "role-label" || resolution.changed) {
+      options?.onWorkflowUpdate?.(
+        `Normalizing ${group.id} agent from ${group.agent} to ${resolution.resolved}` +
+        `${resolution.roleLabel ? ` (role label: ${resolution.roleLabel})` : ""}.`,
+      )
+    }
+    return {
+      ...group,
+      agent: resolution.resolved,
+    }
+  })
 
-  if (groups.length === 0) {
+  if (normalizedGroups.length === 0) {
     const preview = executionGroupsMd.slice(0, 500).trim()
     const previewHint = preview.length > 0
       ? `\n\nFile content preview (first 500 chars):\n\`\`\`markdown\n${preview}${executionGroupsMd.length > 500 ? "\n…(truncated)" : ""}\n\`\`\``
@@ -1993,7 +2011,7 @@ async function runWorktreeDispatchAndFinalize(
       `  ## Execution Group 1: descriptive name\n\n` +
       `Followed by:\n` +
       `  **Files:** path/to/file.ts, another/file.ts\n` +
-      `  **Agent:** zflow.implement-routine\n` +
+      `  **Agent:** ${implementationAgentGuidance.defaultAgent}\n` +
       `  **Scoped verification:** the verification command for this group`
     throw new Error(
       `No execution groups found in ${executionGroupsArtifactPath}. ` +
@@ -2003,7 +2021,7 @@ async function runWorktreeDispatchAndFinalize(
     )
   }
 
-  const missingScopedVerification = groups.filter((g) => !g.scopedVerification)
+  const missingScopedVerification = normalizedGroups.filter((g) => !g.scopedVerification)
   if (missingScopedVerification.length > 0) {
     throw new Error(
       "Cannot dispatch implementation: every execution group must define scoped verification. " +
@@ -2023,7 +2041,7 @@ async function runWorktreeDispatchAndFinalize(
   const runPlan = await prepareWorktreeImplementationRun(
     changeId,
     planVersion,
-    groups,
+    normalizedGroups,
     planArtifactPaths,
     {
       cwd,
@@ -2037,7 +2055,7 @@ async function runWorktreeDispatchAndFinalize(
   // ── Initialize durable group status ledger ────────────────────
   const runBefore = await readRun(runId, cwd)
   const existingLedger = runBefore?.metadata?.[GROUP_LEDGER_META_KEY] as Record<string, GroupStatusEntry> | undefined
-  const ledger = buildGroupLedger(groups, existingLedger)
+  const ledger = buildGroupLedger(normalizedGroups, existingLedger)
   await updateRun(runId, {
     metadata: {
       ...(runBefore?.metadata ?? {}),

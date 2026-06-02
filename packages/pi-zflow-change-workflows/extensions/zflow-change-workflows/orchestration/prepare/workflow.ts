@@ -332,6 +332,9 @@ export async function runChangePrepareWorkflow(
                       )
                       console.info("[zflow] Populated verification.md from RuneContext verification/references/status docs")
 
+                      const { resolveImplementationAgentGuidance } = await import("../implementation-agents.js")
+                      const implementationAgentGuidance = await resolveImplementationAgentGuidance(cwd)
+
                       try {
                         const { deriveExecutionGroupsFromRuneDocs } = await import("pi-zflow-runecontext")
                         const derived = deriveExecutionGroupsFromRuneDocs(runeDocs)
@@ -352,7 +355,7 @@ export async function runChangePrepareWorkflow(
                             `## Group ${i + 1}: ${group.name}`,
                             "",
                             `- **Files:** TBD`,
-                            `- **Agent:** zflow.implement-routine`,
+                            `- **Agent:** ${implementationAgentGuidance.defaultAgent}`,
                             `- **Verification:** ${verification || "TBD — derive scoped verification from RuneContext criteria"}`,
                             `- **Parallelizable:** true`,
                             `- **Canonical source:** ${derived.sourceDocument}`,
@@ -373,7 +376,7 @@ export async function runChangePrepareWorkflow(
                           `## Group 1: RuneContext implementation`,
                           ``,
                           `- **Files:** TBD`,
-                          `- **Agent:** zflow.implement-routine`,
+                          `- **Agent:** ${implementationAgentGuidance.defaultAgent}`,
                           `- **Verification:** TBD`,
                           `- **Canonical source:** ${runeDocs.tasks ? "tasks.md" : "proposal+design+verification"}`,
                         ].join("\n")

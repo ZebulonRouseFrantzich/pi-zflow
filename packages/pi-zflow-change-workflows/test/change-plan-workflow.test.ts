@@ -50,6 +50,7 @@ describe("runChangePlanWorkflow", () => {
       })
       registry.provide(DISPATCH_SERVICE_CAPABILITY, {
         name: "test-dispatch",
+        listAgents: async () => ["planner", "worker"],
         runAgent: async (input: any) => {
           receivedTask = input.task
           const body = [
@@ -131,6 +132,8 @@ describe("runChangePlanWorkflow", () => {
 
       assert.match(receivedTask, /Return ONLY markdown for the `plan.md` body/)
       assert.match(receivedTask, /## Goals \/ Success Criteria/)
+      assert.match(receivedTask, /role labels: `backend-api`, `sdk-client`, `cli-integrations`/)
+      assert.match(receivedTask, /real agent names: `worker`/)
       assert.ok(result.planDocPath.endsWith(path.join("docs", "zflow-changes", "oracle-mssql-entitlements-readonly", "plan.md")))
 
       const doc = await readDurablePlanDoc("oracle-mssql-entitlements-readonly", { repoRoot })

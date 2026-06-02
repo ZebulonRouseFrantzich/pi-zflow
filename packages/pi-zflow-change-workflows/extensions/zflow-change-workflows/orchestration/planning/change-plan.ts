@@ -17,6 +17,7 @@ import {
   resolveDurablePlanRepoRoot,
 } from "./durable-plan-doc.js"
 import { buildRepoMap, buildReconnaissance } from "./repo-analysis.js"
+import { resolveImplementationAgentGuidance } from "../implementation-agents.js"
 
 export interface ChangePlanWorkflowOptions {
   /** Working directory for runtime state dir resolution. */
@@ -106,6 +107,8 @@ function buildChangePlanDraftTaskPrompt(input: {
   reconnaissancePath: string
   changeReferencePath?: string
   existingPlanBody?: string
+  roleLabels: string[]
+  implementationAgents: string[]
 }): string {
   return [
     `Draft a complete durable change plan body for changeId \`${input.changeId}\`.`,
@@ -147,6 +150,8 @@ function buildChangePlanDraftTaskPrompt(input: {
     "- Proposed execution outline should describe logical work groups, likely ordering, and coordination concerns, but it does NOT need the final machine-readable execution-groups format.",
     "- Verification approach should include concrete commands or focused validation methods whenever the repo suggests them.",
     "- Open questions should be empty of fluff; only include unresolved decisions that could materially affect planning.",
+    `- If you mention likely human ownership labels, use only these role labels: ${input.roleLabels.map((label) => `\`${label}\``).join(", ")}.`,
+    `- If you mention dispatchable implementation agents, use only these real agent names: ${input.implementationAgents.map((agent) => `\`${agent}\``).join(", ")}.`,
     "",
     "If the change is RuneContext-backed, treat RuneContext documents as canonical and describe how this durable plan summarizes or stages that work without competing with canonical docs.",
   ].filter(Boolean).join("\n")
@@ -185,6 +190,8 @@ export async function runChangePlanWorkflow(
     )
   }
 
+  const implementationAgentGuidance = await resolveImplementationAgentGuidance(cwd)
+
   const runtimeStateDir = resolveRuntimeStateDir(cwd)
   const outputDir = path.join(runtimeStateDir, "change-plan-drafts")
   await fs.mkdir(outputDir, { recursive: true })
@@ -205,6 +212,8 @@ export async function runChangePlanWorkflow(
       reconnaissancePath: reconResult.path,
       changeReferencePath: options.explicitReference ? options.changeSeed : options.changeReferencePath,
       existingPlanBody: existingPlanBody || undefined,
+      roleLabels: implementationAgentGuidance.roleLabels,
+      implementationAgents: implementationAgentGuidance.implementationAgents,
     }),
     onUpdate: (progress) => {
       options.onAgentProgress?.(progress)

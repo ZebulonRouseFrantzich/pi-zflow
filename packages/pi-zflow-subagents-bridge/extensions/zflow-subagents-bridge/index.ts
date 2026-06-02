@@ -105,6 +105,10 @@ class UnavailableDispatchService implements DispatchService {
     }))
     return { ok: false, results }
   }
+
+  async listAgents(): Promise<Array<string | { name?: string }>> {
+    return []
+  }
 }
 
 // ── Operational backend (wraps pi-subagents-zflow) ────────────────
@@ -131,6 +135,7 @@ type BackendParallelTaskInput = {
 interface BackendDispatchService {
   readonly name?: string
   readonly capabilities?: Partial<DispatchCapabilities>
+  listAgents?(cwd?: string): Promise<Array<string | { name?: string }>>
   runAgent(input: {
     agent: string
     task: string
@@ -294,6 +299,16 @@ class SubagentsDispatchService implements DispatchService {
         error: `Dispatch error: ${err instanceof Error ? err.message : String(err)}`,
       }
     }
+  }
+
+  async listAgents(cwd?: string): Promise<Array<string | { name?: string }>> {
+    if (typeof this.advancedFallback?.listAgents === "function") {
+      return this.advancedFallback.listAgents(cwd)
+    }
+    if (typeof this.backend.listAgents === "function") {
+      return this.backend.listAgents(cwd)
+    }
+    return []
   }
 
   async runParallel(input: ParallelDispatchInput): Promise<ParallelDispatchResult> {
@@ -827,6 +842,14 @@ async function createCompatZflowDispatchService(): Promise<BackendDispatchServic
     }
   }
 
+  const listAgents = async (cwd?: string) => {
+    const resolvedCwd = safeGetCwd(cwd)
+    const { agents } = resolveAgents(resolvedCwd)
+    return agents
+      .map((agent) => (agent as { name?: unknown }).name)
+      .filter((name): name is string => typeof name === "string" && name.trim().length > 0)
+  }
+
   const runAgent = async (input: Parameters<BackendDispatchService["runAgent"]>[0]) => {
     const cwd = safeGetCwd(input.cwd)
     const { agents, error: discoveryError } = resolveAgents(cwd)
@@ -893,6 +916,7 @@ async function createCompatZflowDispatchService(): Promise<BackendDispatchServic
       baseRefWorktrees: true,
       worktreeSetupHooks: true,
     },
+    listAgents,
     runAgent,
     runParallel,
   }

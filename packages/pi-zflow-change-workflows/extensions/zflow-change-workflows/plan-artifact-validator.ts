@@ -276,6 +276,12 @@ async function validateExecutionGroups(
   }
 
   const { parseExecutionGroupsMd } = await import("./orchestration.js")
+  const {
+    matchesKnownAgentName,
+    normalizeImplementationAgentName,
+    resolveImplementationAgentGuidance,
+  } = await import("./orchestration/implementation-agents.js")
+  const implementationAgentGuidance = await resolveImplementationAgentGuidance(cwd)
   const parsedGroupsById = new Map(
     parseExecutionGroupsMd(content).map((group) => [group.id.replace(/^group-/, "").toLowerCase(), group]),
   )
@@ -359,11 +365,25 @@ async function validateExecutionGroups(
 
     // Check Agent field
     const agentMatch = normalizedSection.match(AGENT_RE)
-    if (!agentMatch || !agentMatch[1].trim()) {
+    const agentValue = parsedGroup?.agent?.trim() ?? agentMatch?.[1]?.trim() ?? ""
+    if (!agentValue) {
       issues.push(
         `Group "${groupId}" (section ${i + 1}): missing "Agent:" field. ` +
-        "Each group must specify an agent (e.g. zflow.implement-routine).",
+        "Each group must specify an agent (e.g. worker or zflow.implement-routine).",
       )
+    } else if (implementationAgentGuidance.availableAgents.length > 0) {
+      const resolution = normalizeImplementationAgentName(agentValue, implementationAgentGuidance)
+      if (resolution.reason === "role-label") {
+        issues.push(
+          `Group "${groupId}" (section ${i + 1}): agent value "${agentValue}" is a role label, not a dispatchable agent. ` +
+          `Move it to "Role label:" and set "Agent:" to "${resolution.resolved}".`,
+        )
+      } else if (!matchesKnownAgentName(resolution.resolved, implementationAgentGuidance.availableAgents)) {
+        issues.push(
+          `Group "${groupId}" (section ${i + 1}): unknown agent "${agentValue}". ` +
+          `Discovered agents for this environment: ${implementationAgentGuidance.availableAgents.join(", ")}.`,
+        )
+      }
     }
 
     // Check Dependencies field

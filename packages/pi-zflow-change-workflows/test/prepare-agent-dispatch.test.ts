@@ -199,6 +199,124 @@ describe("runPrepareAgentsIfAvailable — fake service path", () => {
     }
   })
 
+  test("canonicalizes role labels into real implementation agents in generated artifacts", async () => {
+    resetZflowRegistry()
+
+    const repoRoot = await createTestRepo()
+    try {
+      const registry = getZflowRegistry()
+      let receivedInput: any = null
+      registry.claim({
+        capability: DISPATCH_SERVICE_CAPABILITY,
+        version: "0.1.0",
+        provider: "test-dispatch",
+        sourcePath: import.meta.url,
+      })
+      registry.provide(DISPATCH_SERVICE_CAPABILITY, {
+        name: "test-dispatch",
+        listAgents: async () => ["planner", "worker"],
+        runAgent: async (input: any) => {
+          receivedInput = input
+          const versionDir = resolvePlanVersionDir("test-canonicalize-agents", "v1", repoRoot)
+          await fs.mkdir(versionDir, { recursive: true })
+          await fs.writeFile(path.join(versionDir, "design.md"), "# Design\n\nDetailed design body.\n", "utf-8")
+          await fs.writeFile(path.join(versionDir, "execution-groups.md"), [
+            "# Execution Groups",
+            "",
+            "## Group 1: Backend work",
+            "",
+            "- **Files:** src/backend.ts",
+            "- **Owner agent:** backend-api",
+            "- **Dependencies:** none",
+            "- **Scoped verification:** npm test -- backend",
+            "- **Parallelizable:** true",
+            "",
+          ].join("\n"), "utf-8")
+          await fs.writeFile(path.join(versionDir, "standards.md"), "# Standards\n\nDetailed standards body.\n", "utf-8")
+          await fs.writeFile(path.join(versionDir, "verification.md"), "# Verification\n\n```bash\nnpm test -- backend\n```\n", "utf-8")
+          await fs.writeFile(path.join(versionDir, "implementation-tasks.md"), [
+            "# Implementation Tasks",
+            "",
+            "## Group 1: Backend work",
+            "",
+            "Group ID: `group-1`  ",
+            "Assigned agent: `backend-api`  ",
+            "Dependencies: none",
+            "",
+            "### Objective",
+            "Implement backend work.",
+            "",
+            "### Scope",
+            "Included: backend work only.",
+            "",
+            "### Likely files touched",
+            "- src/backend.ts",
+            "",
+            "### Context to read first",
+            "- src/backend.ts",
+            "",
+            "### Implementation checklist",
+            "1. Read the code.",
+            "2. Make the change.",
+            "",
+            "### Pseudocode / implementation sketch",
+            "- Update the backend path.",
+            "",
+            "### Acceptance criteria",
+            "- Backend verification passes.",
+            "",
+            "### Scoped verification",
+            "- npm test -- backend",
+            "",
+            "### Self-check before completion",
+            "- Confirm only backend scope changed.",
+            "",
+            "### Drift triggers",
+            "- Missing backend file.",
+          ].join("\n"), "utf-8")
+          return { ok: true, rawOutput: "done", outputPath: path.join(versionDir, "planner-frontier-output.md") }
+        },
+        runParallel: async () => ({ ok: true, results: [] }),
+      })
+      registry.claim({
+        capability: "profiles",
+        version: "0.1.0",
+        provider: "test-profiles",
+        sourcePath: import.meta.url,
+      })
+      registry.provide("profiles", {
+        getResolvedAgentBinding: async (agentName: string) => ({
+          agent: agentName,
+          resolvedModel: "openai-codex/gpt-5.4",
+        }),
+      })
+
+      await runChangePrepareWorkflow({ cwd: repoRoot, changeId: "test-canonicalize-agents" })
+      const result = await runPrepareAgentsIfAvailable("test-canonicalize-agents", "v1", repoRoot)
+
+      assert.strictEqual(result.dispatched, true)
+      assert.match(receivedInput.task, /Use ONLY these real implementation agent names in `\*\*Agent:\*\*`: `worker`/)
+      assert.match(receivedInput.task, /Do NOT put role labels like `backend-api`, `sdk-client`, or `cli-integrations` in `\*\*Agent:\*\*`/)
+
+      const versionDir = resolvePlanVersionDir("test-canonicalize-agents", "v1", repoRoot)
+      const executionGroups = await fs.readFile(path.join(versionDir, "execution-groups.md"), "utf-8")
+      assert.match(executionGroups, /\*\*Role label:\*\* backend-api/)
+      assert.match(executionGroups, /\*\*Agent:\*\* worker/)
+      assert.doesNotMatch(executionGroups, /\*\*Owner agent:\*\* backend-api/)
+
+      const implementationTasks = await fs.readFile(path.join(versionDir, "implementation-tasks.md"), "utf-8")
+      assert.match(implementationTasks, /Assigned role label: `backend-api`/)
+      assert.match(implementationTasks, /Assigned agent: `worker`/)
+
+      const planStatePath = resolvePlanStatePath("test-canonicalize-agents", repoRoot)
+      const planState = JSON.parse(await fs.readFile(planStatePath, "utf-8"))
+      assert.deepStrictEqual(planState.runtimeMetadata.availableImplementationAgents, ["worker"])
+      assert.deepStrictEqual(planState.runtimeMetadata.canonicalRoleLabels, ["backend-api", "sdk-client", "cli-integrations"])
+    } finally {
+      await removeTestRepo(repoRoot)
+    }
+  })
+
   test("dispatches via a registry service exposing a dispatch method", async () => {
     resetZflowRegistry()
 

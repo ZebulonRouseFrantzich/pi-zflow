@@ -10,6 +10,13 @@ import {
   type AgentDispatchProgress,
 } from "pi-zflow-core/dispatch-service"
 
+import {
+  buildImplementationAgentPromptLines,
+  canonicalizeExecutionGroupsAgentFields,
+  canonicalizeImplementationTasksAgentFields,
+  resolveImplementationAgentGuidance,
+} from "../implementation-agents.js"
+
 /**
  * Result of attempting to dispatch prepare-phase agents via the registry.
  */
@@ -145,6 +152,34 @@ export async function runPrepareAgentsIfAvailable(
     return outputs
   }
 
+  const canonicalizePreparedArtifacts = async (implementationAgentGuidance: Awaited<ReturnType<typeof resolveImplementationAgentGuidance>>): Promise<void> => {
+    try {
+      const executionGroupsRaw = await fs.readFile(artifactPaths.executionGroups, "utf-8")
+      const canonicalExecutionGroups = canonicalizeExecutionGroupsAgentFields(
+        executionGroupsRaw,
+        implementationAgentGuidance,
+      )
+      if (canonicalExecutionGroups.changed) {
+        await fs.writeFile(artifactPaths.executionGroups, canonicalExecutionGroups.content, "utf-8")
+      }
+    } catch {
+      // execution-groups.md may be absent or still unwritten
+    }
+
+    try {
+      const implementationTasksRaw = await fs.readFile(artifactPaths.implementationTasks, "utf-8")
+      const canonicalImplementationTasks = canonicalizeImplementationTasksAgentFields(
+        implementationTasksRaw,
+        implementationAgentGuidance,
+      )
+      if (canonicalImplementationTasks.changed) {
+        await fs.writeFile(artifactPaths.implementationTasks, canonicalImplementationTasks.content, "utf-8")
+      }
+    } catch {
+      // implementation-tasks.md may be absent or still unwritten
+    }
+  }
+
   const recordDispatchMetadata = async (metadata: Record<string, unknown>): Promise<void> => {
     try {
       const planStatePath = resolvePlanStatePath(changeId, cwd)
@@ -164,6 +199,7 @@ export async function runPrepareAgentsIfAvailable(
   const zflowDispatch = registry.optional<DispatchService>(DISPATCH_SERVICE_CAPABILITY)
   if (zflowDispatch && typeof zflowDispatch.runAgent === "function") {
     try {
+      const implementationAgentGuidance = await resolveImplementationAgentGuidance(cwd)
       const task = [
         `Run formal zflow change preparation for changeId \`${changeId}\` and planVersion \`${planVersion}\`.`,
         changePath ? `Change input path: ${changePath}` : "No change input path was provided.",
@@ -188,6 +224,8 @@ export async function runPrepareAgentsIfAvailable(
         "",
         "### execution-groups.md — REQUIRED format",
         "",
+        ...buildImplementationAgentPromptLines(implementationAgentGuidance),
+        "",
         "Each group heading: `## Group X: Name` or `## GX — Name` or `## Execution Group X: Name`",
         "Group IDs: digit-first (1, 1A, 2B) or letter-first (A1, B2, C3a).",
         "",
@@ -195,9 +233,10 @@ export async function runPrepareAgentsIfAvailable(
         "- `**Files:**` or `**Primary files/paths touched:**` — comma-separated paths or bullet list.",
         "  Each file path must be concrete (e.g. `src/auth/login.ts`), not vague like `src/auth/*`.",
         "- `**Scoped verification:**` — a concrete shell command. NOT \"TBD\", not empty.",
-        "- `**Agent:**` — required (e.g. `zflow.implement-routine` or `zflow.implement-hard`).",
+        "- `**Agent:**` — required and must be one of the discoverable implementation agents listed above.",
         "- `**Dependencies:**` — required (group IDs or `none`).",
         "- `**Parallelizable:**` — required (`true` or `false`).",
+        "- `**Role label:**` — optional human ownership label (for example `backend-api`, `sdk-client`, or `cli-integrations`).",
         "",
         "Optional advanced execution fields (default to simple isolated execution unless justified):",
         "- `**Execution mode:** isolated | shared-staging`",
@@ -237,7 +276,8 @@ export async function runPrepareAgentsIfAvailable(
         "## Group A1: Short descriptive name",
         "",
         "**Files:** src/path/file.ts, src/other/file.ts",
-        "**Agent:** zflow.implement-routine",
+        "**Role label:** backend-api",
+        `**Agent:** ${implementationAgentGuidance.defaultAgent}`,
         "**Dependencies:** none",
         "**Scoped verification:** npm test -- --testPathPattern=src/path",
         "**Parallelizable:** true",
@@ -359,12 +399,16 @@ export async function runPrepareAgentsIfAvailable(
       if (lastResult) {
         if (!lastResult.ok) {
           if (outputs.length >= 3) {
+            await canonicalizePreparedArtifacts(implementationAgentGuidance)
+            outputs = await collectOutputs()
             await recordDispatchMetadata({
               agentDispatchStatus: "dispatched",
               agentDispatchService: DISPATCH_SERVICE_CAPABILITY,
               agentDispatchMethod: "runAgent",
               agentDispatchedAt: new Date().toISOString(),
               agentDispatchError: `Recovered: agent wrote ${outputs.length} artifacts before ${lastResult.error ?? "transport error"}`,
+              availableImplementationAgents: implementationAgentGuidance.implementationAgents,
+              canonicalRoleLabels: implementationAgentGuidance.roleLabels,
             })
             return {
               dispatched: true,
@@ -391,12 +435,17 @@ export async function runPrepareAgentsIfAvailable(
           }
         }
 
+        await canonicalizePreparedArtifacts(implementationAgentGuidance)
+        outputs = await collectOutputs()
+
         await recordDispatchMetadata({
           agentDispatchStatus: "dispatched",
           agentDispatchService: DISPATCH_SERVICE_CAPABILITY,
           agentDispatchMethod: "runAgent",
           agentDispatchedAt: new Date().toISOString(),
           plannerOutputPath: lastResult.outputPath,
+          availableImplementationAgents: implementationAgentGuidance.implementationAgents,
+          canonicalRoleLabels: implementationAgentGuidance.roleLabels,
         })
         return {
           dispatched: true,
@@ -407,12 +456,16 @@ export async function runPrepareAgentsIfAvailable(
         }
       }
 
+      await canonicalizePreparedArtifacts(implementationAgentGuidance)
+      outputs = await collectOutputs()
       await recordDispatchMetadata({
         agentDispatchStatus: "dispatched",
         agentDispatchService: DISPATCH_SERVICE_CAPABILITY,
         agentDispatchMethod: "runAgent",
         agentDispatchedAt: new Date().toISOString(),
         agentDispatchError: `Recovered: found ${outputs.length} existing artifacts after transport failures`,
+        availableImplementationAgents: implementationAgentGuidance.implementationAgents,
+        canonicalRoleLabels: implementationAgentGuidance.roleLabels,
       })
       return {
         dispatched: true,

@@ -274,6 +274,14 @@ export interface DispatchService {
   /** Run multiple tasks in parallel (with optional worktree isolation). */
   runParallel(input: ParallelDispatchInput): Promise<ParallelDispatchResult>
 
+  /**
+   * Optionally list discoverable agent runtime names for the current cwd.
+   *
+   * This is used by planning/prepare flows to keep generated execution-group
+   * agent names aligned with what the active backend can actually dispatch.
+   */
+  listAgents?(cwd?: string): Promise<Array<string | { name?: string }>>
+
   /** Human-readable name for diagnostics. */
   readonly name: string
 
