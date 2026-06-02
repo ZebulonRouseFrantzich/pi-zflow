@@ -10,8 +10,10 @@ import * as assert from "node:assert/strict"
 
 import activateZflowSubagentsBridgeExtension from "../extensions/zflow-subagents-bridge/index.js"
 import {
+  extractExecutableScopedVerificationCommands,
   extractUsageLimitWaitTime,
   isUsageLimitError,
+  normalizeScopedVerificationLineForCwd,
   resolveMeaningfulSingleError,
 } from "../extensions/zflow-subagents-bridge/index.js"
 import { resetZflowRegistry } from "pi-zflow-core"
@@ -210,6 +212,36 @@ describe("pi-zflow-subagents-bridge dispatch service behavior", () => {
     assert.equal(result.ok, false)
     assert.equal(result.results.length, 1)
     assert.match(result.results[0]?.error ?? "", /shared concurrent worktree clusters/)
+  })
+})
+
+describe("pi-zflow-subagents-bridge scoped verification helpers", () => {
+  it("strips redundant nested-repo cd prefixes", () => {
+    assert.equal(
+      normalizeScopedVerificationLineForCwd(
+        "cd customer-accessible-apis && yarn tsc-all",
+        "/tmp/pi-worktree-123/customer-accessible-apis",
+      ),
+      "yarn tsc-all",
+    )
+  })
+
+  it("keeps only executable scoped verification lines", () => {
+    assert.deepEqual(
+      extractExecutableScopedVerificationCommands(
+        [
+          "cd customer-accessible-apis && yarn tsc-all",
+          "manual payload review to confirm field parity",
+          "Oracle endpoints compile and remain read-only.",
+          "npm test -- --runInBand api/license-manager",
+        ].join("\n"),
+        "/tmp/pi-worktree-123/customer-accessible-apis",
+      ),
+      [
+        "yarn tsc-all",
+        "npm test -- --runInBand api/license-manager",
+      ],
+    )
   })
 })
 

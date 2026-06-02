@@ -110,6 +110,15 @@ export function parseExecutionGroupsMd(mdContent: string): DispatchExecutionGrou
     currentGroup.dependencies = [...new Set([...(currentGroup.dependencies ?? []), ...extracted])]
   }
 
+  const looksLikeExecutableVerificationLine = (value: string): boolean => {
+    const trimmed = value.trim().replace(/^`|`$/g, "").trim()
+    if (!trimmed) return false
+    if (trimmed.startsWith("#")) return false
+    return /^(?:cd\s+|npm\s+|yarn\s+|pnpm\s+|npx\s+|node\s+|python\s+|python3\s+|pytest\b|make\s+|just\s+|cargo\s+|go\s+|bash\s+|sh\s+|git\s+|\.\/|\.\.\/|\/|[A-Za-z_][A-Za-z0-9_]*=)/.test(trimmed) ||
+      trimmed.includes("&&") ||
+      trimmed.includes("||")
+  }
+
   const appendVerification = (value: string): void => {
     if (!currentGroup) return
     const trimmed = value.trim()
@@ -175,8 +184,8 @@ export function parseExecutionGroupsMd(mdContent: string): DispatchExecutionGrou
       inVerificationFence = false
     }
 
-    const filesHeaderMatch = line.match(/-\s+\*\*Files?(?:\/paths)?:\*\*\s*$/i) ??
-      line.match(/^\*\*Files?(?:\/paths)?:\*\*\s*$/i) ??
+    const filesHeaderMatch = line.match(/-\s+\*\*Files?(?:\s+touched)?(?:\/paths)?(?:\s*\([^)]*\))?:\*\*\s*$/i) ??
+      line.match(/^\*\*Files?(?:\s+touched)?(?:\/paths)?(?:\s*\([^)]*\))?:\*\*\s*$/i) ??
       line.match(/^Files?(?:\s+touched)?(?:\/paths)?(?:\s*\([^)]*\))?:\s*$/i) ??
       line.match(/^\*\*Primary\s+files?(?:\/paths)?\s+touched:\*\*\s*$/i)
     if (filesHeaderMatch) {
@@ -186,8 +195,8 @@ export function parseExecutionGroupsMd(mdContent: string): DispatchExecutionGrou
       continue
     }
 
-    const filesMatch = line.match(/-\s+\*\*Files?(?:\/paths)?:\*\*\s+(.+)/i) ??
-      line.match(/^\*\*Files?(?:\/paths)?:\*\*\s+(.+)/i) ??
+    const filesMatch = line.match(/-\s+\*\*Files?(?:\s+touched)?(?:\/paths)?(?:\s*\([^)]*\))?:\*\*\s+(.+)/i) ??
+      line.match(/^\*\*Files?(?:\s+touched)?(?:\/paths)?(?:\s*\([^)]*\))?:\*\*\s+(.+)/i) ??
       line.match(/^\*\*Primary\s+files?(?:\/paths)?\s+touched:\*\*\s+(.+)/i) ??
       line.match(/^Files?(?:\s+touched)?(?:\/paths)?(?:\s*\([^)]*\))?:\s+(.+)$/i)
     if (filesMatch) {
@@ -276,7 +285,10 @@ export function parseExecutionGroupsMd(mdContent: string): DispatchExecutionGrou
       line.match(/^\*\*(?:Scoped\s+)?[Vv]erification:\*\*\s+(.+)/i) ??
       line.match(/^(?:Scoped\s+)?[Vv]erification:\s+(.+)/i)
     if (verifMatch) {
-      currentGroup.scopedVerification = verifMatch[1].trim()
+      const candidate = verifMatch[1].trim()
+      if (looksLikeExecutableVerificationLine(candidate)) {
+        currentGroup.scopedVerification = candidate
+      }
       collectingVerification = false
       continue
     }
@@ -296,9 +308,8 @@ export function parseExecutionGroupsMd(mdContent: string): DispatchExecutionGrou
       }
       const verificationItemMatch = line.match(/^\s+-\s+(.+)$/)
       if (verificationItemMatch && !verificationItemMatch[1].startsWith("**")) {
-        // Strip all backticks from the captured text and join with newlines
         const cleaned = verificationItemMatch[1].trim().replace(/`/g, "").trim()
-        if (cleaned) {
+        if (cleaned && looksLikeExecutableVerificationLine(cleaned)) {
           currentGroup.scopedVerification = [currentGroup.scopedVerification, cleaned].filter(Boolean).join("\n")
         }
         continue

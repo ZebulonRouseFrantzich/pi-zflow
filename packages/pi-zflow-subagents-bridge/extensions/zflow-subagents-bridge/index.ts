@@ -1053,38 +1053,82 @@ function captureCompatPatchAgainstBase(
   return { changedFiles, headCommit }
 }
 
+function looksLikeExecutableScopedVerificationLine(command: string): boolean {
+  const trimmed = command.trim()
+  if (!trimmed) return false
+  return /^(?:cd\s+|npm\s+|yarn\s+|pnpm\s+|npx\s+|node\s+|python\s+|python3\s+|pytest\b|make\s+|just\s+|cargo\s+|go\s+|bash\s+|sh\s+|git\s+|\.\/|\.\.\/|\/|[A-Za-z_][A-Za-z0-9_]*=)/.test(trimmed) ||
+    trimmed.includes("&&") ||
+    trimmed.includes("||")
+}
+
+function normalizeScopedVerificationLineForCwd(command: string, cwd: string): string {
+  const trimmed = command.trim()
+  const cdMatch = trimmed.match(/^cd\s+([^;&]+?)\s*&&\s*(.+)$/)
+  if (!cdMatch) return trimmed
+
+  const rawTarget = cdMatch[1]!.trim().replace(/^['"]|['"]$/g, "")
+  const remainder = cdMatch[2]!.trim()
+  const cwdBase = path.basename(cwd)
+  if (rawTarget === cwdBase || rawTarget === `./${cwdBase}`) {
+    return remainder
+  }
+  return trimmed
+}
+
+function extractExecutableScopedVerificationCommands(
+  command: string | undefined,
+  cwd: string,
+): string[] {
+  if (!command || !command.trim()) return []
+  return command
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => looksLikeExecutableScopedVerificationLine(line))
+    .map((line) => normalizeScopedVerificationLineForCwd(line, cwd))
+    .filter(Boolean)
+}
+
 function runCompatScopedVerification(
   command: string | undefined,
   cwd: string,
 ): { status: "pass" | "fail" | "skipped"; command?: string; output?: string } | undefined {
-  if (!command || !command.trim()) return undefined
-  try {
-    const output = execFileSync("bash", ["-c", command.trim()], {
-      cwd,
-      encoding: "utf-8",
-      maxBuffer: 50 * 1024,
-      timeout: 300_000,
-    })
-    return {
-      status: "pass",
-      command: command.trim(),
-      output: output.substring(0, 50 * 1024),
+  const commands = extractExecutableScopedVerificationCommands(command, cwd)
+  if (commands.length === 0) return undefined
+
+  const outputs: string[] = []
+  for (const executable of commands) {
+    try {
+      const output = execFileSync("bash", ["-c", executable], {
+        cwd,
+        encoding: "utf-8",
+        maxBuffer: 50 * 1024,
+        timeout: 300_000,
+      })
+      if (output.trim()) {
+        outputs.push(output.trim())
+      }
+    } catch (err: unknown) {
+      const execErr = err as {
+        stdout?: Buffer | string
+        stderr?: Buffer | string
+        message?: string
+      }
+      const parts: string[] = []
+      if (execErr.stdout) parts.push(execErr.stdout.toString().trim())
+      if (execErr.stderr) parts.push(execErr.stderr.toString().trim())
+      if (!parts.length && execErr.message) parts.push(execErr.message)
+      return {
+        status: "fail",
+        command: commands.join("\n"),
+        output: parts.join("\n---stderr---\n").substring(0, 50 * 1024),
+      }
     }
-  } catch (err: unknown) {
-    const execErr = err as {
-      stdout?: Buffer | string
-      stderr?: Buffer | string
-      message?: string
-    }
-    const parts: string[] = []
-    if (execErr.stdout) parts.push(execErr.stdout.toString().trim())
-    if (execErr.stderr) parts.push(execErr.stderr.toString().trim())
-    if (!parts.length && execErr.message) parts.push(execErr.message)
-    return {
-      status: "fail",
-      command: command.trim(),
-      output: parts.join("\n---stderr---\n").substring(0, 50 * 1024),
-    }
+  }
+
+  return {
+    status: "pass",
+    command: commands.join("\n"),
+    output: outputs.join("\n\n").substring(0, 50 * 1024),
   }
 }
 
@@ -1422,4 +1466,6 @@ export {
   isUsageLimitError,
   extractUsageLimitWaitTime,
   resolveMeaningfulSingleError,
+  extractExecutableScopedVerificationCommands,
+  normalizeScopedVerificationLineForCwd,
 }

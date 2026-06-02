@@ -483,6 +483,35 @@ describe("parseExecutionGroupsMd", () => {
     assert.deepStrictEqual(groups[1].dependencies, ["group-g1"])
   })
 
+  test("parses bold 'Files touched' headers and ignores prose-only verification bullets", () => {
+    const content = [
+      "# Execution Groups",
+      "",
+      "### Group G2 — Endpoint wrapper",
+      "",
+      "- **Files touched (≤7):**",
+      "  1. `customer-accessible-apis/functionapps/license-manager/get-oracle-current-entitlements/get-oracle-current-entitlements.ts`",
+      "  2. `customer-accessible-apis/functionapps/license-manager/get-oracle-current-entitlements/function.json`",
+      "- **Dependencies:** `G1`",
+      "- **Scoped verification:**",
+      "  - `cd customer-accessible-apis && yarn tsc-all`",
+      "  - manual request validation against function signatures for required `company` and `accountId` parameters",
+      "  - Both endpoints build successfully and expose the intended read-only Oracle payloads.",
+      "",
+    ].join("\n")
+
+    const groups = parseExecutionGroupsMd(content)
+
+    assert.equal(groups.length, 1)
+    assert.equal(groups[0].id, "group-g2")
+    assert.deepStrictEqual(groups[0].dependencies, ["group-g1"])
+    assert.deepStrictEqual(groups[0].files, [
+      "customer-accessible-apis/functionapps/license-manager/get-oracle-current-entitlements/get-oracle-current-entitlements.ts",
+      "customer-accessible-apis/functionapps/license-manager/get-oracle-current-entitlements/function.json",
+    ])
+    assert.equal(groups[0].scopedVerification, "cd customer-accessible-apis && yarn tsc-all")
+  })
+
   test("returns empty array for empty content", () => {
     const groups = parseExecutionGroupsMd("")
     assert.equal(groups.length, 0)
