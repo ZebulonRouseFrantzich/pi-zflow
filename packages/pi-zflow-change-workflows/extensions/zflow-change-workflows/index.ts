@@ -1463,6 +1463,28 @@ async function resumeWorktreeDispatch(
     },
   )
 
+  // Mark the resumed run active again before dispatching any workers.
+  try {
+    const { updateStateIndexEntry, getChangeLifecycle, upsertChangeLifecycle } = await import("pi-zflow-artifacts/state-index")
+    await updateRun(runId, {
+      phase: "executing",
+      metadata: {
+        ...(run.metadata ?? {}),
+        resumedAt: new Date().toISOString(),
+      },
+    } as any, cwd)
+    await updateStateIndexEntry(runId, { status: "executing" }, cwd)
+    const lifecycle = await getChangeLifecycle(changeId, cwd)
+    if (lifecycle) {
+      await upsertChangeLifecycle({
+        ...lifecycle,
+        lastPhase: "executing",
+      }, cwd)
+    }
+  } catch {
+    // Best-effort; resume can proceed even if lifecycle metadata could not be refreshed.
+  }
+
   // ── Reuse the existing worktree-results dir ────────────────────
   const { resolveRunDir } = await import("pi-zflow-artifacts/artifact-paths")
   const runDir = resolveRunDir(runId, cwd)
@@ -1622,6 +1644,8 @@ async function resumeWorktreeDispatch(
       thinking: implementModel.thinking ?? "unavailable",
       startedAt: new Date().toISOString(),
       lastCommand: "resume dispatching...",
+      error: undefined,
+      failureKind: undefined,
     }, cwd).catch(() => {})
     markGroupProgress(task.groupId, {
       status: "running",
@@ -1907,6 +1931,19 @@ async function resumeWorktreeDispatch(
         partialRunNote: `${resumeFailures.length} resumed group(s) failed. Successful groups preserved.`,
       },
     } as any, cwd).catch(() => {})
+    try {
+      const { updateStateIndexEntry, getChangeLifecycle, upsertChangeLifecycle } = await import("pi-zflow-artifacts/state-index")
+      await updateStateIndexEntry(runId, { status: "partial" }, cwd)
+      const lifecycle = await getChangeLifecycle(changeId, cwd)
+      if (lifecycle) {
+        await upsertChangeLifecycle({
+          ...lifecycle,
+          lastPhase: "partial",
+        }, cwd)
+      }
+    } catch {
+      // Best-effort
+    }
     await writeGroupStatusSummary(runId, changeId, cwd).catch(() => "")
     throw new Error(
       `Resume: ${resumeFailures.length} group(s) still failed: ${resumeFailures.join("; ")}`,
@@ -2643,6 +2680,8 @@ async function runWorktreeDispatchAndFinalize(
         thinking: implementModel.thinking ?? "unavailable",
         startedAt: new Date().toISOString(),
         lastCommand: "starting worktree dispatch...",
+        error: undefined,
+        failureKind: undefined,
       }, cwd).catch(() => {})
       markGroupProgress(gid, {
         status: "running",

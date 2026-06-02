@@ -997,7 +997,11 @@ export function createWorkflowProgressIndicator(
           thinking: update.thinking ?? existing?.thinking,
           status: nextStatus,
           startedAt: update.startedAt ?? existing?.startedAt ?? Date.now(),
-          finishedAt: update.finishedAt ?? existing?.finishedAt ?? (isFinishedSubagentStatus(nextStatus) ? Date.now() : undefined),
+          finishedAt: update.finishedAt !== undefined
+            ? update.finishedAt
+            : isFinishedSubagentStatus(nextStatus)
+              ? existing?.finishedAt ?? Date.now()
+              : undefined,
           lastCommand: update.lastCommand ?? existing?.lastCommand,
           logs: mergedLogs,
           lastActivityAt: Date.now(),

@@ -128,22 +128,59 @@ export async function dispatchParallelWithRateLimitRetries(
   const defaultWaitMs = options.defaultWaitMs ?? DEFAULT_RATE_LIMIT_WAIT_MS
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
 
+  type PendingEntry = {
+    task: ParallelTaskInput
+    index: number
+    consecutiveRateLimitRetries: number
+    totalRateLimitRetries: number
+    sawProgressSinceRetry: boolean
+    hadPriorRateLimit: boolean
+    readyAt: number
+  }
+
   const finalResults: Array<ParallelDispatchResult["results"][number] | undefined> = new Array(options.input.tasks.length)
   const retryCounts: Record<string, number> = {}
-  let pending = options.input.tasks.map((task, index) => ({ task, index, retriesUsed: 0 }))
+  let pending: PendingEntry[] = options.input.tasks.map((task, index) => ({
+    task,
+    index,
+    consecutiveRateLimitRetries: 0,
+    totalRateLimitRetries: 0,
+    sawProgressSinceRetry: false,
+    hadPriorRateLimit: false,
+    readyAt: Date.now(),
+  }))
+  let serializeRetries = false
 
   while (pending.length > 0) {
+    const dispatchEntries = serializeRetries
+      ? [pending.shift()!]
+      : pending.splice(0, pending.length)
+
+    if (serializeRetries) {
+      const waitMs = Math.max(0, dispatchEntries[0]!.readyAt - Date.now())
+      if (waitMs > 0) await sleep(waitMs)
+    }
+
+    const tasksForDispatch = dispatchEntries.map((entry) => ({
+      ...entry.task,
+      onUpdate: (progress: Parameters<NonNullable<ParallelTaskInput["onUpdate"]>>[0]) => {
+        entry.sawProgressSinceRetry = true
+        entry.task.onUpdate?.(progress)
+      },
+    }))
+
     let dispatchResult: ParallelDispatchResult
     try {
       dispatchResult = await options.dispatchService.runParallel({
         ...options.input,
-        tasks: pending.map((entry) => entry.task),
+        tasks: tasksForDispatch,
+        concurrency: serializeRetries ? 1 : options.input.concurrency,
       })
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err)
       dispatchResult = {
         ok: false,
-        results: pending.map((entry) => ({
+        results: dispatchEntries.map((entry) => ({
           agent: entry.task.agent,
           groupId: entry.task.groupId,
           ok: false,
@@ -153,33 +190,35 @@ export async function dispatchParallelWithRateLimitRetries(
       }
     }
 
-    const retryPending: typeof pending = []
-    const waitCandidates: number[] = []
+    const retryPending: PendingEntry[] = []
 
     for (let i = 0; i < dispatchResult.results.length; i++) {
       const result = dispatchResult.results[i]!
-      const pendingEntry = pending[i]!
+      const pendingEntry = dispatchEntries[i]!
       const groupId = pendingEntry.task.groupId ?? `task-${pendingEntry.index}`
 
       if (result.ok || !isRateLimitDispatchError(result.error)) {
         finalResults[pendingEntry.index] = result
-        retryCounts[groupId] = pendingEntry.retriesUsed
+        retryCounts[groupId] = pendingEntry.consecutiveRateLimitRetries
         continue
       }
 
-      if (pendingEntry.retriesUsed >= maxRetries) {
+      const burstRetriesUsed = pendingEntry.hadPriorRateLimit && pendingEntry.sawProgressSinceRetry
+        ? 0
+        : pendingEntry.consecutiveRateLimitRetries
+
+      if (burstRetriesUsed >= maxRetries) {
         finalResults[pendingEntry.index] = {
           ...result,
-          error: `${result.error ?? "429 rate limit exceeded."} (rate-limit retry budget exhausted after ${maxRetries} retries)`,
+          error: `${result.error ?? "429 rate limit exceeded."} (rate-limit retry budget exhausted after ${maxRetries} retries in the current burst)`,
         }
-        retryCounts[groupId] = pendingEntry.retriesUsed
+        retryCounts[groupId] = burstRetriesUsed
         continue
       }
 
-      const nextRetryCount = pendingEntry.retriesUsed + 1
+      const nextRetryCount = burstRetriesUsed + 1
       const waitMs = extractRateLimitRetryDelayMs(result.error, defaultWaitMs)
       retryCounts[groupId] = nextRetryCount
-      waitCandidates.push(waitMs)
 
       const message =
         `⚠️ Group ${groupId} hit a provider rate limit (429). ` +
@@ -197,23 +236,28 @@ export async function dispatchParallelWithRateLimitRetries(
 
       retryPending.push({
         ...pendingEntry,
-        retriesUsed: nextRetryCount,
+        consecutiveRateLimitRetries: nextRetryCount,
+        totalRateLimitRetries: pendingEntry.totalRateLimitRetries + 1,
+        sawProgressSinceRetry: false,
+        hadPriorRateLimit: true,
+        readyAt: Date.now() + waitMs,
       })
     }
 
-    if (retryPending.length === 0) {
+    if (retryPending.length > 0) {
+      serializeRetries = true
+      pending.push(...retryPending)
+      pending.sort((a, b) => a.readyAt - b.readyAt || a.index - b.index)
+      continue
+    }
+
+    if (pending.length === 0) {
       return {
         ok: finalResults.every((result) => result?.ok === true),
         results: finalResults as ParallelDispatchResult["results"],
         retryCounts,
       }
     }
-
-    const waitMs = waitCandidates.length > 0
-      ? Math.max(...waitCandidates)
-      : defaultWaitMs
-    await sleep(waitMs)
-    pending = retryPending
   }
 
   return {

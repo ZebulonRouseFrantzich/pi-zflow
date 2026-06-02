@@ -101,6 +101,145 @@ describe("implementation rate-limit helpers", () => {
     assert.match(notices[0] ?? "", /2s/)
   })
 
+  test("resets the visible retry burst count after progress resumes", async () => {
+    const notices: Array<{ attempt: number; message: string }> = []
+    let attempts = 0
+    const dispatchService: DispatchService = {
+      name: "test-dispatch",
+      runAgent: async () => ({ ok: true, rawOutput: "" }),
+      runParallel: async (input) => {
+        attempts++
+        const task = input.tasks[0]!
+        if (attempts === 1) {
+          return {
+            ok: false,
+            results: [{
+              agent: task.agent,
+              groupId: task.groupId,
+              ok: false,
+              rawOutput: "",
+              error: "429 Rate limit exceeded. Retry after 1 second.",
+            }],
+          }
+        }
+        if (attempts === 2) {
+          task.onUpdate?.({
+            agent: task.agent,
+            status: "running",
+            currentTool: "read",
+            currentToolArgs: "src/example.ts",
+            durationMs: 500,
+          })
+          return {
+            ok: false,
+            results: [{
+              agent: task.agent,
+              groupId: task.groupId,
+              ok: false,
+              rawOutput: "",
+              error: "429 Rate limit exceeded. Retry after 1 second.",
+            }],
+          }
+        }
+        return {
+          ok: true,
+          results: [{
+            agent: task.agent,
+            groupId: task.groupId,
+            ok: true,
+            rawOutput: "done",
+            verification: { status: "skipped" },
+          }],
+        }
+      },
+    }
+
+    const result = await dispatchParallelWithRateLimitRetries({
+      dispatchService,
+      maxRetries: 3,
+      sleep: async () => {},
+      onRateLimitNotice: async (notice) => {
+        notices.push({ attempt: notice.attempt, message: notice.message })
+      },
+      input: {
+        tasks: [{
+          agent: "worker",
+          groupId: "group-g1",
+          task: "Implement the group",
+        }],
+        worktree: true,
+      },
+    })
+
+    assert.equal(result.ok, true)
+    assert.deepEqual(notices.map((notice) => notice.attempt), [1, 1])
+    assert.equal(result.retryCounts["group-g1"], 1)
+  })
+
+  test("serializes retry waves after a multi-group 429 burst", async () => {
+    const sleeps: number[] = []
+    const dispatchBatches: string[][] = []
+    let attempts = 0
+
+    const dispatchService: DispatchService = {
+      name: "test-dispatch",
+      runAgent: async () => ({ ok: true, rawOutput: "" }),
+      runParallel: async (input) => {
+        attempts++
+        dispatchBatches.push(input.tasks.map((task) => task.groupId ?? "unknown"))
+        if (attempts === 1) {
+          return {
+            ok: false,
+            results: input.tasks.map((task, index) => ({
+              agent: task.agent,
+              groupId: task.groupId,
+              ok: false,
+              rawOutput: "",
+              error: `429 Rate limit exceeded. Retry after ${index + 1} second.`,
+            })),
+          }
+        }
+
+        return {
+          ok: true,
+          results: [{
+            agent: input.tasks[0]!.agent,
+            groupId: input.tasks[0]!.groupId,
+            ok: true,
+            rawOutput: "done",
+            verification: { status: "skipped" },
+          }],
+        }
+      },
+    }
+
+    const result = await dispatchParallelWithRateLimitRetries({
+      dispatchService,
+      maxRetries: 3,
+      sleep: async (ms) => {
+        sleeps.push(ms)
+      },
+      input: {
+        tasks: [
+          { agent: "worker", groupId: "group-a", task: "A" },
+          { agent: "worker", groupId: "group-b", task: "B" },
+          { agent: "worker", groupId: "group-c", task: "C" },
+        ],
+        worktree: true,
+        concurrency: 3,
+      },
+    })
+
+    assert.equal(result.ok, true)
+    assert.deepEqual(dispatchBatches, [
+      ["group-a", "group-b", "group-c"],
+      ["group-a"],
+      ["group-b"],
+      ["group-c"],
+    ])
+    assert.deepEqual(sleeps, [1000, 2000, 3000])
+  })
+
   test("surfaces retry exhaustion when the group keeps hitting 429", async () => {
     let attempts = 0
     const dispatchService: DispatchService = {
