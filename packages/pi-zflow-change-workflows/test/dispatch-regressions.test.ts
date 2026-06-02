@@ -246,4 +246,20 @@ describe("dispatch loop accepts missing verification", () => {
       "resumeWorktreeDispatch must prefer explicit targetGroupIds over the broader ledger-derived resumable set",
     )
   })
+
+  test("resume rerun path continues into downstream dispatch after targeted groups succeed", async () => {
+    const content = fs.readFileSync(indexFilePath, "utf-8")
+
+    assert.match(
+      content,
+      /Resume rerun groups completed; continuing with newly eligible downstream groups\./,
+      "resume path should announce when targeted reruns succeeded and downstream groups can continue",
+    )
+
+    assert.match(
+      content,
+      /await runWorktreeDispatchAndFinalize\(\s*runId,\s*changeId,\s*planVersion,\s*dispatchService,/s,
+      "resume path must hand back to the main worktree dispatch loop once rerun prerequisites are satisfied",
+    )
+  })
 })

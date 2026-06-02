@@ -53,6 +53,8 @@ export interface ResumeReconciliation {
   groupsNeedingRerun: GroupResumeStatus[]
   /** Groups that are already applied to primary. */
   alreadyAppliedGroups: GroupResumeStatus[]
+  /** Queued groups still blocked on unmet dependency reruns. */
+  waitingOnDependencies: GroupResumeStatus[]
   /** Whether apply-back was completed or needs retry. */
   applyBackNeeded: boolean
   /** Whether apply-back should use the smart cascade (always true now). */
@@ -315,14 +317,35 @@ export async function reconcileResumeState(
       }
 
       if ((state.status === "ready" || state.status === "queued" || state.status === "pending") && group.dependencies.length > 0) {
-        waitingOnDependencies.push({
-          groupId: group.id,
-          canReuse: false,
-          reason: `Waiting on dependency groups (${group.dependencies.join(", ")}) before it can run.`,
-          patchPath: state.patchPath,
-          patchVerified: state.scopedVerificationPassed,
-          alreadyApplied: false,
-        })
+        const dependencyStates = await Promise.all(
+          group.dependencies.map(async (dependencyId) => ({
+            dependencyId,
+            state: await buildGroupState(runId, dependencyId, cwd),
+          })),
+        )
+        const unmetDependencies = dependencyStates
+          .filter(({ state }) => !(state?.appliedToPrimary || state?.status === "applied" || state?.status === "succeeded" || state?.status === "skipped"))
+          .map(({ dependencyId }) => dependencyId)
+
+        if (unmetDependencies.length > 0) {
+          waitingOnDependencies.push({
+            groupId: group.id,
+            canReuse: false,
+            reason: `Waiting on dependency groups (${unmetDependencies.join(", ")}) before it can run.`,
+            patchPath: state.patchPath,
+            patchVerified: state.scopedVerificationPassed,
+            alreadyApplied: false,
+          })
+        } else {
+          groupsNeedingRerun.push({
+            groupId: group.id,
+            canReuse: false,
+            reason: "Dependencies are satisfied, but this group has not been dispatched successfully yet.",
+            patchPath: state.patchPath,
+            patchVerified: state.scopedVerificationPassed,
+            alreadyApplied: false,
+          })
+        }
       } else {
         groupsNeedingRerun.push({
           groupId: group.id,
@@ -498,6 +521,7 @@ export async function reconcileResumeState(
     reusableGroups,
     groupsNeedingRerun,
     alreadyAppliedGroups,
+    waitingOnDependencies,
     applyBackNeeded,
     applyBackCanUseCascade,
     verificationNeeded,

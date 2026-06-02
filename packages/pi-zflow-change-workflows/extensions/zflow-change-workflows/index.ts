@@ -2025,7 +2025,33 @@ async function resumeWorktreeDispatch(
         `Use /zflow-change-implement ${changeId} --apply-successful to inspect/apply, or --force-apply-successful to bypass semantic-coupling checks.`,
       )
     }
+    return
   }
+
+  emitWorkflowUpdate("Resume rerun groups completed; continuing with newly eligible downstream groups.", {
+    status: "running",
+    completedGroups: Object.values(await getGroupLedger(runId, cwd)).filter((entry) =>
+      entry.status === "succeeded" || entry.status === "applied" || entry.status === "skipped",
+    ).length,
+    elapsedSeconds: Math.round((Date.now() - dispatchStartTime) / 1000),
+  })
+
+  await runWorktreeDispatchAndFinalize(
+    runId,
+    changeId,
+    planVersion,
+    dispatchService,
+    {
+      cwd,
+      force: options?.force,
+      orchestratorTarget: options?.orchestratorTarget,
+      onWorkflowUpdate: options?.onWorkflowUpdate,
+      onSubagentUpdate: options?.onSubagentUpdate,
+      onRateLimitNotice: options?.onRateLimitNotice,
+      sleep: options?.sleep,
+      progressPersistIntervalMs: options?.progressPersistIntervalMs,
+    },
+  )
 }
 
 function classifyFailedGroup(
