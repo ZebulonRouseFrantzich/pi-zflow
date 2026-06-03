@@ -477,9 +477,24 @@ export async function runImplementationPostStartSequence(
     }
   }
 
+  const ledger = (run.metadata?.groupLedger ?? {}) as Record<string, {
+    status?: string
+    patchPath?: string
+    implementationEvidencePath?: string
+    completionMode?: string
+    appliedToPrimary?: boolean
+  }>
   const hasGroupResults = run.groups.some((g) => g.patchPath && g.patchPath.length > 0)
+  const hasLedgerDispatchEvidence = Object.values(ledger).some((entry) =>
+    Boolean(entry.patchPath) ||
+    entry.status === "succeeded" ||
+    entry.status === "applied" ||
+    entry.appliedToPrimary === true ||
+    ((entry.completionMode === "worker-evidence" || entry.completionMode === "noop-evidence") &&
+      Boolean(entry.implementationEvidencePath)),
+  )
   const hasApplyBackArtifacts = run.applyBack.status !== "pending"
-  const hasDispatchArtifacts = hasGroupResults || hasApplyBackArtifacts
+  const hasDispatchArtifacts = hasGroupResults || hasLedgerDispatchEvidence || hasApplyBackArtifacts
 
   if (!hasDispatchArtifacts && !opts.skipDispatchWait) {
     reportProgress("Waiting for dispatch artifacts before final verification")

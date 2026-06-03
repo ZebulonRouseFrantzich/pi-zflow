@@ -230,6 +230,38 @@ describe("runImplementationPostStartSequence", () => {
         "should not wait for dispatch when skipDispatchWait=true",
       )
     })
+
+    test("treats ledger evidence-backed applied groups as dispatch artifacts", async () => {
+      const repoRoot = await createTestRepo()
+      const { runId } = await setupImplementRun(repoRoot, "test-ledger-evidence")
+      const evidencePath = path.join(repoRoot, ".zflow", "runs", runId, "worktree-results", "group-a-resume-result.md")
+      await fs.mkdir(path.dirname(evidencePath), { recursive: true })
+      await fs.writeFile(evidencePath, "Implementation already complete.\n\n## Verification results\nResult: 15 test suites passed, 176 tests passed\n", "utf-8")
+
+      await updateRun(runId, {
+        metadata: {
+          groupLedger: {
+            "group-a": {
+              groupId: "group-a",
+              status: "applied",
+              agent: "zflow.implement-routine",
+              taskPrompt: "",
+              files: ["src/foo.ts"],
+              dependencies: [],
+              semanticCoupling: { dependsOnGroups: [], blocksGroups: [], sharedFiles: [], notes: [] },
+              implementationEvidencePath: evidencePath,
+              completionMode: "worker-evidence",
+              appliedToPrimary: true,
+              retryCount: 0,
+              updatedAt: new Date().toISOString(),
+            },
+          },
+        },
+      } as any, repoRoot)
+
+      const result = await runImplementationPostStartSequence(runId, undefined, repoRoot)
+      assert.notStrictEqual(result.status, "waiting-for-dispatch")
+    })
   })
 
   describe("dispatch artifacts present", () => {
