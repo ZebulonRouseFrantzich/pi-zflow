@@ -539,9 +539,21 @@ export interface GroupStatusEntry {
     command?: string
     output?: string
     outputPath?: string
+    classification?: "environment" | "command-misconfigured" | "implementation"
+    attempts?: Array<{
+      cwd?: string
+      command: string
+      status: "pass" | "fail"
+      output?: string
+      classification?: "environment" | "command-misconfigured" | "implementation"
+    }>
   }
   /** Path to the patch artifact (if produced and captured). */
   patchPath?: string
+  /** Path to preserved worker evidence accepted in lieu of a patch. */
+  implementationEvidencePath?: string
+  /** How this group was accepted/completed. */
+  completionMode?: "patch" | "noop-evidence" | "worker-evidence"
   /** Absolute path to the worktree (if one was created). */
   worktreePath?: string
   /** Files changed by this group (if captured). */
@@ -670,6 +682,8 @@ function buildGroupLedger(
       semanticCoupling: inferSemanticCoupling(group.id, groups),
       scopedVerification: existing?.scopedVerification,
       patchPath: existing?.patchPath,
+      implementationEvidencePath: existing?.implementationEvidencePath,
+      completionMode: existing?.completionMode,
       worktreePath: existing?.worktreePath,
       changedFiles: existing?.changedFiles,
       retryCount: existing?.retryCount ?? 0,
@@ -1023,6 +1037,12 @@ async function writeGroupStatusSummary(
       lines.push(`- **${g.groupId}** — ${g.agent}`)
       lines.push(`  - Files: ${g.files.join(", ")}`)
       lines.push(`  - Patch: ${g.patchPath ?? "(no patch)"}`)
+      if (g.completionMode) {
+        lines.push(`  - Completion mode: ${g.completionMode}`)
+      }
+      if (g.implementationEvidencePath) {
+        lines.push(`  - Evidence: ${g.implementationEvidencePath}`)
+      }
       if (g.lastCommand) {
         lines.push(`  - Last command: ${g.lastCommand}`)
       }
@@ -1049,6 +1069,9 @@ async function writeGroupStatusSummary(
       const scopedVer = g.scopedVerification as { output?: string; command?: string; outputPath?: string } | undefined
       if (scopedVer?.command) {
         lines.push(`  - Verification command: \`${scopedVer.command}\``)
+      }
+      if ((scopedVer as { classification?: string } | undefined)?.classification) {
+        lines.push(`  - Verification classification: ${(scopedVer as { classification?: string }).classification}`)
       }
       if (scopedVer?.output) {
         // Trim to last 5 lines or first 500 chars, whichever is smaller
@@ -1495,7 +1518,7 @@ async function resumeWorktreeDispatch(
   const worktreeResultsDir = path.join(runDir, "worktree-results")
   await fs.mkdir(worktreeResultsDir, { recursive: true })
 
-  const readExistingWorkerEvidence = async (groupId: string): Promise<string | undefined> => {
+  const readExistingWorkerEvidence = async (groupId: string): Promise<{ path?: string; content?: string }> => {
     const candidates = [
       path.join(worktreeResultsDir, `${groupId}-resume-result.md`),
       path.join(worktreeResultsDir, `${groupId}-result.md`),
@@ -1503,12 +1526,12 @@ async function resumeWorktreeDispatch(
     for (const candidate of candidates) {
       try {
         const content = await fs.readFile(candidate, "utf-8")
-        if (content.trim()) return content
+        if (content.trim()) return { path: candidate, content }
       } catch {
         // Ignore missing historical worker outputs.
       }
     }
-    return undefined
+    return {}
   }
 
   const implementModel = await resolveWorkflowModel("zflow.implement-routine")
@@ -1776,9 +1799,10 @@ async function resumeWorktreeDispatch(
 
     const rateLimitRetryCount = dispatchResult.retryCounts?.[group.id] ?? 0
     const verification = normalizeDispatchVerification(r.verification)
+    const existingEvidence = await readExistingWorkerEvidence(group.id)
     const rawOutput = (!r.rawOutput || !r.rawOutput.trim()) && r.outputPath
       ? await fs.readFile(r.outputPath, "utf-8").catch(() => r.rawOutput)
-      : (r.rawOutput?.trim() ? r.rawOutput : await readExistingWorkerEvidence(group.id))
+      : (r.rawOutput?.trim() ? r.rawOutput : existingEvidence.content)
     const acceptedNoop = acceptImplementationNoopResult({
       ok: r.ok,
       error: r.error,
@@ -1891,6 +1915,7 @@ async function resumeWorktreeDispatch(
       : "agent complete; scoped verification deferred to final verification"
 
     if (acceptedResult.accepted) {
+      const completionMode = acceptedNoop.accepted ? "noop-evidence" : "worker-evidence"
       await updateGroupLedger(runId, group.id, {
         status: "applied",
         appliedToPrimary: true,
@@ -1898,8 +1923,16 @@ async function resumeWorktreeDispatch(
         error: undefined,
         failureKind: undefined,
         patchPath: undefined,
+        implementationEvidencePath: r.outputPath ?? existingEvidence.path,
+        completionMode,
         changedFiles: resultForWorkflow.changedFiles ?? group.files,
-        scopedVerification: { status: scopedVerification.status, command: scopedVerification.command, output: scopedVerification.output },
+        scopedVerification: {
+          status: scopedVerification.status,
+          command: scopedVerification.command,
+          output: scopedVerification.output,
+          classification: scopedVerification.classification,
+          attempts: scopedVerification.attempts,
+        },
         rateLimitRetryCount,
         lastCommand: successMessage,
         lastProgressAt: new Date().toISOString(),
@@ -1932,8 +1965,15 @@ async function resumeWorktreeDispatch(
       error: undefined,
       failureKind: undefined,
       patchPath: resultForWorkflow.patchPath,
+      completionMode: resultForWorkflow.patchPath ? "patch" : undefined,
       changedFiles: resultForWorkflow.changedFiles ?? group.files,
-      scopedVerification: { status: scopedVerification.status, command: scopedVerification.command, output: scopedVerification.output },
+      scopedVerification: {
+        status: scopedVerification.status,
+        command: scopedVerification.command,
+        output: scopedVerification.output,
+        classification: scopedVerification.classification,
+        attempts: scopedVerification.attempts,
+      },
       rateLimitRetryCount,
       lastCommand: successMessage,
       lastProgressAt: new Date().toISOString(),
@@ -2177,6 +2217,8 @@ function normalizeDispatchVerification(
     status,
     command: verification.command,
     output: verification.output,
+    classification: verification.classification,
+    attempts: verification.attempts,
   }
 }
 
@@ -2597,7 +2639,7 @@ async function runWorktreeDispatchAndFinalize(
   const runDir = resolveRunDir(runId, cwd)
   const worktreeResultsDir = path.join(runDir, "worktree-results")
   await fs.mkdir(worktreeResultsDir, { recursive: true })
-  const readExistingWorkerEvidence = async (groupId: string): Promise<string | undefined> => {
+  const readExistingWorkerEvidence = async (groupId: string): Promise<{ path?: string; content?: string }> => {
     const candidates = [
       path.join(worktreeResultsDir, `${groupId}-result.md`),
       path.join(worktreeResultsDir, `${groupId}-resume-result.md`),
@@ -2605,12 +2647,12 @@ async function runWorktreeDispatchAndFinalize(
     for (const candidate of candidates) {
       try {
         const content = await fs.readFile(candidate, "utf-8")
-        if (content.trim()) return content
+        if (content.trim()) return { path: candidate, content }
       } catch {
         // Ignore missing historical worker outputs.
       }
     }
-    return undefined
+    return {}
   }
   const implementModel = await resolveWorkflowModel("zflow.implement-routine")
   const sleep = options?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
@@ -2933,9 +2975,10 @@ async function runWorktreeDispatchAndFinalize(
       if (!gid || idx === undefined) continue
 
       const verification = normalizeDispatchVerification(r.verification)
+      const existingEvidence = await readExistingWorkerEvidence(gid)
       const rawOutput = (!r.rawOutput || !r.rawOutput.trim()) && r.outputPath
         ? await fs.readFile(r.outputPath, "utf-8").catch(() => r.rawOutput)
-        : (r.rawOutput?.trim() ? r.rawOutput : await readExistingWorkerEvidence(gid))
+        : (r.rawOutput?.trim() ? r.rawOutput : existingEvidence.content)
       const acceptedNoop = acceptImplementationNoopResult({
         ok: r.ok,
         error: r.error,
@@ -2985,11 +3028,14 @@ async function runWorktreeDispatchAndFinalize(
           lastCommand: successMessage,
         })
         await updateGroupLedger(runId, gid, {
-          status: "succeeded",
+          status: acceptedResult.accepted ? "applied" : "succeeded",
+          appliedToPrimary: acceptedResult.accepted ? true : undefined,
           agent: resultForWorkflow.agent ?? "zflow.implement-routine",
           error: undefined,
           failureKind: undefined,
-          patchPath: resultForWorkflow.patchPath,
+          patchPath: acceptedResult.accepted ? undefined : resultForWorkflow.patchPath,
+          implementationEvidencePath: acceptedResult.accepted ? (r.outputPath ?? existingEvidence.path) : undefined,
+          completionMode: acceptedResult.accepted ? (acceptedNoop.accepted ? "noop-evidence" : "worker-evidence") : (resultForWorkflow.patchPath ? "patch" : undefined),
           changedFiles: resultForWorkflow.changedFiles ?? group?.files,
           scopedVerification: effectiveVerification,
           retryCount: rateLimitRetryCount,

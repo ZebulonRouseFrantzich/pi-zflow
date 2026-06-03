@@ -222,6 +222,14 @@ export interface ParallelTaskResult {
     status: "pass" | "fail" | "skipped" | "missing" | "passed" | "failed"
     command?: string
     output?: string
+    classification?: "environment" | "command-misconfigured" | "implementation"
+    attempts?: Array<{
+      cwd?: string
+      command: string
+      status: "pass" | "fail"
+      output?: string
+      classification?: "environment" | "command-misconfigured" | "implementation"
+    }>
   }
   /** Whether the task completed successfully. */
   ok: boolean

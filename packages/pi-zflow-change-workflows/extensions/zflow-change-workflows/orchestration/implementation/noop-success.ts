@@ -21,6 +21,8 @@ const ALREADY_IMPLEMENTED_PATTERNS = [
   /already complete/i,
   /fully verified/i,
   /no changes needed/i,
+  /no additional code changes were needed/i,
+  /dependency group .* already implemented/i,
   /implementation(?:\s+and\s+verification)?\s+.*complete/i,
 ]
 

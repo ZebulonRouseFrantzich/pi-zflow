@@ -1164,12 +1164,32 @@ function unquoteShellWord(word: string): string {
   return word.replace(/^['"]|['"]$/g, "")
 }
 
-function looksLikeRetryableScopedVerificationFailure(output: string | undefined): boolean {
-  if (!output) return false
-  return /Could not read package\.json/i.test(output) ||
+function classifyScopedVerificationFailureOutput(
+  output: string | undefined,
+): "environment" | "command-misconfigured" | "implementation" {
+  if (!output) return "implementation"
+  if (
+    /Could not read package\.json/i.test(output) ||
     /ENOENT: no such file or directory, open .*package\.json/i.test(output) ||
     /No tests found/i.test(output) ||
     /Pattern: .* - 0 matches/i.test(output)
+  ) {
+    return "command-misconfigured"
+  }
+  if (
+    /ENOENT: no such file or directory, open '\/home\/[^']+\.opscompassdev\/tokens\.json'/i.test(output) ||
+    /path '\/home\/[^']+\.opscompassdev\/tokens\.json'/i.test(output) ||
+    /missing credentials/i.test(output) ||
+    /authentication required/i.test(output)
+  ) {
+    return "environment"
+  }
+  return "implementation"
+}
+
+function looksLikeRetryableScopedVerificationFailure(output: string | undefined): boolean {
+  if (!output) return false
+  return classifyScopedVerificationFailureOutput(output) === "command-misconfigured"
 }
 
 function buildScopedVerificationCommandAttempts(
@@ -1226,11 +1246,31 @@ function runCompatScopedVerification(
   command: string | undefined,
   cwd: string,
   claimedFiles?: string[],
-): { status: "pass" | "fail" | "skipped"; command?: string; output?: string } | undefined {
+): {
+  status: "pass" | "fail" | "skipped"
+  command?: string
+  output?: string
+  classification?: "environment" | "command-misconfigured" | "implementation"
+  attempts?: Array<{
+    cwd?: string
+    command: string
+    status: "pass" | "fail"
+    output?: string
+    classification?: "environment" | "command-misconfigured" | "implementation"
+  }>
+} | undefined {
   const commands = extractExecutableScopedVerificationCommands(command, cwd, claimedFiles)
   if (commands.length === 0) return undefined
 
   const outputs: string[] = []
+  const attemptRecords: Array<{
+    cwd?: string
+    command: string
+    status: "pass" | "fail"
+    output?: string
+    classification?: "environment" | "command-misconfigured" | "implementation"
+  }> = []
+
   for (const executable of commands) {
     const attempts = buildScopedVerificationCommandAttempts(executable, cwd)
 
@@ -1243,8 +1283,15 @@ function runCompatScopedVerification(
           maxBuffer: 50 * 1024,
           timeout: 300_000,
         })
-        if (output.trim()) {
-          outputs.push(output.trim())
+        const trimmedOutput = output.trim()
+        attemptRecords.push({
+          cwd: attempt.cwd,
+          command: attempt.command,
+          status: "pass",
+          output: trimmedOutput || undefined,
+        })
+        if (trimmedOutput) {
+          outputs.push(trimmedOutput)
         }
         break
       } catch (err: unknown) {
@@ -1258,6 +1305,14 @@ function runCompatScopedVerification(
         if (execErr.stderr) parts.push(execErr.stderr.toString().trim())
         if (!parts.length && execErr.message) parts.push(execErr.message)
         const failureOutput = parts.join("\n---stderr---\n").substring(0, 50 * 1024)
+        const classification = classifyScopedVerificationFailureOutput(failureOutput)
+        attemptRecords.push({
+          cwd: attempt.cwd,
+          command: attempt.command,
+          status: "fail",
+          output: failureOutput,
+          classification,
+        })
         const canRetry = attemptIndex < attempts.length - 1 && looksLikeRetryableScopedVerificationFailure(failureOutput)
         if (canRetry) {
           outputs.push(
@@ -1269,6 +1324,8 @@ function runCompatScopedVerification(
         return {
           status: "fail",
           command: commands.join("\n"),
+          classification,
+          attempts: attemptRecords,
           output: [
             ...outputs,
             `Scoped verification failed for ${formatScopedVerificationAttempt(attempt, cwd)}`,
@@ -1282,6 +1339,7 @@ function runCompatScopedVerification(
   return {
     status: "pass",
     command: commands.join("\n"),
+    attempts: attemptRecords,
     output: outputs.join("\n\n").substring(0, 50 * 1024),
   }
 }

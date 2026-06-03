@@ -111,6 +111,8 @@ function isTimestampBefore(a: string | undefined, b: string | undefined): boolea
 interface NormalizedGroupState {
   status: string
   patchPath?: string
+  implementationEvidencePath?: string
+  completionMode?: string
   appliedToPrimary: boolean
   scopedVerificationPassed: boolean
 }
@@ -133,6 +135,8 @@ async function buildGroupState(
   if (ledgerEntry) {
     const status = (ledgerEntry.status as string) ?? ""
     const patchPath = ledgerEntry.patchPath as string | undefined
+    const implementationEvidencePath = ledgerEntry.implementationEvidencePath as string | undefined
+    const completionMode = ledgerEntry.completionMode as string | undefined
     const appliedToPrimary = (ledgerEntry.appliedToPrimary as boolean) ?? false
     const scopedVerification = ledgerEntry.scopedVerification as
       | { status?: string }
@@ -140,7 +144,7 @@ async function buildGroupState(
     const scopedVerificationPassed =
       scopedVerification?.status === "pass" || status === "applied"
 
-    return { status, patchPath, appliedToPrimary, scopedVerificationPassed }
+    return { status, patchPath, implementationEvidencePath, completionMode, appliedToPrimary, scopedVerificationPassed }
   }
 
   // Fall back to run.groups[]
@@ -154,6 +158,16 @@ async function buildGroupState(
     groupMeta.scopedVerification?.status === "pass"
 
   return { status, patchPath, appliedToPrimary, scopedVerificationPassed }
+}
+
+async function hasAcceptedImplementationEvidence(
+  state: NormalizedGroupState,
+): Promise<boolean> {
+  if (!state.implementationEvidencePath) return false
+  if (state.completionMode !== "worker-evidence" && state.completionMode !== "noop-evidence") {
+    return false
+  }
+  return fileExists(state.implementationEvidencePath)
 }
 
 // ---------------------------------------------------------------------------
@@ -275,16 +289,19 @@ export async function reconcileResumeState(
     if (state.patchPath) {
       patchExists = await fileExists(state.patchPath)
     }
+    const evidenceAccepted = await hasAcceptedImplementationEvidence(state)
 
-    if (!distrustAppliedLedger && (state.appliedToPrimary || state.status === "applied" || state.status === "skipped")) {
+    if (!distrustAppliedLedger && (state.appliedToPrimary || state.status === "applied" || state.status === "skipped" || evidenceAccepted)) {
       alreadyAppliedGroups.push({
         groupId: group.id,
         canReuse: true,
         reason:
           state.status === "skipped"
             ? "Group was skipped in previous run."
-            : "Group patch already applied to primary tree.",
-        patchPath: state.patchPath,
+            : evidenceAccepted
+              ? "Group was accepted using preserved worker evidence; no rerun required."
+              : "Group patch already applied to primary tree.",
+        patchPath: state.patchPath ?? state.implementationEvidencePath,
         patchVerified: true,
         alreadyApplied: true,
       })

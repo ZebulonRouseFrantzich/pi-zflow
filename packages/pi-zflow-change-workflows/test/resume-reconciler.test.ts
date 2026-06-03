@@ -389,6 +389,54 @@ describe("reconcileResumeState", () => {
     await fs.rm(repo, { recursive: true, force: true })
   })
 
+  test("worker-evidence-complete groups are treated as already applied even without patches", async () => {
+    const repo = await createTempRepo()
+    writeFile(repo, "README.md", "# Test\n")
+    gitAddCommit(repo, "initial")
+
+    const runId = "test-run-worker-evidence"
+    const changeId = "test-change"
+    const evidencePath = path.join(repo, ".zflow", "runs", runId, "worktree-results", "group-1-resume-result.md")
+    await fs.mkdir(path.dirname(evidencePath), { recursive: true })
+    await fs.writeFile(evidencePath, "Implementation already complete.\n\n## Verification results\nResult: 15 test suites passed, 176 tests passed\n", "utf-8")
+
+    const groupLedger: Record<string, Record<string, unknown>> = {
+      "group-1": {
+        groupId: "group-1",
+        status: "failed",
+        agent: "zflow.implement-routine",
+        taskPrompt: "Do work on a.ts",
+        files: ["a.ts"],
+        dependencies: [],
+        semanticCoupling: { dependsOnGroups: [], blocksGroups: [], sharedFiles: [], notes: [] },
+        implementationEvidencePath: evidencePath,
+        completionMode: "worker-evidence",
+        appliedToPrimary: false,
+        retryCount: 0,
+        updatedAt: new Date().toISOString(),
+      },
+    }
+
+    await createRunJson(
+      repo,
+      runId,
+      repo,
+      changeId,
+      "partial",
+      [{ groupId: "group-1", changedFiles: ["a.ts"] }],
+      groupLedger,
+    )
+
+    writeExecGroupsMd(repo, [["1", "a.ts"]])
+
+    const result = await reconcileResumeState(runId, changeId, "v1", repo)
+    assert.equal(result.groupsNeedingRerun.length, 0)
+    assert.equal(result.alreadyAppliedGroups.length, 1)
+    assert.match(result.alreadyAppliedGroups[0]?.reason ?? "", /preserved worker evidence/i)
+
+    await fs.rm(repo, { recursive: true, force: true })
+  })
+
   test("all groups already applied → applyBackNeeded = false", async () => {
     const repo = await createTempRepo()
     writeFile(repo, "README.md", "# Test\n")
