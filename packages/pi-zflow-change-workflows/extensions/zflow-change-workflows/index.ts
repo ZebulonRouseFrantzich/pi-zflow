@@ -158,6 +158,7 @@ import {
   runChangeAuditWorkflow,
   runChangeFixWorkflow,
   parseReviewFindings,
+  assertFindingsMatchChange,
   buildFixSelectionQuestions,
   buildFixPlan,
   runCleanWorkflow,
@@ -6635,9 +6636,24 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         fixProgress.updatePhaseCard("review-findings", "Review Findings",
           "Loading review findings and plan state...", "running")
 
-        const { parseReviewFindings, buildFixSelectionQuestions, buildFixPlan } =
-          await import("./orchestration.js")
-        const { findings, rawPath } = await parseReviewFindings(ctx.cwd)
+        const {
+          parseReviewFindings,
+          assertFindingsMatchChange,
+          buildFixSelectionQuestions,
+          buildFixPlan,
+        } = await import("./orchestration.js")
+        const { findings, rawPath, metadata } = await parseReviewFindings(ctx.cwd)
+
+        try {
+          assertFindingsMatchChange(changeId, metadata, rawPath)
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err)
+          fixProgress.updatePhaseCard("review-findings", "Review Findings",
+            msg, "failed")
+          ctx.ui.notify(msg, "error")
+          fixProgress.stop("Findings mismatch — cannot fix", "failed")
+          return
+        }
 
         if (findings.length === 0) {
           fixProgress.updatePhaseCard("review-findings", "Review Findings",
@@ -6760,18 +6776,18 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         } catch { /* best-effort */ }
 
         // ═══ Phase 4: Fix orchestrator agent ═══════════════════════
-        // Build the orchestrator task prompt from parsed findings
-        const { resolveCodeReviewFindingsPath, resolveRunDir } =
+        // Build the orchestrator task prompt from parsed findings.
+        // The prompt uses actual artifact paths from the findings themselves,
+        // not a new fix-run review-artifacts dir (which would be empty).
+        const { resolveCodeReviewFindingsPath } =
           await import("pi-zflow-artifacts/artifact-paths")
         const findingsPath = resolveCodeReviewFindingsPath(ctx.cwd)
-        const runDir = resolveRunDir(fixRunId, ctx.cwd)
-        const rawReviewerDir = `${runDir}/review-artifacts`
         const workflowIntercomTarget = ensureWorkflowIntercomTarget(pi, ctx, "fix", changeId)
         const orchTask = await buildFixOrchestratorTaskPrompt(
           changeId,
           planResult,
           findingsPath,
-          rawReviewerDir,
+          undefined, // rawReviewerDir deprecated — findings carry their own artifact paths
           ctx.cwd,
           workflowIntercomTarget,
         )

@@ -308,6 +308,8 @@ export type {
 } from "./orchestration/fix/workflow.js"
 
 export {
+  assertFindingsMatchChange,
+  normalizeFindingsSource,
   parseReviewFindings,
   buildFixSelectionQuestions,
   buildFixPlan,
@@ -315,6 +317,7 @@ export {
 
 export type {
   ParsedFinding,
+  ReviewFindingsMetadata,
 } from "./orchestration/fix/findings.js"
 
 // Cleanup workflow (Phase 7 — /zflow-clean, TTL-based cleanup)

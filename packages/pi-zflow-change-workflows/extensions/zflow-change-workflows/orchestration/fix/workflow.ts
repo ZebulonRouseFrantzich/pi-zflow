@@ -11,9 +11,11 @@ import {
 
 import { migrateLegacyChangeArtifactsIfPresent } from "../implementation/workflow.js"
 import {
+  assertFindingsMatchChange,
   buildFixPlan,
   parseReviewFindings,
   type ParsedFinding,
+  type ReviewFindingsMetadata,
 } from "./findings.js"
 
 function buildLimitedCoordinationLines(
@@ -277,7 +279,8 @@ export async function runChangeFixWorkflow(
   const planVersion = (planState.approvedVersion ?? planState.currentVersion ?? "v1") as string
   const lifecycleState = (planState.lifecycleState ?? "unknown") as string
 
-  const { findings, rawPath } = await parseReviewFindings(cwd)
+  const { findings, rawPath, metadata } = await parseReviewFindings(cwd)
+  assertFindingsMatchChange(changeId, metadata, rawPath)
 
   let selectedFindings = findings
   if (options.findingIndices && options.findingIndices.length > 0) {
@@ -454,21 +457,85 @@ export async function buildFixOrchestratorTaskPrompt(
     lines.push("")
   }
 
-  if (rawReviewerDir) {
+  // Collect unique actual artifact paths from the parsed findings themselves
+  const artifactPaths = [
+    ...new Set(
+      fixResult.parsedFindings
+        .map((f) => f.artifactPath)
+        .filter((p): p is string => !!p && p.trim().length > 0),
+    ),
+  ]
+  if (artifactPaths.length > 0) {
     lines.push("## Raw reviewer artifacts (MUST read for each finding)")
     lines.push("")
     lines.push("The consolidated findings above are summaries. The raw reviewer")
-    lines.push(`artifacts at \`${rawReviewerDir}\` contain the full analysis,`)
-    lines.push("pseudocode, line-by-line evidence, and specific fix strategies from")
-    lines.push("each reviewer agent. These are ESSENTIAL context for fix workers.")
+    lines.push("artifacts below contain the full analysis, pseudocode, line-by-line")
+    lines.push("evidence, and specific fix strategies from each reviewer agent.")
+    lines.push("These are ESSENTIAL context for fix workers.")
+    lines.push("")
+    lines.push("| Finding | Artifact Path |")
+    lines.push("| ------- | ------------- |")
+    for (const finding of fixResult.parsedFindings) {
+      if (finding.artifactPath && finding.artifactPath.trim().length > 0) {
+        lines.push(`| ${finding.findingId} | \`${finding.artifactPath}\` |`)
+      }
+    }
     lines.push("")
     lines.push("**For each finding you dispatch to a fix worker:**")
-    lines.push("1. Read the raw reviewer artifact referenced by the finding's Artifact path.")
+    lines.push("1. Read the raw reviewer artifact listed above.")
     lines.push("2. Extract the detailed evidence (file snippets, pseudocode, reasoning).")
     lines.push("3. Include that detail in the fix worker's task prompt.")
     lines.push("4. Use the raw evidence as the validation baseline when checking the fix.")
     lines.push("")
   }
+
+  // ── Conflict-resolution protocol ─────────────────────────────
+  lines.push("## Conflict Resolution Protocol")
+  lines.push("")
+  lines.push("**Treat suggested approaches as advisory only.** The reviewer's")
+  lines.push("\"Suggested approach\" field in each finding is a hint, not a mandate.")
+  lines.push("The fix orchestrator must evaluate every suggestion against the source")
+  lines.push("design documents, standards, and all other findings before accepting it.")
+  lines.push("")
+  lines.push("**When a suggestion would conflict with plan constraints:**")
+  lines.push("")
+  lines.push("1. Read the relevant sections from `design.md`, `standards.md`, and")
+  lines.push("   `execution-groups.md` for the target file/area.")
+  lines.push("2. Check whether the suggested approach would introduce later-phase")
+  lines.push("   scope (e.g., adding a real database table in a scaffold-only phase).")
+  lines.push("3. If the suggestion violates source-document constraints, choose the")
+  lines.push("   **minimal compliant fix** that satisfies both the finding AND the")
+  lines.push("   plan. Override the suggestion and document why in your gap report.")
+  lines.push("")
+  lines.push("**Placeholder/missing-file guidance:**")
+  lines.push("")
+  lines.push("- For findings about missing placeholder files (schema.ts, config stubs),")
+  lines.push("  prefer `export {}` comment-only stubs or config-path removal/adjustment.")
+  lines.push("- Do not add real schema tables, runtime behavior, or production-adjacent")
+  lines.push("  scaffolding unless the source design documents explicitly require it.")
+  lines.push("- When in doubt, the more minimal fix is correct.")
+  lines.push("")
+  lines.push("**Cross-finding consistency:**")
+  lines.push("")
+  lines.push("1. Before dispatching a fix worker, re-read ALL findings in this report.")
+  lines.push("2. Check whether the proposed fix for one finding would create a new")
+  lines.push("   violation that another finding or another reviewer would reject.")
+  lines.push("3. If a tension exists, document the trade-off in the worker task and")
+  lines.push("   choose the approach that satisfies the larger set of constraints.")
+  lines.push("")
+  lines.push("**Post-fix introduced-risk check:**")
+  lines.push("")
+  lines.push("After each fix worker completes, before marking a finding as FIXED:")
+  lines.push("")
+  lines.push("1. Read the touched files to verify they don't contain plan-forbidden")
+  lines.push("   concepts (later-phase scope, runtime behavior in scaffold phases,")
+  lines.push("   secrets, hard-coded production config, etc.).")
+  lines.push("2. Re-read the finding's evidence and recommendation — did the fix")
+  lines.push("   accidentally introduce the same problem in a different location?")
+  lines.push("3. Re-read the OTHER findings in the same report — does the fix create")
+  lines.push("   a new finding that another reviewer would flag?")
+  lines.push("4. Only mark the finding as FIXED after the introduced-risk check passes.")
+  lines.push("")
 
   if (findingsPath) {
     lines.push("## Consolidated findings path")

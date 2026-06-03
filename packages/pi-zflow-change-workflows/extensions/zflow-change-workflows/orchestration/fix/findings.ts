@@ -37,6 +37,106 @@ export interface ParsedFinding {
 }
 
 /**
+ * Metadata extracted from the code-review-findings.md header.
+ */
+export interface ReviewFindingsMetadata {
+  /** The source change ID normalized from **Source** header (e.g. "feat-auth"). */
+  sourceChangeId?: string
+  /** The raw **Source** header text (e.g. "Implementation of feat-auth"). */
+  rawSource?: string
+  /** The **Run ID** header value (e.g. "rev-mpyebppa-0001"). */
+  runId?: string
+}
+
+/**
+ * Normalize a findings **Source** header value to a change ID.
+ *
+ * "Implementation of cloudflare-phase-1-tooling-scaffold"
+ *   → "cloudflare-phase-1-tooling-scaffold"
+ * "Code review for feat-auth" → "feat-auth"
+ * "phase-4-d1-control-plane" (raw ID) → "phase-4-d1-control-plane"
+ */
+export function normalizeFindingsSource(source: string): string | undefined {
+  const trimmed = source.trim()
+  if (!trimmed) return undefined
+
+  // "Implementation of feat-auth" -> "feat-auth"
+  const implMatch = trimmed.match(/^Implementation\s+of\s+(.+)$/i)
+  if (implMatch) return implMatch[1].trim()
+
+  // "Code review for feature-x" -> "feature-x"
+  const reviewMatch = trimmed.match(/^Code\s+review\s+(?:for|of)\s+(.+)$/i)
+  if (reviewMatch) return reviewMatch[1].trim()
+
+  // If it's already a kebab-case ID, use it directly
+  if (/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(trimmed)) return trimmed
+
+  // Fallback: clean up to a rough kebab-case ID
+  const cleaned = trimmed
+    .replace(/\s+/g, "-")
+    .replace(/[^a-zA-Z0-9-]/g, "")
+    .toLowerCase()
+  if (cleaned.length > 0) return cleaned
+
+  return undefined
+}
+
+/**
+ * Assert that the findings metadata matches the requested change ID.
+ *
+ * - If no source metadata is available (file missing or no header), silently returns.
+ * - If source matches requested ID, silently returns.
+ * - If source is a different change, throws an actionable error with details.
+ *
+ * @throws {Error} When findings are for a different change than requested.
+ */
+export function assertFindingsMatchChange(
+  requestedChangeId: string,
+  metadata: ReviewFindingsMetadata,
+  findingsPath: string,
+): void {
+  if (!metadata.sourceChangeId) return // nothing to validate against
+
+  if (metadata.sourceChangeId === requestedChangeId) return // matches
+
+  // Mismatch: build detailed error
+  const runIdInfo = metadata.runId
+    ? `\n  Run ID: ${metadata.runId}`
+    : ""
+  const rawSourceInfo = metadata.rawSource
+    ? `\n  Source header: "${metadata.rawSource}"`
+    : ""
+
+  throw new Error(
+    `Findings source mismatch:\n` +
+    `  Requested change: "${requestedChangeId}"\n` +
+    `  Findings file:    "${findingsPath}"\n` +
+    `  Findings for:     "${metadata.sourceChangeId}"` +
+    `${rawSourceInfo}` +
+    `${runIdInfo}\n\n` +
+    `The consolidated review findings were generated for a different change.\n` +
+    `To fix this:\n` +
+    `  1. Run /zflow-review-code to regenerate findings for "${requestedChangeId}"\n` +
+    `  2. Or clear the stale findings at: "${findingsPath}"`,
+  )
+}
+
+/**
+ * Parse metadata from the code-review-findings.md header.
+ */
+function parseFindingsHeaderMetadata(rawContent: string): ReviewFindingsMetadata {
+  const sourceMatch = rawContent.match(/^\*\*Source\*\*:\s*(.+)$/m)
+  const runIdMatch = rawContent.match(/^\*\*Run ID\*\*:\s*(.+)$/im)
+
+  const rawSource = sourceMatch ? sourceMatch[1].trim() : undefined
+  const runId = runIdMatch ? runIdMatch[1].trim() : undefined
+
+  const sourceChangeId = rawSource ? normalizeFindingsSource(rawSource) : undefined
+
+  return { sourceChangeId, rawSource, runId }
+}
+
+/**
  * Parse review findings from the canonical code-review-findings.md file.
  */
 export async function parseReviewFindings(
@@ -45,6 +145,7 @@ export async function parseReviewFindings(
   findings: ParsedFinding[]
   rawPath: string
   rawContent: string
+  metadata: ReviewFindingsMetadata
 }> {
   const { default: fs } = await import("node:fs/promises")
   const { resolveCodeReviewFindingsPath } = await import("pi-zflow-artifacts/artifact-paths")
@@ -59,8 +160,10 @@ export async function parseReviewFindings(
   }
 
   if (!rawContent || rawContent.trim().length === 0) {
-    return { findings: [], rawPath, rawContent: "" }
+    return { findings: [], rawPath, rawContent: "", metadata: { sourceChangeId: undefined, rawSource: undefined, runId: undefined } }
   }
+
+  const metadata = parseFindingsHeaderMetadata(rawContent)
 
   const findings: ParsedFinding[] = []
   let findingCounter = 0
@@ -137,7 +240,7 @@ export async function parseReviewFindings(
     })
   }
 
-  return { findings, rawPath, rawContent }
+  return { findings, rawPath, rawContent, metadata }
 }
 
 /**
@@ -239,6 +342,10 @@ export async function buildFixPlan(
     if (finding.recommendation) lines.push(`**Recommendation:** ${finding.recommendation}`)
     if (finding.artifactPath) lines.push(`**Artifact:** \`${finding.artifactPath}\``)
     if (finding.whyItMatters) lines.push(`**Why it matters:** ${finding.whyItMatters}`)
+    if (finding.expectedBehavior) lines.push(`**Expected behavior:** ${finding.expectedBehavior}`)
+    if (finding.fixRequirements) lines.push(`**Fix requirements:** ${finding.fixRequirements}`)
+    if (finding.validation) lines.push(`**Validation:** ${finding.validation}`)
+    if (finding.suggestedApproach) lines.push(`**Suggested approach:** ${finding.suggestedApproach}`)
     lines.push("")
   }
 

@@ -100,6 +100,30 @@ For each finding:
    - File ownership boundaries (no two workers touch same file)
    - How each fix aligns with the source design and standards
 
+### Phase 1.8: Conflict resolution (scope guard)
+
+**Treat suggested approaches as advisory only.** The "Suggested approach" field
+is a hint, not a mandate. Always evaluate it against source design/standards:
+
+1. Read the relevant sections from `design.md`, `standards.md`, and
+   `execution-groups.md` for the target area.
+2. Check whether the suggested approach would introduce later-phase scope
+   (e.g., a real table in a scaffold-only phase, runtime behavior in a
+   placeholder stub).
+3. If the suggestion violates source-document constraints, choose the **minimal
+   compliant fix** that satisfies both the finding AND the plan. Document the
+   override in your gap report.
+
+**Placeholder/missing-file rule:** For findings about missing placeholder files
+(schema.ts, config stubs), prefer `export {}` comment-only stubs or config-path
+removal/adjustment. Do not add real schema tables, runtime behavior, or
+production-adjacent scaffolding unless source docs explicitly require it.
+
+**Cross-finding consistency:** Before dispatching a worker, re-read ALL
+findings. Check whether the proposed fix would create a new violation another
+reviewer would reject. If a tension exists, choose the approach that satisfies
+the larger set of constraints and document the trade-off.
+
 ### Phase 2: Dispatch
 
 **Dispatch all independent findings in a single round.** Do not dispatch findings one at a time and wait for the next cycle.
@@ -135,8 +159,17 @@ After each worker completes:
    - Were unrelated files changed?
    - Did the worker provide verification evidence?
    - Does the result satisfy the acceptance criteria from the finding?
-3. If satisfied: mark finding as FIXED with validation notes.
-4. If NOT satisfied:
+3. **Run the introduced-risk check before marking as FIXED:**
+   - Read the touched files to verify they don't contain plan-forbidden
+     concepts (later-phase scope, runtime behavior in scaffold phases,
+     secrets, hard-coded production config).
+   - Re-read the finding's evidence and recommendation — did the fix
+     accidentally introduce the same problem in a different location?
+   - Re-read the OTHER findings in the same report — does the fix create
+     a new finding that another reviewer would flag?
+   - Only mark as FIXED after the introduced-risk check passes.
+4. If satisfied: mark finding as FIXED with validation notes.
+5. If NOT satisfied:
    - Produce a gap report: what was expected, what was delivered, what's
      still missing
    - If under retry limit: dispatch again with the gap report
