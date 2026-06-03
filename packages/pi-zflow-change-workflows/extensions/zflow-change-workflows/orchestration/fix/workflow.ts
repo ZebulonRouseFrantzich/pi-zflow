@@ -277,7 +277,7 @@ export interface DirectFixFindingOutcome {
   title: string
   severity: ParsedFinding["severity"]
   file?: string
-  status: "fixed" | "unresolved"
+  status: "fixed" | "already-satisfied" | "unresolved"
   attempts: number
   reason?: string
   outputPath?: string
@@ -328,6 +328,67 @@ function toAbsoluteArtifactPath(runtimeStateDir: string, artifactPath: string | 
   return `${runtimeStateDir}/${artifactPath}`
 }
 
+/**
+ * Detect whether a subagent error indicates a no-op/no-edit outcome
+ * rather than a genuine dispatch or provider failure.
+ *
+ * Returns `true` when the error matches known no-edit patterns from
+ * the subagent runner harness.
+ */
+export function isNoEditFailure(error: string | undefined): boolean {
+  if (!error) return false
+  const noEditPatterns = [
+    "subagent completed without making edits",
+    "completed without making edits",
+    "returned planning or scratchpad output instead of applying changes",
+  ]
+  const lower = error.toLowerCase()
+  return noEditPatterns.some((pattern) => lower.includes(pattern))
+}
+
+/**
+ * Check if a finding is already satisfied by the current filesystem state.
+ *
+ * Conservative heuristic designed for contract/signature mismatches.
+ * Primary pattern: async/sync `generateToken` signature finding where
+ * the port and adapter now agree on a synchronous signature.
+ *
+ * Extend with additional patterns as real-world cases emerge.
+ * Returns `true` only when confident the finding is already resolved.
+ */
+export async function checkFindingAlreadySatisfied(
+  finding: ParsedFinding,
+  cwd?: string,
+): Promise<boolean> {
+  if (!finding.file) return false
+  const findingText = [
+    finding.title,
+    finding.evidence,
+    finding.expectedBehavior ?? "",
+    finding.fixRequirements ?? "",
+    finding.recommendation,
+  ].join(" ").toLowerCase()
+  const filePath = finding.file.startsWith("/")
+    ? finding.file
+    : cwd ? cwd + "/" + finding.file : finding.file
+  try {
+    const { default: fs } = await import("node:fs/promises")
+    const fileContent = await fs.readFile(filePath, "utf-8")
+    if (
+      findingText.includes("generatetoken") &&
+      (findingText.includes("async") || findingText.includes("promise"))
+    ) {
+      const hasSyncSig = /generateToken\s*\(\s*\)\s*:\s*string/.test(fileContent)
+      const hasAsyncSig = /generateToken\s*\(\s*\)\s*:\s*Promise<string>/.test(fileContent) ||
+                          /async\s+generateToken/.test(fileContent)
+      if (hasSyncSig && !hasAsyncSig) return true
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
 export function buildDirectFixBatches(
   findings: ParsedFinding[],
   workerAgent: string = "zflow.implement-routine",
@@ -363,6 +424,22 @@ export function buildDirectFixBatches(
     if (sevDiff !== 0) return sevDiff
     return a.fileKey.localeCompare(b.fileKey)
   })
+}
+
+/**
+ * Build a concise conflict/scope guidance block for direct worker prompts.
+ */
+function buildConflictScopeGuidance(): string[] {
+  return [
+    "## Conflict Resolution & Scope Guard",
+    "",
+    "1. **Advisory suggestions only.** The `Suggested approach` in each finding is advisory — not a mandate. If it contradicts the source plan documents, prefer the plan's approved design and standards.",
+    "2. **Minimal compliant fix.** Choose the smallest safe change that satisfies the finding and preserves the approved design/standards. Do not implement features planned for later phases.",
+    "3. **Placeholder/missing-file findings.** For findings that ask for missing files or schema definitions: prefer minimal placeholders (`export {}`) or config adjustments over real schema/table/runtime behavior unless the finding's fix requirements explicitly demand production code.",
+    "4. **Cross-finding consistency.** After editing a file for one finding, verify the change does not introduce a new violation of the other findings in this batch or the batch's target files.",
+    "5. **Post-fix introduced-risk check.** After applying changes, re-read the touched files and verify: (a) no plan-forbidden concepts leaked in, (b) the same problem was not introduced at a different location, (c) the fix does not create a new finding class (e.g., silent failure → overly broad error handling).",
+    "",
+  ]
 }
 
 function buildDirectFixWorkerTaskPrompt(
@@ -428,6 +505,8 @@ function buildDirectFixWorkerTaskPrompt(
     "5. Update or add focused tests when behavior changes.",
     "6. Run the most relevant validation/test commands you can for this batch. Use any explicit validation listed above.",
     "7. In your final response, report: changed files, findings addressed, validation run, and any unresolved blocker.",
+    "",
+    ...buildConflictScopeGuidance(),
   )
 
   return lines.join("\n")
@@ -440,6 +519,8 @@ function buildDirectFixReport(
   fixed: DirectFixFindingOutcome[],
   unresolved: DirectFixFindingOutcome[],
 ): string {
+  const alreadySatisfied = fixed.filter((f) => f.status === "already-satisfied")
+  const actuallyFixed = fixed.filter((f) => f.status === "fixed")
   const lines: string[] = [
     "# Fix Orchestration Report",
     "",
@@ -451,14 +532,26 @@ function buildDirectFixReport(
     "",
     "## Fixed",
     "",
-    ...(fixed.length > 0
-      ? fixed.map((finding) => `- ${finding.findingId}: ${finding.title} (attempts: ${finding.attempts})${finding.outputPath ? ` — output: ${finding.outputPath}` : ""}`)
+    ...(actuallyFixed.length > 0
+      ? actuallyFixed.map((finding) => `- ${finding.findingId}: ${finding.title} (status: fixed, attempts: ${finding.attempts})${finding.outputPath ? ` \u2014 output: ${finding.outputPath}` : ""}`)
       : ["None."]),
     "",
+  ]
+
+  if (alreadySatisfied.length > 0) {
+    lines.push(
+      "## Already Satisfied",
+      "",
+      ...alreadySatisfied.map((finding) => `- ${finding.findingId}: ${finding.title} (status: already-satisfied, attempts: ${finding.attempts})${finding.reason ? ` \u2014 ${finding.reason}` : ""}${finding.outputPath ? ` \u2014 output: ${finding.outputPath}` : ""}`),
+      "",
+    )
+  }
+
+  lines.push(
     "## Unresolved",
     "",
     ...(unresolved.length > 0
-      ? unresolved.map((finding) => `- ${finding.findingId}: ${finding.title} — ${finding.reason ?? "worker failed"} (attempts: ${finding.attempts})${finding.outputPath ? ` — output: ${finding.outputPath}` : ""}`)
+      ? unresolved.map((finding) => `- ${finding.findingId}: ${finding.title} \u2014 ${finding.reason ?? "worker failed"} (attempts: ${finding.attempts})${finding.outputPath ? ` \u2014 output: ${finding.outputPath}` : ""}`)
       : ["None."]),
     "",
     "## Verification",
@@ -467,15 +560,37 @@ function buildDirectFixReport(
       ? `- Verification command: \`${fixResult.verificationCommand}\``
       : "- Verification command: (not resolved)",
     unresolved.length > 0
-      ? "- Result: partial — unresolved findings remain"
+      ? "- Result: partial \u2014 unresolved findings remain"
       : "- Result: worker-level validation completed for all dispatched batches",
     "",
     "## Reviewer Re-check Recommendation",
     "",
     "- Recommend re-running: correctness, integration, security, system",
     `- Focus files: ${[...new Set(fixResult.parsedFindings.map((finding) => finding.file).filter((file): file is string => Boolean(file)))].map((file) => `\`${file}\``).join(", ") || "(none listed)"}`,
-  ]
+  )
 
+  return lines.join("\n")
+}
+
+function buildRetryPromptSuffix(
+  batch: DirectFixBatch,
+  attempt: number,
+  previousError?: string,
+  previousOutputPath?: string,
+): string {
+  const lines: string[] = [
+    "",
+    "## Previous attempt failed",
+    `- Attempt #${attempt - 1} error: ${previousError ?? "unknown"}`,
+  ]
+  if (previousOutputPath) {
+    lines.push(`- Previous output: ${previousOutputPath}`)
+  }
+  lines.push(
+    "- Focus on applying concrete code changes. Return changed file diffs in your output.",
+    "- If the finding is already addressed and no code change is needed, explain clearly which file(s) already satisfy the requirement and why.",
+    "",
+  )
   return lines.join("\n")
 }
 
@@ -491,6 +606,7 @@ export async function runDirectFixWorkflow(
   const runtimeStateDir = resolveRuntimeStateDir(cwd)
   const versionDir = resolvePlanVersionDir(changeId, fixResult.planVersion, cwd)
   const changeDir = resolveChangeDir(changeId, cwd)
+  const maxAttempts = Math.max(1, fixResult.fixOrchestratorConfig.maxAttemptsPerFinding)
   await fs.mkdir(versionDir, { recursive: true })
   await fs.mkdir(changeDir, { recursive: true })
 
@@ -499,32 +615,111 @@ export async function runDirectFixWorkflow(
 
   for (const batch of batches) {
     await options.onBatchStart?.(batch)
-    const outputPath = `${versionDir}/${batch.batchId}-result.md`
-    const result = await options.dispatchService.runAgent({
-      agent: batch.workerAgent,
-      task: buildDirectFixWorkerTaskPrompt(changeId, fixResult, batch, runtimeStateDir),
-      cwd,
-      ...(options.workerModel ? { model: options.workerModel } : {}),
-      output: outputPath,
-      outputMode: "file-only",
-      onUpdate: (progress) => {
-        void options.onBatchUpdate?.(batch, progress)
-      },
-    })
-    await options.onBatchComplete?.(batch, result)
+    let lastResult: (AgentDispatchResult & { outputPath?: string }) | null = null
+    let attempt = 0
 
-    const target = result.ok ? fixed : unresolved
-    for (const finding of batch.findings) {
-      target.push({
-        findingId: finding.findingId,
-        title: finding.title,
-        severity: finding.severity,
-        file: finding.file,
-        status: result.ok ? "fixed" : "unresolved",
-        attempts: 1,
-        reason: result.ok ? undefined : (result.error ?? "worker failed"),
-        outputPath: result.outputPath ?? outputPath,
+    while (attempt < maxAttempts) {
+      attempt++
+      const outputPath = attempt === 1
+        ? `${versionDir}/${batch.batchId}-result.md`
+        : `${versionDir}/${batch.batchId}-attempt-${attempt}.md`
+
+      let task = buildDirectFixWorkerTaskPrompt(changeId, fixResult, batch, runtimeStateDir)
+      if (attempt > 1 && lastResult) {
+        task += buildRetryPromptSuffix(batch, attempt, lastResult.error, lastResult.outputPath)
+      }
+
+      lastResult = await options.dispatchService.runAgent({
+        agent: batch.workerAgent,
+        task,
+        cwd,
+        ...(options.workerModel ? { model: options.workerModel } : {}),
+        ...(options.workerThinking ? { thinking: options.workerThinking } : {}),
+        output: outputPath,
+        outputMode: "file-only",
+        onUpdate: (progress) => {
+          void options.onBatchUpdate?.(batch, progress)
+        },
       })
+
+      if (lastResult.ok) break
+
+      // Ensure diagnostic output is persisted even on failure
+      if (!lastResult.outputPath) {
+        lastResult.outputPath = outputPath
+        try {
+          await fs.writeFile(outputPath, [
+            `# ${batch.batchId} attempt ${attempt}`,
+            "",
+            "**Status**: failed",
+            `**Error**: ${lastResult.error ?? "unknown"}`,
+            "",
+            `**Findings**: ${batch.findings.map((f) => f.findingId).join(", ")}`,
+            `**Files**: ${batch.files.join(", ")}`,
+            "",
+          ].join("\n"), "utf-8")
+        } catch { /* best-effort */ }
+      }
+    }
+
+    await options.onBatchComplete?.(batch, lastResult!)
+
+    const finalResult = lastResult!
+    const isNoEdit = !finalResult.ok && isNoEditFailure(finalResult.error)
+
+    if (finalResult.ok) {
+      for (const finding of batch.findings) {
+        fixed.push({
+          findingId: finding.findingId,
+          title: finding.title,
+          severity: finding.severity,
+          file: finding.file,
+          status: "fixed",
+          attempts: attempt,
+          outputPath: finalResult.outputPath,
+        })
+      }
+    } else if (isNoEdit) {
+      // Check each finding independently — only mark satisfied ones as already-satisfied
+      for (const finding of batch.findings) {
+        if (await checkFindingAlreadySatisfied(finding, cwd)) {
+          fixed.push({
+            findingId: finding.findingId,
+            title: finding.title,
+            severity: finding.severity,
+            file: finding.file,
+            status: "already-satisfied",
+            attempts: attempt,
+            reason: "no-op verified \u2014 finding already satisfied by current code",
+            outputPath: finalResult.outputPath,
+          })
+        } else {
+          unresolved.push({
+            findingId: finding.findingId,
+            title: finding.title,
+            severity: finding.severity,
+            file: finding.file,
+            status: "unresolved",
+            attempts: attempt,
+            reason: finalResult.error ?? "worker failed",
+            outputPath: finalResult.outputPath,
+          })
+        }
+      }
+    } else {
+      // Non no-edit failure (provider error, tool failure, etc.) — all unresolved
+      for (const finding of batch.findings) {
+        unresolved.push({
+          findingId: finding.findingId,
+          title: finding.title,
+          severity: finding.severity,
+          file: finding.file,
+          status: "unresolved",
+          attempts: attempt,
+          reason: finalResult.error ?? "worker failed",
+          outputPath: finalResult.outputPath,
+        })
+      }
     }
   }
 
@@ -543,10 +738,6 @@ export async function runDirectFixWorkflow(
     verificationCommand: fixResult.verificationCommand,
   }
 }
-
-/**
- * Run the `/zflow-change-fix <change-path>` workflow.
- */
 export async function runChangeFixWorkflow(
   options: FixWorkflowOptions,
 ): Promise<FixWorkflowResult> {
@@ -777,53 +968,48 @@ export async function buildFixOrchestratorTaskPrompt(
     lines.push("")
   }
 
-  // ── Conflict-resolution protocol ─────────────────────────────
-  lines.push("## Conflict Resolution Protocol")
-  lines.push("")
-  lines.push("**Treat suggested approaches as advisory only.** The reviewer's")
-  lines.push("\"Suggested approach\" field in each finding is a hint, not a mandate.")
-  lines.push("The fix orchestrator must evaluate every suggestion against the source")
-  lines.push("design documents, standards, and all other findings before accepting it.")
-  lines.push("")
-  lines.push("**When a suggestion would conflict with plan constraints:**")
-  lines.push("")
-  lines.push("1. Read the relevant sections from `design.md`, `standards.md`, and")
-  lines.push("   `execution-groups.md` for the target file/area.")
-  lines.push("2. Check whether the suggested approach would introduce later-phase")
-  lines.push("   scope (e.g., adding a real database table in a scaffold-only phase).")
-  lines.push("3. If the suggestion violates source-document constraints, choose the")
-  lines.push("   **minimal compliant fix** that satisfies both the finding AND the")
-  lines.push("   plan. Override the suggestion and document why in your gap report.")
-  lines.push("")
-  lines.push("**Placeholder/missing-file guidance:**")
-  lines.push("")
-  lines.push("- For findings about missing placeholder files (schema.ts, config stubs),")
-  lines.push("  prefer `export {}` comment-only stubs or config-path removal/adjustment.")
-  lines.push("- Do not add real schema tables, runtime behavior, or production-adjacent")
-  lines.push("  scaffolding unless the source design documents explicitly require it.")
-  lines.push("- When in doubt, the more minimal fix is correct.")
-  lines.push("")
-  lines.push("**Cross-finding consistency:**")
-  lines.push("")
-  lines.push("1. Before dispatching a fix worker, re-read ALL findings in this report.")
-  lines.push("2. Check whether the proposed fix for one finding would create a new")
-  lines.push("   violation that another finding or another reviewer would reject.")
-  lines.push("3. If a tension exists, document the trade-off in the worker task and")
-  lines.push("   choose the approach that satisfies the larger set of constraints.")
-  lines.push("")
-  lines.push("**Post-fix introduced-risk check:**")
-  lines.push("")
-  lines.push("After each fix worker completes, before marking a finding as FIXED:")
-  lines.push("")
-  lines.push("1. Read the touched files to verify they don't contain plan-forbidden")
-  lines.push("   concepts (later-phase scope, runtime behavior in scaffold phases,")
-  lines.push("   secrets, hard-coded production config, etc.).")
-  lines.push("2. Re-read the finding's evidence and recommendation — did the fix")
-  lines.push("   accidentally introduce the same problem in a different location?")
-  lines.push("3. Re-read the OTHER findings in the same report — does the fix create")
-  lines.push("   a new finding that another reviewer would flag?")
-  lines.push("4. Only mark the finding as FIXED after the introduced-risk check passes.")
-  lines.push("")
+  lines.push(
+    "## Conflict Resolution Protocol",
+    "",
+    "**Treat suggested approaches as advisory only.** The reviewer's",
+    "`Suggested approach` field in each finding is a hint, not a mandate.",
+    "Evaluate every suggestion against the source design documents,",
+    "standards, and all other findings before accepting it.",
+    "",
+    "**When a suggestion would conflict with plan constraints:**",
+    "",
+    "1. Read the relevant sections from `design.md`, `standards.md`, and",
+    "   `execution-groups.md` for the target file/area.",
+    "2. Check whether the suggested approach would introduce later-phase",
+    "   scope (for example, adding a real database table in a scaffold-only phase).",
+    "3. If the suggestion violates source-document constraints, choose the",
+    "   **minimal compliant fix** that satisfies both the finding and the plan.",
+    "",
+    "**Placeholder/missing-file guidance:**",
+    "",
+    "- For missing placeholder files, prefer `export {}` comment-only stubs",
+    "  or config-path adjustment over real schema/table/runtime behavior.",
+    "- Do not add production-adjacent scaffolding unless the source design",
+    "  documents explicitly require it.",
+    "",
+    "**Cross-finding consistency:**",
+    "",
+    "1. Before dispatching a fix worker, re-read ALL findings in this report.",
+    "2. Check whether the proposed fix for one finding would create a new",
+    "   violation that another finding or reviewer would reject.",
+    "",
+    "**Post-fix introduced-risk check:**",
+    "",
+    "After each fix worker completes, before marking a finding as FIXED:",
+    "",
+    "1. Read the touched files to verify they do not contain plan-forbidden",
+    "   concepts such as later-phase scope, secrets, or hard-coded production config.",
+    "2. Re-read the finding evidence and recommendation to ensure the fix did not",
+    "   introduce the same problem in a different location.",
+    "3. Re-read other findings in the same report to ensure this fix does not",
+    "   create a new finding class.",
+    "",
+  )
 
   if (findingsPath) {
     lines.push("## Consolidated findings path")

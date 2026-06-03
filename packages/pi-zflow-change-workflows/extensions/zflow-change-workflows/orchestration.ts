@@ -296,6 +296,8 @@ export {
   runChangeAuditWorkflow,
   runChangeFixWorkflow,
   runDirectFixWorkflow,
+  checkFindingAlreadySatisfied,
+  isNoEditFailure,
   buildDirectFixBatches,
   buildFixOrchestratorTaskPrompt,
   resolveFixOrchestratorConfig,

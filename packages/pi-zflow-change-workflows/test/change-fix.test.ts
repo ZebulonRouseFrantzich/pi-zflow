@@ -945,4 +945,525 @@ describe("buildFixOrchestratorTaskPrompt conflict-resolution protocol", { concur
       "prompt should mention checking for same problem in new locations",
     )
   })
+
+describe("runDirectFixWorkflow retry and already-satisfied", { concurrency: false }, () => {
+  it("retries failed batches up to maxAttemptsPerFinding", async () => {
+    const { runChangeFixWorkflow, runDirectFixWorkflow } = await import(
+      "../extensions/zflow-change-workflows/orchestration.js"
+    )
+    const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises")
+    const { join } = await import("node:path")
+    const { tmpdir } = await import("node:os")
+
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-retry-"))
+    const reviewDir = join(tmpDir, ".zflow", "review")
+    const versionDir = join(tmpDir, ".zflow", "plans", "feat-auth", "v1")
+    await mkdir(reviewDir, { recursive: true })
+    await mkdir(versionDir, { recursive: true })
+    await writeFile(join(reviewDir, "code-review-findings.md"), VALID_FINDINGS_MD, "utf-8")
+    await writeFile(join(tmpDir, ".zflow", "plans", "feat-auth", "plan-state.json"), JSON.stringify({
+      currentVersion: "v1", approvedVersion: "v1", lifecycleState: "review-failed",
+    }, null, 2), "utf-8")
+    await writeFile(join(versionDir, "design.md"), "# Design", "utf-8")
+    await writeFile(join(versionDir, "execution-groups.md"), "# Execution Groups\n\n- `src/auth/login.ts`", "utf-8")
+    await writeFile(join(versionDir, "standards.md"), "# Standards", "utf-8")
+    await writeFile(join(versionDir, "verification.md"), "```bash\nnpm test\n```\n", "utf-8")
+    await writeFile(join(versionDir, "implementation-tasks.md"), "# Tasks", "utf-8")
+    try {
+      const { execFileSync } = await import("node:child_process")
+      execFileSync("git", ["init"], { cwd: tmpDir, stdio: "pipe" })
+    } catch { /* ok */ }
+
+    try {
+      const fixResult = await runChangeFixWorkflow({ changeId: "feat-auth", cwd: tmpDir })
+      let callCount = 0
+      const dispatchService = {
+        name: "test-dispatch",
+        async runAgent(_input: Record<string, unknown>) {
+          callCount++
+          if (callCount < 3) {
+            return { ok: false, error: "Subagent completed without making edits for an implementation task." }
+          }
+          return { ok: true, rawOutput: "Fixed.", outputPath: join(versionDir, "batch-1-result.md") }
+        },
+        async runParallel() {
+          return { ok: false, results: [] }
+        },
+      }
+
+      const result = await runDirectFixWorkflow({
+        changeId: "feat-auth",
+        fixResult,
+        dispatchService: dispatchService as any,
+        cwd: tmpDir,
+        workerAgent: "zflow.implement-routine",
+      })
+
+      // With maxAttemptsPerFinding=2 and 2 findings per batch, should exhaust attempts then mark unresolved
+      // Actually: maxAttempts=2, callCount=2 (two fails) -> unresolved
+      // But wait: batch-1 has finding-1 (critical) and batch-2 has finding-2 (major)
+      // Two batches each tried 2 times = up to 4 calls. But we set callCount < 3 so first 2 fail, third succeeds
+      // Actually the batches are processed sequentially:
+      //   batch-1: attempt 1 fail, attempt 2 fail (exhausts) -> unresolved OR already-satisfied
+      //   batch-2: attempt 1 fail, attempt 2 -> actually callCount=3 now, succeeds
+      // BUT: callCount is shared across batches, so batch-1 attempt 1 = call 1, batch-1 attempt 2 = call 2
+      // Then batch-2 attempt 1 = call 3 which succeeds
+      assert.ok(callCount >= 3, "should have retried at least 3 times across batches")
+      assert.equal(result.fixed.length + result.unresolved.length, 4, "all 4 findings should have outcomes")
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("marks no-edit failure as already-satisfied when heuristic matches", async () => {
+    const { runChangeFixWorkflow, runDirectFixWorkflow } = await import(
+      "../extensions/zflow-change-workflows/orchestration.js"
+    )
+    const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises")
+    const { join } = await import("node:path")
+    const { tmpdir } = await import("node:os")
+
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-already-"))
+    const reviewDir = join(tmpDir, ".zflow", "review")
+    const versionDir = join(tmpDir, ".zflow", "plans", "feat-auth", "v1")
+    await mkdir(reviewDir, { recursive: true })
+    await mkdir(versionDir, { recursive: true })
+
+    // Create a finding MD that references generateToken async/sync mismatch
+    const findingsMd = `# Code Review Findings
+
+**Source**: Implementation of feat-auth
+**Run ID**: run-456
+
+## Reviewed Changes
+
+- apps/api/src/ports/crypto.ts
+
+## Findings Summary
+
+| Severity | Count |
+| -------- | ----- |
+| Major | 1 |
+| Minor | 0 |
+| Nit | 0 |
+
+## Major Findings
+
+### TokenCrypto port defines async generateToken() but adapter is synchronous
+
+**Reviewer support**: correctness
+**File**: \`apps/api/src/ports/crypto.ts\`
+**Lines**: 14
+**Evidence**: The port defines generateToken(): Promise<string> (async) but WebCryptoTokenCrypto.generateToken() is synchronous.
+**Why it matters**: Contract inconsistency.
+**Recommendation**: Align port and adapter signatures.
+**Expected behavior**: Port should define generateToken(): string (sync).
+**Fix requirements**: Change the port signature.
+`
+
+    await writeFile(join(reviewDir, "code-review-findings.md"), findingsMd, "utf-8")
+    await writeFile(join(tmpDir, ".zflow", "plans", "feat-auth", "plan-state.json"), JSON.stringify({
+      currentVersion: "v1", approvedVersion: "v1", lifecycleState: "review-failed",
+    }, null, 2), "utf-8")
+    await writeFile(join(versionDir, "design.md"), "# Design", "utf-8")
+    await writeFile(join(versionDir, "execution-groups.md"), "# Execution Groups\n\n- \`apps/api/src/ports/crypto.ts\`", "utf-8")
+    await writeFile(join(versionDir, "standards.md"), "# Standards", "utf-8")
+    await writeFile(join(versionDir, "verification.md"), "```bash\nnpm test\n```\n", "utf-8")
+    await writeFile(join(versionDir, "implementation-tasks.md"), "# Tasks", "utf-8")
+
+    // Create the target file with sync signature (already satisfied)
+    await mkdir(join(tmpDir, "apps", "api", "src", "ports"), { recursive: true })
+    await writeFile(join(tmpDir, "apps", "api", "src", "ports", "crypto.ts"), `export interface TokenCrypto {
+  generateToken(): string
+  hashToken(token: string): Promise<string>
+  verifyToken(token: string, hash: string): Promise<boolean>
+}
+`, "utf-8")
+
+    try {
+      const { execFileSync } = await import("node:child_process")
+      execFileSync("git", ["init"], { cwd: tmpDir, stdio: "pipe" })
+      execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: tmpDir, stdio: "pipe" })
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: tmpDir, stdio: "pipe" })
+      execFileSync("git", ["add", "-A"], { cwd: tmpDir, stdio: "pipe" })
+      execFileSync("git", ["commit", "-m", "initial"], { cwd: tmpDir, stdio: "pipe" })
+    } catch { /* ok */ }
+
+    try {
+      const fixResult = await runChangeFixWorkflow({ changeId: "feat-auth", cwd: tmpDir })
+      const dispatchService = {
+        name: "test-dispatch",
+        async runAgent() {
+          return { ok: false, error: "Subagent completed without making edits for an implementation task." }
+        },
+        async runParallel() {
+          return { ok: false, results: [] }
+        },
+      }
+
+      const result = await runDirectFixWorkflow({
+        changeId: "feat-auth",
+        fixResult,
+        dispatchService: dispatchService as any,
+        cwd: tmpDir,
+        workerAgent: "zflow.implement-routine",
+      })
+
+      // Should have 1 finding marked already-satisfied
+      const alreadySatisfied = result.fixed.filter((f) => f.status === "already-satisfied")
+      assert.ok(alreadySatisfied.length > 0, "should have at least one already-satisfied finding")
+      assert.ok(
+        alreadySatisfied[0].reason?.includes("already satisfied"),
+        "reason should indicate already satisfied",
+      )
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("persists diagnostic output for failed batches", async () => {
+    const { runChangeFixWorkflow, runDirectFixWorkflow } = await import(
+      "../extensions/zflow-change-workflows/orchestration.js"
+    )
+    const { mkdtemp, mkdir, writeFile, rm, readFile } = await import("node:fs/promises")
+    const { join } = await import("node:path")
+    const { tmpdir } = await import("node:os")
+
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-diag-"))
+    const reviewDir = join(tmpDir, ".zflow", "review")
+    const versionDir = join(tmpDir, ".zflow", "plans", "feat-auth", "v1")
+    await mkdir(reviewDir, { recursive: true })
+    await mkdir(versionDir, { recursive: true })
+    await writeFile(join(reviewDir, "code-review-findings.md"), VALID_FINDINGS_MD, "utf-8")
+    await writeFile(join(tmpDir, ".zflow", "plans", "feat-auth", "plan-state.json"), JSON.stringify({
+      currentVersion: "v1", approvedVersion: "v1", lifecycleState: "review-failed",
+    }, null, 2), "utf-8")
+    await writeFile(join(versionDir, "design.md"), "# Design", "utf-8")
+    await writeFile(join(versionDir, "execution-groups.md"), "# Execution Groups\n\n- \`src/auth/login.ts\`", "utf-8")
+    await writeFile(join(versionDir, "standards.md"), "# Standards", "utf-8")
+    await writeFile(join(versionDir, "verification.md"), "```bash\nnpm test\n```\n", "utf-8")
+    await writeFile(join(versionDir, "implementation-tasks.md"), "# Tasks", "utf-8")
+    try {
+      const { execFileSync } = await import("node:child_process")
+      execFileSync("git", ["init"], { cwd: tmpDir, stdio: "pipe" })
+    } catch { /* ok */ }
+
+    try {
+      const fixResult = await runChangeFixWorkflow({ changeId: "feat-auth", cwd: tmpDir })
+      const dispatchService = {
+        name: "test-dispatch",
+        async runAgent() {
+          return { ok: false, error: "Something went wrong" }
+        },
+        async runParallel() {
+          return { ok: false, results: [] }
+        },
+      }
+
+      const result = await runDirectFixWorkflow({
+        changeId: "feat-auth",
+        fixResult,
+        dispatchService: dispatchService as any,
+        cwd: tmpDir,
+        workerAgent: "zflow.implement-routine",
+      })
+
+      // Check that each batch has output files
+      for (const finding of result.unresolved) {
+        assert.ok(finding.outputPath, "unresolved finding should have an outputPath")
+        try {
+          const content = await readFile(finding.outputPath!, "utf-8")
+          assert.ok(content.includes("Status") || content.includes("failed"), "output should indicate status")
+        } catch {
+          assert.fail(`output file missing: ${finding.outputPath}`)
+        }
+      }
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("report does not reference nonexistent batch output files", async () => {
+    const { runChangeFixWorkflow, runDirectFixWorkflow } = await import(
+      "../extensions/zflow-change-workflows/orchestration.js"
+    )
+    const { mkdtemp, mkdir, writeFile, rm, readFile } = await import("node:fs/promises")
+    const { join } = await import("node:path")
+    const { tmpdir } = await import("node:os")
+
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-report-"))
+    const reviewDir = join(tmpDir, ".zflow", "review")
+    const versionDir = join(tmpDir, ".zflow", "plans", "feat-auth", "v1")
+    await mkdir(reviewDir, { recursive: true })
+    await mkdir(versionDir, { recursive: true })
+    await writeFile(join(reviewDir, "code-review-findings.md"), VALID_FINDINGS_MD, "utf-8")
+    await writeFile(join(tmpDir, ".zflow", "plans", "feat-auth", "plan-state.json"), JSON.stringify({
+      currentVersion: "v1", approvedVersion: "v1", lifecycleState: "review-failed",
+    }, null, 2), "utf-8")
+    await writeFile(join(versionDir, "design.md"), "# Design", "utf-8")
+    await writeFile(join(versionDir, "execution-groups.md"), "# Execution Groups\n\n- \`src/auth/login.ts\`", "utf-8")
+    await writeFile(join(versionDir, "standards.md"), "# Standards", "utf-8")
+    await writeFile(join(versionDir, "verification.md"), "```bash\nnpm test\n```\n", "utf-8")
+    await writeFile(join(versionDir, "implementation-tasks.md"), "# Tasks", "utf-8")
+    try {
+      const { execFileSync } = await import("node:child_process")
+      execFileSync("git", ["init"], { cwd: tmpDir, stdio: "pipe" })
+    } catch { /* ok */ }
+
+    try {
+      const fixResult = await runChangeFixWorkflow({ changeId: "feat-auth", cwd: tmpDir })
+      const dispatchService = {
+        name: "test-dispatch",
+        async runAgent() {
+          return { ok: false, error: "Worker failed" }
+        },
+        async runParallel() {
+          return { ok: false, results: [] }
+        },
+      }
+
+      const result = await runDirectFixWorkflow({
+        changeId: "feat-auth",
+        fixResult,
+        dispatchService: dispatchService as any,
+        cwd: tmpDir,
+        workerAgent: "zflow.implement-routine",
+      })
+
+      const report = await readFile(result.reportPath, "utf-8")
+
+      // Check that every referenced output file in the report actually exists
+      const outputRefs = report.match(/output: [^\n]+/g) || []
+      for (const ref of outputRefs) {
+        const path = ref.replace(/output: /, "").trim().replace(/^`|`$/g, "")
+        if (path) {
+          try {
+            await readFile(path, "utf-8")
+          } catch {
+            assert.fail(`Report references nonexistent output file: ${path}`)
+          }
+        }
+      }
+
+      assert.ok(result.fixed.length + result.unresolved.length > 0, "should have outcomes")
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+})
+
+})
+describe("runDirectFixWorkflow follow-up hardening", { concurrency: false }, () => {
+  it("passes workerThinking through to dispatch service", async () => {
+    const { runDirectFixWorkflow, resolveFixOrchestratorConfig } = await import(
+      "../extensions/zflow-change-workflows/orchestration.js"
+    )
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-thinking-"))
+    try {
+      let dispatchedThinking: unknown
+      const dispatchService = {
+        name: "test-dispatch",
+        async runAgent(input: Record<string, unknown>) {
+          dispatchedThinking = input.thinking
+          return { ok: true, rawOutput: "fixed" }
+        },
+        async runParallel() {
+          return { ok: false, results: [] }
+        },
+      }
+
+      await runDirectFixWorkflow({
+        changeId: "feat-auth",
+        cwd: tmpDir,
+        workerAgent: "zflow.implement-routine",
+        workerThinking: "high",
+        dispatchService: dispatchService as any,
+        fixResult: {
+          changeId: "feat-auth",
+          fixPlan: "# Fix",
+          filesToModify: [],
+          parsedFindings: [{
+            findingId: "finding-1",
+            severity: "minor",
+            title: "Minor issue",
+            file: "src/file.ts",
+            reviewerRole: "logic",
+            evidence: "evidence",
+            recommendation: "recommendation",
+          }],
+          planVersion: "v1",
+          lifecycleState: "review-failed",
+          fixOrchestratorConfig: resolveFixOrchestratorConfig(),
+        },
+      })
+
+      assert.equal(dispatchedThinking, "high")
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps arbitrary failures unresolved instead of treating them as already-satisfied", async () => {
+    const { runDirectFixWorkflow, resolveFixOrchestratorConfig } = await import(
+      "../extensions/zflow-change-workflows/orchestration.js"
+    )
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-arbitrary-failure-"))
+    await mkdir(join(tmpDir, "apps/api/src/ports"), { recursive: true })
+    await writeFile(join(tmpDir, "apps/api/src/ports/crypto.ts"), "export interface TokenCrypto { generateToken(): string }\n", "utf-8")
+    try {
+      const dispatchService = {
+        name: "test-dispatch",
+        async runAgent() {
+          return { ok: false, error: "provider stream ended unexpectedly" }
+        },
+        async runParallel() {
+          return { ok: false, results: [] }
+        },
+      }
+
+      const result = await runDirectFixWorkflow({
+        changeId: "feat-auth",
+        cwd: tmpDir,
+        workerAgent: "zflow.implement-routine",
+        dispatchService: dispatchService as any,
+        fixResult: {
+          changeId: "feat-auth",
+          fixPlan: "# Fix",
+          filesToModify: [],
+          parsedFindings: [{
+            findingId: "finding-1",
+            severity: "minor",
+            title: "TokenCrypto port defines async generateToken() but implementation is synchronous",
+            file: "apps/api/src/ports/crypto.ts",
+            reviewerRole: "logic",
+            evidence: "port says Promise generateToken",
+            recommendation: "generateToken should be string",
+          }],
+          planVersion: "v1",
+          lifecycleState: "review-failed",
+          fixOrchestratorConfig: { ...resolveFixOrchestratorConfig(), maxAttemptsPerFinding: 1 },
+        },
+      })
+
+      assert.equal(result.fixed.length, 0)
+      assert.equal(result.unresolved.length, 1)
+      assert.equal(result.unresolved[0].status, "unresolved")
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("marks only satisfied findings in a mixed no-edit batch", async () => {
+    const { runDirectFixWorkflow, resolveFixOrchestratorConfig } = await import(
+      "../extensions/zflow-change-workflows/orchestration.js"
+    )
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-mixed-noedit-"))
+    await mkdir(join(tmpDir, "apps/api/src/ports"), { recursive: true })
+    await writeFile(join(tmpDir, "apps/api/src/ports/crypto.ts"), "export interface TokenCrypto { generateToken(): string }\n", "utf-8")
+    try {
+      const dispatchService = {
+        name: "test-dispatch",
+        async runAgent() {
+          return { ok: false, error: "Subagent completed without making edits for an implementation task." }
+        },
+        async runParallel() {
+          return { ok: false, results: [] }
+        },
+      }
+
+      const result = await runDirectFixWorkflow({
+        changeId: "feat-auth",
+        cwd: tmpDir,
+        workerAgent: "zflow.implement-routine",
+        dispatchService: dispatchService as any,
+        fixResult: {
+          changeId: "feat-auth",
+          fixPlan: "# Fix",
+          filesToModify: [],
+          parsedFindings: [
+            {
+              findingId: "finding-1",
+              severity: "minor",
+              title: "TokenCrypto port defines async generateToken() but implementation is synchronous",
+              file: "apps/api/src/ports/crypto.ts",
+              reviewerRole: "logic",
+              evidence: "port says Promise generateToken",
+              recommendation: "generateToken should be string",
+            },
+            {
+              findingId: "finding-2",
+              severity: "minor",
+              title: "Different issue in the same file",
+              file: "apps/api/src/ports/crypto.ts",
+              reviewerRole: "logic",
+              evidence: "still needs a real edit",
+              recommendation: "make a different change",
+            },
+          ],
+          planVersion: "v1",
+          lifecycleState: "review-failed",
+          fixOrchestratorConfig: { ...resolveFixOrchestratorConfig(), maxAttemptsPerFinding: 1 },
+        },
+      })
+
+      assert.equal(result.fixed.length, 1)
+      assert.equal(result.fixed[0].status, "already-satisfied")
+      assert.equal(result.fixed[0].findingId, "finding-1")
+      assert.equal(result.unresolved.length, 1)
+      assert.equal(result.unresolved[0].findingId, "finding-2")
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("includes direct worker conflict and introduced-risk guidance in dispatched tasks", async () => {
+    const { runDirectFixWorkflow, resolveFixOrchestratorConfig } = await import(
+      "../extensions/zflow-change-workflows/orchestration.js"
+    )
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-direct-prompt-"))
+    try {
+      let task = ""
+      const dispatchService = {
+        name: "test-dispatch",
+        async runAgent(input: Record<string, unknown>) {
+          task = String(input.task ?? "")
+          return { ok: true, rawOutput: "fixed" }
+        },
+        async runParallel() {
+          return { ok: false, results: [] }
+        },
+      }
+
+      await runDirectFixWorkflow({
+        changeId: "feat-auth",
+        cwd: tmpDir,
+        workerAgent: "zflow.implement-routine",
+        dispatchService: dispatchService as any,
+        fixResult: {
+          changeId: "feat-auth",
+          fixPlan: "# Fix",
+          filesToModify: [],
+          parsedFindings: [{
+            findingId: "finding-1",
+            severity: "minor",
+            title: "Minor issue",
+            file: "src/file.ts",
+            reviewerRole: "logic",
+            evidence: "evidence",
+            recommendation: "recommendation",
+          }],
+          planVersion: "v1",
+          lifecycleState: "review-failed",
+          fixOrchestratorConfig: resolveFixOrchestratorConfig(),
+        },
+      })
+
+      assert.ok(task.includes("Conflict Resolution & Scope Guard"))
+      assert.ok(task.includes("Advisory suggestions only"))
+      assert.ok(task.includes("Post-fix introduced-risk check"))
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
 })
