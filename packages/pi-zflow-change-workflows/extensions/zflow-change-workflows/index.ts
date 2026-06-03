@@ -1495,6 +1495,22 @@ async function resumeWorktreeDispatch(
   const worktreeResultsDir = path.join(runDir, "worktree-results")
   await fs.mkdir(worktreeResultsDir, { recursive: true })
 
+  const readExistingWorkerEvidence = async (groupId: string): Promise<string | undefined> => {
+    const candidates = [
+      path.join(worktreeResultsDir, `${groupId}-resume-result.md`),
+      path.join(worktreeResultsDir, `${groupId}-result.md`),
+    ]
+    for (const candidate of candidates) {
+      try {
+        const content = await fs.readFile(candidate, "utf-8")
+        if (content.trim()) return content
+      } catch {
+        // Ignore missing historical worker outputs.
+      }
+    }
+    return undefined
+  }
+
   const implementModel = await resolveWorkflowModel("zflow.implement-routine")
   const sleep = options?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
   const progressPersistIntervalMs = Math.max(1000, options?.progressPersistIntervalMs ?? 5000)
@@ -1762,21 +1778,19 @@ async function resumeWorktreeDispatch(
     const verification = normalizeDispatchVerification(r.verification)
     const rawOutput = (!r.rawOutput || !r.rawOutput.trim()) && r.outputPath
       ? await fs.readFile(r.outputPath, "utf-8").catch(() => r.rawOutput)
-      : r.rawOutput
+      : (r.rawOutput?.trim() ? r.rawOutput : await readExistingWorkerEvidence(group.id))
     const acceptedNoop = acceptImplementationNoopResult({
       ok: r.ok,
       error: r.error,
       rawOutput,
       verification,
     })
-    const acceptedExistingEvidence = verification?.status === "fail"
-      ? acceptAlreadyImplementedEvidenceResult({
-          ok: r.ok,
-          error: r.error,
-          rawOutput,
-          verification,
-        })
-      : { accepted: false as const }
+    const acceptedExistingEvidence = acceptAlreadyImplementedEvidenceResult({
+      ok: r.ok,
+      error: r.error,
+      rawOutput,
+      verification,
+    })
     const acceptedResult = acceptedNoop.accepted ? acceptedNoop : acceptedExistingEvidence
     const effectiveVerification = acceptedResult.accepted && verification?.status === "fail"
       ? {
@@ -2583,6 +2597,21 @@ async function runWorktreeDispatchAndFinalize(
   const runDir = resolveRunDir(runId, cwd)
   const worktreeResultsDir = path.join(runDir, "worktree-results")
   await fs.mkdir(worktreeResultsDir, { recursive: true })
+  const readExistingWorkerEvidence = async (groupId: string): Promise<string | undefined> => {
+    const candidates = [
+      path.join(worktreeResultsDir, `${groupId}-result.md`),
+      path.join(worktreeResultsDir, `${groupId}-resume-result.md`),
+    ]
+    for (const candidate of candidates) {
+      try {
+        const content = await fs.readFile(candidate, "utf-8")
+        if (content.trim()) return content
+      } catch {
+        // Ignore missing historical worker outputs.
+      }
+    }
+    return undefined
+  }
   const implementModel = await resolveWorkflowModel("zflow.implement-routine")
   const sleep = options?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
   const progressPersistIntervalMs = Math.max(1000, options?.progressPersistIntervalMs ?? 5000)
@@ -2906,21 +2935,19 @@ async function runWorktreeDispatchAndFinalize(
       const verification = normalizeDispatchVerification(r.verification)
       const rawOutput = (!r.rawOutput || !r.rawOutput.trim()) && r.outputPath
         ? await fs.readFile(r.outputPath, "utf-8").catch(() => r.rawOutput)
-        : r.rawOutput
+        : (r.rawOutput?.trim() ? r.rawOutput : await readExistingWorkerEvidence(gid))
       const acceptedNoop = acceptImplementationNoopResult({
         ok: r.ok,
         error: r.error,
         rawOutput,
         verification,
       })
-      const acceptedExistingEvidence = verification?.status === "fail"
-        ? acceptAlreadyImplementedEvidenceResult({
-            ok: r.ok,
-            error: r.error,
-            rawOutput,
-            verification,
-          })
-        : { accepted: false as const }
+      const acceptedExistingEvidence = acceptAlreadyImplementedEvidenceResult({
+        ok: r.ok,
+        error: r.error,
+        rawOutput,
+        verification,
+      })
       const acceptedResult = acceptedNoop.accepted ? acceptedNoop : acceptedExistingEvidence
       const effectiveVerification = acceptedResult.accepted && verification?.status === "fail"
         ? {

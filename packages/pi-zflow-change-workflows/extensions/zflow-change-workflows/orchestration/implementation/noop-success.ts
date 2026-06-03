@@ -79,10 +79,6 @@ export function acceptImplementationNoopResult(
 export function acceptAlreadyImplementedEvidenceResult(
   candidate: ImplementationNoopCandidate,
 ): AcceptedImplementationNoop {
-  if (!candidate.ok) {
-    return { accepted: false }
-  }
-
   if (!looksLikeAlreadyImplementedSummary(candidate.rawOutput)) {
     return { accepted: false }
   }

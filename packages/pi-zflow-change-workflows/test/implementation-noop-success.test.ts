@@ -82,6 +82,14 @@ describe("implementation noop-success helpers", () => {
       }).accepted,
       true,
     )
+    assert.equal(
+      acceptAlreadyImplementedEvidenceResult({
+        ok: false,
+        error: "Provider finish_reason: content_filter",
+        rawOutput: output,
+      }).accepted,
+      true,
+    )
   })
 
   test("rejects no-edit results without passing verification", () => {
