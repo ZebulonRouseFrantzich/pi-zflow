@@ -6196,12 +6196,15 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
                   reviewProgress.stop("Workflow Complete")
                 } else {
                   updateReviewCard(`⚠️ Code review found issues`)
+                  const reviewRecoveryLine = reviewResult.infrastructureFailure
+                    ? `  ${reviewResult.recoveryHint ?? "Run /zflow-setup-agents or /zflow-update-agents, then resume the workflow."}`
+                    : "  Use /zflow-change-fix to address findings, then resume."
                   ctx.ui.notify(
                     `⚠️ Code review found issues: ${reviewResult.summary}\n` +
                     (reviewResult.findingsPath
                       ? `  Review findings: ${reviewResult.findingsPath}\n`
                       : "") +
-                    "  Use /zflow-change-fix to address findings, then resume.",
+                    reviewRecoveryLine,
                     "warning",
                   )
 
@@ -6221,7 +6224,14 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
                   } catch {
                     // Best-effort state sync
                   }
-                  reviewProgress.updatePhaseCard("workflow-complete", "Workflow Needs Attention", "Review failed; use /zflow-change-fix", "failed")
+                  reviewProgress.updatePhaseCard(
+                    "workflow-complete",
+                    "Workflow Needs Attention",
+                    reviewResult.infrastructureFailure
+                      ? "Review infrastructure failed; setup agents/config and resume"
+                      : "Review failed; use /zflow-change-fix",
+                    "failed",
+                  )
                   reviewProgress.stop("Review found issues")
                 }
               } catch (err: unknown) {

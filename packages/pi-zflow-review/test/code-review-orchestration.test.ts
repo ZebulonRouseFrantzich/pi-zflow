@@ -414,6 +414,50 @@ void describe("runCodeReview with DispatchService", () => {
     assert.ok(hasFailureNote, "expected coverage note about failed dispatch")
   })
 
+  it("fails closed early with setup guidance when required reviewer agents are not discoverable", async () => {
+    const planningArtifacts = await writeArtifacts(tmpDir, "ch-missing-review-agents", "v1")
+
+    const missingAgentService: DispatchService & { callLog: Array<Record<string, unknown>> } = {
+      name: "test-missing-agents",
+      callLog: [],
+      async listAgents() {
+        return ["context-builder", "delegate", "oracle", "planner", "researcher", "reviewer", "scout", "worker"]
+      },
+      async runAgent(input) {
+        this.callLog.push(input)
+        return { ok: true, rawOutput: JSON.stringify({ findings: [] }) }
+      },
+      async runParallel() {
+        return { ok: false, results: [] }
+      },
+    }
+
+    const registry = getZflowRegistry()
+    registry.claim({
+      capability: DISPATCH_SERVICE_CAPABILITY,
+      version: "0.1.0",
+      provider: "test",
+      sourcePath: import.meta.url,
+      compatibilityMode: "compatible",
+    })
+    registry.provide(DISPATCH_SERVICE_CAPABILITY, missingAgentService)
+
+    const result = await runCodeReview(makeInput(planningArtifacts))
+
+    const reviewerCalls = missingAgentService.callLog.filter((call) => String(call.agent).startsWith("zflow.review-"))
+    assert.equal(reviewerCalls.length, 0, "reviewer agents should fail preflight before dispatch")
+    assert.equal(result.reviewersExecuted, 0)
+    assert.equal(result.recommendation, "NO-GO")
+    assert.equal(result.reviewInfrastructure?.status, "failed")
+    assert.match(String(result.reviewInfrastructure?.summary), /not a clean zero-finding review/i)
+    assert.match(String(result.reviewInfrastructure?.recoveryHint), /zflow-setup-agents|zflow-update-agents/i)
+
+    const findingsContent = await fs.readFile(result.findingsPath, "utf-8")
+    assert.match(findingsContent, /## Review Outcome/)
+    assert.match(findingsContent, /Infrastructure status: failed/)
+    assert.match(findingsContent, /zflow-setup-agents|zflow-update-agents/)
+  })
+
   it("accepts empty findings JSON as valid structured result", async () => {
     const planningArtifacts = await writeArtifacts(tmpDir, "ch-empty-findings", "v1")
     const emptyJson = JSON.stringify({ findings: [] })

@@ -470,13 +470,18 @@ export default function activateZflowReviewExtension(pi: ExtensionAPI): void {
 
         const result = await reviewService.runCodeReview(input)
         const notifyType = result.reviewersExecuted === 0 || result.recommendation === "NO-GO" ? "warning" : "info"
+        const infraNote = result.reviewInfrastructure?.status === "failed"
+          ? `\nInfrastructure: ${result.reviewInfrastructure.summary ?? "review execution failed"}` +
+            (result.reviewInfrastructure.recoveryHint ? `\nRecovery: ${result.reviewInfrastructure.recoveryHint}` : "")
+          : ""
         ctx.ui.notify(
           `Code review complete.\n` +
           `Tier: ${result.tier}\n` +
           `Recommendation: ${result.recommendation}\n` +
           `Reviewers executed: ${result.reviewersExecuted}/${result.manifest.reviewers.length}\n` +
           `Findings: ${result.severity.critical} critical, ${result.severity.major} major\n` +
-          `Path: ${result.findingsPath}`,
+          `Path: ${result.findingsPath}` +
+          infraNote,
           notifyType,
         )
       } catch (err: unknown) {

@@ -447,6 +447,16 @@ export interface CodeReviewFindingsInput {
   verificationContext: string
   /** Structured findings from the synthesizer. */
   findings: CodeReviewFinding[]
+  /** Additional orchestration coverage notes. */
+  coverageNotes?: string[]
+  /** Final recommendation for the review. */
+  recommendation?: "GO" | "NO-GO" | "CONDITIONAL-GO"
+  /** Number of reviewers that executed. */
+  reviewersExecuted?: number
+  /** Optional infrastructure summary for failed/blocked review execution. */
+  reviewInfrastructureSummary?: string
+  /** Optional recovery hint for infrastructure failures. */
+  reviewInfrastructureHint?: string
   /** Working directory for runtime-state resolution (optional). */
   cwd?: string
 }
@@ -685,6 +695,10 @@ export async function persistCodeReviewFindings(
   await fs.mkdir(path.dirname(fp), { recursive: true })
 
   const lines: string[] = []
+  const reviewersExecuted = input.reviewersExecuted ?? input.manifest.reviewers.filter((reviewer) => reviewer.status === "executed").length
+  const normalizedCoverageNotes = [...new Set((input.coverageNotes ?? [])
+    .map((note) => note.trim())
+    .filter((note) => note.length > 0))]
 
   // ── Header ──────────────────────────────────────────────────
   lines.push(`# Code Review Findings`)
@@ -711,10 +725,32 @@ export async function persistCodeReviewFindings(
   lines.push(input.verificationContext)
   lines.push(``)
 
+  // ── Review outcome ──────────────────────────────────────────
+  lines.push(`## Review Outcome`)
+  lines.push(``)
+  lines.push(`- Recommendation: ${input.recommendation ?? "unknown"}`)
+  lines.push(`- Reviewers executed: ${reviewersExecuted}/${input.reviewers.length}`)
+  if (input.reviewInfrastructureSummary) {
+    lines.push(`- Infrastructure status: failed`)
+    lines.push(`- Infrastructure summary: ${input.reviewInfrastructureSummary}`)
+    if (input.reviewInfrastructureHint) {
+      lines.push(`- Recovery hint: ${input.reviewInfrastructureHint}`)
+    }
+  } else {
+    lines.push(`- Infrastructure status: ok`)
+  }
+  lines.push(``)
+
   // ── Coverage Notes ──────────────────────────────────────────
   lines.push(`## Coverage Notes`)
   lines.push(``)
   lines.push(formatCoverageNotes(input.manifest))
+  if (normalizedCoverageNotes.length > 0) {
+    lines.push(``)
+    for (const note of normalizedCoverageNotes) {
+      lines.push(`- ${note}`)
+    }
+  }
   lines.push(``)
 
   // ── Findings Summary ────────────────────────────────────────

@@ -362,6 +362,12 @@ export interface CodeReviewResult {
   reviewersExecuted: number
   /** Coverage notes. */
   coverageNotes: string[]
+  /** Structured review-infrastructure status, when the review could not run cleanly. */
+  reviewInfrastructure?: {
+    status: "ok" | "failed"
+    summary?: string
+    recoveryHint?: string
+  }
 }
 
 /**
@@ -473,6 +479,90 @@ function toCodeReviewAgentName(reviewerName: string): string {
 
 function isRequiredCodeReviewer(reviewerName: string): boolean {
   return reviewerName === "correctness" || reviewerName === "integration" || reviewerName === "security"
+}
+
+function normalizeListedAgentName(entry: string | { name?: unknown }): string | undefined {
+  if (typeof entry === "string") return entry.trim() || undefined
+  if (typeof entry?.name === "string") return entry.name.trim() || undefined
+  return undefined
+}
+
+function uniqueStrings(values: Iterable<string | undefined>): string[] {
+  return [...new Set([...values].filter((value): value is string => Boolean(value && value.trim().length > 0)))]
+}
+
+async function discoverDispatchAgents(
+  dispatchService: DispatchService,
+  cwd?: string,
+): Promise<{ agents?: string[]; error?: string }> {
+  if (typeof dispatchService.listAgents !== "function") return {}
+
+  try {
+    const listed = await dispatchService.listAgents(cwd)
+    return {
+      agents: uniqueStrings((listed ?? []).map(normalizeListedAgentName)),
+    }
+  } catch (err) {
+    return {
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+}
+
+function buildMissingReviewerAgentError(agentName: string, availableAgents: string[]): string {
+  const available = availableAgents.length > 0 ? availableAgents.join(", ") : "(none discovered)"
+  return `Required reviewer agent "${agentName}" is not discoverable in the active dispatch environment. ` +
+    `Available: ${available}. Run /zflow-setup-agents or /zflow-update-agents in this Pi environment, then re-run the review.`
+}
+
+function classifyReviewInfrastructure(
+  manifest: ReviewerManifest,
+): { status: "failed"; summary: string; recoveryHint?: string } | undefined {
+  const blockedRequiredReviewers = manifest.reviewers.filter(
+    (reviewer) => isRequiredCodeReviewer(reviewer.name) && reviewer.status !== "executed",
+  )
+  if (blockedRequiredReviewers.length === 0) return undefined
+
+  const details = blockedRequiredReviewers.map((reviewer) => reviewer.detail ?? "")
+
+  if (details.some((detail) => /not discoverable|Unknown agent|No agents discovered/i.test(detail))) {
+    return {
+      status: "failed",
+      summary:
+        "Required code-review agents were not discoverable in the active dispatch environment. " +
+        "This is a review-environment failure, not a clean zero-finding review.",
+      recoveryHint:
+        "Run /zflow-setup-agents or /zflow-update-agents in this Pi environment, then re-run the review.",
+    }
+  }
+
+  if (details.some((detail) => /No usable resolved model/i.test(detail))) {
+    return {
+      status: "failed",
+      summary:
+        "Required code-review lanes/models were not resolved for the active profile. " +
+        "This is a review-configuration failure, not a clean zero-finding review.",
+      recoveryHint:
+        "Resolve the active zflow profile/lane bindings for the review agents, then re-run the review.",
+    }
+  }
+
+  if (details.some((detail) => /no dispatch service available/i.test(detail))) {
+    return {
+      status: "failed",
+      summary:
+        "No review dispatch service was available. This is a review-infrastructure failure, " +
+        "not a clean zero-finding review.",
+    }
+  }
+
+  return {
+    status: "failed",
+    summary:
+      `Required code reviewers did not execute successfully (${blockedRequiredReviewers.map((reviewer) => reviewer.name).join(", ")}). ` +
+      "This is a review execution failure, not a clean zero-finding review.",
+    recoveryHint: "Inspect the reviewer artifacts and dispatch backend diagnostics, then re-run the review.",
+  }
 }
 
 interface AgentModelInfo {
@@ -708,12 +798,24 @@ export async function runCodeReview(
     const dispatchService = getZflowRegistry().optional<DispatchService>(DISPATCH_SERVICE_CAPABILITY)
 
     if (dispatchService) {
+      const discovery = await discoverDispatchAgents(dispatchService, cwd)
+      if (discovery.error) {
+        coverageNotes.push(`Reviewer agent discovery via "${dispatchService.name}" failed: ${discovery.error}`)
+      }
+      const availableDispatchAgents = discovery.agents && discovery.agents.length > 0
+        ? discovery.agents
+        : undefined
+
       // Pre-resolve model/thinking for all reviewers
       const reviewerAgentInfo = new Map<string, AgentModelInfo>()
+      const reviewerPreflightErrors = new Map<string, string>()
       for (const name of reviewerNames) {
         const agentName = toCodeReviewAgentName(name)
         const info = await resolveAgentModelInfo(agentName)
         reviewerAgentInfo.set(name, info)
+        if (availableDispatchAgents && !availableDispatchAgents.includes(agentName)) {
+          reviewerPreflightErrors.set(name, buildMissingReviewerAgentError(agentName, availableDispatchAgents))
+        }
         emitReviewerUpdate(input.onReviewUpdate, name, agentName, "queued", {
           model: info.model,
           thinking: info.thinking,
@@ -730,6 +832,12 @@ export async function runCodeReview(
             thinking: agentInfo.thinking,
             lastCommand: "starting",
           })
+          const preflightError = reviewerPreflightErrors.get(name)
+          if (preflightError) {
+            const output: ReviewerOutput = { findings: [], rawOutput: `dispatch error: ${preflightError}` }
+            return { name, agentName, agentInfo, prompt: "", output, ok: false, error: preflightError }
+          }
+
           const prompt = await buildInternalReviewPrompt(name, internalCtx)
           let output: ReviewerOutput
           let dispatchOk = true
@@ -939,6 +1047,15 @@ export async function runCodeReview(
     coverageNotes.push("Fail-closed: no code reviewers executed.")
   }
 
+  const reviewersExecuted = manifest.reviewers.filter((r) => r.status === "executed").length
+  const reviewInfrastructure = classifyReviewInfrastructure(manifest)
+  if (reviewInfrastructure?.summary) {
+    coverageNotes.push(`Review infrastructure: ${reviewInfrastructure.summary}`)
+  }
+  if (reviewInfrastructure?.recoveryHint) {
+    coverageNotes.push(`Recovery hint: ${reviewInfrastructure.recoveryHint}`)
+  }
+
   // Step 7: Persist findings
   const codeReviewFindings: CodeReviewFinding[] = allFindings.map(f => f.finding)
   const findingsWithTraceability = addFindingTraceability(
@@ -958,6 +1075,11 @@ export async function runCodeReview(
     reviewedFiles: input.modifiedFiles ?? [],
     verificationContext: `Verification status: ${input.verificationStatus}`,
     findings: findingsWithTraceability,
+    coverageNotes,
+    recommendation,
+    reviewersExecuted,
+    reviewInfrastructureSummary: reviewInfrastructure?.summary,
+    reviewInfrastructureHint: reviewInfrastructure?.recoveryHint,
     cwd,
   })
 
@@ -967,8 +1089,9 @@ export async function runCodeReview(
     severity,
     recommendation,
     findingsPath,
-    reviewersExecuted: manifest.reviewers.filter(r => r.status === "executed").length,
+    reviewersExecuted,
     coverageNotes,
+    reviewInfrastructure: reviewInfrastructure ?? { status: "ok" },
   }
 }
 

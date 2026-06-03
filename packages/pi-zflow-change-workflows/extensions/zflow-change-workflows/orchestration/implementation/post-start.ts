@@ -563,10 +563,15 @@ export async function runImplementationPostStartSequence(
         error: reviewResult.summary,
         runId,
         changeId,
-        nextSteps: [
-          "1. Address code review findings",
-          "2. Re-run /zflow-change-implement or /zflow-change-fix to proceed",
-        ],
+        nextSteps: reviewResult.infrastructureFailure
+          ? [
+              "1. Resolve the review infrastructure/configuration issue.",
+              `2. ${reviewResult.recoveryHint ?? "Run /zflow-setup-agents or /zflow-update-agents, then re-run /zflow-change-implement --resume."}`,
+            ]
+          : [
+              "1. Address code review findings",
+              "2. Re-run /zflow-change-implement or /zflow-change-fix to proceed",
+            ],
       }
     }
 
@@ -692,11 +697,17 @@ export async function runImplementationPostStartSequence(
         error: reviewResult.summary,
         runId,
         changeId,
-        nextSteps: [
-          "1. Address code review findings",
-          "2. Run /zflow-change-fix to apply fixes",
-          "3. Re-run /zflow-change-implement to re-verify",
-        ],
+        nextSteps: reviewResult.infrastructureFailure
+          ? [
+              "1. Resolve the review infrastructure/configuration issue.",
+              `2. ${reviewResult.recoveryHint ?? "Run /zflow-setup-agents or /zflow-update-agents, then re-run /zflow-change-implement --resume."}`,
+              "3. Re-run /zflow-change-implement to restart the review stage.",
+            ]
+          : [
+              "1. Address code review findings",
+              "2. Run /zflow-change-fix to apply fixes",
+              "3. Re-run /zflow-change-implement to re-verify",
+            ],
       }
     }
 
