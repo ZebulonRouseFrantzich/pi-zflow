@@ -295,6 +295,8 @@ export {
 export {
   runChangeAuditWorkflow,
   runChangeFixWorkflow,
+  runDirectFixWorkflow,
+  buildDirectFixBatches,
   buildFixOrchestratorTaskPrompt,
   resolveFixOrchestratorConfig,
 } from "./orchestration/fix/workflow.js"
@@ -302,6 +304,10 @@ export {
 export type {
   AuditWorkflowOptions,
   AuditWorkflowResult,
+  DirectFixBatch,
+  DirectFixFindingOutcome,
+  DirectFixWorkflowOptions,
+  DirectFixWorkflowResult,
   FixOrchestratorConfig,
   FixWorkflowOptions,
   FixWorkflowResult,

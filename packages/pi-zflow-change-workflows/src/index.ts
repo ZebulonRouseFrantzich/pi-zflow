@@ -290,11 +290,17 @@ export type {
 export {
   runChangeAuditWorkflow,
   runChangeFixWorkflow,
+  runDirectFixWorkflow,
+  buildDirectFixBatches,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
 export type {
   AuditWorkflowOptions,
   AuditWorkflowResult,
+  DirectFixBatch,
+  DirectFixFindingOutcome,
+  DirectFixWorkflowOptions,
+  DirectFixWorkflowResult,
   FixWorkflowOptions,
   FixWorkflowResult,
 } from "../extensions/zflow-change-workflows/orchestration.js"

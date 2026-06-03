@@ -3,11 +3,18 @@
  */
 
 import {
+  resolveChangeDir,
   resolveCodeReviewFindingsPath,
   resolvePlanArtifactPath,
   resolvePlanStatePath,
   resolvePlanVersionDir,
 } from "pi-zflow-artifacts/artifact-paths"
+import { resolveRuntimeStateDir } from "pi-zflow-core/runtime-paths"
+import type {
+  AgentDispatchProgress,
+  AgentDispatchResult,
+  DispatchService,
+} from "pi-zflow-core/dispatch-service"
 
 import { migrateLegacyChangeArtifactsIfPresent } from "../implementation/workflow.js"
 import {
@@ -254,6 +261,287 @@ export interface FixWorkflowResult {
   fixOrchestratorTaskPrompt?: string
   /** Paths to the five canonical plan artifacts for source context. */
   planArtifactPaths?: Record<string, string>
+}
+
+export interface DirectFixBatch {
+  batchId: string
+  fileKey: string
+  files: string[]
+  findings: ParsedFinding[]
+  severity: ParsedFinding["severity"]
+  workerAgent: string
+}
+
+export interface DirectFixFindingOutcome {
+  findingId: string
+  title: string
+  severity: ParsedFinding["severity"]
+  file?: string
+  status: "fixed" | "unresolved"
+  attempts: number
+  reason?: string
+  outputPath?: string
+}
+
+export interface DirectFixWorkflowResult {
+  changeId: string
+  planVersion: string
+  reportPath: string
+  batchCount: number
+  fixed: DirectFixFindingOutcome[]
+  unresolved: DirectFixFindingOutcome[]
+  verificationCommand?: string
+}
+
+export interface DirectFixWorkflowOptions {
+  changeId: string
+  fixResult: FixWorkflowResult
+  dispatchService: DispatchService
+  cwd?: string
+  workerAgent?: string
+  workerModel?: string
+  workerThinking?: string
+  onBatchStart?: (batch: DirectFixBatch) => void | Promise<void>
+  onBatchUpdate?: (batch: DirectFixBatch, progress: AgentDispatchProgress) => void | Promise<void>
+  onBatchComplete?: (batch: DirectFixBatch, result: AgentDispatchResult & { outputPath?: string }) => void | Promise<void>
+}
+
+function severityRank(severity: ParsedFinding["severity"]): number {
+  switch (severity) {
+    case "critical": return 0
+    case "major": return 1
+    case "minor": return 2
+    case "nit": return 3
+    default: return 4
+  }
+}
+
+function normalizeBatchFileKey(finding: ParsedFinding): string {
+  const file = finding.file?.trim()
+  if (file) return file
+  return `__${finding.findingId}`
+}
+
+function toAbsoluteArtifactPath(runtimeStateDir: string, artifactPath: string | undefined): string | undefined {
+  if (!artifactPath) return undefined
+  if (artifactPath.startsWith("/") || /^[A-Za-z]:[\\/]/.test(artifactPath)) return artifactPath
+  return `${runtimeStateDir}/${artifactPath}`
+}
+
+export function buildDirectFixBatches(
+  findings: ParsedFinding[],
+  workerAgent: string = "zflow.implement-routine",
+): DirectFixBatch[] {
+  const grouped = new Map<string, DirectFixBatch>()
+
+  for (const finding of findings) {
+    const fileKey = normalizeBatchFileKey(finding)
+    const existing = grouped.get(fileKey)
+    if (existing) {
+      existing.findings.push(finding)
+      if (finding.file && !existing.files.includes(finding.file)) {
+        existing.files.push(finding.file)
+      }
+      if (severityRank(finding.severity) < severityRank(existing.severity)) {
+        existing.severity = finding.severity
+      }
+      continue
+    }
+
+    grouped.set(fileKey, {
+      batchId: `batch-${grouped.size + 1}`,
+      fileKey,
+      files: finding.file ? [finding.file] : [],
+      findings: [finding],
+      severity: finding.severity,
+      workerAgent,
+    })
+  }
+
+  return [...grouped.values()].sort((a, b) => {
+    const sevDiff = severityRank(a.severity) - severityRank(b.severity)
+    if (sevDiff !== 0) return sevDiff
+    return a.fileKey.localeCompare(b.fileKey)
+  })
+}
+
+function buildDirectFixWorkerTaskPrompt(
+  changeId: string,
+  fixResult: FixWorkflowResult,
+  batch: DirectFixBatch,
+  runtimeStateDir: string,
+  orchestratorTarget?: string,
+): string {
+  const planPaths = fixResult.planArtifactPaths ?? {}
+  const lines: string[] = [
+    `# Direct Fix Worker Task — ${changeId}`,
+    "",
+    `You are fixing ${batch.findings.length} review finding(s) for change \`${changeId}\`.`,
+    `Work only on this batch: \`${batch.batchId}\`.`,
+    `Primary target files: ${batch.files.length > 0 ? batch.files.map((file) => `\`${file}\``).join(", ") : "(not specified)"}`,
+    "",
+    "## Source Change Context (MUST read before editing)",
+    "",
+    "Read these canonical documents first and keep the fixes aligned with them:",
+    `- Design: \`${planPaths.design ?? "(missing)"}\``,
+    `- Execution Groups: \`${planPaths.executionGroups ?? "(missing)"}\``,
+    `- Standards: \`${planPaths.standards ?? "(missing)"}\``,
+    `- Verification: \`${planPaths.verification ?? "(missing)"}\``,
+    `- Implementation Tasks: \`${planPaths.implementationTasks ?? "(missing)"}\``,
+    "",
+    fixResult.verificationCommand
+      ? `Final verification command for the change: \`${fixResult.verificationCommand}\``
+      : "No final verification command was resolved for the change artifacts.",
+    "",
+    "## Findings in this batch",
+    "",
+  ]
+
+  for (const finding of batch.findings) {
+    lines.push(`### ${finding.findingId}: ${finding.title}`)
+    lines.push(`- Severity: ${finding.severity}`)
+    lines.push(`- File: ${finding.file ?? "(not specified)"}`)
+    if (finding.line) lines.push(`- Line: ${finding.line}`)
+    lines.push(`- Reviewer: ${finding.reviewerRole}`)
+    lines.push(`- Evidence: ${finding.evidence}`)
+    lines.push(`- Recommendation: ${finding.recommendation}`)
+    if (finding.expectedBehavior) lines.push(`- Expected behavior: ${finding.expectedBehavior}`)
+    if (finding.fixRequirements) lines.push(`- Fix requirements: ${finding.fixRequirements}`)
+    if (finding.validation) lines.push(`- Validation: ${finding.validation}`)
+    if (finding.suggestedApproach) lines.push(`- Suggested approach: ${finding.suggestedApproach}`)
+    if (finding.whyItMatters) lines.push(`- Why it matters: ${finding.whyItMatters}`)
+    const artifactPath = toAbsoluteArtifactPath(runtimeStateDir, finding.artifactPath)
+    if (artifactPath) lines.push(`- Raw reviewer artifact: \`${artifactPath}\``)
+    lines.push("")
+  }
+
+  lines.push(
+    ...buildLimitedCoordinationLines(`fix ${changeId} ${batch.batchId}`, orchestratorTarget),
+    "- Do not use coordination for routine narration.",
+    "",
+    "## Instructions",
+    "",
+    "1. Read the source change documents listed above before editing.",
+    "2. Read the raw reviewer artifact(s) for this batch before editing.",
+    "3. Fix ONLY the findings in this batch. Do not expand scope.",
+    "4. Prefer the minimal code change that satisfies the findings and preserves the approved design/standards.",
+    "5. Update or add focused tests when behavior changes.",
+    "6. Run the most relevant validation/test commands you can for this batch. Use any explicit validation listed above.",
+    "7. In your final response, report: changed files, findings addressed, validation run, and any unresolved blocker.",
+  )
+
+  return lines.join("\n")
+}
+
+function buildDirectFixReport(
+  changeId: string,
+  fixResult: FixWorkflowResult,
+  batchCount: number,
+  fixed: DirectFixFindingOutcome[],
+  unresolved: DirectFixFindingOutcome[],
+): string {
+  const lines: string[] = [
+    "# Fix Orchestration Report",
+    "",
+    `**Change**: ${changeId}`,
+    `**Findings processed**: ${fixResult.parsedFindings.length}`,
+    `**Batches used**: ${batchCount}`,
+    `**Config**: maxAttemptsPerFinding=${fixResult.fixOrchestratorConfig.maxAttemptsPerFinding}, maxGlobalRounds=${fixResult.fixOrchestratorConfig.maxGlobalRounds}`,
+    `**Execution mode**: direct command-layer orchestration (no nested fix-orchestrator subagent)`,
+    "",
+    "## Fixed",
+    "",
+    ...(fixed.length > 0
+      ? fixed.map((finding) => `- ${finding.findingId}: ${finding.title} (attempts: ${finding.attempts})${finding.outputPath ? ` — output: ${finding.outputPath}` : ""}`)
+      : ["None."]),
+    "",
+    "## Unresolved",
+    "",
+    ...(unresolved.length > 0
+      ? unresolved.map((finding) => `- ${finding.findingId}: ${finding.title} — ${finding.reason ?? "worker failed"} (attempts: ${finding.attempts})${finding.outputPath ? ` — output: ${finding.outputPath}` : ""}`)
+      : ["None."]),
+    "",
+    "## Verification",
+    "",
+    fixResult.verificationCommand
+      ? `- Verification command: \`${fixResult.verificationCommand}\``
+      : "- Verification command: (not resolved)",
+    unresolved.length > 0
+      ? "- Result: partial — unresolved findings remain"
+      : "- Result: worker-level validation completed for all dispatched batches",
+    "",
+    "## Reviewer Re-check Recommendation",
+    "",
+    "- Recommend re-running: correctness, integration, security, system",
+    `- Focus files: ${[...new Set(fixResult.parsedFindings.map((finding) => finding.file).filter((file): file is string => Boolean(file)))].map((file) => `\`${file}\``).join(", ") || "(none listed)"}`,
+  ]
+
+  return lines.join("\n")
+}
+
+export async function runDirectFixWorkflow(
+  options: DirectFixWorkflowOptions,
+): Promise<DirectFixWorkflowResult> {
+  const { default: fs } = await import("node:fs/promises")
+  const cwd = options.cwd
+  const changeId = options.changeId
+  const fixResult = options.fixResult
+  const workerAgent = options.workerAgent ?? "zflow.implement-routine"
+  const batches = buildDirectFixBatches(fixResult.parsedFindings, workerAgent)
+  const runtimeStateDir = resolveRuntimeStateDir(cwd)
+  const versionDir = resolvePlanVersionDir(changeId, fixResult.planVersion, cwd)
+  const changeDir = resolveChangeDir(changeId, cwd)
+  await fs.mkdir(versionDir, { recursive: true })
+  await fs.mkdir(changeDir, { recursive: true })
+
+  const fixed: DirectFixFindingOutcome[] = []
+  const unresolved: DirectFixFindingOutcome[] = []
+
+  for (const batch of batches) {
+    await options.onBatchStart?.(batch)
+    const outputPath = `${versionDir}/${batch.batchId}-result.md`
+    const result = await options.dispatchService.runAgent({
+      agent: batch.workerAgent,
+      task: buildDirectFixWorkerTaskPrompt(changeId, fixResult, batch, runtimeStateDir),
+      cwd,
+      ...(options.workerModel ? { model: options.workerModel } : {}),
+      output: outputPath,
+      outputMode: "file-only",
+      onUpdate: (progress) => {
+        void options.onBatchUpdate?.(batch, progress)
+      },
+    })
+    await options.onBatchComplete?.(batch, result)
+
+    const target = result.ok ? fixed : unresolved
+    for (const finding of batch.findings) {
+      target.push({
+        findingId: finding.findingId,
+        title: finding.title,
+        severity: finding.severity,
+        file: finding.file,
+        status: result.ok ? "fixed" : "unresolved",
+        attempts: 1,
+        reason: result.ok ? undefined : (result.error ?? "worker failed"),
+        outputPath: result.outputPath ?? outputPath,
+      })
+    }
+  }
+
+  const reportContent = buildDirectFixReport(changeId, fixResult, batches.length, fixed, unresolved)
+  const reportPath = `${versionDir}/fix-orchestration-report.md`
+  await fs.writeFile(reportPath, reportContent, "utf-8")
+  await fs.writeFile(`${changeDir}/fix-orchestration-report.md`, reportContent, "utf-8")
+
+  return {
+    changeId,
+    planVersion: fixResult.planVersion,
+    reportPath,
+    batchCount: batches.length,
+    fixed,
+    unresolved,
+    verificationCommand: fixResult.verificationCommand,
+  }
 }
 
 /**

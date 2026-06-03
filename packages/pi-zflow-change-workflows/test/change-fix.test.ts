@@ -730,6 +730,73 @@ describe("buildFixPlan enriched fields", { concurrency: false }, () => {
 
 // ── buildFixOrchestratorTaskPrompt conflict-resolution tests ────
 
+describe("runDirectFixWorkflow", { concurrency: false }, () => {
+  it("dispatches fix workers directly without zflow.fix-orchestrator", async () => {
+    const { runChangeFixWorkflow, runDirectFixWorkflow } = await import(
+      "../extensions/zflow-change-workflows/orchestration.js"
+    )
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-direct-fix-"))
+    const reviewDir = join(tmpDir, ".zflow", "review")
+    const versionDir = join(tmpDir, ".zflow", "plans", "feat-auth", "v1")
+    await mkdir(reviewDir, { recursive: true })
+    await mkdir(versionDir, { recursive: true })
+    await writeFile(join(reviewDir, "code-review-findings.md"), VALID_FINDINGS_MD, "utf-8")
+    await writeFile(join(tmpDir, ".zflow", "plans", "feat-auth", "plan-state.json"), JSON.stringify({
+      currentVersion: "v1",
+      approvedVersion: "v1",
+      lifecycleState: "review-failed",
+    }, null, 2), "utf-8")
+    await writeFile(join(versionDir, "design.md"), "# Design\n\nReal design", "utf-8")
+    await writeFile(join(versionDir, "execution-groups.md"), "# Execution Groups\n\n- `src/auth/login.ts`\n- `src/auth/types.ts`", "utf-8")
+    await writeFile(join(versionDir, "standards.md"), "# Standards\n\nFollow existing conventions.", "utf-8")
+    await writeFile(join(versionDir, "verification.md"), "# Verification\n\n```bash\nnpm test\n```\n", "utf-8")
+    await writeFile(join(versionDir, "implementation-tasks.md"), "# Implementation Tasks\n\n## Group 1\n- Fix auth findings.\n", "utf-8")
+    try {
+      const { execFileSync } = await import("node:child_process")
+      execFileSync("git", ["init"], { cwd: tmpDir, stdio: "pipe" })
+    } catch { /* ok */ }
+
+    try {
+      const fixResult = await runChangeFixWorkflow({ changeId: "feat-auth", cwd: tmpDir })
+      const calls: Array<Record<string, unknown>> = []
+      const dispatchService = {
+        name: "test-dispatch",
+        async runAgent(input: Record<string, unknown>) {
+          calls.push(input)
+          return {
+            ok: true,
+            rawOutput: "Applied fixes successfully.",
+            outputPath: join(versionDir, `${String(input.agent)}-output.md`),
+          }
+        },
+        async runParallel() {
+          return { ok: false, results: [] }
+        },
+      }
+
+      const result = await runDirectFixWorkflow({
+        changeId: "feat-auth",
+        fixResult,
+        dispatchService: dispatchService as any,
+        cwd: tmpDir,
+        workerAgent: "zflow.implement-routine",
+      })
+
+      assert.equal(calls.length, 2, "findings should be grouped into two direct worker batches by file")
+      assert.ok(calls.every((call) => call.agent === "zflow.implement-routine"), "all direct fix batches should use implement-routine")
+      assert.ok(calls.every((call) => call.agent !== "zflow.fix-orchestrator"), "direct fix workflow must not dispatch zflow.fix-orchestrator")
+      assert.equal(result.fixed.length, 4)
+      assert.equal(result.unresolved.length, 0)
+      const report = await import("node:fs/promises").then((fs) => fs.readFile(result.reportPath, "utf-8"))
+      assert.ok(report.includes("direct command-layer orchestration"))
+      assert.ok(report.includes("## Fixed"))
+      assert.ok(report.includes("finding-1"))
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe("buildFixOrchestratorTaskPrompt conflict-resolution protocol", { concurrency: false }, () => {
   it("includes the Conflict Resolution Protocol section", async () => {
     const { buildFixOrchestratorTaskPrompt, resolveFixOrchestratorConfig } = await import(
