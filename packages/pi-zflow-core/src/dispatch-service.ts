@@ -80,6 +80,12 @@ export interface AgentDispatchResult {
   ok: boolean
   /** Optional error message. */
   error?: string
+  /** Optional rate-limit retry metadata for durable diagnostics/logging. */
+  rateLimitRetries?: {
+    retryCount: number
+    totalRateLimitRetries: number
+    notices?: string[]
+  }
 }
 
 // ── Parallel run input/output ───────────────────────────────────

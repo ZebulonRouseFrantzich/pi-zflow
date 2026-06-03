@@ -458,6 +458,46 @@ void describe("runCodeReview with DispatchService", () => {
     assert.match(findingsContent, /zflow-setup-agents|zflow-update-agents/)
   })
 
+  it("records reviewer rate-limit recovery notices in coverage notes", async () => {
+    const planningArtifacts = await writeArtifacts(tmpDir, "ch-review-rate-limit-notes", "v1")
+    const fakeService: DispatchService & { callLog: Array<Record<string, unknown>> } = {
+      name: "test-rate-limit-notes",
+      callLog: [],
+      async runAgent(input) {
+        this.callLog.push(input)
+        if (String(input.agent).startsWith("zflow.review-")) {
+          return {
+            ok: true,
+            rawOutput: JSON.stringify({ findings: [] }),
+            rateLimitRetries: {
+              retryCount: 1,
+              totalRateLimitRetries: 1,
+              notices: ["⚠️ Agent zflow.review-system hit a provider rate limit (429). Retry 1/3 scheduled in 30s."],
+            },
+          }
+        }
+        return { ok: true, rawOutput: JSON.stringify({ severity: { critical: 0, major: 0, minor: 0, nit: 0 }, recommendation: "GO" }) }
+      },
+      async runParallel() {
+        return { ok: false, results: [] }
+      },
+    }
+
+    const registry = getZflowRegistry()
+    registry.claim({
+      capability: DISPATCH_SERVICE_CAPABILITY,
+      version: "0.1.0",
+      provider: "test",
+      sourcePath: import.meta.url,
+      compatibilityMode: "compatible",
+    })
+    registry.provide(DISPATCH_SERVICE_CAPABILITY, fakeService)
+
+    const result = await runCodeReview(makeInput(planningArtifacts))
+    assert.ok(result.coverageNotes.some((note) => note.includes("provider rate-limit retry")))
+    assert.ok(result.coverageNotes.some((note) => note.includes("rate-limit notice")))
+  })
+
   it("accepts empty findings JSON as valid structured result", async () => {
     const planningArtifacts = await writeArtifacts(tmpDir, "ch-empty-findings", "v1")
     const emptyJson = JSON.stringify({ findings: [] })

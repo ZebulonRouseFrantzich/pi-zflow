@@ -295,6 +295,7 @@ class SubagentsDispatchService implements DispatchService {
       // execution. That lets zflow surface provider 429 usage-limit failures
       // instead of a later placeholder fallback error.
       const backend = this.advancedFallback ?? this.backend
+      const rateLimitNotices: string[] = []
       const runWithModel = async (modelOverride: string | undefined) => runAgentWithRateLimitRetries({
         dispatchService: {
           name: this.name,
@@ -323,6 +324,7 @@ class SubagentsDispatchService implements DispatchService {
           ...(modelOverride ? { model: modelOverride } : {}),
         },
         onRateLimitNotice: async (notice) => {
+          rateLimitNotices.push(notice.message)
           input.onUpdate?.({
             agent: input.agent,
             status: "running",
@@ -332,25 +334,27 @@ class SubagentsDispatchService implements DispatchService {
         },
       })
 
-      let result = await runWithModel(input.model)
+      let currentModel = input.model
+      let result = await runWithModel(currentModel)
       if (!result.ok && isUnsupportedDeveloperRoleDispatchError(result.error)) {
-        const fallbackModels = await loadAgentFallbackModelCandidates(input.agent, input.model)
+        const fallbackModels = await loadAgentFallbackModelCandidates(input.agent, currentModel)
         for (const fallbackModel of fallbackModels) {
+          const compatibilityNotice =
+            `⚠️ Agent ${input.agent} hit a provider compatibility error on model ${currentModel ?? "(default)"}. ` +
+            `Retrying with fallback model ${fallbackModel}.`
           input.onUpdate?.({
             agent: input.agent,
             status: "running",
             lastActivityAt: Date.now(),
-            recentOutput: [
-              `⚠️ Agent ${input.agent} hit a provider compatibility error on model ${input.model ?? "(default)"}. Retrying with fallback model ${fallbackModel}.`,
-            ],
+            recentOutput: [compatibilityNotice],
           })
+          await persistAgentFallbackModel(input.agent, fallbackModel).catch(() => {})
+          currentModel = fallbackModel
           const fallbackResult = await runWithModel(fallbackModel)
+          result = fallbackResult
           if (fallbackResult.ok) {
-            await persistAgentFallbackModel(input.agent, fallbackModel).catch(() => {})
-            result = fallbackResult
             break
           }
-          result = fallbackResult
           if (!isUnsupportedDeveloperRoleDispatchError(fallbackResult.error)) {
             break
           }
@@ -362,6 +366,13 @@ class SubagentsDispatchService implements DispatchService {
         rawOutput: result.rawOutput,
         outputPath: result.outputPath,
         error: result.error,
+        rateLimitRetries: result.totalRateLimitRetries > 0
+          ? {
+              retryCount: result.retryCount,
+              totalRateLimitRetries: result.totalRateLimitRetries,
+              notices: [...rateLimitNotices],
+            }
+          : undefined,
       }
     } catch (err) {
       return {
@@ -834,9 +845,9 @@ function stripKnownThinkingSuffix(model: string | undefined): string | undefined
 
 function isUnsupportedDeveloperRoleDispatchError(error: string | undefined): boolean {
   if (!error) return false
-  return /messages?[^\n]*role/i.test(error) &&
+  return (/messages?[\s\S]*role/i.test(error) || /\"role\"/i.test(error)) &&
     /input should be 'system', 'user', 'assistant' or 'tool'/i.test(error) &&
-    /developer/i.test(error)
+    (/\bdeveloper\b/i.test(error) || /\"input\"\s*:\s*\"developer\"/i.test(error))
 }
 
 function resolveAgentFallbackModelCandidates(

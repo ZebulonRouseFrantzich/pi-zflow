@@ -570,6 +570,20 @@ interface AgentModelInfo {
   thinking?: string
 }
 
+function buildRateLimitCoverageNotes(
+  label: string,
+  metadata: { retryCount?: number; totalRateLimitRetries?: number; notices?: string[] } | undefined,
+): string[] {
+  if (!metadata || (metadata.totalRateLimitRetries ?? 0) <= 0) return []
+  const notes: string[] = [
+    `${label} recovered after ${metadata.totalRateLimitRetries} provider rate-limit retr${metadata.totalRateLimitRetries === 1 ? "y" : "ies"}.`,
+  ]
+  for (const notice of metadata.notices ?? []) {
+    notes.push(`${label} rate-limit notice: ${notice}`)
+  }
+  return notes
+}
+
 function isUsableResolvedModel(model: string | null | undefined): model is string {
   if (!model) return false
   const normalized = model.trim().toLowerCase()
@@ -873,6 +887,9 @@ export async function runCodeReview(
                 })
               },
             })
+            for (const note of buildRateLimitCoverageNotes(`Reviewer "${name}"`, raw.rateLimitRetries)) {
+              coverageNotes.push(note)
+            }
             if (raw.ok) {
               output = parseReviewerOutput(raw.rawOutput)
             } else {
@@ -998,6 +1015,9 @@ export async function runCodeReview(
           ...(synthesizerModel ? { model: synthesizerModel } : {}),
         })
 
+        for (const note of buildRateLimitCoverageNotes("Synthesizer", synthResult.rateLimitRetries)) {
+          coverageNotes.push(note)
+        }
         synthesizerOutput = synthResult.rawOutput
         coverageNotes.push(`Synthesizer dispatched via "${dispatchService.name}" (zflow.synthesizer)`)
       }
