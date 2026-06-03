@@ -7,9 +7,13 @@
  */
 import { describe, it, afterEach, mock } from "node:test"
 import * as assert from "node:assert/strict"
+import * as fs from "node:fs"
+import * as os from "node:os"
+import * as path from "node:path"
 
 import activateZflowSubagentsBridgeExtension from "../extensions/zflow-subagents-bridge/index.js"
 import {
+  buildScopedVerificationCommandAttempts,
   extractExecutableScopedVerificationCommands,
   extractUsageLimitWaitTime,
   isUsageLimitError,
@@ -275,6 +279,31 @@ describe("pi-zflow-subagents-bridge scoped verification helpers", () => {
       [
         "npm test -- --runInBand license-manager-oracle-entitlements",
         "npm test -- --runInBand license-manager-mssql-parity",
+      ],
+    )
+  })
+
+  it("builds retry attempts for nested package test commands", () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-zflow-bridge-attempts-"))
+    fs.mkdirSync(path.join(tempRoot, "cli", "test"), { recursive: true })
+    fs.writeFileSync(path.join(tempRoot, "package.json"), "{}\n", "utf-8")
+    fs.writeFileSync(path.join(tempRoot, "cli", "package.json"), "{}\n", "utf-8")
+    fs.writeFileSync(path.join(tempRoot, "cli", "test", "license-manager-oracle.test.js"), "test\n", "utf-8")
+
+    assert.deepEqual(
+      buildScopedVerificationCommandAttempts(
+        "npm test -- --runInBand cli/test/license-manager-oracle.test.js",
+        tempRoot,
+      ),
+      [
+        {
+          cwd: tempRoot,
+          command: "npm test -- --runInBand cli/test/license-manager-oracle.test.js",
+        },
+        {
+          cwd: path.join(tempRoot, "cli"),
+          command: "npm test -- --runInBand test/license-manager-oracle.test.js",
+        },
       ],
     )
   })

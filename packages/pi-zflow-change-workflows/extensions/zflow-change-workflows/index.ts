@@ -17,7 +17,7 @@ import {
 } from "pi-zflow-core/runtime-paths"
 
 import { getZflowRegistry } from "pi-zflow-core/registry"
-import { PI_ZFLOW_CHANGE_WORKFLOWS_VERSION } from "pi-zflow-core"
+import { PI_ZFLOW_CHANGE_WORKFLOWS_VERSION, inferTaskRepoRoot } from "pi-zflow-core"
 import type { CapabilityClaim } from "pi-zflow-core/registry"
 
 import {
@@ -108,7 +108,10 @@ import {
   createWorkflowProgressIndicator,
   buildWorkflowFinalNextStepsLine,
 } from "./activation/progress-renderer.js"
-import { acceptImplementationNoopResult } from "./orchestration/implementation/noop-success.js"
+import {
+  acceptAlreadyImplementedEvidenceResult,
+  acceptImplementationNoopResult,
+} from "./orchestration/implementation/noop-success.js"
 import type {
   WorkflowSubagentSnapshot,
   SessionMessageLike,
@@ -1556,8 +1559,9 @@ async function resumeWorktreeDispatch(
   }
 
   const { detectWorktreeSetupCommand } = await import("./orchestration.js")
-  const worktreeSetupCommand = await detectWorktreeSetupCommand(repoRoot)
   const tasks = await Promise.all(runPlan.tasks.map(async (t, taskIndex) => {
+    const taskRepoRoot = inferTaskRepoRoot(repoRoot, { claimedFiles: t.claimedFiles })
+    const worktreeSetupCommand = await detectWorktreeSetupCommand(taskRepoRoot)
     const planGroup = runPlan.groups[taskIndex] as unknown as {
       id: string
       files: string[]
@@ -1578,6 +1582,7 @@ async function resumeWorktreeDispatch(
       agent: t.agent,
       groupId: t.groupId,
       task: t.task,
+      cwd: taskRepoRoot,
       model: implementModel.dispatchModel,
       output: path.join(worktreeResultsDir, `${t.groupId}-resume-result.md`),
       outputMode: "file-only" as const,
@@ -1764,7 +1769,23 @@ async function resumeWorktreeDispatch(
       rawOutput,
       verification,
     })
-    const resultForWorkflow = acceptedNoop.accepted
+    const acceptedExistingEvidence = verification?.status === "fail"
+      ? acceptAlreadyImplementedEvidenceResult({
+          ok: r.ok,
+          error: r.error,
+          rawOutput,
+          verification,
+        })
+      : { accepted: false as const }
+    const acceptedResult = acceptedNoop.accepted ? acceptedNoop : acceptedExistingEvidence
+    const effectiveVerification = acceptedResult.accepted && verification?.status === "fail"
+      ? {
+          ...verification,
+          status: "pass" as const,
+          output: verification.output ?? acceptedResult.reason,
+        }
+      : verification
+    const resultForWorkflow = acceptedResult.accepted
       ? {
           ...r,
           ok: true,
@@ -1772,6 +1793,7 @@ async function resumeWorktreeDispatch(
           patchPath: undefined,
           worktreePath: undefined,
           changedFiles: group.files,
+          verification: effectiveVerification,
         }
       : r
 
@@ -1812,7 +1834,7 @@ async function resumeWorktreeDispatch(
 
     // If the bridge explicitly reported failed scoped verification, fail the group.
     // Missing verification (bridge no longer runs it) = deferred to final verification.
-    if (verification && verification.status === "fail") {
+    if (effectiveVerification && effectiveVerification.status === "fail" && !acceptedResult.accepted) {
       resumeFailures.push(`${group.id}: scoped verification failed`)
       await updateGroupLedger(runId, group.id, {
         status: "failed",
@@ -1845,16 +1867,16 @@ async function resumeWorktreeDispatch(
     }
 
     // Group succeeded
-    const scopedVerification = verification ?? {
+    const scopedVerification = effectiveVerification ?? {
       status: "skipped" as const,
       command: undefined,
       output: "Scoped verification deferred to the final verification phase.",
     }
-    const successMessage = acceptedNoop.accepted
-      ? (acceptedNoop.reason ?? "Implementation already present; scoped verification passed without additional edits.")
+    const successMessage = acceptedResult.accepted
+      ? (acceptedResult.reason ?? "Implementation already present; scoped verification passed without additional edits.")
       : "agent complete; scoped verification deferred to final verification"
 
-    if (acceptedNoop.accepted) {
+    if (acceptedResult.accepted) {
       await updateGroupLedger(runId, group.id, {
         status: "applied",
         appliedToPrimary: true,
@@ -2626,22 +2648,26 @@ async function runWorktreeDispatchAndFinalize(
 
   // Auto-detect worktree setup command (pnpm install, npm ci, etc.)
   const { detectWorktreeSetupCommand } = await import("./orchestration.js")
-  const worktreeSetupCommand = await detectWorktreeSetupCommand(repoRoot)
 
   // Build the full tasks array once. Each wave will select a subset by index.
-  const tasks = runPlan.tasks.map((t, taskIdx) => ({
-    agent: t.agent,
-    groupId: t.groupId,
-    task: t.task,
-    model: implementModel.dispatchModel,
-    output: path.join(worktreeResultsDir, `${t.groupId}-result.md`),
-    outputMode: "file-only" as const,
-    scopedVerification: t.scopedVerification,
-    worktreeSetupCommand,
-    claimedFiles: t.claimedFiles,
-    dependencies: t.dependencies,
-    worktreeStrategy: t.worktreeStrategy,
-    onUpdate: (progress: AgentDispatchProgress) => {
+  const tasks = await Promise.all(runPlan.tasks.map(async (t, taskIdx) => {
+    const taskRepoRoot = inferTaskRepoRoot(repoRoot, { claimedFiles: t.claimedFiles })
+    const worktreeSetupCommand = await detectWorktreeSetupCommand(taskRepoRoot)
+
+    return {
+      agent: t.agent,
+      groupId: t.groupId,
+      task: t.task,
+      cwd: taskRepoRoot,
+      model: implementModel.dispatchModel,
+      output: path.join(worktreeResultsDir, `${t.groupId}-result.md`),
+      outputMode: "file-only" as const,
+      scopedVerification: t.scopedVerification,
+      worktreeSetupCommand,
+      claimedFiles: t.claimedFiles,
+      dependencies: t.dependencies,
+      worktreeStrategy: t.worktreeStrategy,
+      onUpdate: (progress: AgentDispatchProgress) => {
       const recentTools = Array.isArray(progress.recentTools) ? progress.recentTools : []
       const recentTool = recentTools[recentTools.length - 1]
       const recentOutput = Array.isArray(progress.recentOutput) ? progress.recentOutput : []
@@ -2670,6 +2696,7 @@ async function runWorktreeDispatchAndFinalize(
       })
       void flushLiveProgress()
     },
+    }
   }))
 
   // Map groupId → task index for fast lookup
@@ -2886,7 +2913,23 @@ async function runWorktreeDispatchAndFinalize(
         rawOutput,
         verification,
       })
-      const resultForWorkflow = acceptedNoop.accepted
+      const acceptedExistingEvidence = verification?.status === "fail"
+        ? acceptAlreadyImplementedEvidenceResult({
+            ok: r.ok,
+            error: r.error,
+            rawOutput,
+            verification,
+          })
+        : { accepted: false as const }
+      const acceptedResult = acceptedNoop.accepted ? acceptedNoop : acceptedExistingEvidence
+      const effectiveVerification = acceptedResult.accepted && verification?.status === "fail"
+        ? {
+            ...verification,
+            status: "pass" as const,
+            output: verification.output ?? acceptedResult.reason,
+          }
+        : verification
+      const resultForWorkflow = acceptedResult.accepted
         ? {
             ...r,
             ok: true,
@@ -2894,16 +2937,17 @@ async function runWorktreeDispatchAndFinalize(
             patchPath: undefined,
             worktreePath: undefined,
             changedFiles: group?.files ?? r.changedFiles,
+            verification: effectiveVerification,
           }
         : r
-      const dispatchFailed = !resultForWorkflow.ok || verification?.status === "fail"
+      const dispatchFailed = !resultForWorkflow.ok || (effectiveVerification?.status === "fail" && !acceptedResult.accepted)
       const rateLimitRetryCount = dispatchResult.retryCounts?.[gid] ?? 0
       allResults.push({ groupId: gid, result: resultForWorkflow, index: idx })
 
       if (!dispatchFailed) {
-        const successMessage = acceptedNoop.accepted
-          ? (acceptedNoop.reason ?? "implementation already present; verification passed")
-          : verification?.status === "pass"
+        const successMessage = acceptedResult.accepted
+          ? (acceptedResult.reason ?? "implementation already present; verification passed")
+          : effectiveVerification?.status === "pass"
             ? "agent complete; scoped verification passed"
             : "agent complete; scoped verification deferred to final verification"
         options?.onSubagentUpdate?.(gid, {
@@ -2920,7 +2964,7 @@ async function runWorktreeDispatchAndFinalize(
           failureKind: undefined,
           patchPath: resultForWorkflow.patchPath,
           changedFiles: resultForWorkflow.changedFiles ?? group?.files,
-          scopedVerification: verification,
+          scopedVerification: effectiveVerification,
           retryCount: rateLimitRetryCount,
           rateLimitRetryCount,
           lastCommand: successMessage,

@@ -50,7 +50,12 @@ import {
   type DispatchWorktreeSetupHook,
   type TaskWorktreeStrategy,
 } from "pi-zflow-core/dispatch-service"
-import { PI_ZFLOW_SUBAGENTS_BRIDGE_VERSION, runWorktreeSetupHook, type WorktreeSetupHookConfig } from "pi-zflow-core"
+import {
+  PI_ZFLOW_SUBAGENTS_BRIDGE_VERSION,
+  inferTaskRepoRoot,
+  runWorktreeSetupHook,
+  type WorktreeSetupHookConfig,
+} from "pi-zflow-core"
 
 /**
  * Well-known capability name for the dispatch service.
@@ -230,6 +235,18 @@ function describeMissingCapabilities(
   return null
 }
 
+function requiresCompatWorktreeTaskCwds(input: ParallelDispatchInput): boolean {
+  if (!input.worktree) return false
+  const sharedCwd = safeGetCwd(input.cwd)
+  return input.tasks.some((task) => {
+    if (!task.cwd) return false
+    const taskCwd = path.isAbsolute(task.cwd)
+      ? task.cwd
+      : path.resolve(sharedCwd, task.cwd)
+    return path.resolve(taskCwd) !== path.resolve(sharedCwd)
+  })
+}
+
 /**
  * DispatchService that delegates to pi-subagents-zflow's programmatic API.
  *
@@ -312,6 +329,10 @@ class SubagentsDispatchService implements DispatchService {
   }
 
   async runParallel(input: ParallelDispatchInput): Promise<ParallelDispatchResult> {
+    if (this.advancedFallback && requiresCompatWorktreeTaskCwds(input)) {
+      return this.invokeParallel(this.advancedFallback, input)
+    }
+
     const requestedUnsupported = describeMissingCapabilities(input, this.primaryCapabilities)
     if (requestedUnsupported) {
       if (this.advancedFallback) {
@@ -926,13 +947,21 @@ const COMPAT_EXCLUDED_STAGE_PATHS = ["node_modules", ".wrangler"]
 
 interface CompatWorkspacePlan {
   workspaceId: string
+  repoCwd: string
   mode: "isolated" | "shared-staging"
   workspaceConcurrency: "serialized" | "concurrent"
   baseRef?: string
   taskIndexes: number[]
 }
 
-function buildCompatWorkspacePlans(tasks: BackendParallelTaskInput[]): CompatWorkspacePlan[] {
+function resolveCompatTaskRepoCwd(sharedCwd: string, task: BackendParallelTaskInput): string {
+  return inferTaskRepoRoot(sharedCwd, {
+    cwd: task.cwd,
+    claimedFiles: task.claimedFiles,
+  })
+}
+
+function buildCompatWorkspacePlans(sharedCwd: string, tasks: BackendParallelTaskInput[]): CompatWorkspacePlan[] {
   const plans = new Map<string, CompatWorkspacePlan>()
 
   for (let index = 0; index < tasks.length; index++) {
@@ -943,11 +972,13 @@ function buildCompatWorkspacePlans(tasks: BackendParallelTaskInput[]): CompatWor
         `Task ${task.groupId ?? index} requested shared-staging without a workspaceId.`,
       )
     }
+    const repoCwd = resolveCompatTaskRepoCwd(sharedCwd, task)
     const workspaceId = strategy.mode === "shared-staging"
       ? strategy.workspaceId!
       : (task.groupId ?? `task-${index}`)
+    const planKey = `${repoCwd}::${workspaceId}`
 
-    const existing = plans.get(workspaceId)
+    const existing = plans.get(planKey)
     if (existing) {
       existing.taskIndexes.push(index)
       if (strategy.baseRef && existing.baseRef && existing.baseRef !== strategy.baseRef) {
@@ -960,8 +991,9 @@ function buildCompatWorkspacePlans(tasks: BackendParallelTaskInput[]): CompatWor
       continue
     }
 
-    plans.set(workspaceId, {
+    plans.set(planKey, {
       workspaceId,
+      repoCwd,
       mode: strategy.mode,
       workspaceConcurrency: strategy.workspaceConcurrency,
       baseRef: strategy.baseRef,
@@ -1113,6 +1145,83 @@ function extractExecutableScopedVerificationCommands(
     .filter(Boolean)
 }
 
+interface ScopedVerificationAttempt {
+  cwd: string
+  command: string
+}
+
+function looksLikePathToken(token: string): boolean {
+  if (!token || token.startsWith("-")) return false
+  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) return false
+  return token.includes("/") || token.includes("\\")
+}
+
+function splitLooseShellWords(command: string): string[] {
+  return command.match(/"[^"]*"|'[^']*'|\S+/g) ?? []
+}
+
+function unquoteShellWord(word: string): string {
+  return word.replace(/^['"]|['"]$/g, "")
+}
+
+function looksLikeRetryableScopedVerificationFailure(output: string | undefined): boolean {
+  if (!output) return false
+  return /Could not read package\.json/i.test(output) ||
+    /ENOENT: no such file or directory, open .*package\.json/i.test(output) ||
+    /No tests found/i.test(output) ||
+    /Pattern: .* - 0 matches/i.test(output)
+}
+
+function buildScopedVerificationCommandAttempts(
+  command: string,
+  cwd: string,
+): ScopedVerificationAttempt[] {
+  const attempts: ScopedVerificationAttempt[] = [{ cwd, command }]
+  if (!/^(?:npm|yarn|pnpm)\s+test\b|^(?:npx\s+jest|jest)\b/i.test(command.trim())) {
+    return attempts
+  }
+
+  const words = splitLooseShellWords(command)
+  const pathTokens = words
+    .map((word) => unquoteShellWord(word))
+    .filter((word) => looksLikePathToken(word))
+
+  const seen = new Set<string>([`${path.resolve(cwd)}::${command}`])
+  for (const token of pathTokens) {
+    const absoluteTarget = path.resolve(cwd, token)
+    if (!fs.existsSync(absoluteTarget)) continue
+
+    let currentDir = fs.statSync(absoluteTarget).isDirectory()
+      ? absoluteTarget
+      : path.dirname(absoluteTarget)
+
+    while (currentDir !== cwd && currentDir.startsWith(`${path.resolve(cwd)}${path.sep}`)) {
+      if (fs.existsSync(path.join(currentDir, "package.json"))) {
+        const rewrittenToken = path.relative(currentDir, absoluteTarget)
+        if (rewrittenToken && rewrittenToken !== token) {
+          const rewrittenCommand = command.replace(token, rewrittenToken)
+          const dedupeKey = `${path.resolve(currentDir)}::${rewrittenCommand}`
+          if (!seen.has(dedupeKey)) {
+            seen.add(dedupeKey)
+            attempts.push({ cwd: currentDir, command: rewrittenCommand })
+          }
+        }
+      }
+      const parentDir = path.dirname(currentDir)
+      if (parentDir === currentDir) break
+      currentDir = parentDir
+    }
+  }
+
+  return attempts
+}
+
+function formatScopedVerificationAttempt(attempt: ScopedVerificationAttempt, baseCwd: string): string {
+  if (path.resolve(attempt.cwd) === path.resolve(baseCwd)) return attempt.command
+  const relativeCwd = path.relative(baseCwd, attempt.cwd) || "."
+  return `cd ${relativeCwd} && ${attempt.command}`
+}
+
 function runCompatScopedVerification(
   command: string | undefined,
   cwd: string,
@@ -1123,30 +1232,49 @@ function runCompatScopedVerification(
 
   const outputs: string[] = []
   for (const executable of commands) {
-    try {
-      const output = execFileSync("bash", ["-c", executable], {
-        cwd,
-        encoding: "utf-8",
-        maxBuffer: 50 * 1024,
-        timeout: 300_000,
-      })
-      if (output.trim()) {
-        outputs.push(output.trim())
-      }
-    } catch (err: unknown) {
-      const execErr = err as {
-        stdout?: Buffer | string
-        stderr?: Buffer | string
-        message?: string
-      }
-      const parts: string[] = []
-      if (execErr.stdout) parts.push(execErr.stdout.toString().trim())
-      if (execErr.stderr) parts.push(execErr.stderr.toString().trim())
-      if (!parts.length && execErr.message) parts.push(execErr.message)
-      return {
-        status: "fail",
-        command: commands.join("\n"),
-        output: parts.join("\n---stderr---\n").substring(0, 50 * 1024),
+    const attempts = buildScopedVerificationCommandAttempts(executable, cwd)
+
+    for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex++) {
+      const attempt = attempts[attemptIndex]!
+      try {
+        const output = execFileSync("bash", ["-c", attempt.command], {
+          cwd: attempt.cwd,
+          encoding: "utf-8",
+          maxBuffer: 50 * 1024,
+          timeout: 300_000,
+        })
+        if (output.trim()) {
+          outputs.push(output.trim())
+        }
+        break
+      } catch (err: unknown) {
+        const execErr = err as {
+          stdout?: Buffer | string
+          stderr?: Buffer | string
+          message?: string
+        }
+        const parts: string[] = []
+        if (execErr.stdout) parts.push(execErr.stdout.toString().trim())
+        if (execErr.stderr) parts.push(execErr.stderr.toString().trim())
+        if (!parts.length && execErr.message) parts.push(execErr.message)
+        const failureOutput = parts.join("\n---stderr---\n").substring(0, 50 * 1024)
+        const canRetry = attemptIndex < attempts.length - 1 && looksLikeRetryableScopedVerificationFailure(failureOutput)
+        if (canRetry) {
+          outputs.push(
+            `Scoped verification retry ${attemptIndex + 1}/${attempts.length - 1} failed for ` +
+            `${formatScopedVerificationAttempt(attempt, cwd)}\n${failureOutput}`,
+          )
+          continue
+        }
+        return {
+          status: "fail",
+          command: commands.join("\n"),
+          output: [
+            ...outputs,
+            `Scoped verification failed for ${formatScopedVerificationAttempt(attempt, cwd)}`,
+            failureOutput,
+          ].join("\n\n").substring(0, 50 * 1024),
+        }
       }
     }
   }
@@ -1184,6 +1312,16 @@ function runCompatWorktreeSetupCommand(
   }
 }
 
+function prefixChangedFilesForSharedCwd(
+  sharedCwd: string,
+  taskRepoCwd: string,
+  changedFiles: string[],
+): string[] {
+  const repoPrefix = path.relative(sharedCwd, taskRepoCwd)
+  if (!repoPrefix || repoPrefix === ".") return changedFiles
+  return changedFiles.map((file) => path.join(repoPrefix, file))
+}
+
 async function runCompatTaskInWorkspace(
   task: BackendParallelTaskInput,
   taskIndex: number,
@@ -1192,6 +1330,8 @@ async function runCompatTaskInWorkspace(
   runId: string,
   agents: unknown[],
   modules: CompatModules,
+  sharedCwd: string,
+  taskRepoCwd: string,
   baseCommit: string,
   patchPath: string,
 ): Promise<ParallelTaskResult> {
@@ -1217,6 +1357,7 @@ async function runCompatTaskInWorkspace(
 
     const verification = runCompatScopedVerification(task.scopedVerification, worktree.agentCwd, task.claimedFiles)
     const { changedFiles, headCommit } = captureCompatPatchAgainstBase(worktree.agentCwd, baseCommit, patchPath)
+    const normalizedChangedFiles = prefixChangedFilesForSharedCwd(sharedCwd, taskRepoCwd, changedFiles)
 
     return {
       agent: task.agent,
@@ -1229,7 +1370,7 @@ async function runCompatTaskInWorkspace(
       baseCommit,
       headCommit,
       patchPath,
-      changedFiles,
+      changedFiles: normalizedChangedFiles,
       verification,
     }
   } catch (err) {
@@ -1252,26 +1393,27 @@ async function runParallelWithCompatWorktrees(
   modules: CompatModules,
 ): Promise<Awaited<ReturnType<BackendDispatchService["runParallel"]>>> {
   const runId = generateRunId()
-  const workspacePlans = buildCompatWorkspacePlans(input.tasks)
+  const workspacePlans = buildCompatWorkspacePlans(cwd, input.tasks)
   const clusterCount = workspacePlans.length
-  let worktreeSetup: CompatWorktreeSetup | undefined
+  const worktreeSetups: Array<{ setup: CompatWorktreeSetup; planRunId: string } | undefined> = new Array(clusterCount)
 
   try {
-    worktreeSetup = modules.createWorktrees(cwd, runId, clusterCount, {
-      agents: workspacePlans.map((plan) => input.tasks[plan.taskIndexes[0]!]!.agent),
-    })
-
     for (let clusterIndex = 0; clusterIndex < workspacePlans.length; clusterIndex++) {
       const plan = workspacePlans[clusterIndex]!
-      const worktree = worktreeSetup.worktrees[clusterIndex]!
       const representativeTask = input.tasks[plan.taskIndexes[0]!]!
+      const planRunId = `${runId}-${clusterIndex}`
+      const setup = modules.createWorktrees(plan.repoCwd, planRunId, 1, {
+        agents: [representativeTask.agent],
+      })
+      const worktree = setup.worktrees[0]!
+      worktreeSetups[clusterIndex] = { setup, planRunId }
       await maybeRunCompatWorktreeSetupHook(
         input.worktreeSetupHook,
-        worktreeSetup.cwd,
+        setup.cwd,
         worktree,
-        runId,
+        planRunId,
         representativeTask.agent,
-        worktreeSetup.baseCommit,
+        setup.baseCommit,
       )
       if (plan.baseRef) {
         resetWorktreeToBaseRef(worktree.path, plan.baseRef)
@@ -1284,9 +1426,10 @@ async function runParallelWithCompatWorktrees(
     fs.mkdirSync(diffsDir, { recursive: true })
 
     const clusterRuns = workspacePlans.map((plan, clusterIndex) => async () => {
-      const worktree = worktreeSetup!.worktrees[clusterIndex]!
+      const setupEntry = worktreeSetups[clusterIndex]!
+      const worktree = setupEntry.setup.worktrees[0]!
       const orderedTaskIndexes = topoSortWorkspaceTaskIndexes(input.tasks, plan.taskIndexes)
-      let currentBaseCommit = plan.baseRef ? gitOutputTrimmed(worktree.path, ["rev-parse", "HEAD"]) : worktreeSetup!.baseCommit
+      let currentBaseCommit = plan.baseRef ? gitOutputTrimmed(worktree.path, ["rev-parse", "HEAD"]) : setupEntry.setup.baseCommit
       let blockedByFailure: string | undefined
 
       for (const taskIndex of orderedTaskIndexes) {
@@ -1310,9 +1453,11 @@ async function runParallelWithCompatWorktrees(
           taskIndex,
           plan.workspaceId,
           worktree,
-          runId,
+          setupEntry.planRunId,
           agents,
           modules,
+          cwd,
+          plan.repoCwd,
           currentBaseCommit,
           patchPath,
         )
@@ -1351,9 +1496,10 @@ async function runParallelWithCompatWorktrees(
       results: finalizedResults,
     }
   } finally {
-    if (worktreeSetup) {
+    for (const setupEntry of worktreeSetups) {
+      if (!setupEntry) continue
       try {
-        modules.cleanupWorktrees(worktreeSetup)
+        modules.cleanupWorktrees(setupEntry.setup)
       } catch {
         // Best-effort cleanup.
       }
@@ -1492,6 +1638,7 @@ export {
   isUsageLimitError,
   extractUsageLimitWaitTime,
   resolveMeaningfulSingleError,
+  buildScopedVerificationCommandAttempts,
   extractExecutableScopedVerificationCommands,
   normalizeScopedVerificationLineForCwd,
 }

@@ -2,9 +2,11 @@ import * as assert from "node:assert/strict"
 import { describe, test } from "node:test"
 
 import {
+  acceptAlreadyImplementedEvidenceResult,
   acceptImplementationNoopResult,
   isNoEditImplementationGuardError,
   looksLikeAlreadyImplementedSummary,
+  looksLikeVerificationPassedEvidence,
 } from "../extensions/zflow-change-workflows/orchestration/implementation/noop-success.js"
 
 describe("implementation noop-success helpers", () => {
@@ -60,6 +62,26 @@ describe("implementation noop-success helpers", () => {
     })
 
     assert.equal(accepted.accepted, true)
+  })
+
+  test("accepts already-implemented worker summaries with strong verification evidence", () => {
+    const output = [
+      "No additional code changes were needed. The dependency group already implemented this scope.",
+      "",
+      "## Verification results",
+      "Result: 15 test suites passed, 176 tests passed",
+      "Result: 1 test suite passed, 23 tests passed",
+    ].join("\n")
+
+    assert.equal(looksLikeVerificationPassedEvidence(output), true)
+    assert.equal(
+      acceptAlreadyImplementedEvidenceResult({
+        ok: true,
+        rawOutput: output,
+        verification: { status: "fail" },
+      }).accepted,
+      true,
+    )
   })
 
   test("rejects no-edit results without passing verification", () => {

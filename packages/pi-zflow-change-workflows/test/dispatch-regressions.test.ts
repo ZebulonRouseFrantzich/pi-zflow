@@ -204,9 +204,10 @@ describe("dispatch loop accepts missing verification", () => {
     const content = fs.readFileSync(indexFilePath, "utf-8")
 
     // Ensure the old guard `!verification || verification.status !== "pass"` is gone.
-    // The new guard should be `verification && verification.status === "fail"`.
+    // The new guard should be a fail-only check, whether against `verification`
+    // directly or a normalized alias like `effectiveVerification`.
     const oldPattern = /!verification\s*\|\|\s*verification\.status\s*!==\s*["']pass["']/
-    const newPattern = /verification\s*&&\s*verification\.status\s*===\s*["']fail["']/
+    const newPattern = /(verification|effectiveVerification)\s*&&\s*\1\.status\s*===\s*["']fail["']/
 
     assert.ok(
       !oldPattern.test(content),
@@ -223,7 +224,7 @@ describe("dispatch loop accepts missing verification", () => {
 
     // Check that both dispatch and resume paths have the new guard.
     // We expect two occurrences: one in runWorktreeDispatchAndFinalize, one in resumeWorktreeDispatch.
-    const matches = content.match(/verification\s*&&\s*verification\.status\s*===\s*["']fail["']/g)
+    const matches = content.match(/(?:verification|effectiveVerification)\s*&&\s*(?:verification|effectiveVerification)\.status\s*===\s*["']fail["']/g)
     assert.ok(matches, "must find the new guard pattern")
     assert.ok(
       matches.length >= 2,

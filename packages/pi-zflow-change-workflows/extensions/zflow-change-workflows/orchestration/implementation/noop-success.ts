@@ -28,6 +28,8 @@ const VERIFICATION_EVIDENCE_PATTERNS = [
   /verification results/i,
   /\*\*PASS\*\*/i,
   /tests pass/i,
+  /\btests?\s+passed\b/i,
+  /test suites?:\s*\d+\s+passed/i,
   /compile cleanly/i,
 ]
 
@@ -40,7 +42,7 @@ export function looksLikeAlreadyImplementedSummary(output?: string): boolean {
   return ALREADY_IMPLEMENTED_PATTERNS.some((pattern) => pattern.test(output))
 }
 
-function looksLikeVerificationPassedEvidence(output?: string): boolean {
+export function looksLikeVerificationPassedEvidence(output?: string): boolean {
   if (!output) return false
   return VERIFICATION_EVIDENCE_PATTERNS.filter((pattern) => pattern.test(output)).length >= 2
 }
@@ -71,5 +73,26 @@ export function acceptImplementationNoopResult(
   return {
     accepted: true,
     reason: "Implementation already present; scoped verification passed without additional edits.",
+  }
+}
+
+export function acceptAlreadyImplementedEvidenceResult(
+  candidate: ImplementationNoopCandidate,
+): AcceptedImplementationNoop {
+  if (!candidate.ok) {
+    return { accepted: false }
+  }
+
+  if (!looksLikeAlreadyImplementedSummary(candidate.rawOutput)) {
+    return { accepted: false }
+  }
+
+  if (!looksLikeVerificationPassedEvidence(candidate.rawOutput)) {
+    return { accepted: false }
+  }
+
+  return {
+    accepted: true,
+    reason: "Implementation already present; worker output includes strong verification evidence despite bridge-side verification failure.",
   }
 }

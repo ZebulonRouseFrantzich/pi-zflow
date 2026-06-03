@@ -126,6 +126,15 @@ export type {
 } from "./dispatch-service.js"
 export { DISPATCH_SERVICE_CAPABILITY, LEGACY_DISPATCH_CAPABILITIES } from "./dispatch-service.js"
 
+// Re-export task repo-root inference helpers
+export {
+  inferClaimedFileRepoRoots,
+  inferTaskRepoRoot,
+} from "./task-repo-root.js"
+export type {
+  InferTaskRepoRootOptions,
+} from "./task-repo-root.js"
+
 // Re-export diagnostic helpers
 // Also importable directly from "pi-zflow-core/diagnostics"
 export {
