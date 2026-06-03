@@ -135,6 +135,22 @@ export type {
   InferTaskRepoRootOptions,
 } from "./task-repo-root.js"
 
+// Re-export rate-limit retry helpers for dispatch workflows
+export {
+  DEFAULT_RATE_LIMIT_WAIT_MS,
+  isRateLimitDispatchError,
+  extractRateLimitWaitText,
+  parseRetryDelayMs,
+  extractRateLimitRetryDelayMs,
+  formatRetryDelay,
+  runAgentWithRateLimitRetries,
+} from "./rate-limit.js"
+export type {
+  AgentRateLimitRetryNotice,
+  RunAgentWithRateLimitRetriesOptions,
+  RunAgentWithRateLimitRetriesResult,
+} from "./rate-limit.js"
+
 // Re-export diagnostic helpers
 // Also importable directly from "pi-zflow-core/diagnostics"
 export {

@@ -54,6 +54,7 @@ import {
   PI_ZFLOW_SUBAGENTS_BRIDGE_VERSION,
   inferTaskRepoRoot,
   runWorktreeSetupHook,
+  runAgentWithRateLimitRetries,
   type WorktreeSetupHookConfig,
 } from "pi-zflow-core"
 
@@ -293,21 +294,44 @@ class SubagentsDispatchService implements DispatchService {
       // execution. That lets zflow surface provider 429 usage-limit failures
       // instead of a later placeholder fallback error.
       const backend = this.advancedFallback ?? this.backend
-      const result = await backend.runAgent({
-        agent: input.agent,
-        task: input.task,
-        cwd: input.cwd,
-        model: input.model,
-        output: input.output,
-        outputMode: input.outputMode,
-        maxOutput: input.maxOutput,
-        onUpdate: input.onUpdate,
+      const result = await runAgentWithRateLimitRetries({
+        dispatchService: {
+          name: this.name,
+          runAgent: async (dispatchInput) => {
+            const backendResult = await backend.runAgent({
+              agent: dispatchInput.agent,
+              task: dispatchInput.task,
+              cwd: dispatchInput.cwd,
+              model: dispatchInput.model,
+              output: dispatchInput.output,
+              outputMode: dispatchInput.outputMode,
+              maxOutput: dispatchInput.maxOutput,
+              onUpdate: dispatchInput.onUpdate,
+            })
+            return {
+              ok: backendResult.ok,
+              rawOutput: backendResult.rawOutput,
+              outputPath: backendResult.outputPath ?? backendResult.savedOutputPath,
+              error: resolveMeaningfulSingleError(backendResult),
+            }
+          },
+          runParallel: async () => ({ ok: false, results: [] }),
+        },
+        input,
+        onRateLimitNotice: async (notice) => {
+          input.onUpdate?.({
+            agent: input.agent,
+            status: "running",
+            lastActivityAt: Date.now(),
+            recentOutput: [notice.message],
+          })
+        },
       })
       return {
         ok: result.ok,
         rawOutput: result.rawOutput,
-        outputPath: result.outputPath ?? result.savedOutputPath,
-        error: resolveMeaningfulSingleError(result),
+        outputPath: result.outputPath,
+        error: result.error,
       }
     } catch (err) {
       return {
