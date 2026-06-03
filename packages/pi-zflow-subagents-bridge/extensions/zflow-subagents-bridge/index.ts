@@ -51,6 +51,7 @@ import {
   type TaskWorktreeStrategy,
 } from "pi-zflow-core/dispatch-service"
 import {
+  ACTIVE_PROFILE_PATH,
   PI_ZFLOW_SUBAGENTS_BRIDGE_VERSION,
   inferTaskRepoRoot,
   runWorktreeSetupHook,
@@ -294,7 +295,7 @@ class SubagentsDispatchService implements DispatchService {
       // execution. That lets zflow surface provider 429 usage-limit failures
       // instead of a later placeholder fallback error.
       const backend = this.advancedFallback ?? this.backend
-      const result = await runAgentWithRateLimitRetries({
+      const runWithModel = async (modelOverride: string | undefined) => runAgentWithRateLimitRetries({
         dispatchService: {
           name: this.name,
           runAgent: async (dispatchInput) => {
@@ -317,7 +318,10 @@ class SubagentsDispatchService implements DispatchService {
           },
           runParallel: async () => ({ ok: false, results: [] }),
         },
-        input,
+        input: {
+          ...input,
+          ...(modelOverride ? { model: modelOverride } : {}),
+        },
         onRateLimitNotice: async (notice) => {
           input.onUpdate?.({
             agent: input.agent,
@@ -327,6 +331,32 @@ class SubagentsDispatchService implements DispatchService {
           })
         },
       })
+
+      let result = await runWithModel(input.model)
+      if (!result.ok && isUnsupportedDeveloperRoleDispatchError(result.error)) {
+        const fallbackModels = await loadAgentFallbackModelCandidates(input.agent, input.model)
+        for (const fallbackModel of fallbackModels) {
+          input.onUpdate?.({
+            agent: input.agent,
+            status: "running",
+            lastActivityAt: Date.now(),
+            recentOutput: [
+              `⚠️ Agent ${input.agent} hit a provider compatibility error on model ${input.model ?? "(default)"}. Retrying with fallback model ${fallbackModel}.`,
+            ],
+          })
+          const fallbackResult = await runWithModel(fallbackModel)
+          if (fallbackResult.ok) {
+            await persistAgentFallbackModel(input.agent, fallbackModel).catch(() => {})
+            result = fallbackResult
+            break
+          }
+          result = fallbackResult
+          if (!isUnsupportedDeveloperRoleDispatchError(fallbackResult.error)) {
+            break
+          }
+        }
+      }
+
       return {
         ok: result.ok,
         rawOutput: result.rawOutput,
@@ -788,6 +818,103 @@ function resolveMeaningfulSingleError(result: {
     return `429 usage limit reached${modelLabel}. Wait time: ${waitTime}. Provider message: ${providerMessage}`
   }
   return `429 usage limit reached${modelLabel}. Provider message: ${providerMessage}`
+}
+
+const THINKING_SUFFIX_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"])
+
+function stripKnownThinkingSuffix(model: string | undefined): string | undefined {
+  if (!model) return undefined
+  const trimmed = model.trim()
+  const colonIdx = trimmed.lastIndexOf(":")
+  if (colonIdx === -1) return trimmed
+  const suffix = trimmed.slice(colonIdx + 1).toLowerCase()
+  if (!THINKING_SUFFIX_LEVELS.has(suffix)) return trimmed
+  return trimmed.slice(0, colonIdx)
+}
+
+function isUnsupportedDeveloperRoleDispatchError(error: string | undefined): boolean {
+  if (!error) return false
+  return /messages?[^\n]*role/i.test(error) &&
+    /input should be 'system', 'user', 'assistant' or 'tool'/i.test(error) &&
+    /developer/i.test(error)
+}
+
+function resolveAgentFallbackModelCandidates(
+  activeProfileCache: {
+    profileName?: string
+    agentBindings?: Record<string, { lane?: string; resolvedModel?: string }>
+  } | null | undefined,
+  profileDoc: Record<string, { lanes?: Record<string, { preferredModels?: string[] }> }> | null | undefined,
+  agentName: string,
+  currentModel?: string,
+): string[] {
+  const binding = activeProfileCache?.agentBindings?.[agentName]
+  const laneName = binding?.lane
+  const profileName = activeProfileCache?.profileName
+  if (!laneName || !profileName) return []
+
+  const preferredModels = profileDoc?.[profileName]?.lanes?.[laneName]?.preferredModels
+  if (!Array.isArray(preferredModels) || preferredModels.length === 0) return []
+
+  const normalizedCurrent = stripKnownThinkingSuffix(currentModel ?? binding?.resolvedModel)
+  const normalizedPreferred = preferredModels.map((model) => stripKnownThinkingSuffix(model) ?? model)
+  const currentIdx = normalizedCurrent ? normalizedPreferred.findIndex((model) => model === normalizedCurrent) : -1
+  const tail = currentIdx >= 0 ? preferredModels.slice(currentIdx + 1) : preferredModels
+  return [...new Set(tail.filter((model) => stripKnownThinkingSuffix(model) !== normalizedCurrent))]
+}
+
+async function readJsonFile<T>(filePath: string): Promise<T | null> {
+  try {
+    const raw = await fs.promises.readFile(filePath, "utf-8")
+    return JSON.parse(raw) as T
+  } catch {
+    return null
+  }
+}
+
+async function loadAgentFallbackModelCandidates(agentName: string, currentModel?: string): Promise<string[]> {
+  const activeProfile = await readJsonFile<{
+    profileName?: string
+    sourcePath?: string
+    agentBindings?: Record<string, { lane?: string; resolvedModel?: string }>
+  }>(ACTIVE_PROFILE_PATH)
+  if (!activeProfile?.sourcePath) return []
+  const profileDoc = await readJsonFile<Record<string, { lanes?: Record<string, { preferredModels?: string[] }> }>>(activeProfile.sourcePath)
+  return resolveAgentFallbackModelCandidates(activeProfile, profileDoc, agentName, currentModel)
+}
+
+async function persistAgentFallbackModel(agentName: string, successfulModel: string): Promise<void> {
+  const activeProfile = await readJsonFile<{
+    profileName?: string
+    sourcePath?: string
+    resolvedAt?: string
+    agentBindings?: Record<string, { lane?: string; resolvedModel?: string }>
+    resolvedLanes?: Record<string, { model?: string; reason?: string }>
+  }>(ACTIVE_PROFILE_PATH)
+  if (!activeProfile?.agentBindings || !activeProfile.resolvedLanes) return
+
+  const binding = activeProfile.agentBindings[agentName]
+  const laneName = binding?.lane
+  if (!binding || !laneName || !activeProfile.resolvedLanes[laneName]) return
+
+  const previousModel = binding.resolvedModel ?? activeProfile.resolvedLanes[laneName]?.model ?? "unknown"
+  for (const candidateBinding of Object.values(activeProfile.agentBindings)) {
+    if (candidateBinding?.lane === laneName) {
+      candidateBinding.resolvedModel = successfulModel
+    }
+  }
+  activeProfile.resolvedLanes[laneName] = {
+    ...activeProfile.resolvedLanes[laneName],
+    model: successfulModel,
+    reason: `Runtime fallback after provider rejected developer-role messages on \"${previousModel}\". Re-routed to \"${successfulModel}\".`,
+  }
+  activeProfile.resolvedAt = new Date().toISOString()
+
+  const dir = path.dirname(ACTIVE_PROFILE_PATH)
+  const tmpPath = path.join(dir, `.tmp-${Date.now().toString(36)}-active-profile.json`)
+  await fs.promises.mkdir(dir, { recursive: true })
+  await fs.promises.writeFile(tmpPath, JSON.stringify(activeProfile, null, 2), "utf-8")
+  await fs.promises.rename(tmpPath, ACTIVE_PROFILE_PATH)
 }
 
 function mapCompatSingleResult(result: CompatSingleResult): {
@@ -1719,6 +1846,8 @@ export {
   captureCompatPatchAgainstBase,
   isUsageLimitError,
   extractUsageLimitWaitTime,
+  isUnsupportedDeveloperRoleDispatchError,
+  resolveAgentFallbackModelCandidates,
   resolveMeaningfulSingleError,
   buildScopedVerificationCommandAttempts,
   extractExecutableScopedVerificationCommands,

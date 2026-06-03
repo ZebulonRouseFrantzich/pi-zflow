@@ -16,8 +16,10 @@ import {
   buildScopedVerificationCommandAttempts,
   extractExecutableScopedVerificationCommands,
   extractUsageLimitWaitTime,
+  isUnsupportedDeveloperRoleDispatchError,
   isUsageLimitError,
   normalizeScopedVerificationLineForCwd,
+  resolveAgentFallbackModelCandidates,
   resolveMeaningfulSingleError,
 } from "../extensions/zflow-subagents-bridge/index.js"
 import { resetZflowRegistry } from "pi-zflow-core"
@@ -338,6 +340,50 @@ describe("pi-zflow-subagents-bridge usage-limit diagnostics", () => {
       extractUsageLimitWaitTime("No wait time here."),
       undefined,
     )
+  })
+
+  it("detects developer-role incompatibility provider errors", () => {
+    assert.equal(
+      isUnsupportedDeveloperRoleDispatchError(
+        "422 invalid input error: messages[0].role Input should be 'system', 'user', 'assistant' or 'tool' input developer",
+      ),
+      true,
+    )
+    assert.equal(isUnsupportedDeveloperRoleDispatchError("422 invalid input error"), false)
+  })
+
+  it("derives fallback models from the active profile lane ordering", () => {
+    const fallbacks = resolveAgentFallbackModelCandidates(
+      {
+        profileName: "default",
+        agentBindings: {
+          "zflow.review-correctness": {
+            lane: "review-correctness",
+            resolvedModel: "azure-ai-foundry/Kimi-K2.6",
+          },
+        },
+      },
+      {
+        default: {
+          lanes: {
+            "review-correctness": {
+              preferredModels: [
+                "azure-ai-foundry/Kimi-K2.6",
+                "azure-ai-foundry/DeepSeek-V4-Pro",
+                "azure-openai-responses/gpt-5.3-codex",
+              ],
+            },
+          },
+        },
+      },
+      "zflow.review-correctness",
+      "azure-ai-foundry/Kimi-K2.6",
+    )
+
+    assert.deepEqual(fallbacks, [
+      "azure-ai-foundry/DeepSeek-V4-Pro",
+      "azure-openai-responses/gpt-5.3-codex",
+    ])
   })
 
   it("surfaces the first usage-limit attempt instead of placeholder fallback", () => {
