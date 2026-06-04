@@ -28,6 +28,10 @@ finding requirements.
   deletion itself. Use `subagent` tool for this.
 - **Every finding MUST be validated against its original requirements.** Do not
   trust that a subagent's work is correct without checking.
+- **Every fix worker MUST return structured JSON.** When dispatching workers,
+  require a final fenced JSON block with top-level `zflowFixResult`. Workers
+  may report `already_satisfied` when no edit is needed, but only with concrete
+  file/line evidence and validation notes.
 - **You may loop on incomplete fixes.** If a subagent's work does not satisfy
   the finding requirements, dispatch again with precise gap details.
 - **You have bounded retries.** Max 2 fix attempts per finding, max 3 global

@@ -1015,112 +1015,6 @@ describe("runDirectFixWorkflow retry and already-satisfied", { concurrency: fals
     }
   })
 
-  it("marks no-edit failure as already-satisfied when heuristic matches", async () => {
-    const { runChangeFixWorkflow, runDirectFixWorkflow } = await import(
-      "../extensions/zflow-change-workflows/orchestration.js"
-    )
-    const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises")
-    const { join } = await import("node:path")
-    const { tmpdir } = await import("node:os")
-
-    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-already-"))
-    const reviewDir = join(tmpDir, ".zflow", "review")
-    const versionDir = join(tmpDir, ".zflow", "plans", "feat-auth", "v1")
-    await mkdir(reviewDir, { recursive: true })
-    await mkdir(versionDir, { recursive: true })
-
-    // Create a finding MD that references generateToken async/sync mismatch
-    const findingsMd = `# Code Review Findings
-
-**Source**: Implementation of feat-auth
-**Run ID**: run-456
-
-## Reviewed Changes
-
-- apps/api/src/ports/crypto.ts
-
-## Findings Summary
-
-| Severity | Count |
-| -------- | ----- |
-| Major | 1 |
-| Minor | 0 |
-| Nit | 0 |
-
-## Major Findings
-
-### TokenCrypto port defines async generateToken() but adapter is synchronous
-
-**Reviewer support**: correctness
-**File**: \`apps/api/src/ports/crypto.ts\`
-**Lines**: 14
-**Evidence**: The port defines generateToken(): Promise<string> (async) but WebCryptoTokenCrypto.generateToken() is synchronous.
-**Why it matters**: Contract inconsistency.
-**Recommendation**: Align port and adapter signatures.
-**Expected behavior**: Port should define generateToken(): string (sync).
-**Fix requirements**: Change the port signature.
-`
-
-    await writeFile(join(reviewDir, "code-review-findings.md"), findingsMd, "utf-8")
-    await writeFile(join(tmpDir, ".zflow", "plans", "feat-auth", "plan-state.json"), JSON.stringify({
-      currentVersion: "v1", approvedVersion: "v1", lifecycleState: "review-failed",
-    }, null, 2), "utf-8")
-    await writeFile(join(versionDir, "design.md"), "# Design", "utf-8")
-    await writeFile(join(versionDir, "execution-groups.md"), "# Execution Groups\n\n- \`apps/api/src/ports/crypto.ts\`", "utf-8")
-    await writeFile(join(versionDir, "standards.md"), "# Standards", "utf-8")
-    await writeFile(join(versionDir, "verification.md"), "```bash\nnpm test\n```\n", "utf-8")
-    await writeFile(join(versionDir, "implementation-tasks.md"), "# Tasks", "utf-8")
-
-    // Create the target file with sync signature (already satisfied)
-    await mkdir(join(tmpDir, "apps", "api", "src", "ports"), { recursive: true })
-    await writeFile(join(tmpDir, "apps", "api", "src", "ports", "crypto.ts"), `export interface TokenCrypto {
-  generateToken(): string
-  hashToken(token: string): Promise<string>
-  verifyToken(token: string, hash: string): Promise<boolean>
-}
-`, "utf-8")
-
-    try {
-      const { execFileSync } = await import("node:child_process")
-      execFileSync("git", ["init"], { cwd: tmpDir, stdio: "pipe" })
-      execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: tmpDir, stdio: "pipe" })
-      execFileSync("git", ["config", "user.name", "Test"], { cwd: tmpDir, stdio: "pipe" })
-      execFileSync("git", ["add", "-A"], { cwd: tmpDir, stdio: "pipe" })
-      execFileSync("git", ["commit", "-m", "initial"], { cwd: tmpDir, stdio: "pipe" })
-    } catch { /* ok */ }
-
-    try {
-      const fixResult = await runChangeFixWorkflow({ changeId: "feat-auth", cwd: tmpDir })
-      const dispatchService = {
-        name: "test-dispatch",
-        async runAgent() {
-          return { ok: false, error: "Subagent completed without making edits for an implementation task." }
-        },
-        async runParallel() {
-          return { ok: false, results: [] }
-        },
-      }
-
-      const result = await runDirectFixWorkflow({
-        changeId: "feat-auth",
-        fixResult,
-        dispatchService: dispatchService as any,
-        cwd: tmpDir,
-        workerAgent: "zflow.implement-routine",
-      })
-
-      // Should have 1 finding marked already-satisfied
-      const alreadySatisfied = result.fixed.filter((f) => f.status === "already-satisfied")
-      assert.ok(alreadySatisfied.length > 0, "should have at least one already-satisfied finding")
-      assert.ok(
-        alreadySatisfied[0].reason?.includes("already satisfied"),
-        "reason should indicate already satisfied",
-      )
-    } finally {
-      await rm(tmpDir, { recursive: true, force: true })
-    }
-  })
-
   it("persists diagnostic output for failed batches", async () => {
     const { runChangeFixWorkflow, runDirectFixWorkflow } = await import(
       "../extensions/zflow-change-workflows/orchestration.js"
@@ -1308,8 +1202,8 @@ describe("runDirectFixWorkflow follow-up hardening", { concurrency: false }, () 
       "../extensions/zflow-change-workflows/orchestration.js"
     )
     const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-arbitrary-failure-"))
-    await mkdir(join(tmpDir, "apps/api/src/ports"), { recursive: true })
-    await writeFile(join(tmpDir, "apps/api/src/ports/crypto.ts"), "export interface TokenCrypto { generateToken(): Promise<string> }\n", "utf-8")
+    await mkdir(join(tmpDir, "src"), { recursive: true })
+    await writeFile(join(tmpDir, "src/file.ts"), "export const value = 1\n", "utf-8")
     try {
       const dispatchService = {
         name: "test-dispatch",
@@ -1333,11 +1227,11 @@ describe("runDirectFixWorkflow follow-up hardening", { concurrency: false }, () 
           parsedFindings: [{
             findingId: "finding-1",
             severity: "minor",
-            title: "TokenCrypto port defines async generateToken() but implementation is synchronous",
-            file: "apps/api/src/ports/crypto.ts",
+            title: "Generic unresolved issue",
+            file: "src/file.ts",
             reviewerRole: "logic",
-            evidence: "port says Promise generateToken",
-            recommendation: "generateToken should be string",
+            evidence: "the issue still needs a real code change",
+            recommendation: "make the required change",
           }],
           planVersion: "v1",
           lifecycleState: "review-failed",
@@ -1348,69 +1242,6 @@ describe("runDirectFixWorkflow follow-up hardening", { concurrency: false }, () 
       assert.equal(result.fixed.length, 0)
       assert.equal(result.unresolved.length, 1)
       assert.equal(result.unresolved[0].status, "unresolved")
-    } finally {
-      await rm(tmpDir, { recursive: true, force: true })
-    }
-  })
-
-  it("marks only satisfied findings in a mixed no-edit batch", async () => {
-    const { runDirectFixWorkflow, resolveFixOrchestratorConfig } = await import(
-      "../extensions/zflow-change-workflows/orchestration.js"
-    )
-    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-mixed-noedit-"))
-    await mkdir(join(tmpDir, "apps/api/src/ports"), { recursive: true })
-    await writeFile(join(tmpDir, "apps/api/src/ports/crypto.ts"), "export interface TokenCrypto { generateToken(): string }\n", "utf-8")
-    try {
-      const dispatchService = {
-        name: "test-dispatch",
-        async runAgent() {
-          return { ok: false, error: "Subagent completed without making edits for an implementation task." }
-        },
-        async runParallel() {
-          return { ok: false, results: [] }
-        },
-      }
-
-      const result = await runDirectFixWorkflow({
-        changeId: "feat-auth",
-        cwd: tmpDir,
-        workerAgent: "zflow.implement-routine",
-        dispatchService: dispatchService as any,
-        fixResult: {
-          changeId: "feat-auth",
-          fixPlan: "# Fix",
-          filesToModify: [],
-          parsedFindings: [
-            {
-              findingId: "finding-1",
-              severity: "minor",
-              title: "TokenCrypto port defines async generateToken() but implementation is synchronous",
-              file: "apps/api/src/ports/crypto.ts",
-              reviewerRole: "logic",
-              evidence: "port says Promise generateToken",
-              recommendation: "generateToken should be string",
-            },
-            {
-              findingId: "finding-2",
-              severity: "minor",
-              title: "Different issue in the same file",
-              file: "apps/api/src/ports/crypto.ts",
-              reviewerRole: "logic",
-              evidence: "still needs a real edit",
-              recommendation: "make a different change",
-            },
-          ],
-          planVersion: "v1",
-          lifecycleState: "review-failed",
-          fixOrchestratorConfig: { ...resolveFixOrchestratorConfig(), maxAttemptsPerFinding: 1 },
-        },
-      })
-
-      assert.equal(result.fixed.length, 1)
-      assert.equal(result.fixed[0].status, "already-satisfied")
-      assert.equal(result.fixed[0].findingId, "finding-1")
-      assert.equal(result.unresolved.length, 1)
-      assert.equal(result.unresolved[0].findingId, "finding-2")
     } finally {
       await rm(tmpDir, { recursive: true, force: true })
     }
@@ -1461,36 +1292,33 @@ describe("runDirectFixWorkflow follow-up hardening", { concurrency: false }, () 
       assert.ok(task.includes("Conflict Resolution & Scope Guard"))
       assert.ok(task.includes("Advisory suggestions only"))
       assert.ok(task.includes("Post-fix introduced-risk check"))
+      assert.ok(task.includes("Required structured result"))
+      assert.ok(task.includes("zflowFixResult"))
+      assert.ok(task.includes("already_satisfied"))
     } finally {
       await rm(tmpDir, { recursive: true, force: true })
     }
   })
 
 
-  it("marks satisfied organization_members composite primary key findings before dispatch", async () => {
+
+
+  it("marks no-edit failure as already-satisfied from structured worker JSON", async () => {
     const { runDirectFixWorkflow, resolveFixOrchestratorConfig } = await import(
       "../extensions/zflow-change-workflows/orchestration.js"
     )
-    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-sql-precheck-"))
-    await mkdir(join(tmpDir, "apps/api/migrations/control"), { recursive: true })
-    await writeFile(join(tmpDir, "apps/api/migrations/control/0001_initial.sql"), `CREATE TABLE IF NOT EXISTS "organization_members" (
-    "organization_id" TEXT NOT NULL,
-    "app_user_id" TEXT NOT NULL,
-    "role" TEXT NOT NULL,
-    PRIMARY KEY ("organization_id", "app_user_id")
-);
-`, "utf-8")
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-structured-satisfied-"))
     try {
-      let dispatchCount = 0
       const dispatchService = {
         name: "test-dispatch",
         async runAgent() {
-          dispatchCount++
-          return { ok: false, error: "should not dispatch" }
+          return {
+            ok: false,
+            error: "Subagent completed without making edits for an implementation task.",
+            rawOutput: '```json\n{"zflowFixResult":{"status":"already_satisfied","findings":[{"findingId":"finding-1","status":"already_satisfied","evidence":["src/file.ts already contains the required behavior"],"changedFiles":[],"validation":["read src/file.ts"],"reason":"No edit needed"}]}}\n```',
+          }
         },
-        async runParallel() {
-          return { ok: false, results: [] }
-        },
+        async runParallel() { return { ok: false, results: [] } },
       }
 
       const result = await runDirectFixWorkflow({
@@ -1503,14 +1331,13 @@ describe("runDirectFixWorkflow follow-up hardening", { concurrency: false }, () 
           fixPlan: "# Fix",
           filesToModify: [],
           parsedFindings: [{
-            findingId: "finding-22",
+            findingId: "finding-1",
             severity: "minor",
-            title: "Redundant `id` primary key on `organization_members` wastes storage",
-            file: "apps/api/migrations/control/0001_initial.sql",
-            reviewerRole: "system",
-            evidence: "Redundant id primary key on organization_members wastes storage",
-            recommendation: "Drop the id column and promote the composite unique key to PRIMARY KEY.",
-            fixRequirements: "The migration should not declare an id column on organization_members and should use PRIMARY KEY (organization_id, app_user_id).",
+            title: "Generic finding",
+            file: "src/file.ts",
+            reviewerRole: "logic",
+            evidence: "evidence",
+            recommendation: "recommendation",
           }],
           planVersion: "v1",
           lifecycleState: "review-failed",
@@ -1518,44 +1345,34 @@ describe("runDirectFixWorkflow follow-up hardening", { concurrency: false }, () 
         },
       })
 
-      assert.equal(dispatchCount, 0)
       assert.equal(result.fixed.length, 1)
       assert.equal(result.fixed[0].status, "already-satisfied")
-      assert.equal(result.fixed[0].attempts, 0)
       assert.equal(result.unresolved.length, 0)
     } finally {
       await rm(tmpDir, { recursive: true, force: true })
     }
   })
 
-  it("marks a post-failure SQL finding already-satisfied after a terminated worker", async () => {
+  it("uses satisfaction checker JSON after an unstructured terminated worker", async () => {
     const { runDirectFixWorkflow, resolveFixOrchestratorConfig } = await import(
       "../extensions/zflow-change-workflows/orchestration.js"
     )
-    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-sql-postfailure-"))
-    const migrationPath = join(tmpDir, "apps/api/migrations/control/0001_initial.sql")
-    await mkdir(join(tmpDir, "apps/api/migrations/control"), { recursive: true })
-    await writeFile(migrationPath, `CREATE TABLE IF NOT EXISTS "organization_members" (
-    "id" TEXT PRIMARY KEY NOT NULL,
-    "organization_id" TEXT NOT NULL,
-    "app_user_id" TEXT NOT NULL
-);
-`, "utf-8")
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-checker-satisfied-"))
     try {
+      let calls = 0
       const dispatchService = {
         name: "test-dispatch",
-        async runAgent() {
-          await writeFile(migrationPath, `CREATE TABLE IF NOT EXISTS "organization_members" (
-    "organization_id" TEXT NOT NULL,
-    "app_user_id" TEXT NOT NULL,
-    PRIMARY KEY ("organization_id", "app_user_id")
-);
-`, "utf-8")
+        async runAgent(input: Record<string, unknown>) {
+          calls++
+          if (String(input.agent) === "zflow.fix-satisfaction-checker") {
+            return {
+              ok: true,
+              rawOutput: '```json\n{"zflowFixResult":{"status":"already_satisfied","findings":[{"findingId":"finding-1","status":"already_satisfied","evidence":["source evidence"],"changedFiles":[],"validation":["read-only check"],"reason":"Already meets the requirement"}]}}\n```',
+            }
+          }
           return { ok: false, error: "terminated" }
         },
-        async runParallel() {
-          return { ok: false, results: [] }
-        },
+        async runParallel() { return { ok: false, results: [] } },
       }
 
       const result = await runDirectFixWorkflow({
@@ -1568,14 +1385,13 @@ describe("runDirectFixWorkflow follow-up hardening", { concurrency: false }, () 
           fixPlan: "# Fix",
           filesToModify: [],
           parsedFindings: [{
-            findingId: "finding-22",
+            findingId: "finding-1",
             severity: "minor",
-            title: "Redundant `id` primary key on `organization_members` wastes storage",
-            file: "apps/api/migrations/control/0001_initial.sql",
-            reviewerRole: "system",
-            evidence: "Redundant id primary key on organization_members wastes storage",
-            recommendation: "Drop the id column and promote the composite unique key to PRIMARY KEY.",
-            fixRequirements: "The migration should not declare an id column on organization_members and should use PRIMARY KEY (organization_id, app_user_id).",
+            title: "Generic finding",
+            file: "src/file.ts",
+            reviewerRole: "logic",
+            evidence: "evidence",
+            recommendation: "recommendation",
           }],
           planVersion: "v1",
           lifecycleState: "review-failed",
@@ -1583,10 +1399,98 @@ describe("runDirectFixWorkflow follow-up hardening", { concurrency: false }, () 
         },
       })
 
+      assert.equal(calls, 2)
       assert.equal(result.fixed.length, 1)
       assert.equal(result.fixed[0].status, "already-satisfied")
-      assert.equal(result.fixed[0].reason?.includes("post-failure"), true)
       assert.equal(result.unresolved.length, 0)
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("splits mixed structured per-finding statuses", async () => {
+    const { runDirectFixWorkflow, resolveFixOrchestratorConfig } = await import(
+      "../extensions/zflow-change-workflows/orchestration.js"
+    )
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-mixed-structured-"))
+    try {
+      const dispatchService = {
+        name: "test-dispatch",
+        async runAgent() {
+          return {
+            ok: false,
+            error: "Subagent completed without making edits for an implementation task.",
+            rawOutput: '```json\n{"zflowFixResult":{"status":"partial","findings":[{"findingId":"finding-1","status":"already_satisfied","evidence":["evidence 1"],"changedFiles":[],"validation":["check 1"],"reason":"done"},{"findingId":"finding-2","status":"blocked","evidence":["evidence 2"],"changedFiles":[],"validation":[],"reason":"needs a real edit"}]}}\n```',
+          }
+        },
+        async runParallel() { return { ok: false, results: [] } },
+      }
+
+      const result = await runDirectFixWorkflow({
+        changeId: "feat-auth",
+        cwd: tmpDir,
+        workerAgent: "zflow.implement-routine",
+        dispatchService: dispatchService as any,
+        fixResult: {
+          changeId: "feat-auth",
+          fixPlan: "# Fix",
+          filesToModify: [],
+          parsedFindings: [
+            { findingId: "finding-1", severity: "minor", title: "Finding 1", file: "src/file.ts", reviewerRole: "logic", evidence: "evidence", recommendation: "recommendation" },
+            { findingId: "finding-2", severity: "minor", title: "Finding 2", file: "src/file.ts", reviewerRole: "logic", evidence: "evidence", recommendation: "recommendation" },
+          ],
+          planVersion: "v1",
+          lifecycleState: "review-failed",
+          fixOrchestratorConfig: resolveFixOrchestratorConfig(),
+        },
+      })
+
+      assert.equal(result.fixed.length, 1)
+      assert.equal(result.fixed[0].findingId, "finding-1")
+      assert.equal(result.fixed[0].status, "already-satisfied")
+      assert.equal(result.unresolved.length, 1)
+      assert.equal(result.unresolved[0].findingId, "finding-2")
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects already_satisfied structured results without evidence", async () => {
+    const { runDirectFixWorkflow, resolveFixOrchestratorConfig } = await import(
+      "../extensions/zflow-change-workflows/orchestration.js"
+    )
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-low-evidence-"))
+    try {
+      const dispatchService = {
+        name: "test-dispatch",
+        async runAgent() {
+          return {
+            ok: false,
+            error: "Subagent completed without making edits for an implementation task.",
+            rawOutput: '```json\n{"zflowFixResult":{"status":"already_satisfied","findings":[{"findingId":"finding-1","status":"already_satisfied","changedFiles":[]}]}}\n```',
+          }
+        },
+        async runParallel() { return { ok: false, results: [] } },
+      }
+
+      const result = await runDirectFixWorkflow({
+        changeId: "feat-auth",
+        cwd: tmpDir,
+        workerAgent: "zflow.implement-routine",
+        dispatchService: dispatchService as any,
+        fixResult: {
+          changeId: "feat-auth",
+          fixPlan: "# Fix",
+          filesToModify: [],
+          parsedFindings: [{ findingId: "finding-1", severity: "minor", title: "Finding", file: "src/file.ts", reviewerRole: "logic", evidence: "evidence", recommendation: "recommendation" }],
+          planVersion: "v1",
+          lifecycleState: "review-failed",
+          fixOrchestratorConfig: resolveFixOrchestratorConfig(),
+        },
+      })
+
+      assert.equal(result.fixed.length, 0)
+      assert.equal(result.unresolved.length, 1)
     } finally {
       await rm(tmpDir, { recursive: true, force: true })
     }

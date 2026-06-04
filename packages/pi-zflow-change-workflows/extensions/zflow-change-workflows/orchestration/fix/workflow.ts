@@ -346,85 +346,293 @@ export function isNoEditFailure(error: string | undefined): boolean {
   return noEditPatterns.some((pattern) => lower.includes(pattern))
 }
 
-/**
- * Check if a finding is already satisfied by the current filesystem state.
- *
- * Conservative heuristic designed for contract/signature mismatches.
- * Primary pattern: async/sync `generateToken` signature finding where
- * the port and adapter now agree on a synchronous signature.
- *
- * Extend with additional patterns as real-world cases emerge.
- * Returns `true` only when confident the finding is already resolved.
- */
-export async function checkFindingAlreadySatisfied(
-  finding: ParsedFinding,
-  cwd?: string,
-): Promise<boolean> {
-  if (!finding.file) return false
-  const findingText = [
-    finding.title,
-    finding.evidence,
-    finding.expectedBehavior ?? "",
-    finding.fixRequirements ?? "",
-    finding.recommendation,
-  ].join(" ").toLowerCase()
-  const filePath = finding.file.startsWith("/")
-    ? finding.file
-    : cwd ? cwd + "/" + finding.file : finding.file
+export interface ZflowFixFindingResult {
+  findingId: string
+  status: "fixed" | "already_satisfied" | "blocked" | "partial" | "not_satisfied" | "uncertain"
+  evidence?: string[]
+  changedFiles?: string[]
+  validation?: string[]
+  reason?: string
+}
+
+export interface ZflowFixResultEnvelope {
+  zflowFixResult: {
+    status: "fixed" | "already_satisfied" | "blocked" | "partial" | "not_satisfied" | "uncertain"
+    findings?: ZflowFixFindingResult[]
+    evidence?: string[]
+    changedFiles?: string[]
+    validation?: string[]
+    reason?: string
+  }
+}
+
+function normalizeStructuredStatus(status: string | undefined): ZflowFixFindingResult["status"] | undefined {
+  const normalized = status?.trim().toLowerCase().replace(/-/g, "_")
+  switch (normalized) {
+    case "fixed":
+    case "already_satisfied":
+    case "blocked":
+    case "partial":
+    case "not_satisfied":
+    case "uncertain":
+      return normalized
+    default:
+      return undefined
+  }
+}
+
+function hasSubstantiveEvidence(result: ZflowFixFindingResult | ZflowFixResultEnvelope["zflowFixResult"]): boolean {
+  return Boolean(
+    result.reason?.trim() ||
+    result.evidence?.some((entry) => entry.trim()) ||
+    result.validation?.some((entry) => entry.trim()),
+  )
+}
+
+function extractBalancedJsonObject(source: string, marker: string): string | undefined {
+  const markerIndex = source.indexOf(marker)
+  if (markerIndex < 0) return undefined
+
+  let openIndex = markerIndex
+  while (openIndex >= 0 && source[openIndex] !== "{") {
+    openIndex--
+  }
+  if (openIndex < 0) return undefined
+
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let i = openIndex; i < source.length; i++) {
+    const char = source[i]
+    if (inString) {
+      if (escaped) {
+        escaped = false
+      } else if (char === "\\") {
+        escaped = true
+      } else if (char === '"') {
+        inString = false
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inString = true
+    } else if (char === "{") {
+      depth++
+    } else if (char === "}") {
+      depth--
+      if (depth === 0) return source.slice(openIndex, i + 1)
+    }
+  }
+  return undefined
+}
+
+export function parseZflowFixResultEnvelope(output: string | undefined): ZflowFixResultEnvelope | undefined {
+  if (!output?.trim()) return undefined
+
+  const candidates: string[] = []
+  for (const match of output.matchAll(/```(?:json)?\s*\n([\s\S]*?)```/gi)) {
+    candidates.push(match[1])
+  }
+  const balanced = extractBalancedJsonObject(output, '"zflowFixResult"') ??
+    extractBalancedJsonObject(output, "zflowFixResult")
+  if (balanced) candidates.push(balanced)
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown
+      if (!parsed || typeof parsed !== "object" || !("zflowFixResult" in parsed)) continue
+      const envelope = parsed as ZflowFixResultEnvelope
+      const status = normalizeStructuredStatus(envelope.zflowFixResult?.status)
+      if (!status) continue
+      envelope.zflowFixResult.status = status
+      envelope.zflowFixResult.findings = (envelope.zflowFixResult.findings ?? [])
+        .filter((finding) => finding && typeof finding.findingId === "string")
+        .map((finding) => ({
+          ...finding,
+          status: normalizeStructuredStatus(finding.status) ?? "uncertain",
+          evidence: Array.isArray(finding.evidence) ? finding.evidence.map(String) : undefined,
+          changedFiles: Array.isArray(finding.changedFiles) ? finding.changedFiles.map(String) : undefined,
+          validation: Array.isArray(finding.validation) ? finding.validation.map(String) : undefined,
+          reason: typeof finding.reason === "string" ? finding.reason : undefined,
+        }))
+      return envelope
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  return undefined
+}
+
+async function readDispatchOutput(result: AgentDispatchResult & { outputPath?: string }): Promise<string> {
+  if (result.rawOutput?.trim()) return result.rawOutput
+  if (!result.outputPath) return ""
   try {
     const { default: fs } = await import("node:fs/promises")
-    const fileContent = await fs.readFile(filePath, "utf-8")
-    if (
-      findingText.includes("generatetoken") &&
-      (findingText.includes("async") || findingText.includes("promise"))
-    ) {
-      const hasSyncSig = /generateToken\s*\(\s*\)\s*:\s*string/.test(fileContent)
-      const hasAsyncSig = /generateToken\s*\(\s*\)\s*:\s*Promise<string>/.test(fileContent) ||
-                          /async\s+generateToken/.test(fileContent)
-      if (hasSyncSig && !hasAsyncSig) return true
-    }
-
-    if (
-      findingText.includes("organization_members") &&
-      (findingText.includes("redundant") || findingText.includes("synthetic") || findingText.includes("id primary key")) &&
-      findingText.includes("primary key")
-    ) {
-      const tableDdl = extractCreateTableDdl(fileContent, "organization_members")
-      if (!tableDdl) return false
-      const hasSyntheticIdColumn = /^\s*["`]?id["`]?\s+/im.test(tableDdl)
-      const hasSyntheticIdPrimaryKey = /^\s*["`]?id["`]?\s+[^\n,]*primary\s+key/im.test(tableDdl)
-      const hasCompositePrimaryKey = /primary\s+key\s*\(\s*["`]?organization_id["`]?\s*,\s*["`]?app_user_id["`]?\s*\)/i.test(tableDdl)
-      if (!hasSyntheticIdColumn && !hasSyntheticIdPrimaryKey && hasCompositePrimaryKey) return true
-    }
-    return false
+    return await fs.readFile(result.outputPath, "utf-8")
   } catch {
-    return false
+    return ""
   }
 }
 
-function extractCreateTableDdl(sql: string, tableName: string): string | undefined {
-  const escaped = tableName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  const pattern = new RegExp(
-    `create\\s+table(?:\\s+if\\s+not\\s+exists)?\\s+["\`]?(?:\\w+\\.)?${escaped}["\`]?\\s*\\([\\s\\S]*?\\n\\s*\\);`,
-    "i",
-  )
-  return sql.match(pattern)?.[0]
+function structuredResultForFinding(
+  envelope: ZflowFixResultEnvelope,
+  finding: ParsedFinding,
+): ZflowFixFindingResult | undefined {
+  const specific = envelope.zflowFixResult.findings?.find((entry) => entry.findingId === finding.findingId)
+  if (specific) return specific
+  if ((envelope.zflowFixResult.findings?.length ?? 0) > 0) return undefined
+  return {
+    findingId: finding.findingId,
+    status: envelope.zflowFixResult.status,
+    evidence: envelope.zflowFixResult.evidence,
+    changedFiles: envelope.zflowFixResult.changedFiles,
+    validation: envelope.zflowFixResult.validation,
+    reason: envelope.zflowFixResult.reason,
+  }
 }
 
-async function collectAlreadySatisfiedFindings(
-  findings: ParsedFinding[],
-  cwd?: string,
-): Promise<{ satisfied: ParsedFinding[], pending: ParsedFinding[] }> {
-  const satisfied: ParsedFinding[] = []
-  const pending: ParsedFinding[] = []
-  for (const finding of findings) {
-    if (await checkFindingAlreadySatisfied(finding, cwd)) {
-      satisfied.push(finding)
-    } else {
-      pending.push(finding)
+function applyStructuredFixResults(
+  batch: DirectFixBatch,
+  envelope: ZflowFixResultEnvelope,
+  fixed: DirectFixFindingOutcome[],
+  unresolved: DirectFixFindingOutcome[],
+  attempts: number,
+  outputPath: string | undefined,
+): Set<string> {
+  const handled = new Set<string>()
+  for (const finding of batch.findings) {
+    const result = structuredResultForFinding(envelope, finding)
+    if (!result) continue
+    handled.add(finding.findingId)
+
+    const evidenceSuffix = result.reason ?? result.evidence?.join("; ")
+    if (result.status === "fixed") {
+      fixed.push({
+        findingId: finding.findingId,
+        title: finding.title,
+        severity: finding.severity,
+        file: finding.file,
+        status: "fixed",
+        attempts,
+        reason: evidenceSuffix,
+        outputPath,
+      })
+      continue
     }
+
+    if (result.status === "already_satisfied" && hasSubstantiveEvidence(result)) {
+      fixed.push({
+        findingId: finding.findingId,
+        title: finding.title,
+        severity: finding.severity,
+        file: finding.file,
+        status: "already-satisfied",
+        attempts,
+        reason: evidenceSuffix ?? "worker reported finding already satisfied",
+        outputPath,
+      })
+      continue
+    }
+
+    unresolved.push({
+      findingId: finding.findingId,
+      title: finding.title,
+      severity: finding.severity,
+      file: finding.file,
+      status: "unresolved",
+      attempts,
+      reason: result.reason ?? `worker reported ${result.status}`,
+      outputPath,
+    })
   }
-  return { satisfied, pending }
+  return handled
+}
+
+function buildFixSatisfactionCheckerPrompt(
+  changeId: string,
+  fixResult: FixWorkflowResult,
+  batch: DirectFixBatch,
+  workerOutput: string,
+): string {
+  const lines: string[] = [
+    `# Fix Satisfaction Check for ${changeId}`,
+    "",
+    "You are a read-only zflow satisfaction checker. Decide whether the current repository state already satisfies the listed review finding(s).",
+    "Do not edit files. Inspect only the source files, plan artifacts, review finding text, and worker output.",
+    "",
+    "## Required JSON result",
+    "",
+    "Return a single JSON object in a fenced ```json block using this exact top-level key:",
+    "",
+    "```json",
+    JSON.stringify({
+      zflowFixResult: {
+        status: "already_satisfied | not_satisfied | uncertain",
+        findings: [{
+          findingId: "finding-id",
+          status: "already_satisfied | not_satisfied | uncertain",
+          evidence: ["file/path:line or concrete reason"],
+          changedFiles: [],
+          validation: ["read-only checks performed"],
+          reason: "brief explanation",
+        }],
+      },
+    }, null, 2),
+    "```",
+    "",
+    "Only use `already_satisfied` when concrete source evidence proves the fix requirements are met. Otherwise use `not_satisfied` or `uncertain`.",
+    "",
+    "## Findings",
+    "",
+  ]
+
+  for (const finding of batch.findings) {
+    lines.push(
+      `### ${finding.findingId}: ${finding.title}`,
+      `- Severity: ${finding.severity}`,
+      `- File: ${finding.file ?? "(not specified)"}`,
+      `- Evidence: ${finding.evidence}`,
+      `- Expected behavior: ${finding.expectedBehavior ?? "(not specified)"}`,
+      `- Fix requirements: ${finding.fixRequirements ?? finding.recommendation}`,
+      `- Validation: ${finding.validation ?? "(not specified)"}`,
+      "",
+    )
+  }
+
+  lines.push(
+    "## Plan artifacts",
+    "",
+    ...Object.entries(fixResult.planArtifactPaths ?? {}).map(([name, path]) => `- ${name}: ${path}`),
+    "",
+    "## Worker output / error context",
+    "",
+    workerOutput.trim() || "(no worker output)",
+    "",
+  )
+
+  return lines.join("\n")
+}
+
+async function runSatisfactionChecker(
+  options: DirectFixWorkflowOptions,
+  changeId: string,
+  fixResult: FixWorkflowResult,
+  batch: DirectFixBatch,
+  workerOutput: string,
+  outputPath: string,
+): Promise<ZflowFixResultEnvelope | undefined> {
+  const result = await options.dispatchService.runAgent({
+    agent: "zflow.fix-satisfaction-checker",
+    task: buildFixSatisfactionCheckerPrompt(changeId, fixResult, batch, workerOutput),
+    cwd: options.cwd,
+    ...(options.workerModel ? { model: options.workerModel } : {}),
+    output: outputPath,
+    outputMode: "file-only",
+  })
+  const checkerOutput = await readDispatchOutput({ ...result, outputPath: result.outputPath ?? outputPath })
+  return parseZflowFixResultEnvelope(checkerOutput)
 }
 
 export function buildDirectFixBatches(
@@ -534,6 +742,27 @@ function buildDirectFixWorkerTaskPrompt(
     ...buildLimitedCoordinationLines(`fix ${changeId} ${batch.batchId}`, orchestratorTarget),
     "- Do not use coordination for routine narration.",
     "",
+    "## Required structured result",
+    "",
+    "End your final response with a single fenced ```json block using this exact top-level key.",
+    "Use `already_satisfied` when no edit is needed because the current code already satisfies the finding. Include concrete evidence.",
+    "",
+    "```json",
+    JSON.stringify({
+      zflowFixResult: {
+        status: "fixed | already_satisfied | blocked | partial",
+        findings: [{
+          findingId: batch.findings[0]?.findingId ?? "finding-id",
+          status: "fixed | already_satisfied | blocked | partial",
+          evidence: ["file/path:line or concrete reason"],
+          changedFiles: ["file/path.ts"],
+          validation: ["command/result or read-only verification"],
+          reason: "brief explanation",
+        }],
+      },
+    }, null, 2),
+    "```",
+    "",
     "## Instructions",
     "",
     "1. Read the source change documents listed above before editing.",
@@ -543,6 +772,7 @@ function buildDirectFixWorkerTaskPrompt(
     "5. Update or add focused tests when behavior changes.",
     "6. Run the most relevant validation/test commands you can for this batch. Use any explicit validation listed above.",
     "7. In your final response, report: changed files, findings addressed, validation run, and any unresolved blocker.",
+    "8. Always include the required structured JSON result block. If you made no edits because the finding was already satisfied, set the relevant finding status to `already_satisfied` and include evidence.",
     "",
     ...buildConflictScopeGuidance(),
   )
@@ -652,45 +882,23 @@ export async function runDirectFixWorkflow(
   const unresolved: DirectFixFindingOutcome[] = []
 
   for (const batch of batches) {
-    const initialSatisfaction = await collectAlreadySatisfiedFindings(batch.findings, cwd)
-    for (const finding of initialSatisfaction.satisfied) {
-      fixed.push({
-        findingId: finding.findingId,
-        title: finding.title,
-        severity: finding.severity,
-        file: finding.file,
-        status: "already-satisfied",
-        attempts: 0,
-        reason: "pre-dispatch verification — finding already satisfied by current code",
-      })
-    }
-    if (initialSatisfaction.pending.length === 0) {
-      continue
-    }
-
-    const activeBatch: DirectFixBatch = {
-      ...batch,
-      findings: initialSatisfaction.pending,
-      files: [...new Set(initialSatisfaction.pending.map((finding) => finding.file).filter((file): file is string => Boolean(file)))],
-    }
-
-    await options.onBatchStart?.(activeBatch)
+    await options.onBatchStart?.(batch)
     let lastResult: (AgentDispatchResult & { outputPath?: string }) | null = null
     let attempt = 0
 
     while (attempt < maxAttempts) {
       attempt++
       const outputPath = attempt === 1
-        ? `${versionDir}/${activeBatch.batchId}-result.md`
-        : `${versionDir}/${activeBatch.batchId}-attempt-${attempt}.md`
+        ? `${versionDir}/${batch.batchId}-result.md`
+        : `${versionDir}/${batch.batchId}-attempt-${attempt}.md`
 
-      let task = buildDirectFixWorkerTaskPrompt(changeId, fixResult, activeBatch, runtimeStateDir)
+      let task = buildDirectFixWorkerTaskPrompt(changeId, fixResult, batch, runtimeStateDir)
       if (attempt > 1 && lastResult) {
-        task += buildRetryPromptSuffix(activeBatch, attempt, lastResult.error, lastResult.outputPath)
+        task += buildRetryPromptSuffix(batch, attempt, lastResult.error, lastResult.outputPath)
       }
 
       lastResult = await options.dispatchService.runAgent({
-        agent: activeBatch.workerAgent,
+        agent: batch.workerAgent,
         task,
         cwd,
         ...(options.workerModel ? { model: options.workerModel } : {}),
@@ -698,37 +906,68 @@ export async function runDirectFixWorkflow(
         output: outputPath,
         outputMode: "file-only",
         onUpdate: (progress) => {
-          void options.onBatchUpdate?.(activeBatch, progress)
+          void options.onBatchUpdate?.(batch, progress)
         },
       })
 
-      if (lastResult.ok) break
+      if (!lastResult.outputPath) lastResult.outputPath = outputPath
 
-      // Ensure diagnostic output is persisted even on failure
-      if (!lastResult.outputPath) {
-        lastResult.outputPath = outputPath
+      if (!lastResult.ok && !lastResult.rawOutput?.trim()) {
         try {
-          await fs.writeFile(outputPath, [
-            `# ${activeBatch.batchId} attempt ${attempt}`,
-            "",
-            "**Status**: failed",
-            `**Error**: ${lastResult.error ?? "unknown"}`,
-            "",
-            `**Findings**: ${activeBatch.findings.map((f) => f.findingId).join(", ")}`,
-            `**Files**: ${activeBatch.files.join(", ")}`,
-            "",
-          ].join("\n"), "utf-8")
-        } catch { /* best-effort */ }
+          await fs.access(outputPath)
+        } catch {
+          try {
+            await fs.writeFile(outputPath, [
+              `# ${batch.batchId} attempt ${attempt}`,
+              "",
+              "**Status**: failed",
+              `**Error**: ${lastResult.error ?? "unknown"}`,
+              "",
+              `**Findings**: ${batch.findings.map((f) => f.findingId).join(", ")}`,
+              `**Files**: ${batch.files.join(", ")}`,
+              "",
+            ].join("\n"), "utf-8")
+          } catch { /* best-effort */ }
+        }
       }
+
+      if (lastResult.ok) break
     }
 
-    await options.onBatchComplete?.(activeBatch, lastResult!)
+    await options.onBatchComplete?.(batch, lastResult!)
 
     const finalResult = lastResult!
-    const isNoEdit = !finalResult.ok && isNoEditFailure(finalResult.error)
+    const finalOutput = await readDispatchOutput(finalResult)
+    const structuredResult = parseZflowFixResultEnvelope(finalOutput)
+
+    if (structuredResult) {
+      const handled = applyStructuredFixResults(
+        batch,
+        structuredResult,
+        fixed,
+        unresolved,
+        attempt,
+        finalResult.outputPath,
+      )
+      for (const finding of batch.findings) {
+        if (!handled.has(finding.findingId)) {
+          unresolved.push({
+            findingId: finding.findingId,
+            title: finding.title,
+            severity: finding.severity,
+            file: finding.file,
+            status: "unresolved",
+            attempts: attempt,
+            reason: "structured fix result omitted this finding",
+            outputPath: finalResult.outputPath,
+          })
+        }
+      }
+      continue
+    }
 
     if (finalResult.ok) {
-      for (const finding of activeBatch.findings) {
+      for (const finding of batch.findings) {
         fixed.push({
           findingId: finding.findingId,
           title: finding.title,
@@ -739,32 +978,56 @@ export async function runDirectFixWorkflow(
           outputPath: finalResult.outputPath,
         })
       }
-    } else {
-      const postFailureSatisfaction = await collectAlreadySatisfiedFindings(activeBatch.findings, cwd)
-      for (const finding of postFailureSatisfaction.satisfied) {
-        fixed.push({
-          findingId: finding.findingId,
-          title: finding.title,
-          severity: finding.severity,
-          file: finding.file,
-          status: "already-satisfied",
-          attempts: attempt,
-          reason: `${isNoEdit ? "no-op" : "post-failure"} verified — finding already satisfied by current code`,
-          outputPath: finalResult.outputPath,
-        })
+      continue
+    }
+
+    const checkerOutputPath = `${versionDir}/${batch.batchId}-satisfaction-check.md`
+    const checkerResult = await runSatisfactionChecker(
+      options,
+      changeId,
+      fixResult,
+      batch,
+      finalOutput || finalResult.error || "",
+      checkerOutputPath,
+    )
+
+    if (checkerResult) {
+      const handled = applyStructuredFixResults(
+        batch,
+        checkerResult,
+        fixed,
+        unresolved,
+        attempt,
+        checkerOutputPath,
+      )
+      for (const finding of batch.findings) {
+        if (!handled.has(finding.findingId)) {
+          unresolved.push({
+            findingId: finding.findingId,
+            title: finding.title,
+            severity: finding.severity,
+            file: finding.file,
+            status: "unresolved",
+            attempts: attempt,
+            reason: "satisfaction checker omitted this finding",
+            outputPath: checkerOutputPath,
+          })
+        }
       }
-      for (const finding of postFailureSatisfaction.pending) {
-        unresolved.push({
-          findingId: finding.findingId,
-          title: finding.title,
-          severity: finding.severity,
-          file: finding.file,
-          status: "unresolved",
-          attempts: attempt,
-          reason: finalResult.error ?? "worker failed",
-          outputPath: finalResult.outputPath,
-        })
-      }
+      continue
+    }
+
+    for (const finding of batch.findings) {
+      unresolved.push({
+        findingId: finding.findingId,
+        title: finding.title,
+        severity: finding.severity,
+        file: finding.file,
+        status: "unresolved",
+        attempts: attempt,
+        reason: finalResult.error ?? "worker failed",
+        outputPath: finalResult.outputPath,
+      })
     }
   }
 
