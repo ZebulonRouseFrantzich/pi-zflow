@@ -1496,4 +1496,55 @@ describe("runDirectFixWorkflow follow-up hardening", { concurrency: false }, () 
     }
   })
 
+
+  it("cleans stale direct-fix batch artifacts before a new run", async () => {
+    const { runDirectFixWorkflow, resolveFixOrchestratorConfig } = await import(
+      "../extensions/zflow-change-workflows/orchestration.js"
+    )
+    const { resolvePlanVersionDir, resolveChangeDir } = await import("pi-zflow-artifacts")
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-stale-cleanup-"))
+    const versionDir = resolvePlanVersionDir("feat-auth", "v1", tmpDir)
+    const changeDir = resolveChangeDir("feat-auth", tmpDir)
+    await mkdir(versionDir, { recursive: true })
+    await writeFile(join(versionDir, "batch-1-result.md"), "stale previous run", "utf-8")
+    await writeFile(join(versionDir, "batch-1-attempt-2.md"), "stale previous attempt", "utf-8")
+    await writeFile(join(versionDir, "batch-1-satisfaction-check.md"), "stale previous checker", "utf-8")
+    await writeFile(join(versionDir, "fix-orchestration-report.md"), "stale report", "utf-8")
+    await writeFile(join(changeDir, "fix-orchestration-report.md"), "stale report", "utf-8")
+    try {
+      const dispatchService = {
+        name: "test-dispatch",
+        async runAgent() {
+          return { ok: false, error: "fresh failure" }
+        },
+        async runParallel() { return { ok: false, results: [] } },
+      }
+
+      const result = await runDirectFixWorkflow({
+        changeId: "feat-auth",
+        cwd: tmpDir,
+        workerAgent: "zflow.implement-routine",
+        dispatchService: dispatchService as any,
+        fixResult: {
+          changeId: "feat-auth",
+          fixPlan: "# Fix",
+          filesToModify: [],
+          parsedFindings: [{ findingId: "finding-1", severity: "minor", title: "Finding", file: "src/file.ts", reviewerRole: "logic", evidence: "evidence", recommendation: "recommendation" }],
+          planVersion: "v1",
+          lifecycleState: "review-failed",
+          fixOrchestratorConfig: { ...resolveFixOrchestratorConfig(), maxAttemptsPerFinding: 1 },
+        },
+      })
+
+      const { readFile } = await import("node:fs/promises")
+      const batchOutput = await readFile(join(versionDir, "batch-1-result.md"), "utf-8")
+      assert.ok(batchOutput.includes("fresh failure"), "batch output should be from current run")
+      assert.ok(!batchOutput.includes("stale previous run"), "stale batch output should be removed")
+      const report = await readFile(result.reportPath, "utf-8")
+      assert.ok(!report.includes("stale report"), "stale report should be replaced")
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
 })

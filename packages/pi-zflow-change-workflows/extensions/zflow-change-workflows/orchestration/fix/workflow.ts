@@ -631,8 +631,56 @@ async function runSatisfactionChecker(
     output: outputPath,
     outputMode: "file-only",
   })
-  const checkerOutput = await readDispatchOutput({ ...result, outputPath: result.outputPath ?? outputPath })
+  const resultWithPath = { ...result, outputPath: result.outputPath ?? outputPath }
+  await ensureDispatchOutputFile(resultWithPath, outputPath, "satisfaction-checker")
+  const checkerOutput = await readDispatchOutput(resultWithPath)
   return parseZflowFixResultEnvelope(checkerOutput)
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    const { default: fs } = await import("node:fs/promises")
+    await fs.access(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function ensureDispatchOutputFile(
+  result: AgentDispatchResult & { outputPath?: string },
+  outputPath: string,
+  label: string,
+): Promise<void> {
+  const { default: fs } = await import("node:fs/promises")
+  result.outputPath = result.outputPath ?? outputPath
+  if (await fileExists(outputPath)) return
+
+  const content = result.rawOutput?.trim()
+    ? result.rawOutput
+    : [
+        `# ${label}`,
+        "",
+        `**Status**: ${result.ok ? "completed" : "failed"}`,
+        `**Error**: ${result.error ?? "none"}`,
+        "",
+      ].join("\n")
+  try {
+    await fs.writeFile(outputPath, content, "utf-8")
+  } catch { /* best-effort */ }
+}
+
+async function cleanupStaleDirectFixArtifacts(versionDir: string, changeDir: string): Promise<void> {
+  const { default: fs } = await import("node:fs/promises")
+  try {
+    const entries = await fs.readdir(versionDir)
+    await Promise.all(entries
+      .filter((entry) => /^batch-\d+(?:-result|-attempt-\d+|-satisfaction-check)\.md$/.test(entry) || entry === "fix-orchestration-report.md")
+      .map((entry) => fs.rm(`${versionDir}/${entry}`, { force: true })))
+  } catch { /* best-effort */ }
+  try {
+    await fs.rm(`${changeDir}/fix-orchestration-report.md`, { force: true })
+  } catch { /* best-effort */ }
 }
 
 export function buildDirectFixBatches(
@@ -877,6 +925,7 @@ export async function runDirectFixWorkflow(
   const maxAttempts = Math.max(1, fixResult.fixOrchestratorConfig.maxAttemptsPerFinding)
   await fs.mkdir(versionDir, { recursive: true })
   await fs.mkdir(changeDir, { recursive: true })
+  await cleanupStaleDirectFixArtifacts(versionDir, changeDir)
 
   const fixed: DirectFixFindingOutcome[] = []
   const unresolved: DirectFixFindingOutcome[] = []
@@ -910,26 +959,7 @@ export async function runDirectFixWorkflow(
         },
       })
 
-      if (!lastResult.outputPath) lastResult.outputPath = outputPath
-
-      if (!lastResult.ok && !lastResult.rawOutput?.trim()) {
-        try {
-          await fs.access(outputPath)
-        } catch {
-          try {
-            await fs.writeFile(outputPath, [
-              `# ${batch.batchId} attempt ${attempt}`,
-              "",
-              "**Status**: failed",
-              `**Error**: ${lastResult.error ?? "unknown"}`,
-              "",
-              `**Findings**: ${batch.findings.map((f) => f.findingId).join(", ")}`,
-              `**Files**: ${batch.files.join(", ")}`,
-              "",
-            ].join("\n"), "utf-8")
-          } catch { /* best-effort */ }
-        }
-      }
+      await ensureDispatchOutputFile(lastResult, outputPath, `${batch.batchId} attempt ${attempt}`)
 
       if (lastResult.ok) break
     }
