@@ -942,6 +942,8 @@ export async function runDirectFixWorkflow(
   for (const batch of batches) {
     await options.onBatchStart?.(batch)
     let lastResult: (AgentDispatchResult & { outputPath?: string }) | null = null
+    let structuredResult: ZflowFixResultEnvelope | undefined
+    let finalOutput = ""
     let attempt = 0
 
     while (attempt < maxAttempts) {
@@ -978,14 +980,21 @@ export async function runDirectFixWorkflow(
 
       await ensureDispatchOutputFile(lastResult, outputPath, `${batch.batchId} attempt ${attempt}`)
 
+      finalOutput = await readDispatchOutput(lastResult)
+      structuredResult = parseZflowFixResultEnvelope(finalOutput)
+      if (structuredResult) {
+        lastResult = { ...lastResult, ok: true, error: undefined }
+        break
+      }
+
       if (lastResult.ok) break
     }
 
     await options.onBatchComplete?.(batch, lastResult!)
 
     const finalResult = lastResult!
-    const finalOutput = await readDispatchOutput(finalResult)
-    const structuredResult = parseZflowFixResultEnvelope(finalOutput)
+    if (!finalOutput) finalOutput = await readDispatchOutput(finalResult)
+    structuredResult = structuredResult ?? parseZflowFixResultEnvelope(finalOutput)
 
     if (structuredResult) {
       const handled = applyStructuredFixResults(
