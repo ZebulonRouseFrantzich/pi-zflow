@@ -623,14 +623,23 @@ async function runSatisfactionChecker(
   workerOutput: string,
   outputPath: string,
 ): Promise<ZflowFixResultEnvelope | undefined> {
-  const result = await options.dispatchService.runAgent({
-    agent: "zflow.fix-satisfaction-checker",
-    task: buildFixSatisfactionCheckerPrompt(changeId, fixResult, batch, workerOutput),
-    cwd: options.cwd,
-    ...(options.workerModel ? { model: options.workerModel } : {}),
-    output: outputPath,
-    outputMode: "file-only",
-  })
+  let result: AgentDispatchResult & { outputPath?: string }
+  try {
+    result = await options.dispatchService.runAgent({
+      agent: "zflow.fix-satisfaction-checker",
+      task: buildFixSatisfactionCheckerPrompt(changeId, fixResult, batch, workerOutput),
+      cwd: options.cwd,
+      ...(options.workerModel ? { model: options.workerModel } : {}),
+      output: outputPath,
+      outputMode: "file-only",
+    })
+  } catch (error) {
+    result = {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      outputPath,
+    }
+  }
   const resultWithPath = { ...result, outputPath: result.outputPath ?? outputPath }
   await ensureDispatchOutputFile(resultWithPath, outputPath, "satisfaction-checker")
   const checkerOutput = await readDispatchOutput(resultWithPath)
@@ -946,18 +955,26 @@ export async function runDirectFixWorkflow(
         task += buildRetryPromptSuffix(batch, attempt, lastResult.error, lastResult.outputPath)
       }
 
-      lastResult = await options.dispatchService.runAgent({
-        agent: batch.workerAgent,
-        task,
-        cwd,
-        ...(options.workerModel ? { model: options.workerModel } : {}),
-        ...(options.workerThinking ? { thinking: options.workerThinking } : {}),
-        output: outputPath,
-        outputMode: "file-only",
-        onUpdate: (progress) => {
-          void options.onBatchUpdate?.(batch, progress)
-        },
-      })
+      try {
+        lastResult = await options.dispatchService.runAgent({
+          agent: batch.workerAgent,
+          task,
+          cwd,
+          ...(options.workerModel ? { model: options.workerModel } : {}),
+          ...(options.workerThinking ? { thinking: options.workerThinking } : {}),
+          output: outputPath,
+          outputMode: "file-only",
+          onUpdate: (progress) => {
+            void options.onBatchUpdate?.(batch, progress)
+          },
+        })
+      } catch (error) {
+        lastResult = {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+          outputPath,
+        }
+      }
 
       await ensureDispatchOutputFile(lastResult, outputPath, `${batch.batchId} attempt ${attempt}`)
 

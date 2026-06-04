@@ -1547,4 +1547,45 @@ describe("runDirectFixWorkflow follow-up hardening", { concurrency: false }, () 
     }
   })
 
+
+  it("parses structured output when dispatch throws after writing the output file", async () => {
+    const { runDirectFixWorkflow, resolveFixOrchestratorConfig } = await import(
+      "../extensions/zflow-change-workflows/orchestration.js"
+    )
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-throw-after-output-"))
+    try {
+      const dispatchService = {
+        name: "test-dispatch",
+        async runAgent(input: Record<string, unknown>) {
+          const outputPath = String(input.output)
+          await writeFile(outputPath, '```json\n{"zflowFixResult":{"status":"already_satisfied","findings":[{"findingId":"finding-1","status":"already_satisfied","evidence":["source file already satisfies the requirement"],"changedFiles":[],"validation":["read-only verification"],"reason":"No edit needed"}]}}\n```', "utf-8")
+          throw new Error("Subagent completed without making edits for an implementation task.")
+        },
+        async runParallel() { return { ok: false, results: [] } },
+      }
+
+      const result = await runDirectFixWorkflow({
+        changeId: "feat-auth",
+        cwd: tmpDir,
+        workerAgent: "zflow.implement-routine",
+        dispatchService: dispatchService as any,
+        fixResult: {
+          changeId: "feat-auth",
+          fixPlan: "# Fix",
+          filesToModify: [],
+          parsedFindings: [{ findingId: "finding-1", severity: "minor", title: "Finding", file: "src/file.ts", reviewerRole: "logic", evidence: "evidence", recommendation: "recommendation" }],
+          planVersion: "v1",
+          lifecycleState: "review-failed",
+          fixOrchestratorConfig: { ...resolveFixOrchestratorConfig(), maxAttemptsPerFinding: 1 },
+        },
+      })
+
+      assert.equal(result.fixed.length, 1)
+      assert.equal(result.fixed[0].status, "already-satisfied")
+      assert.equal(result.unresolved.length, 0)
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
 })
