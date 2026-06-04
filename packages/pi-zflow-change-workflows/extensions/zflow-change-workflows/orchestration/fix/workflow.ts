@@ -383,10 +383,48 @@ export async function checkFindingAlreadySatisfied(
                           /async\s+generateToken/.test(fileContent)
       if (hasSyncSig && !hasAsyncSig) return true
     }
+
+    if (
+      findingText.includes("organization_members") &&
+      (findingText.includes("redundant") || findingText.includes("synthetic") || findingText.includes("id primary key")) &&
+      findingText.includes("primary key")
+    ) {
+      const tableDdl = extractCreateTableDdl(fileContent, "organization_members")
+      if (!tableDdl) return false
+      const hasSyntheticIdColumn = /^\s*["`]?id["`]?\s+/im.test(tableDdl)
+      const hasSyntheticIdPrimaryKey = /^\s*["`]?id["`]?\s+[^\n,]*primary\s+key/im.test(tableDdl)
+      const hasCompositePrimaryKey = /primary\s+key\s*\(\s*["`]?organization_id["`]?\s*,\s*["`]?app_user_id["`]?\s*\)/i.test(tableDdl)
+      if (!hasSyntheticIdColumn && !hasSyntheticIdPrimaryKey && hasCompositePrimaryKey) return true
+    }
     return false
   } catch {
     return false
   }
+}
+
+function extractCreateTableDdl(sql: string, tableName: string): string | undefined {
+  const escaped = tableName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const pattern = new RegExp(
+    `create\\s+table(?:\\s+if\\s+not\\s+exists)?\\s+["\`]?(?:\\w+\\.)?${escaped}["\`]?\\s*\\([\\s\\S]*?\\n\\s*\\);`,
+    "i",
+  )
+  return sql.match(pattern)?.[0]
+}
+
+async function collectAlreadySatisfiedFindings(
+  findings: ParsedFinding[],
+  cwd?: string,
+): Promise<{ satisfied: ParsedFinding[], pending: ParsedFinding[] }> {
+  const satisfied: ParsedFinding[] = []
+  const pending: ParsedFinding[] = []
+  for (const finding of findings) {
+    if (await checkFindingAlreadySatisfied(finding, cwd)) {
+      satisfied.push(finding)
+    } else {
+      pending.push(finding)
+    }
+  }
+  return { satisfied, pending }
 }
 
 export function buildDirectFixBatches(
@@ -614,23 +652,45 @@ export async function runDirectFixWorkflow(
   const unresolved: DirectFixFindingOutcome[] = []
 
   for (const batch of batches) {
-    await options.onBatchStart?.(batch)
+    const initialSatisfaction = await collectAlreadySatisfiedFindings(batch.findings, cwd)
+    for (const finding of initialSatisfaction.satisfied) {
+      fixed.push({
+        findingId: finding.findingId,
+        title: finding.title,
+        severity: finding.severity,
+        file: finding.file,
+        status: "already-satisfied",
+        attempts: 0,
+        reason: "pre-dispatch verification — finding already satisfied by current code",
+      })
+    }
+    if (initialSatisfaction.pending.length === 0) {
+      continue
+    }
+
+    const activeBatch: DirectFixBatch = {
+      ...batch,
+      findings: initialSatisfaction.pending,
+      files: [...new Set(initialSatisfaction.pending.map((finding) => finding.file).filter((file): file is string => Boolean(file)))],
+    }
+
+    await options.onBatchStart?.(activeBatch)
     let lastResult: (AgentDispatchResult & { outputPath?: string }) | null = null
     let attempt = 0
 
     while (attempt < maxAttempts) {
       attempt++
       const outputPath = attempt === 1
-        ? `${versionDir}/${batch.batchId}-result.md`
-        : `${versionDir}/${batch.batchId}-attempt-${attempt}.md`
+        ? `${versionDir}/${activeBatch.batchId}-result.md`
+        : `${versionDir}/${activeBatch.batchId}-attempt-${attempt}.md`
 
-      let task = buildDirectFixWorkerTaskPrompt(changeId, fixResult, batch, runtimeStateDir)
+      let task = buildDirectFixWorkerTaskPrompt(changeId, fixResult, activeBatch, runtimeStateDir)
       if (attempt > 1 && lastResult) {
-        task += buildRetryPromptSuffix(batch, attempt, lastResult.error, lastResult.outputPath)
+        task += buildRetryPromptSuffix(activeBatch, attempt, lastResult.error, lastResult.outputPath)
       }
 
       lastResult = await options.dispatchService.runAgent({
-        agent: batch.workerAgent,
+        agent: activeBatch.workerAgent,
         task,
         cwd,
         ...(options.workerModel ? { model: options.workerModel } : {}),
@@ -638,7 +698,7 @@ export async function runDirectFixWorkflow(
         output: outputPath,
         outputMode: "file-only",
         onUpdate: (progress) => {
-          void options.onBatchUpdate?.(batch, progress)
+          void options.onBatchUpdate?.(activeBatch, progress)
         },
       })
 
@@ -649,26 +709,26 @@ export async function runDirectFixWorkflow(
         lastResult.outputPath = outputPath
         try {
           await fs.writeFile(outputPath, [
-            `# ${batch.batchId} attempt ${attempt}`,
+            `# ${activeBatch.batchId} attempt ${attempt}`,
             "",
             "**Status**: failed",
             `**Error**: ${lastResult.error ?? "unknown"}`,
             "",
-            `**Findings**: ${batch.findings.map((f) => f.findingId).join(", ")}`,
-            `**Files**: ${batch.files.join(", ")}`,
+            `**Findings**: ${activeBatch.findings.map((f) => f.findingId).join(", ")}`,
+            `**Files**: ${activeBatch.files.join(", ")}`,
             "",
           ].join("\n"), "utf-8")
         } catch { /* best-effort */ }
       }
     }
 
-    await options.onBatchComplete?.(batch, lastResult!)
+    await options.onBatchComplete?.(activeBatch, lastResult!)
 
     const finalResult = lastResult!
     const isNoEdit = !finalResult.ok && isNoEditFailure(finalResult.error)
 
     if (finalResult.ok) {
-      for (const finding of batch.findings) {
+      for (const finding of activeBatch.findings) {
         fixed.push({
           findingId: finding.findingId,
           title: finding.title,
@@ -679,36 +739,21 @@ export async function runDirectFixWorkflow(
           outputPath: finalResult.outputPath,
         })
       }
-    } else if (isNoEdit) {
-      // Check each finding independently — only mark satisfied ones as already-satisfied
-      for (const finding of batch.findings) {
-        if (await checkFindingAlreadySatisfied(finding, cwd)) {
-          fixed.push({
-            findingId: finding.findingId,
-            title: finding.title,
-            severity: finding.severity,
-            file: finding.file,
-            status: "already-satisfied",
-            attempts: attempt,
-            reason: "no-op verified \u2014 finding already satisfied by current code",
-            outputPath: finalResult.outputPath,
-          })
-        } else {
-          unresolved.push({
-            findingId: finding.findingId,
-            title: finding.title,
-            severity: finding.severity,
-            file: finding.file,
-            status: "unresolved",
-            attempts: attempt,
-            reason: finalResult.error ?? "worker failed",
-            outputPath: finalResult.outputPath,
-          })
-        }
-      }
     } else {
-      // Non no-edit failure (provider error, tool failure, etc.) — all unresolved
-      for (const finding of batch.findings) {
+      const postFailureSatisfaction = await collectAlreadySatisfiedFindings(activeBatch.findings, cwd)
+      for (const finding of postFailureSatisfaction.satisfied) {
+        fixed.push({
+          findingId: finding.findingId,
+          title: finding.title,
+          severity: finding.severity,
+          file: finding.file,
+          status: "already-satisfied",
+          attempts: attempt,
+          reason: `${isNoEdit ? "no-op" : "post-failure"} verified — finding already satisfied by current code`,
+          outputPath: finalResult.outputPath,
+        })
+      }
+      for (const finding of postFailureSatisfaction.pending) {
         unresolved.push({
           findingId: finding.findingId,
           title: finding.title,

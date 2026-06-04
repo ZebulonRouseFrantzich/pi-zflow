@@ -1309,7 +1309,7 @@ describe("runDirectFixWorkflow follow-up hardening", { concurrency: false }, () 
     )
     const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-arbitrary-failure-"))
     await mkdir(join(tmpDir, "apps/api/src/ports"), { recursive: true })
-    await writeFile(join(tmpDir, "apps/api/src/ports/crypto.ts"), "export interface TokenCrypto { generateToken(): string }\n", "utf-8")
+    await writeFile(join(tmpDir, "apps/api/src/ports/crypto.ts"), "export interface TokenCrypto { generateToken(): Promise<string> }\n", "utf-8")
     try {
       const dispatchService = {
         name: "test-dispatch",
@@ -1461,6 +1461,132 @@ describe("runDirectFixWorkflow follow-up hardening", { concurrency: false }, () 
       assert.ok(task.includes("Conflict Resolution & Scope Guard"))
       assert.ok(task.includes("Advisory suggestions only"))
       assert.ok(task.includes("Post-fix introduced-risk check"))
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+
+  it("marks satisfied organization_members composite primary key findings before dispatch", async () => {
+    const { runDirectFixWorkflow, resolveFixOrchestratorConfig } = await import(
+      "../extensions/zflow-change-workflows/orchestration.js"
+    )
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-sql-precheck-"))
+    await mkdir(join(tmpDir, "apps/api/migrations/control"), { recursive: true })
+    await writeFile(join(tmpDir, "apps/api/migrations/control/0001_initial.sql"), `CREATE TABLE IF NOT EXISTS "organization_members" (
+    "organization_id" TEXT NOT NULL,
+    "app_user_id" TEXT NOT NULL,
+    "role" TEXT NOT NULL,
+    PRIMARY KEY ("organization_id", "app_user_id")
+);
+`, "utf-8")
+    try {
+      let dispatchCount = 0
+      const dispatchService = {
+        name: "test-dispatch",
+        async runAgent() {
+          dispatchCount++
+          return { ok: false, error: "should not dispatch" }
+        },
+        async runParallel() {
+          return { ok: false, results: [] }
+        },
+      }
+
+      const result = await runDirectFixWorkflow({
+        changeId: "feat-auth",
+        cwd: tmpDir,
+        workerAgent: "zflow.implement-routine",
+        dispatchService: dispatchService as any,
+        fixResult: {
+          changeId: "feat-auth",
+          fixPlan: "# Fix",
+          filesToModify: [],
+          parsedFindings: [{
+            findingId: "finding-22",
+            severity: "minor",
+            title: "Redundant `id` primary key on `organization_members` wastes storage",
+            file: "apps/api/migrations/control/0001_initial.sql",
+            reviewerRole: "system",
+            evidence: "Redundant id primary key on organization_members wastes storage",
+            recommendation: "Drop the id column and promote the composite unique key to PRIMARY KEY.",
+            fixRequirements: "The migration should not declare an id column on organization_members and should use PRIMARY KEY (organization_id, app_user_id).",
+          }],
+          planVersion: "v1",
+          lifecycleState: "review-failed",
+          fixOrchestratorConfig: resolveFixOrchestratorConfig(),
+        },
+      })
+
+      assert.equal(dispatchCount, 0)
+      assert.equal(result.fixed.length, 1)
+      assert.equal(result.fixed[0].status, "already-satisfied")
+      assert.equal(result.fixed[0].attempts, 0)
+      assert.equal(result.unresolved.length, 0)
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("marks a post-failure SQL finding already-satisfied after a terminated worker", async () => {
+    const { runDirectFixWorkflow, resolveFixOrchestratorConfig } = await import(
+      "../extensions/zflow-change-workflows/orchestration.js"
+    )
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-sql-postfailure-"))
+    const migrationPath = join(tmpDir, "apps/api/migrations/control/0001_initial.sql")
+    await mkdir(join(tmpDir, "apps/api/migrations/control"), { recursive: true })
+    await writeFile(migrationPath, `CREATE TABLE IF NOT EXISTS "organization_members" (
+    "id" TEXT PRIMARY KEY NOT NULL,
+    "organization_id" TEXT NOT NULL,
+    "app_user_id" TEXT NOT NULL
+);
+`, "utf-8")
+    try {
+      const dispatchService = {
+        name: "test-dispatch",
+        async runAgent() {
+          await writeFile(migrationPath, `CREATE TABLE IF NOT EXISTS "organization_members" (
+    "organization_id" TEXT NOT NULL,
+    "app_user_id" TEXT NOT NULL,
+    PRIMARY KEY ("organization_id", "app_user_id")
+);
+`, "utf-8")
+          return { ok: false, error: "terminated" }
+        },
+        async runParallel() {
+          return { ok: false, results: [] }
+        },
+      }
+
+      const result = await runDirectFixWorkflow({
+        changeId: "feat-auth",
+        cwd: tmpDir,
+        workerAgent: "zflow.implement-routine",
+        dispatchService: dispatchService as any,
+        fixResult: {
+          changeId: "feat-auth",
+          fixPlan: "# Fix",
+          filesToModify: [],
+          parsedFindings: [{
+            findingId: "finding-22",
+            severity: "minor",
+            title: "Redundant `id` primary key on `organization_members` wastes storage",
+            file: "apps/api/migrations/control/0001_initial.sql",
+            reviewerRole: "system",
+            evidence: "Redundant id primary key on organization_members wastes storage",
+            recommendation: "Drop the id column and promote the composite unique key to PRIMARY KEY.",
+            fixRequirements: "The migration should not declare an id column on organization_members and should use PRIMARY KEY (organization_id, app_user_id).",
+          }],
+          planVersion: "v1",
+          lifecycleState: "review-failed",
+          fixOrchestratorConfig: { ...resolveFixOrchestratorConfig(), maxAttemptsPerFinding: 1 },
+        },
+      })
+
+      assert.equal(result.fixed.length, 1)
+      assert.equal(result.fixed[0].status, "already-satisfied")
+      assert.equal(result.fixed[0].reason?.includes("post-failure"), true)
+      assert.equal(result.unresolved.length, 0)
     } finally {
       await rm(tmpDir, { recursive: true, force: true })
     }
