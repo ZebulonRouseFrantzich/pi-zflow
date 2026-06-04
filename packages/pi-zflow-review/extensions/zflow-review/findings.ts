@@ -399,6 +399,8 @@ export interface CodeReviewFinding {
   title: string
   reviewerSupport: string[]
   reviewerDissent?: string[]
+  /** Stable persisted finding identifier (e.g. "finding-3"). */
+  findingId?: string
   /** Source file path for this finding (when available from the reviewer). */
   file?: string
   /** Starting line number for the finding. */
@@ -409,8 +411,10 @@ export interface CodeReviewFinding {
   whyItMatters: string
   failureMode?: string
   recommendation: string
-  /** Path to the raw reviewer artifact for traceability */
+  /** Path to the primary raw reviewer artifact for traceability */
   artifactPath?: string
+  /** Additional raw reviewer artifacts that support this consolidated finding. */
+  artifactPaths?: string[]
   /** Run ID for cross-referencing */
   runId?: string
   /** Enriched: what the code SHOULD do instead. */
@@ -421,11 +425,49 @@ export interface CodeReviewFinding {
   validation?: string
   /** Enriched: optional hint for the fix worker. */
   suggestedApproach?: string
+  /** Root-cause classification used for clustering and escalation. */
+  rootCause?: string
+  /** Root-cause family identifier shared across related findings/files. */
+  findingFamily?: string
+  /** Canonical key for exact duplicate/recurrence matching. */
+  canonicalKey?: string
+  /** Number of consecutive review loops this canonical issue has survived. */
+  recurrenceCount?: number
+  /** Prior finding IDs or canonical keys that this finding recurs from. */
+  previousOccurrenceIds?: string[]
+  /** Priority hint for downstream fix orchestration (1=highest). */
+  fixPriority?: number
 }
 
 /**
  * Input for generating the internal code review findings file.
  */
+export interface FocusedFixReviewContext {
+  mode: "fix-follow-up"
+  targetFiles?: string[]
+  targetFamilies?: string[]
+  priorFindings?: Array<{
+    findingId?: string
+    title: string
+    severity: "critical" | "major" | "minor" | "nit"
+    file?: string
+    findingFamily?: string
+    canonicalKey?: string
+  }>
+}
+
+export interface PersistedCodeReviewFindingRef {
+  findingId?: string
+  title: string
+  severity: "critical" | "major" | "minor" | "nit"
+  file?: string
+  rootCause?: string
+  findingFamily?: string
+  canonicalKey?: string
+  recurrenceCount?: number
+  previousOccurrenceIds?: string[]
+}
+
 export interface CodeReviewFindingsInput {
   /** Description of what was reviewed (e.g. "Implementation of feat-auth"). */
   source: string
@@ -459,6 +501,8 @@ export interface CodeReviewFindingsInput {
   reviewInfrastructureHint?: string
   /** Working directory for runtime-state resolution (optional). */
   cwd?: string
+  /** Optional focused follow-up review context for post-fix reruns. */
+  focusReview?: FocusedFixReviewContext
 }
 
 // ── Severity helpers ───────────────────────────────────────────
@@ -474,6 +518,187 @@ function severityRank(severity: string): number {
     case "nit":      return 3
     default:         return 4
   }
+}
+
+const ROOT_CAUSE_PATTERNS: Array<{ pattern: RegExp, category: string }> = [
+  { pattern: /\b(auth|authori[sz]ation|permission|idor|secret|credential|token|xss|csrf|sql injection|security)\b/i, category: "security" },
+  { pattern: /\b(pagination|limit|offset|page size|max[_ -]?order[_ -]?item[_ -]?ids)\b/i, category: "pagination" },
+  { pattern: /\b(validate|validation|invalid|bad request|input size|safe integer|non[- ]?numeric|parse)\b/i, category: "validation" },
+  { pattern: /\b(client|cli|dto|request interface|response dto|contract|pass-through|query params?)\b/i, category: "contract" },
+  { pattern: /\b(error handling|error swallow|throw|catch|5xx|exception)\b/i, category: "error-handling" },
+  { pattern: /\b(log|logging|observability|trace|correlation)\b/i, category: "observability" },
+  { pattern: /\b(n\+1|performance|parallel|sequential await|scalability|latency)\b/i, category: "performance" },
+  { pattern: /\b(type|typescript|date annotations?|string dates?|interface)\b/i, category: "types" },
+  { pattern: /\b(test|coverage|assert|mock|fixture)\b/i, category: "testing" },
+  { pattern: /\b(doc|documentation|help text|comment|readme)\b/i, category: "documentation" },
+]
+
+function normalizeConcernText(text: string): string {
+  const stopWords = new Set(["the", "and", "for", "with", "that", "this", "from", "into", "does", "not", "lack", "lacks", "missing", "current", "new", "oracle", "endpoint", "method", "function", "client", "api", "cli"])
+  const tokens = text
+    .toLowerCase()
+    .replace(/`[^`]+`/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter((token) => token.length > 2 && !stopWords.has(token))
+  return tokens.slice(0, 6).join("-") || "general-issue"
+}
+
+export function inferFindingRootCause(finding: Pick<CodeReviewFinding, "title" | "evidence" | "recommendation" | "expectedBehavior" | "fixRequirements">): string {
+  const haystack = [
+    finding.title,
+    finding.evidence,
+    finding.recommendation,
+    finding.expectedBehavior ?? "",
+    finding.fixRequirements ?? "",
+  ].join(" ")
+
+  for (const { pattern, category } of ROOT_CAUSE_PATTERNS) {
+    if (pattern.test(haystack)) return category
+  }
+
+  return "general"
+}
+
+export function buildFindingFamily(finding: Pick<CodeReviewFinding, "title" | "evidence" | "recommendation" | "expectedBehavior" | "fixRequirements" | "rootCause">): string {
+  const rootCause = finding.rootCause ?? inferFindingRootCause(finding)
+  const concern = normalizeConcernText(
+    finding.expectedBehavior ??
+    finding.fixRequirements ??
+    finding.title ??
+    finding.recommendation ??
+    finding.evidence,
+  )
+  return `${rootCause}:${concern}`
+}
+
+export function buildCanonicalFindingKey(finding: Pick<CodeReviewFinding, "file" | "title" | "evidence" | "recommendation" | "expectedBehavior" | "fixRequirements" | "rootCause" | "findingFamily">): string {
+  const family = finding.findingFamily ?? buildFindingFamily(finding)
+  const file = finding.file?.trim() || "repo"
+  return `${family}::${file}`
+}
+
+function mergeUniqueStrings(values: Array<string | undefined>): string[] | undefined {
+  const merged = [...new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)))]
+  return merged.length > 0 ? merged : undefined
+}
+
+function choosePreferredText(primary: string | undefined, candidate: string | undefined): string | undefined {
+  if (!primary?.trim()) return candidate?.trim()
+  if (!candidate?.trim()) return primary.trim()
+  return candidate.trim().length > primary.trim().length ? candidate.trim() : primary.trim()
+}
+
+export function parsePersistedCodeReviewFindings(content: string): PersistedCodeReviewFindingRef[] {
+  if (!content.trim()) return []
+
+  const findings: PersistedCodeReviewFindingRef[] = []
+  const blocks = content.split(/(?=^### )/m).filter(Boolean)
+  for (const block of blocks) {
+    const titleMatch = block.match(/^### (.+)$/m)
+    if (!titleMatch) continue
+    const severityMatch = content
+      .slice(0, content.indexOf(block))
+      .split("\n")
+      .reverse()
+      .find((line) => /^## (Critical|Major|Minor)(?: Findings?)?$|^## Nits?$/i.test(line))
+    let severity: PersistedCodeReviewFindingRef["severity"] = "minor"
+    if (severityMatch) {
+      const normalized = severityMatch.replace(/^## /, "").replace(/ Findings?$/i, "").toLowerCase()
+      if (normalized === "critical") severity = "critical"
+      else if (normalized === "major") severity = "major"
+      else if (normalized === "minor") severity = "minor"
+      else if (normalized.startsWith("nit")) severity = "nit"
+    }
+    const line = (label: string) => block.match(new RegExp(`^\\*\\*${label}\\*\\*:\\s*(.+)$`, "im"))?.[1]?.trim()
+    const previous = line("Previous occurrences")
+      ?.split(/\s*,\s*/)
+      .map((entry) => entry.replace(/^`|`$/g, "").trim())
+      .filter(Boolean)
+
+    findings.push({
+      findingId: line("Finding ID"),
+      title: titleMatch[1].trim(),
+      severity,
+      file: line("File")?.replace(/^`|`$/g, ""),
+      rootCause: line("Root cause"),
+      findingFamily: line("Finding family"),
+      canonicalKey: line("Canonical key"),
+      recurrenceCount: line("Recurrence count") ? Number.parseInt(line("Recurrence count")!, 10) || undefined : undefined,
+      previousOccurrenceIds: previous,
+    })
+  }
+
+  return findings
+}
+
+export function consolidateCodeReviewFindings(
+  findings: CodeReviewFinding[],
+  previousFindings: PersistedCodeReviewFindingRef[] = [],
+): CodeReviewFinding[] {
+  const previousByKey = new Map(previousFindings
+    .filter((finding) => finding.canonicalKey)
+    .map((finding) => [finding.canonicalKey!, finding]))
+
+  const grouped = new Map<string, CodeReviewFinding>()
+  for (const finding of findings) {
+    const rootCause = finding.rootCause ?? inferFindingRootCause(finding)
+    const findingFamily = finding.findingFamily ?? buildFindingFamily({ ...finding, rootCause })
+    const canonicalKey = finding.canonicalKey ?? buildCanonicalFindingKey({ ...finding, rootCause, findingFamily })
+    const existing = grouped.get(canonicalKey)
+    const previous = previousByKey.get(canonicalKey)
+
+    const normalized: CodeReviewFinding = {
+      ...finding,
+      rootCause,
+      findingFamily,
+      canonicalKey,
+      artifactPaths: mergeUniqueStrings([...(finding.artifactPaths ?? []), finding.artifactPath]),
+      recurrenceCount: previous ? Math.max(1, previous.recurrenceCount ?? 1) + 1 : 1,
+      previousOccurrenceIds: mergeUniqueStrings([...(finding.previousOccurrenceIds ?? []), ...(previous?.previousOccurrenceIds ?? []), previous?.findingId, previous?.canonicalKey]),
+      fixPriority: severityRank(finding.severity) + 1,
+    }
+
+    if (!existing) {
+      grouped.set(canonicalKey, normalized)
+      continue
+    }
+
+    grouped.set(canonicalKey, {
+      ...existing,
+      severity: severityRank(normalized.severity) < severityRank(existing.severity) ? normalized.severity : existing.severity,
+      reviewerSupport: mergeUniqueStrings([...existing.reviewerSupport, ...normalized.reviewerSupport]) ?? existing.reviewerSupport,
+      reviewerDissent: mergeUniqueStrings([...(existing.reviewerDissent ?? []), ...(normalized.reviewerDissent ?? [])]),
+      evidence: choosePreferredText(existing.evidence, normalized.evidence) ?? existing.evidence,
+      whyItMatters: choosePreferredText(existing.whyItMatters, normalized.whyItMatters) ?? existing.whyItMatters,
+      failureMode: choosePreferredText(existing.failureMode, normalized.failureMode),
+      recommendation: choosePreferredText(existing.recommendation, normalized.recommendation) ?? existing.recommendation,
+      expectedBehavior: choosePreferredText(existing.expectedBehavior, normalized.expectedBehavior),
+      fixRequirements: choosePreferredText(existing.fixRequirements, normalized.fixRequirements),
+      validation: choosePreferredText(existing.validation, normalized.validation),
+      suggestedApproach: choosePreferredText(existing.suggestedApproach, normalized.suggestedApproach),
+      artifactPath: existing.artifactPath ?? normalized.artifactPath,
+      artifactPaths: mergeUniqueStrings([...(existing.artifactPaths ?? []), ...(normalized.artifactPaths ?? [])]),
+      recurrenceCount: Math.max(existing.recurrenceCount ?? 1, normalized.recurrenceCount ?? 1),
+      previousOccurrenceIds: mergeUniqueStrings([...(existing.previousOccurrenceIds ?? []), ...(normalized.previousOccurrenceIds ?? [])]),
+      fixPriority: Math.min(existing.fixPriority ?? 4, normalized.fixPriority ?? 4),
+    })
+  }
+
+  return [...grouped.values()]
+    .sort((a, b) => {
+      const sevDiff = severityRank(a.severity) - severityRank(b.severity)
+      if (sevDiff !== 0) return sevDiff
+      const fileDiff = (a.file ?? "").localeCompare(b.file ?? "")
+      if (fileDiff !== 0) return fileDiff
+      return a.title.localeCompare(b.title)
+    })
+    .map((finding, index) => ({
+      ...finding,
+      findingId: finding.findingId ?? `finding-${index + 1}`,
+      artifactPath: finding.artifactPath ?? finding.artifactPaths?.[0],
+    }))
 }
 
 /**
@@ -632,6 +857,9 @@ export function formatFindingsBySeverity(findings: CodeReviewFinding[]): string 
 
     for (const f of entries) {
       lines.push(`### ${f.title}`)
+      if (f.findingId) {
+        lines.push(`**Finding ID**: ${f.findingId}`)
+      }
       lines.push(`**Reviewer support**: ${f.reviewerSupport.join(", ")}`)
       if (f.reviewerDissent && f.reviewerDissent.length > 0) {
         lines.push(`**Reviewer dissent**: ${f.reviewerDissent.join(", ")}`)
@@ -644,8 +872,26 @@ export function formatFindingsBySeverity(findings: CodeReviewFinding[]): string 
       } else if (f.line) {
         lines.push(`**Lines**: ${f.line}`)
       }
+      if (f.rootCause) {
+        lines.push(`**Root cause**: ${f.rootCause}`)
+      }
+      if (f.findingFamily) {
+        lines.push(`**Finding family**: ${f.findingFamily}`)
+      }
+      if (f.canonicalKey) {
+        lines.push(`**Canonical key**: ${f.canonicalKey}`)
+      }
+      if (typeof f.recurrenceCount === "number") {
+        lines.push(`**Recurrence count**: ${f.recurrenceCount}`)
+      }
+      if (f.previousOccurrenceIds && f.previousOccurrenceIds.length > 0) {
+        lines.push(`**Previous occurrences**: ${f.previousOccurrenceIds.map((entry) => `\`${entry}\``).join(", ")}`)
+      }
       if (f.artifactPath) {
         lines.push(`**Artifact path**: ${f.artifactPath}`)
+      }
+      if (f.artifactPaths && f.artifactPaths.length > 1) {
+        lines.push(`**Artifact paths**: ${f.artifactPaths.map((entry) => `\`${entry}\``).join(", ")}`)
       }
       lines.push(`**Evidence**: ${f.evidence}`)
       lines.push(`**Why it matters**: ${f.whyItMatters}`)
@@ -723,6 +969,16 @@ export async function persistCodeReviewFindings(
   lines.push(`## Verification Context`)
   lines.push(``)
   lines.push(input.verificationContext)
+  if (input.focusReview) {
+    lines.push("")
+    lines.push(`Focused review mode: ${input.focusReview.mode}`)
+    if (input.focusReview.targetFiles && input.focusReview.targetFiles.length > 0) {
+      lines.push(`Focus files: ${input.focusReview.targetFiles.map((file) => `\`${file}\``).join(", ")}`)
+    }
+    if (input.focusReview.targetFamilies && input.focusReview.targetFamilies.length > 0) {
+      lines.push(`Focus families: ${input.focusReview.targetFamilies.map((family) => `\`${family}\``).join(", ")}`)
+    }
+  }
   lines.push(``)
 
   // ── Review outcome ──────────────────────────────────────────
@@ -892,15 +1148,18 @@ export function addFindingTraceability(
   runId: string,
   cwd?: string,
 ): CodeReviewFinding[] {
-  return findings.map((f) => ({
-    ...f,
-    artifactPath: f.artifactPath ?? (
-      f.reviewerSupport.length > 0
-        ? resolveReviewerArtifactDir(runId, f.reviewerSupport[0], cwd)
-        : undefined
-    ),
-    runId: f.runId ?? runId,
-  }))
+  return findings.map((f) => {
+    const inferredPrimary = f.reviewerSupport.length > 0
+      ? resolveReviewerArtifactDir(runId, f.reviewerSupport[0], cwd)
+      : undefined
+    const artifactPaths = mergeUniqueStrings([...(f.artifactPaths ?? []), f.artifactPath, inferredPrimary])
+    return {
+      ...f,
+      artifactPath: f.artifactPath ?? artifactPaths?.[0],
+      artifactPaths,
+      runId: f.runId ?? runId,
+    }
+  })
 }
 
 // ═══════════════════════════════════════════════════════════════

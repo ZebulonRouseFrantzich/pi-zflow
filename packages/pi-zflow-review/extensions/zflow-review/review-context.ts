@@ -19,6 +19,7 @@
  */
 
 import * as fs from "node:fs/promises"
+import type { FocusedFixReviewContext } from "./findings.js"
 import type { PrMetadata as PrMetadata_ } from "./pr.js"
 
 // Re-export PrMetadata so downstream modules and tests can import it from
@@ -52,6 +53,8 @@ export interface InternalReviewContext {
   verificationStatus: "passed" | "failed" | "skipped" | "unknown"
   /** The review tier (e.g. "standard", "+logic", "+system", "+full") */
   tier: string
+  /** Optional focused post-fix review context. */
+  focusReview?: FocusedFixReviewContext
 }
 
 /**
@@ -367,6 +370,26 @@ export async function buildInternalReviewPrompt(
     "REVIEW ONLY. Do not edit, write, modify, patch, or apply changes. " +
     "Return findings only. Do not attempt to fix the code yourself.\n",
   )
+
+  if (context.focusReview?.mode === "fix-follow-up") {
+    parts.push(
+      "## Focused follow-up review mode\n\n" +
+      "This review is part of the review→fix loop. Your PRIMARY objective is to verify whether the targeted prior finding families were actually resolved in the current filesystem state. Start with the focused files/families below, and treat unrelated code as out of scope unless you discover a new high-confidence severe issue or a regression directly caused by the targeted fix.\n",
+    )
+    if (context.focusReview.targetFiles && context.focusReview.targetFiles.length > 0) {
+      parts.push(`Focused files: ${context.focusReview.targetFiles.map((file) => `\`${file}\``).join(", ")}`)
+    }
+    if (context.focusReview.targetFamilies && context.focusReview.targetFamilies.length > 0) {
+      parts.push(`Focused finding families: ${context.focusReview.targetFamilies.map((family) => `\`${family}\``).join(", ")}`)
+    }
+    if (context.focusReview.priorFindings && context.focusReview.priorFindings.length > 0) {
+      parts.push("Prior findings to verify first:")
+      for (const finding of context.focusReview.priorFindings) {
+        parts.push(`- ${finding.findingId ?? "(no-id)"}: [${finding.severity}] ${finding.title}${finding.file ? ` — ${finding.file}` : ""}${finding.findingFamily ? ` — family: ${finding.findingFamily}` : ""}`)
+      }
+    }
+    parts.push("")
+  }
 
   // ── Filesystem-verification instruction ─────────────────────
   // Reviewers receive a git diff that may be stale (e.g. after a fix

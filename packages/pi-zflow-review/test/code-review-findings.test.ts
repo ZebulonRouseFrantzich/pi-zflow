@@ -18,6 +18,10 @@ import {
   formatCoverageNotes,
   formatFindingsBySeverity,
   persistCodeReviewFindings,
+  consolidateCodeReviewFindings,
+  parsePersistedCodeReviewFindings,
+  buildFindingFamily,
+  buildCanonicalFindingKey,
   chooseCodeReviewTier,
   resolveReviewerArtifactDir,
   persistReviewerRawOutput,
@@ -266,6 +270,70 @@ void describe("formatFindingsBySeverity", () => {
     assert.ok(criticalIdx < majorIdx)
     assert.ok(majorIdx < minorIdx)
     assert.ok(minorIdx < nitIdx)
+  })
+})
+
+void describe("consolidateCodeReviewFindings", () => {
+  it("merges overlapping reviewer findings into a canonical finding and carries recurrence metadata", () => {
+    const base = makeFinding({
+      severity: "major",
+      title: "Pagination parameters lack validation",
+      file: "src/api.ts",
+      expectedBehavior: "Reject invalid limit/offset",
+      fixRequirements: "Validate numeric pagination values",
+      reviewerSupport: ["correctness"],
+    })
+    const duplicate = makeFinding({
+      severity: "critical",
+      title: "Pagination parameters lack numeric validation",
+      file: "src/api.ts",
+      expectedBehavior: "Reject invalid limit/offset",
+      fixRequirements: "Validate numeric pagination values",
+      reviewerSupport: ["security"],
+      recommendation: "Validate before passing to ORM",
+    })
+    const previous = [{
+      findingId: "finding-2",
+      title: "Pagination parameters lack validation",
+      severity: "major" as const,
+      file: "src/api.ts",
+      findingFamily: buildFindingFamily(base),
+      canonicalKey: buildCanonicalFindingKey(base),
+      recurrenceCount: 2,
+      previousOccurrenceIds: ["finding-1"],
+    }]
+
+    const consolidated = consolidateCodeReviewFindings([base, duplicate], previous)
+
+    assert.equal(consolidated.length, 1)
+    assert.equal(consolidated[0].severity, "critical")
+    assert.deepEqual(consolidated[0].reviewerSupport.sort(), ["correctness", "security"])
+    assert.equal(consolidated[0].findingFamily, buildFindingFamily(base))
+    assert.equal(consolidated[0].canonicalKey, buildCanonicalFindingKey(base))
+    assert.equal(consolidated[0].recurrenceCount, 3)
+    assert.ok(consolidated[0].previousOccurrenceIds?.includes("finding-2"))
+  })
+
+  it("parses persisted canonical finding metadata from markdown", () => {
+    const parsed = parsePersistedCodeReviewFindings([
+      "## Major Findings",
+      "",
+      "### Pagination parameters lack validation",
+      "**Finding ID**: finding-3",
+      "**File**: src/api.ts",
+      "**Root cause**: pagination",
+      "**Finding family**: pagination:validation",
+      "**Canonical key**: pagination:validation::src/api.ts",
+      "**Recurrence count**: 2",
+      "**Previous occurrences**: `finding-1`, `finding-2`",
+      "**Evidence**: test",
+    ].join("\n"))
+
+    assert.equal(parsed.length, 1)
+    assert.equal(parsed[0].findingId, "finding-3")
+    assert.equal(parsed[0].findingFamily, "pagination:validation")
+    assert.equal(parsed[0].canonicalKey, "pagination:validation::src/api.ts")
+    assert.equal(parsed[0].recurrenceCount, 2)
   })
 })
 

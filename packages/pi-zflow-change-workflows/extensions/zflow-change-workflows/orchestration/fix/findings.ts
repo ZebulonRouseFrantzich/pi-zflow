@@ -24,6 +24,8 @@ export interface ParsedFinding {
   recommendation: string
   /** Path to the raw reviewer artifact for traceability. */
   artifactPath?: string
+  /** Additional reviewer artifacts that support the same canonical finding. */
+  artifactPaths?: string[]
   /** Why the finding matters. */
   whyItMatters?: string
   /** What the code SHOULD do instead (enriched field for fix orchestrator). */
@@ -34,6 +36,16 @@ export interface ParsedFinding {
   validation?: string
   /** Optional hint for the fix worker (enriched field for fix orchestrator). */
   suggestedApproach?: string
+  /** Root-cause classification from the canonical findings pipeline. */
+  rootCause?: string
+  /** Family identifier shared across related findings/files. */
+  findingFamily?: string
+  /** Canonical key for exact duplicate/recurrence matching. */
+  canonicalKey?: string
+  /** Number of consecutive review loops this issue survived. */
+  recurrenceCount?: number
+  /** Prior finding IDs/canonical keys that this finding recurs from. */
+  previousOccurrenceIds?: string[]
 }
 
 /**
@@ -187,7 +199,6 @@ export async function parseReviewFindings(
     }
 
     findingCounter++
-    const findingId = `finding-${findingCounter}`
 
     let severity: ParsedFinding["severity"] = "minor"
     const sectionBefores = rawContent.slice(0, rawContent.indexOf(block)).split("\n").filter(Boolean)
@@ -202,6 +213,7 @@ export async function parseReviewFindings(
 
     const fileMatch = block.match(/\*\*File\*\*:\s*`?([^`\n]+)`?/i)
     const lineMatch = block.match(/\*\*Lines?\*\*:\s*(\d+)/i)
+    const findingIdMatch = block.match(/\*\*Finding ID\*\*:\s*(.+)$/im)
     const supportMatch = block.match(/\*\*Reviewer support\*\*:\s*(.+)$/im)
     const evidenceBlockMatch = block.match(/\*\*Evidence\*\*:\s*([\s\S]+?)(?=\n\*\*[^*\n]+\*\*|\n\*\*$|$)/i)
     const evidenceMulti = evidenceBlockMatch ? evidenceBlockMatch[1].trim() : ""
@@ -213,14 +225,28 @@ export async function parseReviewFindings(
     const whyLineMatch = block.match(/\*\*Why it matters\*\*:\s*(.+)$/im)
     const recLineMatch = block.match(/\*\*Recommendation\*\*:\s*(.+)$/im)
     const artifactMatch = block.match(/\*\*Artifact[^:]*\*\*:\s*`?([^`\n]+)`?/i)
+    const artifactPathsMatch = block.match(/\*\*Artifact paths\*\*:\s*(.+)$/im)
     const expectedBehaviorMatch = block.match(/\*\*Expected behavior\*\*:\s*(.+)$/im)
     const fixRequirementsMatch = block.match(/\*\*Fix requirements\*\*:\s*(.+)$/im)
     const validationMatch = block.match(/\*\*Validation\*\*:\s*(.+)$/im)
     const suggestedApproachMatch = block.match(/\*\*Suggested approach\*\*:\s*(.+)$/im)
+    const rootCauseMatch = block.match(/\*\*Root cause\*\*:\s*(.+)$/im)
+    const findingFamilyMatch = block.match(/\*\*Finding family\*\*:\s*(.+)$/im)
+    const canonicalKeyMatch = block.match(/\*\*Canonical key\*\*:\s*(.+)$/im)
+    const recurrenceCountMatch = block.match(/\*\*Recurrence count\*\*:\s*(.+)$/im)
+    const previousOccurrencesMatch = block.match(/\*\*Previous occurrences\*\*:\s*(.+)$/im)
 
     const evidence = evidenceMulti || (evidenceLineMatch ? evidenceLineMatch[1].trim() : "")
     const recommendation = recMulti || (recLineMatch ? recLineMatch[1].trim() : "")
     const whyItMatters = whyMulti || (whyLineMatch ? whyLineMatch[1].trim() : "")
+
+    const findingId = findingIdMatch ? findingIdMatch[1].trim() : `finding-${findingCounter}`
+    const artifactPaths = artifactPathsMatch
+      ? artifactPathsMatch[1].split(/\s*,\s*/).map((entry) => entry.replace(/^`|`$/g, "").trim()).filter(Boolean)
+      : undefined
+    const previousOccurrenceIds = previousOccurrencesMatch
+      ? previousOccurrencesMatch[1].split(/\s*,\s*/).map((entry) => entry.replace(/^`|`$/g, "").trim()).filter(Boolean)
+      : undefined
 
     findings.push({
       findingId,
@@ -232,15 +258,49 @@ export async function parseReviewFindings(
       evidence: evidence || (block.split("\n").slice(1, 4).join(" ").trim().slice(0, 300) || title),
       recommendation: recommendation || "Review the finding and apply appropriate fix.",
       artifactPath: artifactMatch ? artifactMatch[1].trim() : undefined,
+      artifactPaths,
       whyItMatters: whyItMatters || undefined,
       expectedBehavior: expectedBehaviorMatch ? expectedBehaviorMatch[1].trim() : undefined,
       fixRequirements: fixRequirementsMatch ? fixRequirementsMatch[1].trim() : undefined,
       validation: validationMatch ? validationMatch[1].trim() : undefined,
       suggestedApproach: suggestedApproachMatch ? suggestedApproachMatch[1].trim() : undefined,
+      rootCause: rootCauseMatch ? rootCauseMatch[1].trim() : undefined,
+      findingFamily: findingFamilyMatch ? findingFamilyMatch[1].trim() : undefined,
+      canonicalKey: canonicalKeyMatch ? canonicalKeyMatch[1].trim() : undefined,
+      recurrenceCount: recurrenceCountMatch ? Number.parseInt(recurrenceCountMatch[1].trim(), 10) || undefined : undefined,
+      previousOccurrenceIds,
     })
   }
 
   return { findings, rawPath, rawContent, metadata }
+}
+
+export function inferRootCause(finding: Pick<ParsedFinding, "title" | "evidence" | "recommendation" | "expectedBehavior" | "fixRequirements">): string {
+  const haystack = [
+    finding.title,
+    finding.evidence,
+    finding.recommendation,
+    finding.expectedBehavior ?? "",
+    finding.fixRequirements ?? "",
+  ].join(" ")
+
+  const patterns: Array<{ pattern: RegExp, category: string }> = [
+    { pattern: /\b(auth|authori[sz]ation|permission|idor|secret|token|security)\b/i, category: "security" },
+    { pattern: /\b(pagination|limit|offset|page size|max[_ -]?order[_ -]?item[_ -]?ids)\b/i, category: "pagination" },
+    { pattern: /\b(validate|validation|invalid|bad request|safe integer|non[- ]?numeric|parse)\b/i, category: "validation" },
+    { pattern: /\b(client|cli|dto|contract|request interface|response dto|query params?)\b/i, category: "contract" },
+    { pattern: /\b(error handling|throw|catch|exception|5xx|swallow)\b/i, category: "error-handling" },
+    { pattern: /\b(log|logging|observability|trace|correlation)\b/i, category: "observability" },
+    { pattern: /\b(n\+1|performance|parallel|sequential await|latency)\b/i, category: "performance" },
+    { pattern: /\b(test|coverage|assert|mock|fixture)\b/i, category: "testing" },
+    { pattern: /\b(doc|documentation|help text|comment|readme)\b/i, category: "documentation" },
+  ]
+
+  for (const { pattern, category } of patterns) {
+    if (pattern.test(haystack)) return category
+  }
+
+  return "general"
 }
 
 /**
@@ -341,6 +401,10 @@ export async function buildFixPlan(
     if (finding.evidence) lines.push(`**Evidence:** ${finding.evidence}`)
     if (finding.recommendation) lines.push(`**Recommendation:** ${finding.recommendation}`)
     if (finding.artifactPath) lines.push(`**Artifact:** \`${finding.artifactPath}\``)
+    if (finding.rootCause) lines.push(`**Root cause:** ${finding.rootCause}`)
+    if (finding.findingFamily) lines.push(`**Finding family:** ${finding.findingFamily}`)
+    if (finding.canonicalKey) lines.push(`**Canonical key:** ${finding.canonicalKey}`)
+    if (typeof finding.recurrenceCount === "number") lines.push(`**Recurrence count:** ${finding.recurrenceCount}`)
     if (finding.whyItMatters) lines.push(`**Why it matters:** ${finding.whyItMatters}`)
     if (finding.expectedBehavior) lines.push(`**Expected behavior:** ${finding.expectedBehavior}`)
     if (finding.fixRequirements) lines.push(`**Fix requirements:** ${finding.fixRequirements}`)

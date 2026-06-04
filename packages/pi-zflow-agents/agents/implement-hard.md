@@ -51,7 +51,9 @@ Same as `implement-routine`:
    it would materially improve outcome quality.
 5. **Implement** using multi-edit for multi-file groups.
 6. **Run scoped verification** from the plan.
-7. **Report** — comprehensive summary with observations, risks, and
+7. **Run a root-cause completeness pass** for recurring or cross-module
+   finding families so the same issue does not survive the next review loop.
+8. **Report** — comprehensive summary with observations, risks, and
    subagent contributions.
 
 ## Deviation protocol

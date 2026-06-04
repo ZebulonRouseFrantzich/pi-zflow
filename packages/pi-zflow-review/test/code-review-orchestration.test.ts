@@ -263,15 +263,15 @@ void describe("runCodeReview with DispatchService", () => {
 
     const result = await runCodeReview(makeInput(planningArtifacts))
 
-    // Each reviewer (correctness, integration, security — 3 total) gets the
-    // same output with 1 critical and 1 major finding, so totals are 3 each.
+    // Canonical consolidation should merge overlapping reviewer findings into
+    // one canonical critical finding and one canonical major finding.
     assert.equal(
-      result.severity.critical, 3,
-      `expected 3 critical findings (3 reviewers × 1), got ${result.severity.critical}`,
+      result.severity.critical, 1,
+      `expected 1 canonical critical finding after consolidation, got ${result.severity.critical}`,
     )
     assert.equal(
-      result.severity.major, 3,
-      `expected 3 major findings (3 reviewers × 1), got ${result.severity.major}`,
+      result.severity.major, 1,
+      `expected 1 canonical major finding after consolidation, got ${result.severity.major}`,
     )
     assert.equal(result.severity.minor, 0, "should have 0 minor findings")
     assert.equal(result.severity.nit, 0, "should have 0 nit findings")
@@ -344,10 +344,10 @@ void describe("runCodeReview with DispatchService", () => {
 
     const result = await runCodeReview(makeInput(planningArtifacts))
 
-    // Should fall back to local severity: 3 reviewers × 1 major = 3 major
+    // Should fall back to canonical local severity: one merged major finding.
     assert.equal(
-      result.severity.major, 3,
-      `expected local major=3 (3 reviewers × 1), got major=${result.severity.major}`,
+      result.severity.major, 1,
+      `expected canonical local major=1 after consolidation, got major=${result.severity.major}`,
     )
     assert.equal(
       result.severity.critical, 0,

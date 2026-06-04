@@ -10,7 +10,7 @@
 import * as assert from "node:assert/strict"
 import { describe, it } from "node:test"
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { tmpdir } from "node:os"
 
 // ── Fixtures ─────────────────────────────────────────────────────
@@ -763,9 +763,24 @@ describe("runDirectFixWorkflow", { concurrency: false }, () => {
         name: "test-dispatch",
         async runAgent(input: Record<string, unknown>) {
           calls.push(input)
+          if (String(input.agent) === "zflow.fix-satisfaction-checker") {
+            const findings = fixResult.parsedFindings.map((finding) => ({
+              findingId: finding.findingId,
+              status: "fixed",
+              evidence: [`${finding.file ?? "src/file.ts"}: current code satisfies the requirement`],
+              changedFiles: finding.file ? [finding.file] : [],
+              validation: ["independent check"],
+              reason: "verified by checker",
+            }))
+            return {
+              ok: true,
+              rawOutput: `\`\`\`json\n${JSON.stringify({ zflowFixResult: { status: "fixed", findings } })}\n\`\`\``,
+              outputPath: join(versionDir, `checker-output.md`),
+            }
+          }
           return {
             ok: true,
-            rawOutput: "Applied fixes successfully.",
+            rawOutput: `\`\`\`json\n${JSON.stringify({ zflowFixResult: { status: "fixed", findings: fixResult.parsedFindings.map((finding) => ({ findingId: finding.findingId, status: "fixed", changedFiles: finding.file ? [finding.file] : [], validation: ["worker validation"], evidence: [finding.title], reason: "worker fixed it" })) } })}\n\`\`\``,
             outputPath: join(versionDir, `${String(input.agent)}-output.md`),
           }
         },
@@ -782,8 +797,9 @@ describe("runDirectFixWorkflow", { concurrency: false }, () => {
         workerAgent: "zflow.implement-routine",
       })
 
-      assert.equal(calls.length, 2, "findings should be grouped into two direct worker batches by file")
-      assert.ok(calls.every((call) => call.agent === "zflow.implement-routine"), "all direct fix batches should use implement-routine")
+      const workerCalls = calls.filter((call) => call.agent !== "zflow.fix-satisfaction-checker")
+      assert.equal(workerCalls.length, 4, "findings should be grouped into canonical worker batches before checker passes")
+      assert.ok(workerCalls.every((call) => call.agent === "zflow.implement-routine" || call.agent === "zflow.implement-hard"), "direct fix batches should use routine or hard implementation workers")
       assert.ok(calls.every((call) => call.agent !== "zflow.fix-orchestrator"), "direct fix workflow must not dispatch zflow.fix-orchestrator")
       assert.equal(result.fixed.length, 4)
       assert.equal(result.unresolved.length, 0)
@@ -794,6 +810,109 @@ describe("runDirectFixWorkflow", { concurrency: false }, () => {
     } finally {
       await rm(tmpDir, { recursive: true, force: true })
     }
+  })
+})
+
+describe("canonical fix metadata parsing and batching", { concurrency: false }, () => {
+  it("parses canonical finding metadata from persisted findings markdown", async () => {
+    const { parseReviewFindings } = await import(
+      "../extensions/zflow-change-workflows/orchestration.js"
+    )
+    const { resolveCodeReviewFindingsPath } = await import("pi-zflow-artifacts")
+    const tmpDir = await mkdtemp(join(tmpdir(), "zflow-test-canonical-findings-"))
+    const findingsPath = resolveCodeReviewFindingsPath(tmpDir)
+    await mkdir(dirname(findingsPath), { recursive: true })
+    await writeFile(findingsPath, [
+      "# Code Review Findings",
+      "",
+      "**Source**: Implementation of feat-auth",
+      "**Run ID**: rev-test-001",
+      "",
+      "## Major Findings",
+      "",
+      "### Pagination parameters lack validation",
+      "**Finding ID**: finding-7",
+      "**Reviewer support**: correctness, security",
+      "**File**: `src/api.ts`",
+      "**Root cause**: pagination",
+      "**Finding family**: pagination:validation",
+      "**Canonical key**: pagination:validation::src/api.ts",
+      "**Recurrence count**: 3",
+      "**Previous occurrences**: `finding-3`, `finding-5`",
+      "**Evidence**: invalid pagination reaches ORM",
+      "**Recommendation**: validate inputs",
+      "**Fix requirements**: reject invalid limit/offset",
+      "",
+    ].join("\n"), "utf-8")
+
+    try {
+      const { findings } = await parseReviewFindings(tmpDir)
+      assert.equal(findings.length, 1)
+      assert.equal(findings[0].findingId, "finding-7")
+      assert.equal(findings[0].rootCause, "pagination")
+      assert.equal(findings[0].findingFamily, "pagination:validation")
+      assert.equal(findings[0].canonicalKey, "pagination:validation::src/api.ts")
+      assert.equal(findings[0].recurrenceCount, 3)
+      assert.deepEqual(findings[0].previousOccurrenceIds, ["finding-3", "finding-5"])
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it("clusters fix batches by finding family and escalates recurring/security work", async () => {
+    const { buildDirectFixBatches } = await import(
+      "../extensions/zflow-change-workflows/orchestration.js"
+    )
+
+    const batches = buildDirectFixBatches([
+      {
+        findingId: "finding-1",
+        severity: "major",
+        title: "Pagination parameters lack validation",
+        file: "src/api.ts",
+        reviewerRole: "correctness",
+        evidence: "evidence",
+        recommendation: "recommendation",
+        rootCause: "pagination",
+        findingFamily: "pagination:validation",
+        recurrenceCount: 1,
+      },
+      {
+        findingId: "finding-2",
+        severity: "minor",
+        title: "Client should expose pagination",
+        file: "src/client.ts",
+        reviewerRole: "integration",
+        evidence: "evidence",
+        recommendation: "recommendation",
+        rootCause: "pagination",
+        findingFamily: "pagination:validation",
+        recurrenceCount: 1,
+      },
+      {
+        findingId: "finding-3",
+        severity: "critical",
+        title: "Authorization bypass",
+        file: "src/security.ts",
+        reviewerRole: "security",
+        evidence: "evidence",
+        recommendation: "recommendation",
+        rootCause: "security",
+        findingFamily: "security:authorization-bypass",
+        recurrenceCount: 2,
+      },
+    ])
+
+    assert.equal(batches.length, 2)
+    const paginationBatch = batches.find((batch) => batch.familyKey === "pagination:validation")
+    assert.ok(paginationBatch)
+    assert.deepEqual(paginationBatch?.files.sort(), ["src/api.ts", "src/client.ts"])
+    assert.equal(paginationBatch?.workerAgent, "zflow.implement-hard")
+
+    const securityBatch = batches.find((batch) => batch.familyKey === "security:authorization-bypass")
+    assert.ok(securityBatch)
+    assert.equal(securityBatch?.workerAgent, "zflow.implement-hard")
+    assert.equal(securityBatch?.isRecurring, true)
   })
 })
 
@@ -1158,8 +1277,17 @@ describe("runDirectFixWorkflow follow-up hardening", { concurrency: false }, () 
       const dispatchService = {
         name: "test-dispatch",
         async runAgent(input: Record<string, unknown>) {
-          dispatchedThinking = input.thinking
-          return { ok: true, rawOutput: "fixed" }
+          if (String(input.agent) !== "zflow.fix-satisfaction-checker") {
+            dispatchedThinking = input.thinking
+            return {
+              ok: true,
+              rawOutput: '```json\n{"zflowFixResult":{"status":"fixed","findings":[{"findingId":"finding-1","status":"fixed","evidence":["worker evidence"],"changedFiles":["src/file.ts"],"validation":["worker validation"],"reason":"done"}]}}\n```',
+            }
+          }
+          return {
+            ok: true,
+            rawOutput: '```json\n{"zflowFixResult":{"status":"fixed","findings":[{"findingId":"finding-1","status":"fixed","evidence":["checker evidence"],"changedFiles":["src/file.ts"],"validation":["checker validation"],"reason":"verified"}]}}\n```',
+          }
         },
         async runParallel() {
           return { ok: false, results: [] }
@@ -1257,8 +1385,17 @@ describe("runDirectFixWorkflow follow-up hardening", { concurrency: false }, () 
       const dispatchService = {
         name: "test-dispatch",
         async runAgent(input: Record<string, unknown>) {
-          task = String(input.task ?? "")
-          return { ok: true, rawOutput: "fixed" }
+          if (String(input.agent) !== "zflow.fix-satisfaction-checker") {
+            task = String(input.task ?? "")
+            return {
+              ok: true,
+              rawOutput: '```json\n{"zflowFixResult":{"status":"fixed","findings":[{"findingId":"finding-1","status":"fixed","evidence":["worker evidence"],"changedFiles":["src/file.ts"],"validation":["worker validation"],"reason":"done"}]}}\n```',
+            }
+          }
+          return {
+            ok: true,
+            rawOutput: '```json\n{"zflowFixResult":{"status":"fixed","findings":[{"findingId":"finding-1","status":"fixed","evidence":["checker evidence"],"changedFiles":["src/file.ts"],"validation":["checker validation"],"reason":"verified"}]}}\n```',
+          }
         },
         async runParallel() {
           return { ok: false, results: [] }
@@ -1582,7 +1719,7 @@ describe("runDirectFixWorkflow follow-up hardening", { concurrency: false }, () 
         },
       })
 
-      assert.equal(calls, 1, "structured output should stop retries even when dispatch throws")
+      assert.equal(calls, 2, "structured output should stop worker retries even though the independent checker still runs")
       assert.equal(result.fixed.length, 1)
       assert.equal(result.fixed[0].status, "already-satisfied")
       assert.equal(result.unresolved.length, 0)

@@ -298,6 +298,7 @@ export {
   runDirectFixWorkflow,
   isNoEditFailure,
   parseZflowFixResultEnvelope,
+  buildFamilyClusters,
   buildDirectFixBatches,
   buildFixOrchestratorTaskPrompt,
   resolveFixOrchestratorConfig,
@@ -310,6 +311,7 @@ export type {
   DirectFixFindingOutcome,
   DirectFixWorkflowOptions,
   DirectFixWorkflowResult,
+  GlobalRoundState,
   ZflowFixFindingResult,
   ZflowFixResultEnvelope,
   FixOrchestratorConfig,
@@ -319,6 +321,7 @@ export type {
 
 export {
   assertFindingsMatchChange,
+  inferRootCause,
   normalizeFindingsSource,
   parseReviewFindings,
   buildFixSelectionQuestions,
