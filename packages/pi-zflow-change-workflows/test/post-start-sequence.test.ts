@@ -507,6 +507,9 @@ describe("runImplementationPostStartSequence", () => {
         lifecycle.lastPhase === "completed" || lifecycle.lastPhase === "verification-failed",
         `lastPhase should reflect final state, got: ${lifecycle.lastPhase}`,
       )
+      if (result2.status === "completed") {
+        assert.ok(!lifecycle.unfinishedRuns.includes(runId), "completed runs should be removed from unfinishedRuns")
+      }
     })
   })
 

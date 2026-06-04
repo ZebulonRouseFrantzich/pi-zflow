@@ -831,10 +831,12 @@ describe("completeWorkflow", () => {
       const planState = JSON.parse(await fs.readFile(planStatePath, "utf-8"))
       assert.strictEqual(planState.lifecycleState, "completed")
 
-      // Verify run.json phase
+      // Verify run.json phase and final bookkeeping
       const runStatePath = resolveRunStatePath(result.runId, repoRoot)
       const runJson = JSON.parse(await fs.readFile(runStatePath, "utf-8"))
       assert.strictEqual(runJson.phase, "completed")
+      assert.deepStrictEqual(runJson.nextSteps ?? [], [], "completed run should not retain stale nextSteps")
+      assert.strictEqual(runJson.applyBack.status, "completed", "pending applyBack should be normalized on completion")
 
       // Verify state-index
       const index = await loadStateIndex(repoRoot)
@@ -843,6 +845,10 @@ describe("completeWorkflow", () => {
       )
       assert.ok(planEntry, "plan entry should exist")
       assert.strictEqual(planEntry!.status, "completed")
+      const lifecycle = index.changes["test-complete"]
+      assert.ok(lifecycle, "change lifecycle should exist")
+      assert.strictEqual(lifecycle.lastPhase, "completed")
+      assert.ok(!lifecycle.unfinishedRuns.includes(result.runId), "completed run should be removed from unfinishedRuns")
     } finally {
       await removeTestRepo(repoRoot)
     }

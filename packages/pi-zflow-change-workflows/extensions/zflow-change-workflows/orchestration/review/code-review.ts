@@ -80,6 +80,30 @@ function uniqueStrings(values: Iterable<string | null | undefined>): string[] {
   return [...new Set([...values].filter((value): value is string => Boolean(value && value.trim().length > 0)))]
 }
 
+async function readAuthoritativeSeveritySummary(
+  findingsPath: string | undefined,
+): Promise<{ critical: number; major: number; minor: number; nit: number } | null> {
+  if (!findingsPath) return null
+
+  try {
+    const content = await readFile(findingsPath, "utf-8")
+    const rows = [...content.matchAll(/^\|\s*(Critical|Major|Minor|Nit)\s*\|\s*(\d+)\s*\|\s*$/gim)]
+    if (rows.length === 0) return null
+
+    const summary = { critical: 0, major: 0, minor: 0, nit: 0 }
+    for (const row of rows) {
+      const severity = row[1].trim().toLowerCase() as keyof typeof summary
+      const count = Number.parseInt(row[2], 10)
+      if (Number.isFinite(count)) {
+        summary[severity] = count
+      }
+    }
+    return summary
+  } catch {
+    return null
+  }
+}
+
 function collectLedgerEntries(run: Awaited<ReturnType<typeof readRun>>): Array<Record<string, unknown>> {
   const ledger = (run.metadata as { groupLedger?: unknown } | undefined)?.groupLedger
   if (!ledger || typeof ledger !== "object") return []
@@ -278,7 +302,7 @@ export async function finalizeCodeReview(
         cwd,
       })
 
-      const severity = (result as any).severity as { critical: number; major: number; minor: number; nit: number }
+      const rawSeverity = (result as any).severity as { critical: number; major: number; minor: number; nit: number }
       const recommendation = (result as any).recommendation as string | undefined
       const manifest = (result as any).manifest as { reviewers: Array<{ name: string; status: string; required?: boolean }> } | undefined
       const coverageNotes = (result as any).coverageNotes as string[] | undefined
@@ -295,12 +319,17 @@ export async function finalizeCodeReview(
         }
       }
 
-      const hasPassableSeverity = severity.critical === 0 && severity.major === 0
       const hasFailedRequiredReviewers = failedRequiredReviewers.length > 0
       const isNoGo = recommendation === "NO-GO"
+
+      const findingsPath = (result as any).findingsPath as string | undefined
+      const severity = await readAuthoritativeSeveritySummary(findingsPath) ?? rawSeverity
+      const infrastructureFailure = reviewInfrastructure?.status === "failed"
+
+      const hasPassableSeverity = severity.critical === 0 && severity.major === 0
       const pass = hasPassableSeverity && !hasFailedRequiredReviewers && !isNoGo
 
-      let summary = `Code review: ${severity.critical} critical, ${severity.major} major, ${severity.minor} minor issues.`
+      let summary = `Code review: ${severity.critical} critical, ${severity.major} major, ${severity.minor} minor, ${severity.nit} nit issues.`
       if (hasFailedRequiredReviewers) {
         summary += ` Required reviewer(s) failed: ${failedRequiredReviewers.join(", ")}.`
       }
@@ -321,9 +350,6 @@ export async function finalizeCodeReview(
       if (reviewInfrastructure?.recoveryHint && !summary.includes(reviewInfrastructure.recoveryHint)) {
         summary += ` ${reviewInfrastructure.recoveryHint}`
       }
-
-      const findingsPath = (result as any).findingsPath as string | undefined
-      const infrastructureFailure = reviewInfrastructure?.status === "failed"
 
       try {
         await updateRun(runId, {
