@@ -9,6 +9,9 @@ import { describe, it, afterEach } from "node:test"
 import * as assert from "node:assert/strict"
 
 import activateZflowChangeWorkflowsExtension, {
+  deriveChangePlanId,
+  extractChangePlanReference,
+  parseChangePlanArgs,
   parseChangePrepareArgs,
   shouldForkImplementationSessionAfterPrepare,
 } from "../extensions/zflow-change-workflows/index.js"
@@ -45,6 +48,7 @@ describe("zflow-change-workflows extension activation", () => {
     const registered = [...commands.keys()].sort()
 
     assert.ok(registered.includes("zflow-clean"), "zflow-clean must be registered")
+    assert.ok(registered.includes("zflow-change-plan"), "zflow-change-plan must be registered")
     assert.ok(registered.includes("zflow-change-prepare"), "zflow-change-prepare must be registered")
     assert.ok(registered.includes("zflow-change-implement"), "zflow-change-implement must be registered")
     assert.ok(registered.includes("zflow-change-audit"), "zflow-change-audit must be registered")
@@ -77,6 +81,7 @@ describe("zflow-change-workflows extension activation", () => {
     // First call should register all commands
     const firstCommands = [...first.commands.keys()].sort()
     assert.ok(firstCommands.includes("zflow-clean"))
+    assert.ok(firstCommands.includes("zflow-change-plan"))
     assert.ok(firstCommands.includes("zflow-change-prepare"))
     assert.ok(firstCommands.includes("zflow-change-implement"))
     assert.ok(firstCommands.includes("zflow-resolve-apply-back"))
@@ -106,6 +111,65 @@ describe("zflow-change-workflows extension activation", () => {
     // shouldForkImplementationSessionAfterPrepare now always returns false
     // because /zflow-change-prepare should never start implementation automatically.
     assert.equal(shouldForkImplementationSessionAfterPrepare(), false)
+  })
+
+  it("parses change-plan args into explicit change reference and notes", () => {
+    const parsed = parseChangePlanArgs("oracle-mssql-entitlements-readonly initial read-only Oracle draft")
+
+    assert.equal(parsed.changeSeed, "oracle-mssql-entitlements-readonly")
+    assert.equal(parsed.notes, "initial read-only Oracle draft")
+    assert.equal(parsed.explicitReference, true)
+  })
+
+  it("allows freeform change descriptions without requiring a path", () => {
+    const parsed = parseChangePlanArgs("Draft a read-only Oracle and MSSQL entitlements plan")
+
+    assert.equal(parsed.changeSeed, "Draft a read-only Oracle and MSSQL entitlements plan")
+    assert.equal(parsed.notes, "Draft a read-only Oracle and MSSQL entitlements plan")
+    assert.equal(parsed.explicitReference, false)
+  })
+
+  it("supports -- notes separator for explicit ids", () => {
+    const parsed = parseChangePlanArgs("oracle-mssql-entitlements-readonly -- initial read-only Oracle draft")
+
+    assert.equal(parsed.changeSeed, "oracle-mssql-entitlements-readonly")
+    assert.equal(parsed.notes, "initial read-only Oracle draft")
+    assert.equal(parsed.explicitReference, true)
+  })
+
+  it("keeps prose with embedded paths as freeform descriptions", () => {
+    const parsed = parseChangePlanArgs("Please pull all detail needed for this plan from @.zflow/plans/oracle-mssql-entitlements-readonly/")
+
+    assert.equal(parsed.explicitReference, false)
+    assert.match(parsed.notes, /Please pull all detail needed/)
+    assert.equal(
+      extractChangePlanReference(parsed.changeSeed),
+      "@.zflow/plans/oracle-mssql-entitlements-readonly/",
+    )
+  })
+
+  it("derives compact change ids from freeform descriptions", () => {
+    const changeId = deriveChangePlanId(
+      "oracle mssql entitlements readonly or in its subfolders",
+      false,
+    )
+
+    assert.equal(changeId, "oracle-mssql-entitlements-readonly")
+  })
+
+  it("preserves explicit change ids when provided", () => {
+    const changeId = deriveChangePlanId("oracle-mssql-entitlements-readonly", true)
+
+    assert.equal(changeId, "oracle-mssql-entitlements-readonly")
+  })
+
+  it("derives ids from repo paths mentioned inside prose", () => {
+    const changeId = deriveChangePlanId(
+      "Please pull detail from @.zflow/plans/oracle-mssql-entitlements-readonly/ and its subfolders.",
+      false,
+    )
+
+    assert.equal(changeId, "oracle-mssql-entitlements-readonly")
   })
 
   it("parses change-prepare notes and --no-runecontext opt-out", () => {

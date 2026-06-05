@@ -13,11 +13,65 @@ import {
   updatePlanState,
   bumpPlanVersion,
   markPlanVersionState,
+  writeDurablePlanDoc,
 } from "../extensions/zflow-change-workflows/orchestration.js"
+import { resetZflowRegistry } from "pi-zflow-core"
+import { getZflowRegistry } from "pi-zflow-core/registry"
 
 import type {
   PrepareWorkflowOptions,
 } from "../extensions/zflow-change-workflows/orchestration.js"
+
+const COMPLETE_PLAN_BODY = [
+  "## Summary",
+  "",
+  "Deliver a read-only Oracle and MSSQL entitlements plan that keeps durable planning in one reviewed plan.md file.",
+  "",
+  "## Goals / Success Criteria",
+  "",
+  "- Draft a single reviewed durable plan.md.",
+  "- Preserve immutable prepared plan versions under docs/zflow-changes/<id>/<version>/.",
+  "",
+  "## Scope In",
+  "",
+  "- Durable planning workflow changes.",
+  "- Prepare-time compilation of versioned artifacts.",
+  "",
+  "## Scope Out",
+  "",
+  "- Source-code implementation for the target business change.",
+  "",
+  "## Relevant codebase areas",
+  "",
+  "- packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/index.ts",
+  "- packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts",
+  "",
+  "## Constraints",
+  "",
+  "- Keep .zflow as runtime state.",
+  "- Keep plan.md human-reviewable.",
+  "",
+  "## Decisions",
+  "",
+  "- plan.md is the durable reviewed intake document.",
+  "- prepare expands plan.md into versioned artifacts.",
+  "",
+  "## Risks / Unknowns",
+  "",
+  "- The plan drafter must produce stable section headings for downstream validation.",
+  "",
+  "## Proposed execution outline",
+  "",
+  "1. Read repo-map and reconnaissance.\n2. Draft detailed plan.md.\n3. Review plan.md.\n4. Compile versioned artifacts during prepare.",
+  "",
+  "## Verification approach",
+  "",
+  "- Run targeted change-workflow tests covering plan drafting and prepare compilation.",
+  "",
+  "## Open questions",
+  "",
+  "- None at this stage.",
+].join("\n")
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -48,6 +102,43 @@ async function removeTestRepo(repoRoot: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 describe("runChangePrepareWorkflow", () => {
+  test("forwards profile resolution options to the profiles service", async () => {
+    const repoRoot = await createTestRepo()
+    resetZflowRegistry()
+    try {
+      let receivedOptions: Record<string, unknown> | undefined
+      const registry = getZflowRegistry()
+      registry.claim({
+        capability: "profiles",
+        version: "0.1.0",
+        provider: "pi-zflow-profiles",
+        sourcePath: "test",
+        compatibilityMode: "compatible",
+      })
+      registry.provide("profiles", {
+        ensureResolved: async (_requiredLanes?: string[], options?: Record<string, unknown>) => {
+          receivedOptions = options
+        },
+      })
+
+      const modelRegistry = { marker: "live-model-registry" }
+      await runChangePrepareWorkflow({
+        cwd: repoRoot,
+        changeId: "test-profile-options",
+        profileResolutionOptions: {
+          repoRoot,
+          registry: modelRegistry,
+        },
+      })
+
+      assert.equal(receivedOptions?.repoRoot, repoRoot)
+      assert.equal(receivedOptions?.registry, modelRegistry)
+    } finally {
+      resetZflowRegistry()
+      await removeTestRepo(repoRoot)
+    }
+  })
+
   test("creates plan-state.json with draft status", async () => {
     const repoRoot = await createTestRepo()
     try {
@@ -181,6 +272,58 @@ describe("runChangePrepareWorkflow", () => {
       })
 
       assert.strictEqual(result.changeId, "unfinished-test")
+    } finally {
+      await removeTestRepo(repoRoot)
+    }
+  })
+
+  test("records durable plan path in runtime metadata when plan.md exists", async () => {
+    const repoRoot = await createTestRepo()
+    try {
+      const planDocPath = await writeDurablePlanDoc("durable-plan-metadata", {
+        changeId: "durable-plan-metadata",
+      }, {
+        repoRoot,
+        bodyContent: COMPLETE_PLAN_BODY,
+      })
+
+      const result = await runChangePrepareWorkflow({
+        cwd: repoRoot,
+        changeId: "durable-plan-metadata",
+      })
+
+      const planState = JSON.parse(await fs.readFile(result.planStatePath, "utf-8"))
+      assert.strictEqual(planState.runtimeMetadata.durablePlanDocPath, planDocPath)
+      assert.strictEqual(result.initialPlanState.runtimeMetadata?.durablePlanDocPath, planDocPath)
+    } finally {
+      await removeTestRepo(repoRoot)
+    }
+  })
+
+  test("rejects invalid durable plan frontmatter before prepare proceeds", async () => {
+    const repoRoot = await createTestRepo()
+    try {
+      const planDocPath = path.join(repoRoot, "docs", "zflow-changes", "invalid-frontmatter", "plan.md")
+      await fs.mkdir(path.dirname(planDocPath), { recursive: true })
+      await fs.writeFile(planDocPath, [
+        "---",
+        "schemaVersion: 2",
+        "changeId: invalid-frontmatter",
+        "status: draft",
+        "sourceMode: adhoc",
+        "currentVersion: not-a-version",
+        "approvedVersion: null",
+        "---",
+        "# Plan",
+      ].join("\n"), "utf-8")
+
+      await assert.rejects(
+        runChangePrepareWorkflow({
+          cwd: repoRoot,
+          changeId: "invalid-frontmatter",
+        }),
+        /Durable draft plan frontmatter is invalid/,
+      )
     } finally {
       await removeTestRepo(repoRoot)
     }

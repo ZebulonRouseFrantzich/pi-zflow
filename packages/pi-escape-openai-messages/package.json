@@ -1,0 +1,12 @@
+{
+  "name": "pi-escape-openai-messages",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "build": "tsc --project ."
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

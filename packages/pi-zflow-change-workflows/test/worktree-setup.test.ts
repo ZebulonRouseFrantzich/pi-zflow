@@ -11,6 +11,8 @@ import * as os from "node:os"
 import {
   repoNeedsWorktreeSetup,
   getRepoWorktreeSetupConfig,
+  getRepoWorktreeSetupPreference,
+  resolveDispatchWorktreeSetup,
 } from "../extensions/zflow-change-workflows/worktree-setup.js"
 
 // ---------------------------------------------------------------------------
@@ -83,6 +85,83 @@ describe("repoNeedsWorktreeSetup", () => {
 // getRepoWorktreeSetupConfig
 // ---------------------------------------------------------------------------
 
+describe("resolveDispatchWorktreeSetup", () => {
+  let repoRoot: string
+
+  before(async () => {
+    repoRoot = await createTempRepo()
+  })
+
+  after(async () => {
+    await fs.rm(repoRoot, { recursive: true, force: true })
+  })
+
+  test("uses built-in auto setup for pnpm workspaces without requiring a hook", async () => {
+    await fs.writeFile(path.join(repoRoot, "pnpm-workspace.yaml"), "packages:\n  - packages/*\n", "utf-8")
+    const resolution = await resolveDispatchWorktreeSetup(repoRoot)
+    assert.equal(resolution.ok, true)
+    assert.equal(resolution.strategy, "auto")
+    assert.equal(resolution.hook, undefined)
+    assert.match(resolution.autoSetupCommand ?? "", /pnpm install --frozen-lockfile/)
+    await fs.rm(path.join(repoRoot, "pnpm-workspace.yaml"), { force: true })
+  })
+
+  test("returns dispatch hook config when a repo-local hook is configured", async () => {
+    await fs.writeFile(path.join(repoRoot, "pnpm-workspace.yaml"), "packages:\n  - packages/*\n", "utf-8")
+    await fs.mkdir(path.join(repoRoot, ".pi", "zflow"), { recursive: true })
+    await fs.writeFile(
+      path.join(repoRoot, ".pi", "zflow", "config.json"),
+      JSON.stringify({
+        worktreeSetupHook: {
+          script: ".pi/zflow/worktree-setup-hook.sh",
+          runtime: "shell",
+          timeoutMs: 45000,
+          description: "Prepare isolated worktrees",
+        },
+      }),
+      "utf-8",
+    )
+
+    const resolution = await resolveDispatchWorktreeSetup(repoRoot)
+    assert.equal(resolution.ok, true)
+    assert.equal(resolution.required, true)
+    assert.equal(resolution.hook?.script, ".pi/zflow/worktree-setup-hook.sh")
+    assert.equal(resolution.hook?.timeoutMs, 45000)
+    await fs.rm(path.join(repoRoot, "pnpm-workspace.yaml"), { force: true })
+    await fs.rm(path.join(repoRoot, ".pi", "zflow", "config.json"), { force: true })
+  })
+
+  test("fails fast for custom hook-required repo classes when no hook is configured", async () => {
+    await fs.writeFile(path.join(repoRoot, ".env.example"), "FOO=bar\n", "utf-8")
+    const resolution = await resolveDispatchWorktreeSetup(repoRoot)
+    assert.equal(resolution.ok, false)
+    assert.equal(resolution.required, true)
+    assert.equal(resolution.strategy, "hook")
+    assert.match(resolution.message ?? "", /worktreeSetupHook required but not configured/)
+    await fs.rm(path.join(repoRoot, ".env.example"), { force: true })
+  })
+
+  test("treats worktreeSetupHook: null as an explicit disable", async () => {
+    await fs.writeFile(path.join(repoRoot, ".env.example"), "FOO=bar\n", "utf-8")
+    await fs.mkdir(path.join(repoRoot, ".pi", "zflow"), { recursive: true })
+    await fs.writeFile(
+      path.join(repoRoot, ".pi", "zflow", "config.json"),
+      JSON.stringify({ worktreeSetupHook: null }),
+      "utf-8",
+    )
+
+    const preference = await getRepoWorktreeSetupPreference(repoRoot)
+    assert.equal(preference.state, "disabled")
+
+    const resolution = await resolveDispatchWorktreeSetup(repoRoot)
+    assert.equal(resolution.ok, true)
+    assert.equal(resolution.disabled, true)
+    assert.equal(resolution.strategy, "disabled")
+    await fs.rm(path.join(repoRoot, ".env.example"), { force: true })
+    await fs.rm(path.join(repoRoot, ".pi", "zflow", "config.json"), { force: true })
+  })
+})
+
 describe("getRepoWorktreeSetupConfig", () => {
   let repoRoot: string
 
@@ -105,6 +184,18 @@ describe("getRepoWorktreeSetupConfig", () => {
     await fs.writeFile(
       path.join(configDir, "config.json"),
       JSON.stringify({ someOtherSetting: true }),
+      "utf-8",
+    )
+    const config = await getRepoWorktreeSetupConfig(repoRoot)
+    assert.equal(config, null)
+  })
+
+  test("returns null when config file explicitly disables the hook", async () => {
+    const configDir = path.join(repoRoot, ".pi", "zflow")
+    await fs.mkdir(configDir, { recursive: true })
+    await fs.writeFile(
+      path.join(configDir, "config.json"),
+      JSON.stringify({ worktreeSetupHook: null }),
       "utf-8",
     )
     const config = await getRepoWorktreeSetupConfig(repoRoot)

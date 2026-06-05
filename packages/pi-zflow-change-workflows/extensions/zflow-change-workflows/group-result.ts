@@ -58,6 +58,8 @@ export interface GroupVerificationResult {
   command?: string
   /** Truncated stdout/stderr from verification. */
   output?: string
+  /** Path to the persisted verification output file (relative to worktree-results). */
+  outputPath?: string
 }
 
 /**
@@ -100,6 +102,10 @@ export interface CaptureGroupResultOptions {
   runId: string
   /** Repo root (used for relative path resolution and git commands). */
   repoRoot: string
+  /** Optional explicit base commit/ref for diff capture. */
+  baseCommit?: string
+  /** Optional explicit head commit when already known from the dispatcher. */
+  headCommit?: string
   /** Scope of files this group was expected to change (for diff filtering). */
   scopedFiles: string[]
   /** Whether to retain the worktree after capture. */
@@ -339,17 +345,20 @@ export async function captureGroupResult(
     worktreePath,
     runId,
     repoRoot,
+    baseCommit: explicitBaseCommit,
+    headCommit: explicitHeadCommit,
     scopedFiles,
     retain = false,
     verification,
     cwd,
   } = options
 
-  // The base commit is the commit the worktree was created from (the primary's HEAD)
-  const baseCommit = getHeadSha(repoRoot)
+  // The base commit is normally the commit the worktree was created from.
+  // Dependency-lineage dispatches can override it explicitly.
+  const baseCommit = explicitBaseCommit ?? getHeadSha(repoRoot)
 
   // The worktree's HEAD (may differ from base if worker committed)
-  const headCommit = getHeadSha(worktreePath)
+  const headCommit = explicitHeadCommit ?? getHeadSha(worktreePath)
 
   // Get changed files FROM the worktree (captures both committed and uncommitted)
   const changedFiles = getChangedFiles(worktreePath, baseCommit, scopedFiles)
@@ -425,6 +434,7 @@ export async function captureGroupResult(
           status: verification.status,
           command: verification.command,
           output: verification.output,
+          outputPath: verification.outputPath,
         }
       : undefined,
     retained: retain,
@@ -472,6 +482,7 @@ export async function getGroupResult(
           status: group.scopedVerification.status,
           command: group.scopedVerification.command,
           output: group.scopedVerification.output,
+          outputPath: group.scopedVerification.outputPath,
         }
       : undefined,
     retained: group.retained,
@@ -504,6 +515,7 @@ export async function listGroupResults(
           status: group.scopedVerification.status,
           command: group.scopedVerification.command,
           output: group.scopedVerification.output,
+          outputPath: group.scopedVerification.outputPath,
         }
       : undefined,
     retained: group.retained,

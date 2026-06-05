@@ -77,6 +77,8 @@ export type {
   VerificationStatus,
   GroupRunMetadata,
   RetainedArtifact,
+  WorkspaceClusterMetadata,
+  LineageRefMetadata,
 } from "./run-state.js"
 
 // Re-export cleanup metadata helpers

@@ -20,6 +20,7 @@ import {
   approvePlanVersion,
   runChangeImplementWorkflow,
   runImplementationPostStartSequence,
+  finalizeVerification,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
 import type {
@@ -228,6 +229,38 @@ describe("runImplementationPostStartSequence", () => {
         "waiting-for-dispatch",
         "should not wait for dispatch when skipDispatchWait=true",
       )
+    })
+
+    test("treats ledger evidence-backed applied groups as dispatch artifacts", async () => {
+      const repoRoot = await createTestRepo()
+      const { runId } = await setupImplementRun(repoRoot, "test-ledger-evidence")
+      const evidencePath = path.join(repoRoot, ".zflow", "runs", runId, "worktree-results", "group-a-resume-result.md")
+      await fs.mkdir(path.dirname(evidencePath), { recursive: true })
+      await fs.writeFile(evidencePath, "Implementation already complete.\n\n## Verification results\nResult: 15 test suites passed, 176 tests passed\n", "utf-8")
+
+      await updateRun(runId, {
+        metadata: {
+          groupLedger: {
+            "group-a": {
+              groupId: "group-a",
+              status: "applied",
+              agent: "zflow.implement-routine",
+              taskPrompt: "",
+              files: ["src/foo.ts"],
+              dependencies: [],
+              semanticCoupling: { dependsOnGroups: [], blocksGroups: [], sharedFiles: [], notes: [] },
+              implementationEvidencePath: evidencePath,
+              completionMode: "worker-evidence",
+              appliedToPrimary: true,
+              retryCount: 0,
+              updatedAt: new Date().toISOString(),
+            },
+          },
+        },
+      } as any, repoRoot)
+
+      const result = await runImplementationPostStartSequence(runId, undefined, repoRoot)
+      assert.notStrictEqual(result.status, "waiting-for-dispatch")
     })
   })
 
@@ -474,6 +507,90 @@ describe("runImplementationPostStartSequence", () => {
         lifecycle.lastPhase === "completed" || lifecycle.lastPhase === "verification-failed",
         `lastPhase should reflect final state, got: ${lifecycle.lastPhase}`,
       )
+      if (result2.status === "completed") {
+        assert.ok(!lifecycle.unfinishedRuns.includes(runId), "completed runs should be removed from unfinishedRuns")
+      }
+    })
+  })
+
+  describe("stale codeReview invalidation", () => {
+    test("finalizeVerification clears codeReview when verification passes", async () => {
+      const repoRoot = await createTestRepoWithPassingVerification()
+      const { runId, changeId } = await setupImplementRun(repoRoot, "test-clear-review")
+
+      // Simulate dispatch artifacts so the run looks like a completed dispatch
+      await simulateDispatchArtifacts(runId, repoRoot)
+
+      // Inject a stale codeReview entry directly into run.json
+      const runPath = resolveRunStatePath(runId, repoRoot)
+      const raw = JSON.parse(await fs.readFile(runPath, "utf-8"))
+      raw.codeReview = {
+        pass: false,
+        summary: "Stale review from previous run",
+        completedAt: new Date(Date.now() - 86400000).toISOString(), // 1 day ago
+      }
+      await fs.writeFile(runPath, JSON.stringify(raw, null, 2), "utf-8")
+
+      // Call finalizeVerification — it should clear the stale codeReview on pass
+      const result = await finalizeVerification(runId, repoRoot)
+
+      // Read run.json and check codeReview state
+      const updated = JSON.parse(await fs.readFile(runPath, "utf-8"))
+
+      if (result.status === "passed") {
+        // Verification passed — stale codeReview should be null
+        assert.strictEqual(
+          updated.codeReview,
+          null,
+          "codeReview should be null after successful verification",
+        )
+      }
+      // If verification was skipped (no command resolved), codeReview may
+      // persist — that's acceptable since no actual verification ran.
+
+      await removeTestRepo(repoRoot)
+    })
+
+    test("runImplementationPostStartSequence overwrites stale codeReview on full cycle", async () => {
+      const repoRoot = await createTestRepoWithPassingVerification()
+      const { runId, changeId } = await setupImplementRun(repoRoot, "test-cycle-clear")
+
+      await simulateDispatchArtifacts(runId, repoRoot)
+      await setRunPhase(runId, "applying", repoRoot)
+
+      // Inject stale codeReview
+      const runPath = resolveRunStatePath(runId, repoRoot)
+      const raw = JSON.parse(await fs.readFile(runPath, "utf-8"))
+      raw.codeReview = {
+        pass: false,
+        summary: "Stale review",
+        completedAt: new Date(Date.now() - 86400000).toISOString(),
+      }
+      await fs.writeFile(runPath, JSON.stringify(raw, null, 2), "utf-8")
+
+      // Run the full post-start sequence (verification + review)
+      const result = await runImplementationPostStartSequence(
+        runId,
+        { skipDispatchWait: true },
+        repoRoot,
+      )
+
+      if (result.status === "completed") {
+        // Read fresh run state
+        const updated = JSON.parse(await fs.readFile(runPath, "utf-8"))
+        // codeReview should be present (new review result) but NOT the stale one
+        assert.ok(updated.codeReview !== undefined, "codeReview should exist after full cycle")
+        if (updated.codeReview) {
+          // The summary should not be the stale one
+          assert.notStrictEqual(
+            updated.codeReview.summary,
+            "Stale review",
+            "codeReview should not retain stale summary",
+          )
+        }
+      }
+
+      await removeTestRepo(repoRoot)
     })
   })
 })

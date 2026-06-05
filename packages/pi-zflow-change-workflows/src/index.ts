@@ -95,8 +95,9 @@ export {
   promptResumeChoices,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
-// Formal prepare workflow (Phase 7 — /zflow-change-prepare orchestration)
+// Formal plan/prepare workflow helpers (Phase 7 — /zflow-change-plan + /zflow-change-prepare)
 export {
+  runChangePlanWorkflow,
   runChangePrepareWorkflow,
   ensureImplementationTasksArtifact,
   updatePlanState,
@@ -114,6 +115,8 @@ export {
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
 export type {
+  ChangePlanWorkflowOptions,
+  ChangePlanWorkflowResult,
   PrepareWorkflowOptions,
   PrepareWorkflowResult,
 } from "../extensions/zflow-change-workflows/orchestration.js"
@@ -158,6 +161,28 @@ export type {
   PublishPlanArtifactsResult,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
+// Durable draft-plan doc (plan.md) helpers
+export {
+  resolveDurablePlanDocPath,
+  parsePlanDocFrontmatter,
+  serializePlanDoc,
+  scaffoldDurablePlanDocBody,
+  extractPlanDocSections,
+  buildPlanDocVersionIndexSection,
+  writeDurablePlanDoc,
+  readDurablePlanDoc,
+  validateDurablePlanDocFrontmatter,
+  validateDurablePlanDocBody,
+  normalizeDurablePlanDocBody,
+  listPublishedDurablePlanVersions,
+  buildPrepareNotesFromDurablePlanDoc,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
+export type {
+  DurablePlanDocFrontmatter,
+  DurablePlanDoc,
+} from "../extensions/zflow-change-workflows/orchestration.js"
+
 // Verification and failure log (Phase 7 — verification command resolution)
 export {
   resolveVerificationCommand,
@@ -194,10 +219,12 @@ export type {
 export {
   repoNeedsWorktreeSetup,
   getRepoWorktreeSetupConfig,
+  resolveDispatchWorktreeSetup,
   assertWorktreeSetupReady,
 } from "../extensions/zflow-change-workflows/worktree-setup.js"
 
 export type {
+  DispatchWorktreeSetupResolution,
   WorktreeSetupResult,
 } from "../extensions/zflow-change-workflows/worktree-setup.js"
 
@@ -263,11 +290,20 @@ export type {
 export {
   runChangeAuditWorkflow,
   runChangeFixWorkflow,
+  runDirectFixWorkflow,
+  buildFamilyClusters,
+  buildDirectFixBatches,
+  inferRootCause,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
 export type {
   AuditWorkflowOptions,
   AuditWorkflowResult,
+  DirectFixBatch,
+  DirectFixFindingOutcome,
+  DirectFixWorkflowOptions,
+  DirectFixWorkflowResult,
+  GlobalRoundState,
   FixWorkflowOptions,
   FixWorkflowResult,
 } from "../extensions/zflow-change-workflows/orchestration.js"

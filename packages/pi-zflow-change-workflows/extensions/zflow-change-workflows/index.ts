@@ -4,8 +4,8 @@
  * Phase 7 implementation:
  * - Path resolution helpers integrated from pi-zflow-artifacts
  * - `resolveAllPaths` convenience helper for workflow commands
- * - Registers `/zflow-change-prepare`, `/zflow-change-implement`,
- *   `/zflow-change-audit`, `/zflow-change-fix`, and `/zflow-clean`
+ * - Registers `/zflow-change-plan`, `/zflow-change-prepare`,
+ *   `/zflow-change-implement`, `/zflow-change-audit`, `/zflow-change-fix`, and `/zflow-clean`
  * - Wires state-driven resume, HITL gates, handoff, prompt reminders,
  *   verification/review sequencing, cleanup, and path-guard enforcement
  */
@@ -17,7 +17,7 @@ import {
 } from "pi-zflow-core/runtime-paths"
 
 import { getZflowRegistry } from "pi-zflow-core/registry"
-import { PI_ZFLOW_CHANGE_WORKFLOWS_VERSION } from "pi-zflow-core"
+import { PI_ZFLOW_CHANGE_WORKFLOWS_VERSION, inferTaskRepoRoot } from "pi-zflow-core"
 import type { CapabilityClaim } from "pi-zflow-core/registry"
 
 import {
@@ -35,126 +35,116 @@ import {
   resolveReconnaissancePath,
 } from "pi-zflow-artifacts/artifact-paths"
 
-// ── Path resolution helpers ──────────────────────────────────────
+// ── Extracted activation / command helpers ─────────────────────
 
-/**
- * All workflow-relevant runtime paths resolved once.
- *
- * This is the single authoritative source of runtime path locations
- * for all workflow commands. Every command should call this to get
- * consistent paths throughout the session.
- */
-export interface AllWorkflowPaths {
-  /** Root of all runtime state artifacts (`<git-dir>/pi-zflow/`). */
-  runtimeStateDir: string
-  /** Path to the state index JSON file. */
-  stateIndexPath: string
-  /** Path to the failure log markdown file. */
-  failureLogPath: string
-  /** Path to the review artifacts directory. */
-  reviewDir: string
-  /** Path to the code-review-findings.md file. */
-  codeReviewFindingsPath: string
-  /** Path to the repo-map.md file. */
-  repoMapPath: string
-  /** Path to the reconnaissance.md file. */
-  reconnaissancePath: string
-}
+import { ensureWorkflowIntercomTarget } from "./activation/path-helpers.js"
 
-/**
- * Resolve all workflow-relevant runtime paths.
- *
- * Centralises path resolution so that every workflow command resolves
- * paths the same way. Accepts an optional working directory for context.
- *
- * @param cwd - Working directory (defaults to `process.cwd()`)
- */
-export function resolveAllPaths(cwd?: string): AllWorkflowPaths {
-  return {
-    runtimeStateDir: resolveRuntimeStateDir(cwd),
-    stateIndexPath: resolveStateIndexPath(cwd),
-    failureLogPath: resolveFailureLogPath(cwd),
-    reviewDir: resolveReviewDir(cwd),
-    codeReviewFindingsPath: resolveCodeReviewFindingsPath(cwd),
-    repoMapPath: resolveRepoMapPath(cwd),
-    reconnaissancePath: resolveReconnaissancePath(cwd),
-  }
-}
+export {
+  resolveAllPaths,
+  resolvePlanPaths,
+  resolveRunPaths,
+  buildWorkflowIntercomSessionName,
+  ensureWorkflowIntercomTarget,
+} from "./activation/path-helpers.js"
 
-/**
- * Resolve plan-related paths for a specific change and version.
- *
- * @param changeId - Unique change identifier (kebab-case)
- * @param planVersion - Plan version (e.g. "v1")
- * @param cwd - Working directory (defaults to `process.cwd()`)
- */
-export function resolvePlanPaths(
-  changeId: string,
-  planVersion: string,
-  cwd?: string,
-): {
-  changeDir: string
-  planVersionDir: string
-  planStatePath: string
-} {
-  return {
-    changeDir: resolveChangeDir(changeId, cwd),
-    planVersionDir: resolvePlanVersionDir(changeId, planVersion, cwd),
-    planStatePath: resolvePlanStatePath(changeId, cwd),
-  }
-}
+export type {
+  AllWorkflowPaths,
+} from "./activation/path-helpers.js"
 
-/**
- * Resolve run-related paths for a specific run.
- *
- * @param runId - Unique run identifier
- * @param cwd - Working directory (defaults to `process.cwd()`)
- */
-export function resolveRunPaths(
-  runId: string,
-  cwd?: string,
-): {
-  runStatePath: string
-} {
-  return {
-    runStatePath: resolveRunStatePath(runId, cwd),
-  }
-}
+import {
+  setActiveWorkflowMode,
+  getActiveWorkflowMode,
+  isWorkflowToolGuardActive,
+  addReminder,
+  removeReminder,
+  getActiveReminders,
+  clearReminders,
+  resetWorkflowState,
+} from "./activation/workflow-state.js"
 
-function sanitizeWorkflowSessionToken(token: string, fallback: string): string {
-  const sanitized = token
+export {
+  setActiveWorkflowMode,
+  getActiveWorkflowMode,
+  isWorkflowToolGuardActive,
+  addReminder,
+  removeReminder,
+  getActiveReminders,
+  clearReminders,
+  resetWorkflowState,
+} from "./activation/workflow-state.js"
+
+import type { InterviewableContext } from "./interview/structured-interview.js"
+import { runStructuredInterview } from "./interview/structured-interview.js"
+
+export type { InterviewableContext } from "./interview/structured-interview.js"
+
+import {
+  promptForChangePlanInput,
+  deriveChangePlanId,
+  parseChangePlanArgs,
+  parseChangePrepareArgs,
+  extractChangePlanReference,
+} from "./commands/args.js"
+
+function isRuneContextReference(referencePath: string | null | undefined): boolean {
+  if (!referencePath) return false
+  const normalized = referencePath
+    .trim()
+    .replace(/^@+/, "")
+    .replace(/\\/g, "/")
     .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-  return sanitized || fallback
+  if (!normalized) return false
+  return normalized.split("/").some((segment) =>
+    segment === "runecontext" ||
+    segment === ".runecontext" ||
+    segment === "runectx" ||
+    segment === "rune-context"
+  )
 }
 
-export function buildWorkflowIntercomSessionName(
-  workflow: "implement" | "fix",
-  changeId: string,
-  sessionId: string,
-): string {
-  const safeChangeId = sanitizeWorkflowSessionToken(changeId, "change")
-  const safeSessionId = sanitizeWorkflowSessionToken(sessionId, "session").slice(0, 8) || "session"
-  return `zflow-${workflow}-${safeChangeId}-${safeSessionId}`
-}
+export {
+  isAdHocPlanModeActive,
+  shouldForkImplementationSessionAfterPrepare,
+  deriveChangePlanId,
+  parseChangePlanArgs,
+  parseChangePrepareArgs,
+  extractChangePlanReference,
+} from "./commands/args.js"
 
-export function ensureWorkflowIntercomTarget(
-  pi: Pick<ExtensionAPI, "getSessionName" | "setSessionName">,
-  ctx: { sessionManager?: { getSessionId?: () => string } },
-  workflow: "implement" | "fix",
-  changeId: string,
-): string | undefined {
-  const existing = pi.getSessionName()?.trim()
-  if (existing) return existing
+export type {
+  ParsedChangePlanArgs,
+  ParsedChangePrepareArgs,
+} from "./commands/args.js"
 
-  const sessionId = ctx.sessionManager?.getSessionId?.()
-  if (!sessionId) return undefined
+import {
+  formatElapsed,
+  detectWorkflowAttentionSignal,
+  detectIncomingWorkflowAttention,
+  registerWorkflowProgressRenderer,
+  createWorkflowProgressIndicator,
+  buildWorkflowFinalNextStepsLine,
+} from "./activation/progress-renderer.js"
+import {
+  acceptAlreadyImplementedEvidenceResult,
+  acceptImplementationNoopResult,
+} from "./orchestration/implementation/noop-success.js"
+import type {
+  WorkflowSubagentSnapshot,
+  SessionMessageLike,
+  SessionEntryLike,
+  WorkflowAttentionSignalInput,
+} from "./activation/progress-renderer.js"
 
-  const generated = buildWorkflowIntercomSessionName(workflow, changeId, sessionId)
-  pi.setSessionName(generated)
-  return generated
-}
+export {
+  detectWorkflowAttentionSignal,
+  detectIncomingWorkflowAttention,
+} from "./activation/progress-renderer.js"
+
+export type {
+  SessionMessageLike,
+  SessionEntryLike,
+  WorkflowAttentionSignalInput,
+} from "./activation/progress-renderer.js"
 
 // ── State-index lifecycle helpers ─────────────────────────────────
 
@@ -165,6 +155,7 @@ import {
   discoverUnfinishedWork,
   promptResumeChoices,
   checkUnfinishedOnEntry,
+  runChangePlanWorkflow,
   runChangePrepareWorkflow,
   resolveProfileIfAvailable,
   buildRepoMap,
@@ -183,6 +174,7 @@ import {
   runChangeAuditWorkflow,
   runChangeFixWorkflow,
   parseReviewFindings,
+  assertFindingsMatchChange,
   buildFixSelectionQuestions,
   buildFixPlan,
   runCleanWorkflow,
@@ -211,12 +203,12 @@ import {
   buildCodeReviewInputFromContext,
   publishPlanArtifacts,
   deriveSemanticChangeId,
+  writeDurablePlanDoc,
+  listPublishedDurablePlanVersions,
   resolveChangeImplementTarget,
   applyPatchesWithLedger,
   buildSubagentResolutionPrompt,
   formatApplyBackFailureMessage,
-  buildFixOrchestratorTaskPrompt,
-  resolveFixOrchestratorConfig,
   type PublishPlanArtifactsResult,
 } from "./orchestration.js"
 
@@ -314,6 +306,15 @@ import type {
   FixLoopResult,
   FixAttempt,
 } from "./verification.js"
+
+import type { AgentDispatchProgress, DispatchService, DispatchWorktreeSetupHook } from "pi-zflow-core/dispatch-service"
+import { DISPATCH_SERVICE_CAPABILITY } from "pi-zflow-core/dispatch-service"
+import {
+  buildFixWorkerWorktreeStrategy,
+  extractFixVerificationCommand,
+  mergeSuccessfulFixResult,
+  selectCanonicalGroupPatchPath,
+} from "./fix-dispatch.js"
 
 export {
   discoverUnfinishedWork,
@@ -413,1217 +414,9 @@ export type {
   ArtifactRepairResult,
 }
 
-// ── Structured interview helper ─────────────────────────────────
-
 /**
- * Minimal type for a context with interview/UI capability.
- *
- * Permissive to avoid depending on concrete Pi internals — any object
- * matching one of the recognised shapes will work.
+ * Format plan inspection paths for the prepare approval gate.
  */
-export interface InterviewableContext {
-  /** Direct interview function (future Pi API). */
-  interview?: (payload: string) => Promise<string | undefined> | string | undefined
-  /** Nested UI context. */
-  ui?: {
-    interview?: (payload: string) => Promise<string | undefined> | string | undefined
-    /** Single-select from options. */
-    select?: (title: string, options: string[], extra?: Record<string, unknown>) => Promise<string | undefined>
-    /** Confirm dialog (boolean). */
-    confirm?: (title: string, message: string, extra?: Record<string, unknown>) => Promise<boolean>
-    /** Plain text input. */
-    input?: (title: string, placeholder?: string, extra?: Record<string, unknown>) => Promise<string | undefined>
-    /** Non-blocking notification. */
-    notify: (message: string, type?: "info" | "warning" | "error") => void
-    /** Dynamic widget rendered near the editor in interactive TUI mode. */
-    setWidget?: (id: string, content?: string[], options?: { placement?: "aboveEditor" | "belowEditor" }) => void
-    /** Footer status indicator in interactive TUI mode. */
-    setStatus?: (id: string, value?: string) => void
-    /** Request an immediate TUI redraw. */
-    requestRender?: () => void
-  }
-  /**
-   * The Pi runtime model registry, available when the handler runs inside
-   * a Pi extension command context. Provides model discovery and auth checks.
-   *
-   * When present, profile resolution can check lane models against
-   * real model availability. When absent, lane-health checks are skipped
-   * and all resolved lanes are assumed healthy.
-   */
-  modelRegistry?: {
-    getAll(): Array<{
-      provider: string
-      id: string
-      api?: string
-      baseUrl?: string
-      reasoning?: boolean
-      input?: string[]
-      contextWindow?: number
-      maxTokens?: number
-      [key: string]: unknown
-    }>
-    hasConfiguredAuth(model: {
-      provider: string
-      id: string
-      [key: string]: unknown
-    }): boolean
-  }
-}
-
-function formatElapsed(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000))
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
-}
-
-const WORKFLOW_PROGRESS_MESSAGE_TYPE = "zflow-workflow-progress" as const
-const WORKFLOW_ATTENTION_PHASE_CARD_ID = "coordination-attention" as const
-
-interface WorkflowProgressSnapshot {
-  id: string
-  command: string
-  changePath: string
-  model?: string
-  thinking?: string
-  status: "running" | "completed" | "failed"
-  startedAt: number
-  finishedAt?: number
-  lastMessage: string
-  updateCount: number
-  recentMessages: string[]
-  subagents: WorkflowSubagentSnapshot[]
-  phaseCards: WorkflowPhaseCardSnapshot[]
-  reviewers: WorkflowReviewerSnapshot[]
-}
-
-interface WorkflowReviewerSnapshot {
-  id: string
-  reviewerName: string
-  agentName: string
-  model?: string
-  thinking?: string
-  status: "queued" | "running" | "completed" | "failed"
-  startedAt: number
-  finishedAt?: number
-  currentTool?: string
-  lastCommand?: string
-}
-
-interface WorkflowPhaseCardSnapshot {
-  id: string
-  title: string
-  status: "running" | "completed" | "failed"
-  startedAt: number
-  finishedAt?: number
-  messages: string[]
-}
-
-interface WorkflowSubagentSnapshot {
-  id: string
-  agent: string
-  title?: string
-  model?: string
-  thinking?: string
-  status: string
-  startedAt: number
-  finishedAt?: number
-  lastCommand?: string
-  logs?: string[]
-  lastActivityAt?: number
-}
-
-interface WorkflowProgressMessageDetails {
-  id: string
-  snapshot: WorkflowProgressSnapshot
-}
-
-export interface SessionMessageLike {
-  role?: string
-  customType?: string
-  content?: unknown
-  timestamp?: number
-}
-
-export interface SessionEntryLike {
-  id?: string
-  type?: string
-  message?: SessionMessageLike
-}
-
-export interface WorkflowAttentionSignalInput {
-  id: string
-  agent: string
-  title?: string
-  lastCommand?: string
-  logs?: string[]
-}
-
-const workflowProgressSnapshots = new Map<string, WorkflowProgressSnapshot>()
-let workflowProgressCounter = 0
-
-function truncateText(value: string, width: number): string {
-  if (width <= 0) return ""
-  if (value.length <= width) return value
-  return `${value.slice(0, Math.max(0, width - 1))}…`
-}
-
-function subagentSortKey(id: string): number {
-  const match = id.match(/(\d+)$/)
-  return match ? Number.parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER
-}
-
-function flattenMessageContentToText(content: unknown): string {
-  if (typeof content === "string") return content
-  if (!Array.isArray(content)) return ""
-  return content
-    .map((part) => {
-      if (!part || typeof part !== "object") return ""
-      const maybeText = part as { type?: unknown; text?: unknown }
-      if (maybeText.type === "text" && typeof maybeText.text === "string") return maybeText.text
-      return ""
-    })
-    .filter(Boolean)
-    .join("\n")
-}
-
-function detectCoordinationKeyword(text: string): string | undefined {
-  const normalized = text.toLowerCase()
-  if (normalized.includes("drift detected")) return "DRIFT_DETECTED"
-  if (normalized.includes("need_clarification") || normalized.includes("need clarification")) return "NEED_CLARIFICATION"
-  if (normalized.includes("verification_failed") || normalized.includes("verification failed")) return "VERIFICATION_FAILED"
-  if (normalized.includes("blocked") || normalized.includes("need_decision") || normalized.includes("need decision")) return "BLOCKED"
-  if (normalized.includes("progress_update") || normalized.includes("progress update")) return "PROGRESS_UPDATE"
-  return undefined
-}
-
-export function detectWorkflowAttentionSignal(subagent: WorkflowAttentionSignalInput): string | undefined {
-  const candidates = [subagent.lastCommand, ...(subagent.logs ?? [])]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-  const matched = candidates.find((value) => /contact_supervisor|intercom/i.test(value))
-  if (!matched) return undefined
-
-  const label = subagent.title?.trim() || subagent.agent || subagent.id
-  const keyword = detectCoordinationKeyword(matched)
-  const tool = /contact_supervisor/i.test(matched) ? "contact_supervisor" : "intercom"
-  const detail = visualTruncate(matched.replace(/\s+/g, " ").trim(), 140)
-  return keyword
-    ? `${label} raised ${keyword} via ${tool}: ${detail}`
-    : `${label} used ${tool}: ${detail}`
-}
-
-export function detectIncomingWorkflowAttention(entry: SessionEntryLike): string | undefined {
-  if (entry.type !== "message" || !entry.message) return undefined
-  const message = entry.message
-  const customType = typeof message.customType === "string" ? message.customType : ""
-  if (customType === WORKFLOW_PROGRESS_MESSAGE_TYPE) return undefined
-
-  const text = flattenMessageContentToText(message.content)
-  const haystack = `${customType}\n${text}`.toLowerCase()
-  const looksLikeIntercom = haystack.includes("intercom") || haystack.includes("contact_supervisor")
-  const keyword = detectCoordinationKeyword(haystack)
-
-  if (!looksLikeIntercom && !keyword) return undefined
-
-  const summary = visualTruncate(text.replace(/\s+/g, " ").trim(), 180) || visualTruncate(customType, 80)
-  if (!summary) return undefined
-  return keyword
-    ? `Incoming ${keyword} signal: ${summary}`
-    : `Incoming coordination signal: ${summary}`
-}
-
-function visualCharWidth(char: string): number {
-  const cp = char.codePointAt(0) ?? 0
-  if (cp >= 0x1F300 && cp <= 0x1F9FF) return 2
-  if (cp >= 0x2600 && cp <= 0x27BF) return 2
-  if (cp >= 0x2300 && cp <= 0x23FF) return 2
-  if (cp >= 0x2B00 && cp <= 0x2BFF) return 2
-  if (cp >= 0xFE00 && cp <= 0xFE0F) return 0
-  if (cp >= 0x1F000 && cp <= 0x1F02F) return 2
-  return 1
-}
-
-function visualWidth(text: string): number {
-  let w = 0
-  for (const ch of text) w += visualCharWidth(ch)
-  return w
-}
-
-function ansiAwareVisualWidth(text: string): number {
-  let w = 0
-  let index = 0
-  while (index < text.length) {
-    const ansi = text.slice(index).match(/^\x1b\[[0-9;]*m/)
-    if (ansi) {
-      index += ansi[0].length
-      continue
-    }
-
-    const codePoint = text.codePointAt(index)
-    if (codePoint === undefined) break
-    const ch = String.fromCodePoint(codePoint)
-    w += visualCharWidth(ch)
-    index += ch.length
-  }
-  return w
-}
-
-function visualTruncate(value: string, maxVisualWidth: number): string {
-  if (maxVisualWidth <= 0) return ""
-
-  // ANSI-aware truncation. Workflow progress lines often contain theme SGR
-  // sequences; slicing by raw string length can cut an escape sequence or drop
-  // the reset emitted by theme.bg()/theme.fg(), which leaves terminal
-  // background color bleeding into later transcript lines. This follows the
-  // same principle as pi-subagents' TUI renderer: count only visible cells and
-  // copy escape sequences through untouched.
-  let w = 0
-  let result = ""
-  let index = 0
-  while (index < value.length) {
-    const ansi = value.slice(index).match(/^\x1b\[[0-9;]*m/)
-    if (ansi) {
-      result += ansi[0]
-      index += ansi[0].length
-      continue
-    }
-
-    const codePoint = value.codePointAt(index)
-    if (codePoint === undefined) break
-    const ch = String.fromCodePoint(codePoint)
-    const cw = visualCharWidth(ch)
-    if (w + cw > maxVisualWidth) break
-    result += ch
-    w += cw
-    index += ch.length
-  }
-  return result
-}
-
-function visualPadEnd(value: string, targetVisualWidth: number): string {
-  const currentWidth = visualWidth(value)
-  if (currentWidth >= targetVisualWidth) return value
-  return value + " ".repeat(targetVisualWidth - currentWidth)
-}
-
-function ansiAwarePadEnd(value: string, targetVisualWidth: number): string {
-  const currentWidth = ansiAwareVisualWidth(value)
-  if (currentWidth >= targetVisualWidth) return value
-  return value + " ".repeat(targetVisualWidth - currentWidth)
-}
-
-/**
- * Word-wrap plain text at word boundaries, preserving visual character widths.
- * Input MUST NOT contain ANSI escape codes.
- * Returns lines each with visual width ≤ maxWidth.
- */
-function wordWrap(text: string, maxWidth: number): string[] {
-  if (!text) return [""]
-  if (maxWidth <= 0) return [""]
-  if (visualWidth(text) <= maxWidth) return [text]
-
-  const result: string[] = []
-  let line = ""
-
-  for (const word of text.split(" ")) {
-    if (!word) {
-      if (line) line += " " // preserve inter-word spacing
-      continue
-    }
-
-    const candidate = line ? line + " " + word : word
-    if (visualWidth(candidate) <= maxWidth) {
-      line = candidate
-    } else {
-      if (line) result.push(line)
-
-      // Word itself may exceed maxWidth — hard-break it
-      if (visualWidth(word) > maxWidth) {
-        let remaining = word
-        let chunk = ""
-        for (const ch of remaining) {
-          const test = chunk + ch
-          if (visualWidth(test) > maxWidth && chunk) {
-            result.push(chunk)
-            chunk = ch
-          } else {
-            chunk = test
-          }
-        }
-        line = chunk
-      } else {
-        line = word
-      }
-    }
-  }
-
-  if (line) result.push(line)
-  return result
-}
-
-function isFinishedSubagentStatus(status: string): boolean {
-  const normalized = status.toLowerCase()
-  return normalized === "completed" || normalized === "failed"
-}
-
-function subagentStatusIcon(status: string): string {
-  const normalized = status.toLowerCase()
-  if (normalized === "completed") return "✅"
-  if (normalized === "failed") return "❌"
-  if (normalized === "queued") return "⏳"
-  return "▶️"
-}
-
-/**
- * View model for a single zflow card.
- * Pure data — the card renderer consumes this to produce themed lines.
- */
-interface ZflowCardViewModel {
-  /** Unique card identifier. */
-  id: string
-  /** Primary heading line (e.g. "✅ Code Review"). */
-  title: string
-  /** Status for coloring. */
-  status: "queued" | "running" | "completed" | "failed"
-  /** First metadata line — the status + elapsed string. */
-  statusLine: string
-  /** Additional metadata lines (model, thinking, agent, etc.). */
-  metaLines: string[]
-  /** Body lines — bullet messages or detail entries. */
-  bodyLines: string[]
-  /** Raw thinking level string if known ("off", "low", …, "xhigh"). */
-  thinking?: string
-}
-
-/**
- * Apply the Pi theme's thinking level color to a raw thinking string.
- * Falls back to dim when unknown or unavailable.
- */
-function colorizeThinking(thinking: string | undefined, theme: any): string {
-  if (!thinking) return theme.fg("dim", "unavailable")
-  const t = thinking.toLowerCase()
-  const colorMap: Record<string, string> = {
-    off: "thinkingOff",
-    low: "thinkingLow",
-    medium: "thinkingMedium",
-    high: "thinkingHigh",
-    xhigh: "thinkingXhigh",
-  }
-  const colorKey = colorMap[t]
-  if (colorKey) return theme.fg(colorKey, thinking)
-  return theme.fg("dim", thinking)
-}
-
-function statusTextColor(status: ZflowCardViewModel["status"], theme: any, text: string): string {
-  if (status === "completed") return theme.fg("success", text)
-  if (status === "failed") return theme.fg("error", text)
-  if (status === "queued") return theme.fg("warning", text)
-  return theme.fg("accent", text)
-}
-
-/**
- * Choose a Pi TUI background function for a card based on its status.
- * Returns a function that wraps text in the appropriate theme background color.
- */
-function cardBgFn(status: ZflowCardViewModel["status"], theme: any): (s: string) => string {
-  // Keep for row-fill compatibility in the grid renderers, but do not paint
-  // each card line. The earlier filled-background card style could bleed into
-  // surrounding transcript text when Pi clipped styled lines, producing the
-  // large rectangular artifacts shown in the TUI. pi-subagents avoids this by
-  // rendering compact foreground-only rows inside one outer result box.
-  void status
-  void theme
-  return (s) => s
-}
-
-function colorizeMetaLine(rawMeta: string, theme: any): string {
-  const thinkingIdx = rawMeta.lastIndexOf("thinking:")
-  if (thinkingIdx === -1) return theme.fg("dim", rawMeta)
-
-  const prefix = rawMeta.slice(0, thinkingIdx)
-  const label = "thinking:"
-  const rest = rawMeta.slice(thinkingIdx + label.length)
-  const leading = rest.match(/^\s*/)?.[0] ?? ""
-  const valueAndSuffix = rest.slice(leading.length)
-  const value = valueAndSuffix.split(/\s+/)[0] ?? valueAndSuffix
-  const suffix = valueAndSuffix.slice(value.length)
-
-  return `${theme.fg("dim", prefix)}${theme.fg("dim", label)}${theme.fg("dim", leading)}${colorizeThinking(value, theme)}${theme.fg("dim", suffix)}`
-}
-
-/**
- * Render a single zflow card as a filled-background panel with text wrapping.
- *
- * Uses Pi TUI theme background colors based on status. Each content line is
- * word-wrapped to fit the available width, and the card grows vertically to
- * accommodate wrapped content. No truncation — text that would overflow wraps
- * to one or more additional lines.
- */
-function buildCardLines(model: ZflowCardViewModel, theme: any, width: number): string[] {
-  const MAX_CARD_WIDTH = 90
-  const safeWidth = Math.max(8, Math.min(width, MAX_CARD_WIDTH))
-
-  function cardLineWrapped(text: string, indent: string, colorize: (s: string) => string): string[] {
-    const contentWidth = Math.max(1, safeWidth - visualWidth(indent))
-    const wrapped = wordWrap(text, contentWidth)
-    return wrapped.map((fragment) => {
-      const plainLine = indent + fragment
-      const clippedLine = visualTruncate(plainLine, safeWidth)
-      const styledLine = colorize(clippedLine)
-      // Do not pass padding through theme.fg()/theme.bg(); some theme
-      // functions trim or reset trailing whitespace, which collapses reviewer
-      // grid columns and lets text from one card run into the next. Pad after
-      // styling with ANSI-aware width accounting so every card line occupies
-      // exactly safeWidth cells before the inter-column gap is appended.
-      return ansiAwarePadEnd(visualTruncate(styledLine, safeWidth), safeWidth)
-    })
-  }
-
-  const lines: string[] = []
-
-  // Foreground-only compact card, inspired by pi-subagents' result rows. Avoid
-  // per-card backgrounds; the outer Pi tool/message renderer already provides
-  // the visual grouping.
-  for (const l of cardLineWrapped(model.title, "  ", (s) => statusTextColor(model.status, theme, s))) {
-    lines.push(l)
-  }
-
-  // Status + elapsed line — dimmed metadata
-  for (const l of cardLineWrapped(`⎿  ${model.statusLine}`, "  ", (s) => theme.fg("dim", s))) {
-    lines.push(l)
-  }
-
-  // Meta lines — dimmed, with thinking level highlighted
-  for (const meta of model.metaLines) {
-    for (const l of cardLineWrapped(meta, "     ", (s) => colorizeMetaLine(s, theme))) {
-      lines.push(l)
-    }
-  }
-
-  // Body lines — dimmed bullet items
-  for (const body of model.bodyLines) {
-    for (const l of cardLineWrapped(body, "     ", (s) => theme.fg("dim", s))) {
-      lines.push(l)
-    }
-  }
-
-  return lines
-}
-
-/**
- * View-model adapters for each card kind.
- */
-function toSubagentCardModel(subagent: WorkflowSubagentSnapshot): ZflowCardViewModel {
-  const elapsed = formatElapsed((subagent.finishedAt ?? Date.now()) - subagent.startedAt)
-  const model = subagent.model ?? "unavailable"
-  const thinking = subagent.thinking ?? "unavailable"
-  const status = mapSubagentStatus(subagent.status)
-  const bodyLines: string[] = [`last: ${subagent.lastCommand ?? "starting"}`]
-  if (subagent.logs && subagent.logs.length > 0) {
-    for (const log of subagent.logs.slice(-5)) {
-      bodyLines.push(`• ${log}`)
-    }
-  }
-  return {
-    id: subagent.id,
-    title: `${subagentStatusIcon(subagent.status)} ${subagent.title ?? "untitled group"}`,
-    status,
-    statusLine: `${subagent.status} · ${elapsed}`,
-    metaLines: [
-      subagent.id,
-      `${subagent.agent} · ${model} · ${thinking}`,
-    ],
-    bodyLines,
-    thinking: subagent.thinking,
-  }
-}
-
-function toPhaseCardModel(card: WorkflowPhaseCardSnapshot): ZflowCardViewModel {
-  const elapsed = formatElapsed((card.finishedAt ?? Date.now()) - card.startedAt)
-  return {
-    id: card.id,
-    title: `${subagentStatusIcon(card.status)} ${card.title}`,
-    status: card.status,
-    statusLine: `${card.status} · ${elapsed}`,
-    metaLines: [],
-    bodyLines: card.messages.slice(-4).map((m) => `• ${m}`),
-  }
-}
-
-function toReviewerCardModel(reviewer: WorkflowReviewerSnapshot): ZflowCardViewModel {
-  const modelWithThinking = reviewer.model?.match(/^(.*?)\s+·\s+thinking:\s*(\S+)\s*$/i)
-  const model = modelWithThinking?.[1]?.trim() || reviewer.model || "unavailable"
-  const thinking = reviewer.thinking ?? modelWithThinking?.[2] ?? "unavailable"
-  const status = reviewer.status
-  const icon = status === "completed" ? "✅" : status === "failed" ? "❌" : status === "queued" ? "⏳" : "▶️"
-  return {
-    id: reviewer.id,
-    title: `${icon} ${reviewer.reviewerName}`,
-    status,
-    statusLine: status,
-    metaLines: [
-      `${reviewer.agentName}`,
-      `model: ${model}`,
-      `thinking: ${thinking}`,
-    ],
-    bodyLines: [`last: ${reviewer.lastCommand ?? reviewer.currentTool ?? "starting"}`],
-    thinking: reviewer.thinking,
-  }
-}
-
-function mapSubagentStatus(status: string): "queued" | "running" | "completed" | "failed" {
-  const s = status.toLowerCase()
-  if (s === "completed") return "completed"
-  if (s === "failed") return "failed"
-  if (s === "queued") return "queued"
-  return "running"
-}
-
-/**
- * Component-style zflow card.
- *
- * Implements the Pi TUI Component interface (render + invalidate) so it can
- * be used directly in Pi's TUI framework. Internally caches rendered output
- * for the same width to avoid recomputation on every render cycle.
- */
-class ZflowCard {
-  private model: ZflowCardViewModel
-  private theme: any
-  private cachedWidth?: number
-  private cachedLines?: string[]
-
-  constructor(model: ZflowCardViewModel, theme: any) {
-    this.model = model
-    this.theme = theme
-  }
-
-  /** Update the card's content. Invalidates cache. */
-  setModel(model: ZflowCardViewModel): void {
-    this.model = model
-    this.invalidate()
-  }
-
-  invalidate(): void {
-    this.cachedWidth = undefined
-    this.cachedLines = undefined
-  }
-
-  render(width: number): string[] {
-    if (this.cachedLines && this.cachedWidth === width) {
-      return this.cachedLines
-    }
-    this.cachedWidth = width
-    this.cachedLines = buildCardLines(this.model, this.theme, width)
-    return this.cachedLines
-  }
-}
-
-/**
- * Render a grid of reviewer cards.
- */
-function renderReviewerCards(reviewers: WorkflowReviewerSnapshot[], width: number, theme: any): string[] {
-  const available = Math.max(32, width - 2)
-  const columns = available >= 120 ? 3 : available >= 76 ? 2 : 1
-  const gap = 4
-  const cardWidth = Math.min(
-    Math.max(32, Math.floor((available - (columns - 1) * gap) / columns)),
-    90,  // match buildCardLines cap
-  )
-  const ordered = [...reviewers].sort((a, b) => a.reviewerName.localeCompare(b.reviewerName))
-  const rendered: string[] = []
-
-  for (let index = 0; index < ordered.length; index += columns) {
-    const rowSlice = ordered.slice(index, index + columns)
-    const rowCardData = rowSlice.map((r) => {
-      const model = toReviewerCardModel(r)
-      return {
-        lines: new ZflowCard(model, theme).render(cardWidth),
-        bg: cardBgFn(model.status, theme),
-      }
-    })
-    const rowHeight = Math.max(...rowCardData.map((d) => d.lines.length))
-    for (let line = 0; line < rowHeight; line++) {
-      rendered.push(
-        rowCardData
-          .map((d) => d.lines[line] ?? d.bg(" ".repeat(cardWidth)))
-          .join(" ".repeat(gap)),
-      )
-    }
-  }
-
-  return rendered
-}
-
-/**
- * Render a vertical stack of phase workflow cards, with reviewer cards
- * inserted immediately after the Code Review phase card.
- */
-function renderWorkflowCards(
-  cards: WorkflowPhaseCardSnapshot[],
-  width: number,
-  theme: any,
-  reviewers: WorkflowReviewerSnapshot[] = [],
-): string[] {
-  const available = Math.max(32, width - 2)
-  const rendered: string[] = []
-  let reviewersRendered = false
-
-  for (const card of cards) {
-    if (rendered.length > 0) rendered.push("")
-    rendered.push(...new ZflowCard(toPhaseCardModel(card), theme).render(available))
-    if (card.id === "code-review" && reviewers.length > 0) {
-      rendered.push("")
-      rendered.push(...renderReviewerCards(reviewers, available, theme))
-      reviewersRendered = true
-    }
-  }
-
-  if (!reviewersRendered && reviewers.length > 0) {
-    if (rendered.length > 0) rendered.push("")
-    rendered.push(...renderReviewerCards(reviewers, available, theme))
-  }
-
-  return rendered
-}
-
-function buildWorkflowFinalNextStepsLine(
-  postResult: { status: string; phase: string; nextSteps: string[]; reviewFindingsPath?: string },
-  changeInput: string,
-): string {
-  if (postResult.status === "completed") return "No further steps — workflow is complete."
-
-  if (postResult.phase === "review-failed") {
-    const findings = postResult.reviewFindingsPath
-      ? ` Findings: ${postResult.reviewFindingsPath}.`
-      : ""
-    return `Next: /zflow-change-fix ${changeInput} to review findings, then /zflow-change-implement ${changeInput} --resume to re-verify.${findings}`
-  }
-
-  if (postResult.phase === "verification-failed") {
-    return `Next: fix verification failures, then run /zflow-change-implement ${changeInput} --resume.`
-  }
-
-  if (postResult.nextSteps.length > 0) {
-    return `Next steps: ${postResult.nextSteps.map((s) => s.replace(/^\d+\.\s*/, "")).join("; ")}`
-  }
-
-  return `Next: inspect the run, then run /zflow-change-implement ${changeInput} --resume when ready.`
-}
-
-/**
- * Render a grid of subagent cards.
- *
- * Features:
- * - Variable-width rows: if a row has fewer cards than the max column count,
- *   cards expand to fill the available width evenly.
- * - Vertical spacing: a blank line separates each row for readability.
- */
-function renderSubagentCards(subagents: WorkflowSubagentSnapshot[], width: number, theme: any): string[] {
-  const available = Math.max(32, width - 2)
-  const maxColumns = available >= 120 ? 3 : available >= 76 ? 2 : 1
-  const gap = 2
-  const ordered = [...subagents].sort((a, b) => subagentSortKey(a.id) - subagentSortKey(b.id) || a.id.localeCompare(b.id))
-  const rendered: string[] = []
-
-  for (let index = 0; index < ordered.length;) {
-    const remainingCards = ordered.length - index
-    const rowColumns = Math.min(maxColumns, remainingCards)
-    const cardWidth = Math.max(32, Math.floor((available - (rowColumns - 1) * gap) / rowColumns))
-    const rowSlice = ordered.slice(index, index + rowColumns)
-    const rowCardData = rowSlice.map((sa) => {
-      const model = toSubagentCardModel(sa)
-      return {
-        lines: new ZflowCard(model, theme).render(cardWidth),
-        bg: cardBgFn(model.status, theme),
-      }
-    })
-    const rowHeight = Math.max(...rowCardData.map((d) => d.lines.length))
-    for (let line = 0; line < rowHeight; line++) {
-      rendered.push(
-        rowCardData
-          .map((d) => d.lines[line] ?? d.bg(" ".repeat(cardWidth)))
-          .join(" ".repeat(gap)),
-      )
-    }
-    index += rowColumns
-    if (index < ordered.length) {
-      // Vertical spacer between rows
-      rendered.push("")
-    }
-  }
-
-  return rendered
-}
-
-function makeWorkflowProgressComponent(details: WorkflowProgressMessageDetails, theme: any): {
-  invalidate: () => void
-  render: (width: number) => string[]
-} {
-  return {
-    invalidate() {
-      // Render always reads from workflowProgressSnapshots dynamically;
-      // no local cache to invalidate. This stub ensures Pi's TUI framework
-      // recognises the component as properly implementing the lifecycle.
-    },
-    render(width: number): string[] {
-      const snapshot = workflowProgressSnapshots.get(details.id) ?? details.snapshot
-      const finishedAt = snapshot.finishedAt ?? Date.now()
-      const elapsed = formatElapsed(finishedAt - snapshot.startedAt)
-      const statusLabel = snapshot.status === "running"
-        ? theme.fg("accent", "running")
-        : snapshot.status === "completed"
-          ? theme.fg("success", "completed")
-          : theme.fg("error", "failed")
-      const icon = snapshot.status === "running" ? "🤖" : snapshot.status === "completed" ? "✅" : "⚠️"
-      const available = Math.max(24, width - 2)
-      const lines = [
-        truncateText(`${icon} ${theme.bold(snapshot.command)} ${statusLabel}`, available),
-        truncateText(`  ${theme.fg("dim", "change:")} ${snapshot.changePath}`, available),
-      ]
-      if (snapshot.model) {
-        lines.push(truncateText(`  ${theme.fg("dim", "model:")} ${snapshot.model}`, available))
-      }
-      if (snapshot.thinking) {
-        lines.push(truncateText(`  ${theme.fg("dim", "thinking:")} ${snapshot.thinking}`, available))
-      }
-      lines.push(
-        truncateText(`  ${theme.fg("dim", "elapsed:")} ${elapsed}`, available),
-        truncateText(`  ${theme.fg("dim", "updates:")} ${snapshot.updateCount}`, available),
-        truncateText(`  ${theme.fg("dim", "last:")} ${snapshot.lastMessage}`, available),
-      )
-      const phaseCards = snapshot.phaseCards ?? []
-      // Suppress top-level recent-message bullets when phase cards are present,
-      // because the cards provide the same information in a more readable layout.
-      if (phaseCards.length === 0) {
-        for (const message of snapshot.recentMessages.slice(-3)) {
-          lines.push(truncateText(`  ${theme.fg("dim", "•")} ${message}`, available))
-        }
-      }
-      if (snapshot.subagents.length > 0) {
-        const finished = snapshot.subagents.filter((subagent) => isFinishedSubagentStatus(subagent.status)).length
-        lines.push(truncateText(`  ${theme.fg("dim", "subagents:")} ${finished}/${snapshot.subagents.length} finished`, available))
-        lines.push(...renderSubagentCards(snapshot.subagents, available, theme))
-      }
-      const reviewers = snapshot.reviewers ?? []
-      if (phaseCards.length > 0) {
-        lines.push(truncateText(`  ${theme.fg("dim", "workflow cards:")}`, available))
-        lines.push(...renderWorkflowCards(phaseCards, available, theme, reviewers))
-      } else if (reviewers.length > 0) {
-        lines.push(`  ${theme.fg("dim", "reviewers:")}`)
-        lines.push(...renderReviewerCards(reviewers, available, theme))
-      }
-      // Safety: enforce terminal width on every line to prevent TUI crashes
-      return lines.map((line) => visualTruncate(line, width))
-    },
-  }
-}
-
-function registerWorkflowProgressRenderer(pi: ExtensionAPI): void {
-  if (typeof pi.registerMessageRenderer !== "function") return
-  pi.registerMessageRenderer<WorkflowProgressMessageDetails>(
-    WORKFLOW_PROGRESS_MESSAGE_TYPE,
-    (message, _options, theme) => {
-      const details = message.details as WorkflowProgressMessageDetails | undefined
-      if (!details?.id || !details.snapshot) return undefined
-      return makeWorkflowProgressComponent(details, theme)
-    },
-  )
-}
-
-function createWorkflowProgressIndicator(
-  pi: ExtensionAPI,
-  ctx: InterviewableContext,
-  changePath: string,
-  options?: { command?: string; model?: string; thinking?: string; initialMessage?: string; statusId?: string; widgetId?: string },
-): {
-  update: (message: string) => void
-  updatePhaseCard: (id: string, title: string, message: string, status?: "running" | "completed" | "failed") => void
-  updateSubagent: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id">>) => void
-  updateReviewer: (id: string, update: {
-    reviewerName: string
-    agentName: string
-    status: "queued" | "running" | "completed" | "failed"
-    model?: string
-    thinking?: string
-    currentTool?: string
-    lastCommand?: string
-  }) => void
-  stop: (message?: string, status?: "completed" | "failed") => void
-} {
-  const ui = ctx.ui
-  const id = `wf-${Date.now().toString(36)}-${++workflowProgressCounter}`
-  const command = options?.command ?? "zflow-workflow"
-  const statusId = options?.statusId ?? `zflow-${command.replace(/^zflow-/, "").replace(/-/g, "")}`
-  const widgetId = options?.widgetId ?? `${command}-progress`
-  const startedAt = Date.now()
-  let stopped = false
-  // Clear the older below-editor widget if it exists from a hot-reloaded session.
-  ui?.setWidget?.(widgetId, undefined)
-  const initialSnapshot: WorkflowProgressSnapshot = {
-    id,
-    command,
-    changePath,
-    model: options?.model,
-    thinking: options?.thinking,
-    status: "running",
-    startedAt,
-    lastMessage: options?.initialMessage ?? "Initializing workflow",
-    updateCount: 0,
-    recentMessages: [options?.initialMessage ?? "Initializing workflow"],
-    subagents: [],
-    phaseCards: [],
-    reviewers: [],
-  }
-  workflowProgressSnapshots.set(id, initialSnapshot)
-
-  if (typeof pi.sendMessage === "function") {
-    pi.sendMessage({
-      customType: WORKFLOW_PROGRESS_MESSAGE_TYPE,
-      content: `${command} ${changePath}`,
-      display: true,
-      details: { id, snapshot: initialSnapshot },
-    })
-  }
-
-  const refreshProgressMessage = (): void => {
-    // The custom message renderer reads the latest snapshot from
-    // workflowProgressSnapshots, so one persistent chat component is enough.
-    // Re-sending visible messages for every tick/update creates duplicated
-    // historical progress blocks in chat.
-    ui?.requestRender?.()
-  }
-
-  const render = (): void => {
-    if (stopped) return
-    const elapsed = formatElapsed(Date.now() - startedAt)
-    ui?.setStatus?.(statusId, `${command} ${elapsed}`)
-    ui?.requestRender?.()
-  }
-
-  render()
-  refreshProgressMessage()
-
-  const activeAttentionSignals = new Map<string, string>()
-  const seenIncomingAttentionKeys = new Set<string>()
-  let lastAttentionNotice = ""
-
-  const upsertAttentionCard = (message: string, status: "running" | "completed" | "failed" = "running"): void => {
-    const current = workflowProgressSnapshots.get(id)
-    const normalizedMessage = visualTruncate(message.replace(/\s+/g, " ").trim(), 200)
-    if (!current || !normalizedMessage) return
-
-    const currentPhaseCards = current.phaseCards ?? []
-    const existing = currentPhaseCards.find((card) => card.id === WORKFLOW_ATTENTION_PHASE_CARD_ID)
-    const nextCard: WorkflowPhaseCardSnapshot = {
-      id: WORKFLOW_ATTENTION_PHASE_CARD_ID,
-      title: "Coordination Attention",
-      status,
-      startedAt: existing?.startedAt ?? Date.now(),
-      finishedAt: status === "running" ? undefined : existing?.finishedAt ?? Date.now(),
-      messages: [...(existing?.messages ?? []), normalizedMessage].slice(-8),
-    }
-    const phaseCards = [...currentPhaseCards]
-    const existingIdx = phaseCards.findIndex((card) => card.id === WORKFLOW_ATTENTION_PHASE_CARD_ID)
-    if (existingIdx >= 0) phaseCards[existingIdx] = nextCard
-    else phaseCards.push(nextCard)
-    workflowProgressSnapshots.set(id, {
-      ...current,
-      lastMessage: normalizedMessage,
-      updateCount: current.updateCount + 1,
-      recentMessages: [...current.recentMessages, normalizedMessage].slice(-5),
-      phaseCards,
-    })
-    if (normalizedMessage !== lastAttentionNotice) {
-      lastAttentionNotice = normalizedMessage
-      ui?.notify?.(normalizedMessage, status === "failed" ? "error" : "warning")
-    }
-    refreshProgressMessage()
-  }
-
-  const reconcileAttentionCard = (): void => {
-    if (activeAttentionSignals.size > 0) {
-      const latest = [...activeAttentionSignals.values()][activeAttentionSignals.size - 1]
-      if (latest) upsertAttentionCard(latest, "running")
-      return
-    }
-
-    const current = workflowProgressSnapshots.get(id)
-    const existing = current?.phaseCards?.find((card) => card.id === WORKFLOW_ATTENTION_PHASE_CARD_ID)
-    if (existing && existing.status === "running") {
-      upsertAttentionCard("No active worker coordination signals.", "completed")
-    }
-  }
-
-  const scanSessionAttention = (): void => {
-    const entries = ctx.sessionManager?.getEntries?.() as SessionEntryLike[] | undefined
-    if (!entries || entries.length === 0) return
-    const recentEntries = entries.slice(-25)
-    for (let index = 0; index < recentEntries.length; index++) {
-      const entry = recentEntries[index]!
-      const attention = detectIncomingWorkflowAttention(entry)
-      if (!attention) continue
-      const timestamp = typeof entry.message?.timestamp === "number" ? entry.message.timestamp : 0
-      const key = `${entry.id ?? `recent-${index}`}:${timestamp}:${attention}`
-      if (seenIncomingAttentionKeys.has(key)) continue
-      seenIncomingAttentionKeys.add(key)
-      upsertAttentionCard(attention, "running")
-    }
-  }
-
-  const interval = setInterval(() => {
-    const current = workflowProgressSnapshots.get(id)
-    if (current) {
-      const now = Date.now()
-      let mutated = false
-      const updatedSubagents = [...current.subagents]
-      for (let i = 0; i < updatedSubagents.length; i++) {
-        const subagent = updatedSubagents[i]
-        if (subagent && subagent.status === "running" && subagent.lastActivityAt && now - subagent.lastActivityAt > 20_000) {
-          updatedSubagents[i] = { ...subagent, lastCommand: "thinking / waiting for model..." }
-          mutated = true
-        }
-      }
-      if (mutated) {
-        workflowProgressSnapshots.set(id, { ...current, subagents: updatedSubagents })
-      }
-    }
-    scanSessionAttention()
-    reconcileAttentionCard()
-    render()
-    refreshProgressMessage()
-  }, 1000)
-
-  return {
-    update(message: string) {
-      const current = workflowProgressSnapshots.get(id)
-      const normalizedMessage = visualTruncate(message.replace(/\s+/g, " ").trim(), 140)
-      if (current) {
-        workflowProgressSnapshots.set(id, {
-          ...current,
-          lastMessage: normalizedMessage,
-          updateCount: current.updateCount + 1,
-          recentMessages: [...current.recentMessages, normalizedMessage].slice(-5),
-        })
-      }
-      render()
-      refreshProgressMessage()
-    },
-    updatePhaseCard(cardId: string, title: string, message: string, status: "running" | "completed" | "failed" = "running") {
-      const current = workflowProgressSnapshots.get(id)
-      const normalizedMessage = visualTruncate(message.replace(/\s+/g, " ").trim(), 200)
-      if (current) {
-        const currentPhaseCards = current.phaseCards ?? []
-        const existing = currentPhaseCards.find((card) => card.id === cardId)
-        const nextCard: WorkflowPhaseCardSnapshot = {
-          id: cardId,
-          title,
-          status,
-          startedAt: existing?.startedAt ?? Date.now(),
-          finishedAt: status === "running" ? undefined : existing?.finishedAt ?? Date.now(),
-          messages: [...(existing?.messages ?? []), normalizedMessage].slice(-8),
-        }
-        const phaseCards = [...currentPhaseCards]
-        const existingIdx = phaseCards.findIndex((card) => card.id === cardId)
-        if (existingIdx >= 0) phaseCards[existingIdx] = nextCard
-        else phaseCards.push(nextCard)
-        workflowProgressSnapshots.set(id, {
-          ...current,
-          lastMessage: normalizedMessage,
-          updateCount: current.updateCount + 1,
-          recentMessages: [...current.recentMessages, normalizedMessage].slice(-5),
-          phaseCards,
-        })
-      }
-      render()
-      refreshProgressMessage()
-    },
-    updateSubagent(subagentId: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id">>) {
-      const current = workflowProgressSnapshots.get(id)
-      let shouldSendMessage = false
-      let nextSubagentSnapshot: WorkflowSubagentSnapshot | undefined
-      if (current) {
-        const existing = current.subagents.find((subagent) => subagent.id === subagentId)
-        const nextStatus = update.status ?? existing?.status ?? "running"
-        const statusChanged = update.status !== undefined && update.status !== existing?.status
-        const lastCommandChanged = update.lastCommand !== undefined && update.lastCommand !== existing?.lastCommand
-        const startedAtChanged = update.startedAt !== undefined && update.startedAt !== existing?.startedAt
-        // Logs: if caller provides logs, append them to existing logs, bounded at 6
-        const existingLogs = existing?.logs ?? []
-        const newLogs = update.logs
-        const mergedLogs = newLogs !== undefined
-          ? [...existingLogs, ...newLogs].slice(-6)
-          : existingLogs
-        const nextSubagent: WorkflowSubagentSnapshot = {
-          id: subagentId,
-          agent: update.agent ?? existing?.agent ?? subagentId,
-          title: update.title ?? existing?.title,
-          model: update.model ?? existing?.model,
-          thinking: update.thinking ?? existing?.thinking,
-          status: nextStatus,
-          startedAt: update.startedAt ?? existing?.startedAt ?? Date.now(),
-          finishedAt: update.finishedAt ?? existing?.finishedAt ?? (isFinishedSubagentStatus(nextStatus) ? Date.now() : undefined),
-          lastCommand: update.lastCommand ?? existing?.lastCommand,
-          logs: mergedLogs,
-          lastActivityAt: Date.now(),
-        }
-        nextSubagentSnapshot = nextSubagent
-        const existingIdx = current.subagents.findIndex((subagent) => subagent.id === subagentId)
-        const updatedSubagents = [...current.subagents]
-        if (existingIdx >= 0) {
-          updatedSubagents[existingIdx] = nextSubagent
-        } else {
-          updatedSubagents.push(nextSubagent)
-        }
-        workflowProgressSnapshots.set(id, {
-          ...current,
-          subagents: updatedSubagents,
-        })
-        shouldSendMessage = statusChanged || lastCommandChanged || startedAtChanged || (newLogs !== undefined && newLogs.length > 0)
-      }
-
-      if (nextSubagentSnapshot) {
-        const attentionSignal = detectWorkflowAttentionSignal(nextSubagentSnapshot)
-        const previousAttention = activeAttentionSignals.get(subagentId)
-        if (attentionSignal) {
-          activeAttentionSignals.set(subagentId, attentionSignal)
-          if (attentionSignal !== previousAttention) {
-            upsertAttentionCard(attentionSignal, "running")
-          }
-        } else if (previousAttention) {
-          activeAttentionSignals.delete(subagentId)
-          reconcileAttentionCard()
-        }
-      }
-
-      render()
-      if (shouldSendMessage) {
-        refreshProgressMessage()
-      }
-    },
-    updateReviewer(reviewerId: string, update: {
-      reviewerName: string
-      agentName: string
-      status: "queued" | "running" | "completed" | "failed"
-      model?: string
-      thinking?: string
-      currentTool?: string
-      lastCommand?: string
-    }) {
-      const current = workflowProgressSnapshots.get(id)
-      if (current) {
-        const currentReviewers = current.reviewers ?? []
-        const existing = currentReviewers.find((r) => r.id === reviewerId)
-        const statusChanged = update.status !== existing?.status
-        const activityChanged = update.lastCommand !== existing?.lastCommand || update.currentTool !== existing?.currentTool
-        const nextReviewer: WorkflowReviewerSnapshot = {
-          id: reviewerId,
-          reviewerName: update.reviewerName,
-          agentName: update.agentName,
-          model: update.model ?? existing?.model,
-          thinking: update.thinking ?? existing?.thinking,
-          status: update.status,
-          startedAt: existing?.startedAt ?? Date.now(),
-          finishedAt: update.status === "completed" || update.status === "failed" ? existing?.finishedAt ?? Date.now() : undefined,
-          currentTool: update.currentTool ?? existing?.currentTool,
-          lastCommand: update.lastCommand ?? existing?.lastCommand,
-        }
-        const updatedReviewers = [...currentReviewers]
-        const existingIdx = updatedReviewers.findIndex((r) => r.id === reviewerId)
-        if (existingIdx >= 0) updatedReviewers[existingIdx] = nextReviewer
-        else updatedReviewers.push(nextReviewer)
-        workflowProgressSnapshots.set(id, {
-          ...current,
-          reviewers: updatedReviewers,
-        })
-        if (statusChanged || activityChanged) refreshProgressMessage()
-      }
-      render()
-    },
-    stop(message?: string, status: "completed" | "failed" = "completed") {
-      if (stopped) return
-      stopped = true
-      clearInterval(interval)
-      ui?.setStatus?.(statusId, undefined)
-      ui?.setWidget?.(widgetId, undefined)
-      const current = workflowProgressSnapshots.get(id)
-      if (current) {
-        workflowProgressSnapshots.set(id, {
-          ...current,
-          status,
-          finishedAt: Date.now(),
-          lastMessage: message ?? current.lastMessage,
-        })
-      }
-      refreshProgressMessage()
-      ui?.requestRender?.()
-    },
-  }
-}
-
-/**
- * Parse a simplified questions payload to extract the first single-choice
- * question and its options for a fallback `ui.select` or `ui.confirm` call.
- */
-function extractFirstChoice(questionsJson: string): {
-  title: string
-  question: string
-  options: string[]
-} | null {
-  try {
-    const parsed = JSON.parse(questionsJson)
-    const title = parsed.title ?? "Decision Required"
-    const q = parsed.questions?.[0]
-    if (!q) return null
-    if (q.type === "single" && Array.isArray(q.options)) {
-      return {
-        title,
-        question: q.question,
-        options: q.options.map((o: { label: string }) => o.label),
-      }
-    }
-    return { title, question: q.question ?? "Proceed?", options: ["Yes", "No"] }
-  } catch {
-    return null
-  }
-}
-
-/** Map a fallback select choice to a decision string. */
-function selectToDecision(
-  selected: string | undefined,
-  questionsJson: string,
-): { decision: string; revisionNotes?: string } | null {
-  if (!selected) {
-    return { decision: "cancel" }
-  }
-  // Match the selected label against the options in the JSON payload
-  try {
-    const parsed = JSON.parse(questionsJson)
-    const q = parsed.questions?.[0]
-    if (q?.type === "single" && Array.isArray(q.options)) {
-      const matched = q.options.find(
-        (o: { label: string }) => o.label === selected,
-      )
-      if (matched?.label?.startsWith?.("Approve") || matched?.label === "Yes") {
-        return { decision: "approve" }
-      }
-      if (matched?.label?.startsWith?.("Request Revisions")) {
-        return { decision: "revise", revisionNotes: "Revision requested via gate" }
-      }
-      if (matched?.label?.startsWith?.("Cancel") || matched?.label === "No") {
-        return { decision: "cancel" }
-      }
-      if (matched?.label?.startsWith?.("Inspect Artifacts")) {
-        return { decision: "inspect" }
-      }
-      // Other labels map to a "continue" decision
-      return { decision: "continue" }
-    }
-  } catch {
-    // fall through
-  }
-  return { decision: "continue" }
-}
-
 function formatPlanInspectionPaths(input: {
   changeId: string
   planVersion: string
@@ -1675,207 +468,20 @@ function formatPlanInspectionPaths(input: {
   return sections.join("\n")
 }
 
-/**
- * Run a structured interview with the user, adapting to whatever UI
- * capabilities the context provides.
- *
- * Priority order:
- * 1. `ctx.interview(payload)` — future Pi native interview API
- * 2. `ctx.ui.interview(payload)` — future Pi UI interview API
- * 3. `ctx.ui.select()` / `ctx.ui.confirm()` — fallback for single-choice questions
- * 4. `ctx.ui.notify()` — last-resort notification
- *
- * @param ctx - The extension command context (or any InterviewableContext).
- * @param questionsJson - JSON string produced by buildPlanApprovalQuestions()
- *                        or buildImplementationGateQuestions().
- * @param fallbackMessage - Concise message to show when no interactive UI is
- *                          available.
- * @returns Parsed decision + optional revision notes, or null if the
- *          context had no usable UI at all.
- */
-async function runStructuredInterview(
-  ctx: InterviewableContext,
-  questionsJson: string,
-  fallbackMessage: string,
-): Promise<{ decision: string; revisionNotes?: string; selectedFindings?: string[] } | null> {
-  // 1. Try ctx.interview (native Pi interview API)
-  if (typeof ctx.interview === "function") {
-    const raw = await Promise.resolve(ctx.interview(questionsJson))
-    if (raw !== undefined) {
-      return parseInterviewResponse(raw)
-    }
-  }
-
-  // 2. Try ctx.ui.interview
-  if (typeof ctx.ui?.interview === "function") {
-    const raw = await Promise.resolve(ctx.ui.interview(questionsJson))
-    if (raw !== undefined) {
-      return parseInterviewResponse(raw)
-    }
-  }
-
-  // 3. Fall back to ctx.ui.select / ctx.ui.confirm
-  const choice = extractFirstChoice(questionsJson)
-  if (choice && typeof ctx.ui?.select === "function") {
-    const selected = await ctx.ui.select(
-      `${choice.title}: ${choice.question}`,
-      choice.options,
-    )
-    const result = selectToDecision(selected, questionsJson)
-    if (result) return result
-  }
-
-  // 4. Fall back to ctx.ui.confirm (binary yes/no)
-  if (typeof ctx.ui?.confirm === "function") {
-    const ok = await ctx.ui.confirm(
-      "Approve?",
-      fallbackMessage,
-    )
-    return { decision: ok ? "approve" : "cancel" }
-  }
-
-  // 5. No interactive UI — notify and return a safe default
-  if (typeof ctx.ui?.notify === "function") {
-    ctx.ui.notify(fallbackMessage, "info")
-  }
-  return { decision: "inspect" }
-}
-
-/**
- * Return whether ad-hoc `/zflow-plan` mode is currently active.
- *
- * Formal change preparation may approve a plan while plan mode is active, but
- * it must not immediately fork or hand off to implementation from that
- * read-only planning context.
- */
-export function isAdHocPlanModeActive(): boolean {
-  try {
-    const service = getZflowRegistry().optional<{
-      isPlanModeActive?: () => boolean
-    }>("plan-mode")
-    return service?.isPlanModeActive?.() === true
-  } catch {
-    return false
-  }
-}
-
-/**
- * Decide whether `/zflow-change-prepare` should create an implementation
- * handoff/session fork after plan approval.
- *
- * Always returns false — implementation is only started when the user
- * manually triggers `/zflow-change-implement`. The prepare workflow
- * creates and publishes plan artifacts, runs validation + review + approval,
- * but never launches implementation.
- */
-export function shouldForkImplementationSessionAfterPrepare(): boolean {
-  return false
-}
-
-/** Parsed arguments for `/zflow-change-prepare`. */
-export interface ParsedChangePrepareArgs {
-  changePath: string
-  forceAdHoc: boolean
-  notes: string
-}
-
-/**
- * Parse `/zflow-change-prepare` arguments.
- *
- * The command's first token is the change document/path. Remaining text is
- * advisory notes. `--no-runecontext` or a note like "not a RuneContext" forces
- * normal ad-hoc change-doc handling.
- */
-export function parseChangePrepareArgs(args: string): ParsedChangePrepareArgs {
-  const parts = args.trim().split(/\s+/).filter(Boolean)
-  const rawPath = parts[0] ?? ""
-  const rest = parts.slice(1)
-  const notes = rest.filter((part) => part !== "--no-runecontext").join(" ")
-  const forceAdHoc =
-    rest.includes("--no-runecontext") ||
-    /\bnot\s+(?:a\s+)?runecontext\b/i.test(notes) ||
-    /\bnormal\s+idea\s+file\b/i.test(notes)
-  const changePath = forceAdHoc && rawPath.startsWith("@")
-    ? rawPath.slice(1)
-    : rawPath
-
-  return { changePath, forceAdHoc, notes }
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// Workflow mode/reminder state management
-// ═══════════════════════════════════════════════════════════════════
-//
-// In-memory state for the current active workflow mode and active
-// runtime reminders. The before_agent_start hook reads this state to
-// inject prompt fragments and reminders into the system prompt.
-//
-// State is set by command handlers and cleared when the mode/state
-// ends. Exported for testability.
-
-let _activeWorkflowMode: ModeFragment | null = null
-let _activeReminders: Set<ReminderId> = new Set()
-
-/**
- * Set the current active workflow mode.
- * The before_agent_start hook will inject the corresponding mode fragment.
- */
-export function setActiveWorkflowMode(mode: ModeFragment | null): void {
-  _activeWorkflowMode = mode
-}
-
-/**
- * Get the current active workflow mode.
- */
-export function getActiveWorkflowMode(): ModeFragment | null {
-  return _activeWorkflowMode
-}
-
-/**
- * Activate a runtime reminder. Duplicates are ignored.
- */
-export function addReminder(reminder: ReminderId): void {
-  _activeReminders.add(reminder)
-}
-
-/**
- * Deactivate a runtime reminder.
- */
-export function removeReminder(reminder: ReminderId): void {
-  _activeReminders.delete(reminder)
-}
-
-/**
- * Get all currently active reminders.
- */
-export function getActiveReminders(): ReminderId[] {
-  return [..._activeReminders]
-}
-
-/**
- * Clear all active reminders.
- */
-export function clearReminders(): void {
-  _activeReminders.clear()
-}
-
-/**
- * Reset both mode and reminders (clean slate).
- */
-export function resetWorkflowState(): void {
-  _activeWorkflowMode = null
-  _activeReminders.clear()
-}
-
 // ═══════════════════════════════════════════════════════════════════
 // Dispatch service helpers
 // ═══════════════════════════════════════════════════════════════════
 
-import type { AgentDispatchProgress, DispatchService } from "pi-zflow-core/dispatch-service"
-import { DISPATCH_SERVICE_CAPABILITY } from "pi-zflow-core/dispatch-service"
-
 const IMPLEMENT_GROUP_MAX_RETRIES = 1
+const IMPLEMENT_RATE_LIMIT_MAX_RETRIES = 3
+const IMPLEMENT_RATE_LIMIT_DEFAULT_WAIT_MS = 60 * 1000
 const DEFAULT_IMPLEMENT_CONCURRENCY = 2
+
+// ── Fix loop bounds ──────────────────────────────────────────────
+/** Maximum fix attempts per group. */
+const MAX_FIX_ATTEMPTS_PER_GROUP = 2
+/** Maximum total time spent fixing a single group (15 minutes). */
+const MAX_TOTAL_FIX_TIME_MS = 15 * 60 * 1000
 
 function resolveImplementConcurrency(): number {
   const raw = process.env.ZFLOW_IMPLEMENT_CONCURRENCY
@@ -1894,9 +500,11 @@ type DispatchGroupResult = Awaited<ReturnType<DispatchService["runParallel"]>>["
  */
 export type GroupLedgerStatus =
   | "queued"
+  | "ready"
   | "running"
   | "succeeded"
   | "failed"
+  | "blocked"
   | "retrying"
   | "pending"
   | "applied"
@@ -1945,19 +553,56 @@ export interface GroupStatusEntry {
     status: "pass" | "fail" | "skipped" | "missing"
     command?: string
     output?: string
+    outputPath?: string
+    classification?: "environment" | "command-misconfigured" | "implementation"
+    attempts?: Array<{
+      cwd?: string
+      command: string
+      status: "pass" | "fail"
+      output?: string
+      classification?: "environment" | "command-misconfigured" | "implementation"
+    }>
   }
   /** Path to the patch artifact (if produced and captured). */
   patchPath?: string
+  /** Path to preserved worker evidence accepted in lieu of a patch. */
+  implementationEvidencePath?: string
+  /** How this group was accepted/completed. */
+  completionMode?: "patch" | "noop-evidence" | "worker-evidence"
   /** Absolute path to the worktree (if one was created). */
   worktreePath?: string
   /** Files changed by this group (if captured). */
   changedFiles?: string[]
   /** Number of retry attempts so far. */
   retryCount: number
+  /** Last dispatch command/tool observed for this group. */
+  lastCommand?: string
+  /** Current tool name, when known. */
+  currentTool?: string
+  /** Resolved model used for this group, when known. */
+  model?: string
+  /** Resolved thinking level used for this group, when known. */
+  thinking?: string
+  /** ISO timestamp when this group first entered running state. */
+  startedAt?: string
+  /** ISO timestamp when live progress was last observed. */
+  lastProgressAt?: string
+  /** Number of rate-limit retries consumed so far. */
+  rateLimitRetryCount?: number
   /** Error message if status is "failed". */
   error?: string
+  /** Group IDs that caused this group to be blocked (when status is "blocked"). */
+  blockedBy?: string[]
   /** Categorization of failure for retry policy. */
   failureKind?: "retryable" | "blocker"
+  /** Fix-loop state: number of fix attempts made so far. */
+  fixAttempts?: number
+  /** Fix-loop state: classification from the last fix attempt. */
+  fixClassification?: string
+  /** Fix-loop state: result of the last fix attempt ("succeeded" | "failed" | "needs-user-decision"). */
+  fixResult?: string
+  /** Fix-loop state: path to the fix patch (if separate from the original). */
+  fixPatchPath?: string
   /** Whether this group's patch has been applied back to the primary. */
   appliedToPrimary: boolean
   /** ISO timestamp of last state change. */
@@ -2052,6 +697,8 @@ function buildGroupLedger(
       semanticCoupling: inferSemanticCoupling(group.id, groups),
       scopedVerification: existing?.scopedVerification,
       patchPath: existing?.patchPath,
+      implementationEvidencePath: existing?.implementationEvidencePath,
+      completionMode: existing?.completionMode,
       worktreePath: existing?.worktreePath,
       changedFiles: existing?.changedFiles,
       retryCount: existing?.retryCount ?? 0,
@@ -2096,6 +743,257 @@ async function updateGroupLedger(
 }
 
 /**
+ * Attempt to fix a failed group by dispatching a targeted fix worker.
+ *
+ * The fix worker runs in a fresh isolated worktree rooted at the same base
+ * commit as the original group. When it succeeds, its patch becomes the
+ * canonical patch for downstream lineage/apply-back while the original failed
+ * patch remains available only for diagnostics.
+ *
+ * @param groupId - The failing group's ID.
+ * @param taskPrompt - The group's task description.
+ * @param files - Allowed file paths for this group.
+ * @param agent - The agent to use for the fix worker.
+ * @param failedResult - The failed dispatch result (contains error, verification output, patch path).
+ * @param dispatchService - The dispatch service.
+ * @param options - Context: runId, cwd, repoRoot, changeId, planVersion, worktreeResultsDir, onSubagentUpdate.
+ * @returns Object with fix outcome: whether fixed, canonical fix patch path, classification, error.
+ */
+async function attemptGroupFix(
+  groupId: string,
+  taskPrompt: string,
+  files: string[],
+  agent: string,
+  failedResult: DispatchGroupResult,
+  dispatchService: DispatchService,
+  options: {
+    runId: string
+    cwd?: string
+    repoRoot: string
+    changeId: string
+    planVersion: string
+    worktreeResultsDir: string
+    worktreeSetupHook?: DispatchWorktreeSetupHook
+    onSubagentUpdate?: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) => void
+    onWorkflowUpdate?: (message: string) => void
+    implementModel: { dispatchModel?: string }
+  },
+): Promise<{
+  fixed: boolean
+  fixPatchPath?: string
+  fixClassification: string
+  error?: string
+  verificationCommand?: string
+  verificationOutput?: string
+  verificationOutputPath?: string
+  dispatchResult?: DispatchGroupResult
+}> {
+  const { default: fs } = await import("node:fs/promises")
+  const { default: path } = await import("node:path")
+
+  const fixOutputPath = path.join(options.worktreeResultsDir, `${groupId}-fix-result.md`)
+  const fixVerificationPath = path.join(options.worktreeResultsDir, `${groupId}-fix-verification.txt`)
+
+  // Read the original patch content to include in the fix prompt
+  let originalPatchContent = ""
+  if (failedResult.patchPath) {
+    try {
+      originalPatchContent = await fs.readFile(failedResult.patchPath, "utf-8")
+    } catch {
+      // Patch may not exist if the group had no changes
+    }
+  }
+
+  const verificationCmd = extractFixVerificationCommand(failedResult)
+  const verificationOutput = failedResult.verification?.output ?? failedResult.error ?? "(not captured)"
+  const errorHint = failedResult.error ?? ""
+
+  // Build fix prompt
+  const fixPrompt = [
+    `# Fix: ${groupId} — ${taskPrompt}`,
+    "",
+    "## Original group failure",
+    verificationCmd
+      ? "The dispatch service reported that the worker did not pass scoped verification."
+      : "The dispatch service reported that the worker failed before a scoped verification command could be confirmed.",
+    "",
+    "## Context",
+    "",
+    `**Group:** ${groupId}`,
+    `**Agent:** ${agent}`,
+    `**Allowed files:** ${files.join(", ")}`,
+    "",
+    ...(verificationCmd ? [
+      "## Verification command that failed",
+      "```bash",
+      verificationCmd,
+      "```",
+      "",
+    ] : [
+      "## Verification command",
+      "No scoped verification command was captured for the original failure.",
+      "",
+    ]),
+    "## Failure output",
+    "```",
+    verificationOutput.slice(0, 10000),
+    "```",
+    "",
+    ...(errorHint ? [
+      "## Error hint",
+      errorHint,
+      "",
+    ] : []),
+    ...(originalPatchContent ? [
+      "## Original patch (the previous implementation attempt)",
+      "",
+      "The following patch was produced by the original implementation but did not complete successfully.",
+      "```diff",
+      originalPatchContent.slice(0, 15000),
+      "```",
+      "",
+    ] : []),
+    "## Your task",
+    "",
+    verificationCmd
+      ? "Fix the implementation so this group's changes pass the scoped verification command."
+      : "Fix the implementation failure within the allowed files. If you can infer the relevant scoped verification command from project context, run it yourself before finishing.",
+    "",
+    "## Rules",
+    "",
+    "1. Stay within the allowed files unless drift criteria require escalation.",
+    "2. If the original patch contains changes that are valid, reapply them in your implementation.",
+    "3. Focus on the concrete failure mode — patch syntax errors, missing config, incompatible CLI flags, invalid file formats, etc.",
+    ...(verificationCmd ? [
+      "4. After making your changes, run the verification command yourself:",
+      "   ```bash",
+      verificationCmd,
+      "   ```",
+      "5. If verification passes, you're done. Report what you fixed.",
+      "6. If verification still fails, fix the remaining issues and retry verification.",
+      "7. If you cannot fix within the allowed files, report why and suggest scope expansion.",
+    ] : [
+      "4. Run the most relevant scoped verification you can determine from the group's context before finishing.",
+      "5. If you cannot determine a reliable verification command, state that clearly in the summary.",
+      "6. If you cannot fix within the allowed files, report why and suggest scope expansion.",
+    ]),
+    "",
+    "## Report format",
+    "",
+    "End your response with a summary:",
+    "- **Changes made**: (list of files changed and what was fixed)",
+    "- **Verification result**: passed / failed / not-confirmed",
+    "- **Classification**: fixable-within-group / requires-prerequisite-change / needs-user-decision",
+    "",
+  ].join("\n")
+
+  options?.onSubagentUpdate?.(groupId, {
+    agent,
+    title: `fix: ${groupId}`,
+    status: "fixing",
+    lastCommand: "dispatching fix worker...",
+  })
+
+  try {
+    const { detectWorktreeSetupCommand } = await import("./orchestration.js")
+    const fixWorktreeSetupCommand = await detectWorktreeSetupCommand(options.repoRoot)
+    const fixResult = await dispatchService.runParallel({
+      tasks: [{
+        agent,
+        groupId,
+        task: fixPrompt,
+        model: options.implementModel.dispatchModel,
+        output: fixOutputPath,
+        outputMode: "file-only" as const,
+        claimedFiles: files,
+        worktreeStrategy: buildFixWorkerWorktreeStrategy(failedResult),
+        scopedVerification: verificationCmd,
+        worktreeSetupCommand: fixWorktreeSetupCommand,
+        onUpdate: (progress) => {
+          const recentOutput = Array.isArray(progress.recentOutput) ? progress.recentOutput : []
+          options?.onSubagentUpdate?.(groupId, {
+            agent,
+            title: `fix: ${groupId}`,
+            status: "fixing",
+            lastCommand: progress.currentTool
+              ? `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}`
+              : recentOutput[recentOutput.length - 1] ?? "fixing...",
+          })
+        },
+      }],
+      cwd: options.cwd,
+      concurrency: 1,
+      worktree: true,
+      worktreeSetupHook: options.worktreeSetupHook,
+      maxOutput: { lines: 5000, bytes: 500_000 },
+    })
+
+    const fixTaskResult = fixResult.results[0]
+    if (!fixTaskResult) {
+      return { fixed: false, fixClassification: "fix-worker-error", error: "Fix worker produced no result" }
+    }
+
+    let verificationOutputPath: string | undefined
+    if (fixTaskResult.verification?.output) {
+      verificationOutputPath = fixVerificationPath
+      await fs.writeFile(fixVerificationPath, fixTaskResult.verification.output, "utf-8").catch(() => {})
+    }
+
+    const fixPassed = fixTaskResult.ok && fixTaskResult.verification?.status !== "fail" && fixTaskResult.verification?.status !== "failed"
+    const fixVerificationStatus = fixTaskResult.verification?.status
+
+    if (fixPassed) {
+      options?.onSubagentUpdate?.(groupId, {
+        agent,
+        title: `fix: ${groupId}`,
+        status: "completed",
+        lastCommand: "fix succeeded",
+      })
+      return {
+        fixed: true,
+        fixPatchPath: fixTaskResult.patchPath,
+        fixClassification: "fixable-within-group",
+        verificationCommand: verificationCmd,
+        verificationOutput: fixTaskResult.verification?.output,
+        verificationOutputPath,
+        dispatchResult: fixTaskResult,
+      }
+    }
+
+    const fixError = fixTaskResult.error
+      ? `Fix worker error: ${fixTaskResult.error}`
+      : fixVerificationStatus === "fail" || fixVerificationStatus === "failed"
+        ? `Fix verification failed: ${verificationCmd ?? "(not captured)"}`
+        : "Fix worker failed without error"
+
+    const workerOutput = fixTaskResult.rawOutput ?? ""
+    let classification = "fixable-within-group"
+    const lower = workerOutput.toLowerCase()
+    if (lower.includes("needs-user-decision") || lower.includes("needs_user_decision") || lower.includes("requires user")) {
+      classification = "needs-user-decision"
+    } else if (lower.includes("requires-prerequisite-change") || lower.includes("requires prerequisite") || lower.includes("scope expansion")) {
+      classification = "requires-prerequisite-change"
+    }
+
+    return {
+      fixed: false,
+      fixClassification: classification,
+      error: fixError,
+      verificationCommand: verificationCmd,
+      verificationOutput: fixTaskResult.verification?.output,
+      verificationOutputPath,
+      dispatchResult: fixTaskResult,
+    }
+  } catch (err) {
+    return {
+      fixed: false,
+      fixClassification: "fix-worker-error",
+      error: `Fix worker crashed: ${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
+}
+
+/**
  * Write a human-readable group status summary artifact.
  *
  * Path: `<run-dir>/group-status-summary.md`
@@ -2112,11 +1010,13 @@ async function writeGroupStatusSummary(
 
   const run = await readRun(runId, cwd)
   const ledger = (run.metadata?.[GROUP_LEDGER_META_KEY] ?? {}) as Record<string, GroupStatusEntry>
+  const dispatchProgress = (run.metadata?.dispatchProgress ?? {}) as Record<string, unknown>
   const entries = Object.values(ledger)
 
   const lines: string[] = []
   const succeeded = entries.filter((e) => e.status === "succeeded" || e.status === "applied")
   const failed = entries.filter((e) => e.status === "failed")
+  const blocked = entries.filter((e) => e.status === "blocked")
   const running_ = entries.filter((e) => e.status === "running" || e.status === "retrying")
   const pending_ = entries.filter((e) => e.status === "queued" || e.status === "pending")
 
@@ -2129,8 +1029,22 @@ async function writeGroupStatusSummary(
   lines.push(`- Total groups: ${entries.length}`)
   lines.push(`- Succeeded: ${succeeded.length}`)
   lines.push(`- Failed: ${failed.length}`)
+  lines.push(`- Blocked: ${blocked.length}`)
   lines.push(`- In progress: ${running_.length}`)
-  lines.push(`- Pending: ${pending_.length}\n`)
+  lines.push(`- Pending: ${pending_.length}`)
+  if (dispatchProgress["activeWave"] !== undefined) {
+    lines.push(`- Active wave: ${String(dispatchProgress["activeWave"])}`)
+  }
+  if (dispatchProgress["heartbeatCount"] !== undefined) {
+    lines.push(`- Heartbeats: ${String(dispatchProgress["heartbeatCount"])}`)
+  }
+  if (typeof dispatchProgress["elapsedSeconds"] === "number") {
+    lines.push(`- Elapsed seconds: ${dispatchProgress["elapsedSeconds"]}`)
+  }
+  if (typeof dispatchProgress["lastWorkflowUpdate"] === "string" && dispatchProgress["lastWorkflowUpdate"].trim().length > 0) {
+    lines.push(`- Last workflow update: ${dispatchProgress["lastWorkflowUpdate"]}`)
+  }
+  lines.push("")
 
   if (succeeded.length > 0) {
     lines.push(`## Succeeded Groups`)
@@ -2138,6 +1052,18 @@ async function writeGroupStatusSummary(
       lines.push(`- **${g.groupId}** — ${g.agent}`)
       lines.push(`  - Files: ${g.files.join(", ")}`)
       lines.push(`  - Patch: ${g.patchPath ?? "(no patch)"}`)
+      if (g.completionMode) {
+        lines.push(`  - Completion mode: ${g.completionMode}`)
+      }
+      if (g.implementationEvidencePath) {
+        lines.push(`  - Evidence: ${g.implementationEvidencePath}`)
+      }
+      if (g.lastCommand) {
+        lines.push(`  - Last command: ${g.lastCommand}`)
+      }
+      if (g.rateLimitRetryCount) {
+        lines.push(`  - Rate-limit retries: ${g.rateLimitRetryCount}`)
+      }
       if (g.semanticCoupling.notes.length > 0) {
         for (const note of g.semanticCoupling.notes) {
           lines.push(`  - Note: ${note}`)
@@ -2154,6 +1080,37 @@ async function writeGroupStatusSummary(
       lines.push(`  - Error: ${g.error ?? "(unknown)"}`)
       lines.push(`  - Failure kind: ${g.failureKind ?? "unknown"}`)
       lines.push(`  - Retry count: ${g.retryCount}`)
+      // Show verification output snippet when available
+      const scopedVer = g.scopedVerification as { output?: string; command?: string; outputPath?: string } | undefined
+      if (scopedVer?.command) {
+        lines.push(`  - Verification command: \`${scopedVer.command}\``)
+      }
+      if ((scopedVer as { classification?: string } | undefined)?.classification) {
+        lines.push(`  - Verification classification: ${(scopedVer as { classification?: string }).classification}`)
+      }
+      if (scopedVer?.output) {
+        // Trim to last 5 lines or first 500 chars, whichever is smaller
+        const tail = scopedVer.output.split("\n").slice(-5).join("\n")
+        const snippet = tail.length > 500 ? tail.slice(0, 500) + "..." : tail
+        if (snippet.trim()) {
+          lines.push(`  - Verification output:`)
+          lines.push("```")
+          lines.push(snippet)
+          lines.push("```")
+        }
+      }
+      if (scopedVer?.outputPath) {
+        lines.push(`  - Verification output file: ${scopedVer.outputPath}`)
+      }
+      if (g.lastCommand) {
+        lines.push(`  - Last command: ${g.lastCommand}`)
+      }
+      if (g.lastProgressAt) {
+        lines.push(`  - Last progress at: ${g.lastProgressAt}`)
+      }
+      if (g.rateLimitRetryCount) {
+        lines.push(`  - Rate-limit retries: ${g.rateLimitRetryCount}`)
+      }
       if (g.semanticCoupling.notes.length > 0) {
         for (const note of g.semanticCoupling.notes) {
           lines.push(`  - Note: ${note}`)
@@ -2163,11 +1120,39 @@ async function writeGroupStatusSummary(
     lines.push("")
   }
 
+  if (blocked.length > 0) {
+    lines.push(`## Blocked Groups`)
+    for (const g of blocked) {
+      lines.push(`- **${g.groupId}** — ${g.agent}`)
+      lines.push(`  - Blocked by: ${g.blockedBy?.join(", ") ?? "(unknown)"}`)
+      lines.push(`  - Status: ${g.status}`)
+      if (g.semanticCoupling.notes.length > 0) {
+        for (const note of g.semanticCoupling.notes) {
+          lines.push(`  - Note: ${note}`)
+        }
+      }
+    }
+    lines.push("")
+  }
+
+  if (running_.length > 0) {
+    lines.push(`## Running Groups`)
+    for (const g of running_) {
+      lines.push(`- **${g.groupId}** — ${g.agent}`)
+      lines.push(`  - Status: ${g.status}`)
+      if (g.lastCommand) lines.push(`  - Last command: ${g.lastCommand}`)
+      if (g.lastProgressAt) lines.push(`  - Last progress at: ${g.lastProgressAt}`)
+      if (g.rateLimitRetryCount) lines.push(`  - Rate-limit retries: ${g.rateLimitRetryCount}`)
+    }
+    lines.push("")
+  }
+
   if (pending_.length > 0) {
     lines.push(`## Pending Groups`)
     for (const g of pending_) {
       lines.push(`- **${g.groupId}** — ${g.agent}`)
       lines.push(`  - Status: ${g.status}`)
+      if (g.lastCommand) lines.push(`  - Last command: ${g.lastCommand}`)
     }
     lines.push("")
   }
@@ -2430,7 +1415,12 @@ async function resumeWorktreeDispatch(
     cwd?: string
     force?: boolean
     orchestratorTarget?: string
+    targetGroupIds?: string[]
+    onWorkflowUpdate?: (message: string) => void
     onSubagentUpdate?: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) => void
+    onRateLimitNotice?: (message: string) => void
+    sleep?: (ms: number) => Promise<void>
+    progressPersistIntervalMs?: number
   },
 ): Promise<void> {
   const { default: fs } = await import("node:fs/promises")
@@ -2441,6 +1431,13 @@ async function resumeWorktreeDispatch(
     finalizeWorktreeImplementationRun,
   } = await import("./orchestration.js")
   const { captureGroupResult } = await import("./group-result.js")
+  const {
+    dispatchParallelWithRateLimitRetries,
+    isRateLimitDispatchError,
+  } = await import("./orchestration/implementation/rate-limit.js")
+  const {
+    persistImplementationDispatchSnapshot,
+  } = await import("./orchestration/implementation/live-progress.js")
   const { readRun, updateRun } = await import("pi-zflow-artifacts")
 
   const cwd = options?.cwd ?? process.cwd()
@@ -2449,6 +1446,19 @@ async function resumeWorktreeDispatch(
   const execFileAsync = promisify(execFile)
   const { stdout: repoRootRaw } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd })
   const repoRoot = repoRootRaw.trim()
+  const { resolveDispatchWorktreeSetup } = await import("./worktree-setup.js")
+  const worktreeSetupResolution = await resolveDispatchWorktreeSetup(repoRoot)
+  if (!worktreeSetupResolution.ok) {
+    throw new Error(worktreeSetupResolution.message ?? "worktree setup requirements were not satisfied")
+  }
+  if (worktreeSetupResolution.hook && dispatchService.capabilities?.worktreeSetupHooks === false) {
+    throw new Error(
+      "Dispatch backend does not support repo-configured worktree setup hooks. " +
+      `Active backend: ${dispatchService.name}. ` +
+      "Remove/disable worktreeSetupHook for repos covered by built-in auto setup, " +
+      "or install a dispatch backend that advertises worktreeSetupHooks=true.",
+    )
+  }
 
   // Read existing execution groups from plan artifact
   const executionGroupsArtifactPath = resolvePlanArtifactPath(changeId, planVersion, "execution-groups", cwd)
@@ -2464,8 +1474,11 @@ async function resumeWorktreeDispatch(
   const run = await readRun(runId, cwd)
   const existingLedger = (run.metadata?.[GROUP_LEDGER_META_KEY] ?? {}) as Record<string, GroupStatusEntry>
 
-  // Filter groups to only those needing resume
-  const resumableGroupIds = new Set(getResumableGroupIds(existingLedger))
+  // Filter groups to only those explicitly targeted for rerun, falling back
+  // to the ledger-derived resumable set when no target override is supplied.
+  const resumableGroupIds = new Set(options?.targetGroupIds?.length
+    ? options.targetGroupIds
+    : getResumableGroupIds(existingLedger))
   if (resumableGroupIds.size === 0) {
     throw new Error("No groups found to resume. All groups are already succeeded/applied/skipped.")
   }
@@ -2500,34 +1513,182 @@ async function resumeWorktreeDispatch(
     },
   )
 
+  // Mark the resumed run active again before dispatching any workers.
+  try {
+    const { updateStateIndexEntry, getChangeLifecycle, upsertChangeLifecycle } = await import("pi-zflow-artifacts/state-index")
+    await updateRun(runId, {
+      phase: "executing",
+      metadata: {
+        ...(run.metadata ?? {}),
+        resumedAt: new Date().toISOString(),
+      },
+    } as any, cwd)
+    await updateStateIndexEntry(runId, { status: "executing" }, cwd)
+    const lifecycle = await getChangeLifecycle(changeId, cwd)
+    if (lifecycle) {
+      await upsertChangeLifecycle({
+        ...lifecycle,
+        lastPhase: "executing",
+      }, cwd)
+    }
+  } catch {
+    // Best-effort; resume can proceed even if lifecycle metadata could not be refreshed.
+  }
+
   // ── Reuse the existing worktree-results dir ────────────────────
   const { resolveRunDir } = await import("pi-zflow-artifacts/artifact-paths")
   const runDir = resolveRunDir(runId, cwd)
   const worktreeResultsDir = path.join(runDir, "worktree-results")
   await fs.mkdir(worktreeResultsDir, { recursive: true })
 
+  const readExistingWorkerEvidence = async (groupId: string): Promise<{ path?: string; content?: string }> => {
+    const candidates = [
+      path.join(worktreeResultsDir, `${groupId}-resume-result.md`),
+      path.join(worktreeResultsDir, `${groupId}-result.md`),
+    ]
+    for (const candidate of candidates) {
+      try {
+        const content = await fs.readFile(candidate, "utf-8")
+        if (content.trim()) return { path: candidate, content }
+      } catch {
+        // Ignore missing historical worker outputs.
+      }
+    }
+    return {}
+  }
+
   const implementModel = await resolveWorkflowModel("zflow.implement-routine")
-  const tasks = runPlan.tasks.map((t) => ({
-    agent: t.agent,
-    task: t.task,
-    model: implementModel.dispatchModel,
-    output: path.join(worktreeResultsDir, `${t.groupId}-resume-result.md`),
-    outputMode: "file-only" as const,
-    onUpdate: (progress: AgentDispatchProgress) => {
-      const recentTools = Array.isArray(progress.recentTools) ? progress.recentTools : []
-      const recentTool = recentTools[recentTools.length - 1]
-      const recentOutput = Array.isArray(progress.recentOutput) ? progress.recentOutput : []
-      options?.onSubagentUpdate?.(t.groupId, {
-        agent: t.agent,
-        title: undefined,
-        status: progress.status ?? "running",
-        lastCommand: progress.currentTool
+  const sleep = options?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  const progressPersistIntervalMs = Math.max(1000, options?.progressPersistIntervalMs ?? 5000)
+  const dispatchStartedAt = new Date().toISOString()
+  const pendingGroupProgress = new Map<string, Record<string, unknown>>()
+  let pendingDispatchProgress: Record<string, unknown> = {
+    dispatchStartedAt,
+    totalGroups: runPlan.tasks.length,
+    completedGroups: 0,
+    status: "running",
+  }
+  let liveProgressDirty = false
+  let lastLiveProgressFlushAt = 0
+  let liveProgressFlushPromise: Promise<void> = Promise.resolve()
+
+  const markGroupProgress = (groupId: string, partial: Record<string, unknown>): void => {
+    pendingGroupProgress.set(groupId, {
+      ...(pendingGroupProgress.get(groupId) ?? {}),
+      ...partial,
+    })
+    liveProgressDirty = true
+  }
+
+  const markDispatchProgress = (partial: Record<string, unknown>): void => {
+    pendingDispatchProgress = {
+      ...pendingDispatchProgress,
+      ...partial,
+    }
+    liveProgressDirty = true
+  }
+
+  const flushLiveProgress = async (force = false): Promise<void> => {
+    if (!liveProgressDirty) return liveProgressFlushPromise
+    const now = Date.now()
+    if (!force && now - lastLiveProgressFlushAt < progressPersistIntervalMs) {
+      return liveProgressFlushPromise
+    }
+    lastLiveProgressFlushAt = now
+
+    const groupUpdates = Object.fromEntries(pendingGroupProgress.entries())
+    pendingGroupProgress.clear()
+    const dispatchProgress = { ...pendingDispatchProgress }
+    liveProgressDirty = false
+
+    liveProgressFlushPromise = liveProgressFlushPromise
+      .then(() => persistImplementationDispatchSnapshot(runId, {
+        groupUpdates,
+        dispatchProgress,
+      }, cwd))
+      .catch(() => {})
+
+    return liveProgressFlushPromise
+  }
+
+  const emitWorkflowUpdate = (message: string, partial: Record<string, unknown> = {}): void => {
+    options?.onWorkflowUpdate?.(message)
+    markDispatchProgress({
+      lastWorkflowUpdate: message,
+      ...partial,
+    })
+    void flushLiveProgress()
+  }
+
+  const { detectWorktreeSetupCommand } = await import("./orchestration.js")
+  const tasks = await Promise.all(runPlan.tasks.map(async (t, taskIndex) => {
+    const taskRepoRoot = inferTaskRepoRoot(repoRoot, { claimedFiles: t.claimedFiles })
+    const worktreeSetupCommand = await detectWorktreeSetupCommand(taskRepoRoot)
+    const planGroup = runPlan.groups[taskIndex] as unknown as {
+      id: string
+      files: string[]
+      dependencies: string[]
+      parallelizable: boolean
+    }
+    const lineage = t.worktreeStrategy?.baseStrategy === "dependency-lineage"
+      ? await materializeDependencyLineageRef(
+          runId,
+          repoRoot,
+          planGroup,
+          runPlan.groups as Array<{ id: string; files: string[]; dependencies: string[]; parallelizable: boolean }>,
+          cwd,
+        )
+      : null
+
+    return {
+      agent: t.agent,
+      groupId: t.groupId,
+      task: t.task,
+      cwd: taskRepoRoot,
+      model: implementModel.dispatchModel,
+      output: path.join(worktreeResultsDir, `${t.groupId}-resume-result.md`),
+      outputMode: "file-only" as const,
+      scopedVerification: t.scopedVerification,
+      worktreeSetupCommand,
+      claimedFiles: t.claimedFiles,
+      dependencies: t.dependencies,
+      worktreeStrategy: lineage
+        ? {
+            ...t.worktreeStrategy,
+            baseStrategy: "dependency-lineage" as const,
+            baseRef: lineage.ref,
+          }
+        : t.worktreeStrategy,
+      onUpdate: (progress: AgentDispatchProgress) => {
+        const recentTools = Array.isArray(progress.recentTools) ? progress.recentTools : []
+        const recentTool = recentTools[recentTools.length - 1]
+        const recentOutput = Array.isArray(progress.recentOutput) ? progress.recentOutput : []
+        const lastCommand = progress.currentTool
           ? `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}`
           : recentTool?.tool
             ? `${recentTool.tool}${recentTool.args ? ` ${recentTool.args}` : ""}`
-            : recentOutput[recentOutput.length - 1] ?? "resume dispatching...",
-      })
-    },
+            : recentOutput[recentOutput.length - 1] ?? "resume dispatching..."
+        options?.onSubagentUpdate?.(t.groupId, {
+          agent: t.agent,
+          title: runPlan.groups[taskIndex]?.taskPrompt ?? undefined,
+          model: implementModel.model ?? "unavailable",
+          thinking: implementModel.thinking ?? "unavailable",
+          status: progress.status ?? "running",
+          lastCommand,
+        })
+        markGroupProgress(t.groupId, {
+          status: progress.status ?? "running",
+          agent: t.agent,
+          taskPrompt: runPlan.groups[taskIndex]?.taskPrompt ?? "",
+          model: implementModel.model ?? "unavailable",
+          thinking: implementModel.thinking ?? "unavailable",
+          currentTool: progress.currentTool,
+          lastCommand,
+          lastProgressAt: new Date().toISOString(),
+        })
+        void flushLiveProgress()
+      },
+    }
   }))
 
   const WORKTREE_DISPATCH_CONCURRENCY = resolveImplementConcurrency()
@@ -2538,14 +1699,35 @@ async function resumeWorktreeDispatch(
     const task = runPlan.tasks[taskIdx]!
     options?.onSubagentUpdate?.(task.groupId, {
       agent: task.agent,
+      title: runPlan.groups[taskIdx]?.taskPrompt ?? undefined,
+      model: implementModel.model ?? "unavailable",
+      thinking: implementModel.thinking ?? "unavailable",
       status: "running",
       lastCommand: "resume dispatching...",
     })
     await updateGroupLedger(runId, task.groupId, {
       status: "running",
       agent: task.agent,
+      model: implementModel.model ?? "unavailable",
+      thinking: implementModel.thinking ?? "unavailable",
+      startedAt: new Date().toISOString(),
+      lastCommand: "resume dispatching...",
+      error: undefined,
+      failureKind: undefined,
     }, cwd).catch(() => {})
+    markGroupProgress(task.groupId, {
+      status: "running",
+      agent: task.agent,
+      taskPrompt: runPlan.groups[taskIdx]?.taskPrompt ?? "",
+      model: implementModel.model ?? "unavailable",
+      thinking: implementModel.thinking ?? "unavailable",
+      startedAt: new Date().toISOString(),
+      lastCommand: "resume dispatching...",
+      lastProgressAt: new Date().toISOString(),
+    })
   }
+
+  await flushLiveProgress(true)
 
   // ── Dispatch ──────────────────────────────────────────────────
 
@@ -2558,24 +1740,74 @@ async function resumeWorktreeDispatch(
     heartbeatCount++
     const elapsed = Math.round((Date.now() - dispatchStartTime) / 1000)
     const runningCount = runPlan.tasks.length
-    options?.onWorkflowUpdate?.(
+    emitWorkflowUpdate(
       `⏳ Workers running: ${runningCount} group(s) dispatched, ` +
       `${heartbeatCount} heartbeat(s), ${elapsed}s elapsed`,
+      {
+        activeWave: 1,
+        heartbeatCount,
+        totalGroups: runPlan.tasks.length,
+        dispatchedGroups: runPlan.tasks.map((task) => task.groupId),
+        completedGroups: 0,
+        elapsedSeconds: elapsed,
+        status: "running",
+      },
     )
   }, 10000)
   heartbeat.unref?.()
 
   let dispatchResult
   try {
-    dispatchResult = await dispatchService.runParallel({
-      tasks,
-      cwd,
-      concurrency: WORKTREE_DISPATCH_CONCURRENCY,
-      worktree: true,
-      maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
+    dispatchResult = await dispatchParallelWithRateLimitRetries({
+      dispatchService,
+      maxRetries: IMPLEMENT_RATE_LIMIT_MAX_RETRIES,
+      defaultWaitMs: IMPLEMENT_RATE_LIMIT_DEFAULT_WAIT_MS,
+      sleep,
+      onRateLimitNotice: async (notice) => {
+        const retryMessage = `${notice.message} ${notice.error ?? ""}`.trim()
+        emitWorkflowUpdate(retryMessage, {
+          activeWave: 1,
+          heartbeatCount,
+          totalGroups: runPlan.tasks.length,
+          dispatchedGroups: runPlan.tasks.map((task) => task.groupId),
+          completedGroups: 0,
+          elapsedSeconds: Math.round((Date.now() - dispatchStartTime) / 1000),
+          status: "retrying",
+        })
+        options?.onRateLimitNotice?.(retryMessage)
+        options?.onSubagentUpdate?.(notice.groupId, {
+          agent: notice.task.agent,
+          title: runPlan.groups.find((group) => group.id === notice.groupId)?.taskPrompt ?? undefined,
+          model: implementModel.model ?? "unavailable",
+          thinking: implementModel.thinking ?? "unavailable",
+          status: "running",
+          lastCommand: retryMessage,
+        })
+        markGroupProgress(notice.groupId, {
+          status: "retrying",
+          agent: notice.task.agent,
+          model: implementModel.model ?? "unavailable",
+          thinking: implementModel.thinking ?? "unavailable",
+          lastCommand: retryMessage,
+          lastProgressAt: new Date().toISOString(),
+          retryCount: notice.attempt,
+          rateLimitRetryCount: notice.attempt,
+          failureKind: "retryable",
+        })
+        await flushLiveProgress(true)
+      },
+      input: {
+        tasks,
+        cwd,
+        concurrency: WORKTREE_DISPATCH_CONCURRENCY,
+        worktree: true,
+        worktreeSetupHook: worktreeSetupResolution.hook,
+        maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
+      },
     })
   } finally {
     clearInterval(heartbeat)
+    await flushLiveProgress(true)
   }
 
   // ── Collect results and update ledger ─────────────────────────
@@ -2588,76 +1820,222 @@ async function resumeWorktreeDispatch(
     const group = resumeGroups[idx]
     if (!group) continue
 
-    if (!r.ok) {
-      resumeFailures.push(`${group.id}: ${r.error ?? "unknown error"}`)
+    const rateLimitRetryCount = dispatchResult.retryCounts?.[group.id] ?? 0
+    const verification = normalizeDispatchVerification(r.verification)
+    const existingEvidence = await readExistingWorkerEvidence(group.id)
+    const rawOutput = (!r.rawOutput || !r.rawOutput.trim()) && r.outputPath
+      ? await fs.readFile(r.outputPath, "utf-8").catch(() => r.rawOutput)
+      : (r.rawOutput?.trim() ? r.rawOutput : existingEvidence.content)
+    const acceptedNoop = acceptImplementationNoopResult({
+      ok: r.ok,
+      error: r.error,
+      rawOutput,
+      verification,
+    })
+    const acceptedExistingEvidence = acceptAlreadyImplementedEvidenceResult({
+      ok: r.ok,
+      error: r.error,
+      rawOutput,
+      verification,
+    })
+    const acceptedResult = acceptedNoop.accepted ? acceptedNoop : acceptedExistingEvidence
+    const effectiveVerification = acceptedResult.accepted && verification?.status === "fail"
+      ? {
+          ...verification,
+          status: "pass" as const,
+          output: verification.output ?? acceptedResult.reason,
+        }
+      : verification
+    const resultForWorkflow = acceptedResult.accepted
+      ? {
+          ...r,
+          ok: true,
+          error: undefined,
+          patchPath: undefined,
+          worktreePath: undefined,
+          changedFiles: group.files,
+          verification: effectiveVerification,
+        }
+      : r
+
+    if (!resultForWorkflow.ok) {
+      const failureMessage = resultForWorkflow.error ?? "unknown error"
+      resumeFailures.push(`${group.id}: ${failureMessage}`)
       await updateGroupLedger(runId, group.id, {
         status: "failed",
-        error: r.error ?? "unknown error",
-        failureKind: "blocker",
+        error: failureMessage,
+        failureKind: isRateLimitDispatchError(failureMessage) ? "retryable" : "blocker",
         retryCount: ((existingLedger[group.id]?.retryCount ?? 0) + 1),
+        rateLimitRetryCount,
+        lastCommand: failureMessage,
+        lastProgressAt: new Date().toISOString(),
       }, cwd).catch(() => {})
       options?.onSubagentUpdate?.(group.id, {
+        agent: resultForWorkflow.agent ?? group.agent,
+        title: group.taskPrompt ?? undefined,
+        model: implementModel.model ?? "unavailable",
+        thinking: implementModel.thinking ?? "unavailable",
         status: "failed",
         finishedAt: Date.now(),
-        lastCommand: r.error ?? "resume failed",
+        lastCommand: failureMessage,
+      })
+      markGroupProgress(group.id, {
+        status: "failed",
+        agent: resultForWorkflow.agent ?? group.agent,
+        taskPrompt: group.taskPrompt ?? "",
+        model: implementModel.model ?? "unavailable",
+        thinking: implementModel.thinking ?? "unavailable",
+        lastCommand: failureMessage,
+        lastProgressAt: new Date().toISOString(),
+        rateLimitRetryCount,
+        failureKind: isRateLimitDispatchError(failureMessage) ? "retryable" : "blocker",
       })
       continue
     }
 
-    const verification = normalizeDispatchVerification(r.verification)
-
     // If the bridge explicitly reported failed scoped verification, fail the group.
     // Missing verification (bridge no longer runs it) = deferred to final verification.
-    if (verification && verification.status === "fail") {
+    if (effectiveVerification && effectiveVerification.status === "fail" && !acceptedResult.accepted) {
       resumeFailures.push(`${group.id}: scoped verification failed`)
       await updateGroupLedger(runId, group.id, {
         status: "failed",
         error: "scoped verification failed",
         failureKind: "blocker",
         scopedVerification: verification,
+        rateLimitRetryCount,
+        lastCommand: "scoped verification failed",
+        lastProgressAt: new Date().toISOString(),
       }, cwd).catch(() => {})
       options?.onSubagentUpdate?.(group.id, {
+        agent: r.agent ?? group.agent,
+        title: group.taskPrompt ?? undefined,
+        model: implementModel.model ?? "unavailable",
+        thinking: implementModel.thinking ?? "unavailable",
         status: "failed",
         finishedAt: Date.now(),
         lastCommand: "scoped verification failed",
+      })
+      markGroupProgress(group.id, {
+        status: "failed",
+        agent: r.agent ?? group.agent,
+        taskPrompt: group.taskPrompt ?? "",
+        model: implementModel.model ?? "unavailable",
+        thinking: implementModel.thinking ?? "unavailable",
+        lastCommand: "scoped verification failed",
+        lastProgressAt: new Date().toISOString(),
       })
       continue
     }
 
     // Group succeeded
-    const scopedVerification = verification ?? {
+    const scopedVerification = effectiveVerification ?? {
       status: "skipped" as const,
       command: undefined,
       output: "Scoped verification deferred to the final verification phase.",
     }
+    const successMessage = acceptedResult.accepted
+      ? (acceptedResult.reason ?? "Implementation already present; scoped verification passed without additional edits.")
+      : "agent complete; scoped verification deferred to final verification"
+
+    if (acceptedResult.accepted) {
+      const completionMode = acceptedNoop.accepted ? "noop-evidence" : "worker-evidence"
+      await updateGroupLedger(runId, group.id, {
+        status: "applied",
+        appliedToPrimary: true,
+        agent: resultForWorkflow.agent ?? "zflow.implement-routine",
+        error: undefined,
+        failureKind: undefined,
+        patchPath: undefined,
+        implementationEvidencePath: r.outputPath ?? existingEvidence.path,
+        completionMode,
+        changedFiles: resultForWorkflow.changedFiles ?? group.files,
+        scopedVerification: {
+          status: scopedVerification.status,
+          command: scopedVerification.command,
+          output: scopedVerification.output,
+          classification: scopedVerification.classification,
+          attempts: scopedVerification.attempts,
+        },
+        rateLimitRetryCount,
+        lastCommand: successMessage,
+        lastProgressAt: new Date().toISOString(),
+      }, cwd).catch(() => {})
+      options?.onSubagentUpdate?.(group.id, {
+        agent: resultForWorkflow.agent ?? group.agent,
+        title: group.taskPrompt ?? undefined,
+        model: implementModel.model ?? "unavailable",
+        thinking: implementModel.thinking ?? "unavailable",
+        status: "completed",
+        finishedAt: Date.now(),
+        lastCommand: successMessage,
+      })
+      markGroupProgress(group.id, {
+        status: "applied",
+        agent: resultForWorkflow.agent ?? group.agent,
+        taskPrompt: group.taskPrompt ?? "",
+        model: implementModel.model ?? "unavailable",
+        thinking: implementModel.thinking ?? "unavailable",
+        lastCommand: successMessage,
+        lastProgressAt: new Date().toISOString(),
+        rateLimitRetryCount,
+      })
+      continue
+    }
+
     await updateGroupLedger(runId, group.id, {
       status: "succeeded",
-      agent: r.agent ?? "zflow.implement-routine",
+      agent: resultForWorkflow.agent ?? "zflow.implement-routine",
       error: undefined,
       failureKind: undefined,
-      scopedVerification: { status: scopedVerification.status, command: scopedVerification.command, output: scopedVerification.output },
+      patchPath: resultForWorkflow.patchPath,
+      completionMode: resultForWorkflow.patchPath ? "patch" : undefined,
+      changedFiles: resultForWorkflow.changedFiles ?? group.files,
+      scopedVerification: {
+        status: scopedVerification.status,
+        command: scopedVerification.command,
+        output: scopedVerification.output,
+        classification: scopedVerification.classification,
+        attempts: scopedVerification.attempts,
+      },
+      rateLimitRetryCount,
+      lastCommand: successMessage,
+      lastProgressAt: new Date().toISOString(),
     }, cwd).catch(() => {})
     options?.onSubagentUpdate?.(group.id, {
+      agent: resultForWorkflow.agent ?? group.agent,
+      title: group.taskPrompt ?? undefined,
+      model: implementModel.model ?? "unavailable",
+      thinking: implementModel.thinking ?? "unavailable",
       status: "completed",
       finishedAt: Date.now(),
-      lastCommand: "agent complete; scoped verification deferred to final verification",
+      lastCommand: successMessage,
+    })
+    markGroupProgress(group.id, {
+      status: "succeeded",
+      agent: resultForWorkflow.agent ?? group.agent,
+      taskPrompt: group.taskPrompt ?? "",
+      model: implementModel.model ?? "unavailable",
+      thinking: implementModel.thinking ?? "unavailable",
+      lastCommand: successMessage,
+      lastProgressAt: new Date().toISOString(),
+      rateLimitRetryCount,
     })
 
     // Collect group result for apply-back later
-    if (r.patchPath) {
+    if (resultForWorkflow.patchPath) {
       const patchesDir = path.join(runDir, "patches")
       await fs.mkdir(patchesDir, { recursive: true })
       const destPatchPath = path.join(patchesDir, `${group.id}.patch`)
-      if (path.resolve(r.patchPath) !== path.resolve(destPatchPath)) {
-        await fs.copyFile(r.patchPath, destPatchPath)
+      if (path.resolve(resultForWorkflow.patchPath) !== path.resolve(destPatchPath)) {
+        await fs.copyFile(resultForWorkflow.patchPath, destPatchPath)
       }
       groupResults.push({
         groupId: group.id,
-        agent: r.agent ?? "zflow.implement-routine",
-        worktreePath: r.worktreePath ?? "(patch-based)",
-        baseCommit: run.head as string,
-        headCommit: run.head as string,
-        changedFiles: r.changedFiles ?? group.files,
+        agent: resultForWorkflow.agent ?? "zflow.implement-routine",
+        worktreePath: resultForWorkflow.worktreePath ?? "(patch-based)",
+        baseCommit: resultForWorkflow.baseCommit ?? run.head as string,
+        headCommit: resultForWorkflow.headCommit ?? run.head as string,
+        changedFiles: resultForWorkflow.changedFiles ?? group.files,
         uncommittedChanges: [],
         patchPath: destPatchPath,
         verification: scopedVerification,
@@ -2665,15 +2043,17 @@ async function resumeWorktreeDispatch(
       })
       await updateGroupLedger(runId, group.id, {
         patchPath: destPatchPath,
-        changedFiles: r.changedFiles ?? group.files,
+        changedFiles: resultForWorkflow.changedFiles ?? group.files,
       }, cwd).catch(() => {})
-    } else if (r.worktreePath) {
+    } else if (resultForWorkflow.worktreePath) {
       const captured = await captureGroupResult({
         groupId: group.id,
-        agent: r.agent ?? group.agent ?? "zflow.implement-routine",
-        worktreePath: r.worktreePath,
+        agent: resultForWorkflow.agent ?? group.agent ?? "zflow.implement-routine",
+        worktreePath: resultForWorkflow.worktreePath,
         runId,
         repoRoot,
+        baseCommit: resultForWorkflow.baseCommit,
+        headCommit: resultForWorkflow.headCommit,
         scopedFiles: group.files,
         verification: scopedVerification,
         cwd,
@@ -2688,6 +2068,8 @@ async function resumeWorktreeDispatch(
   }
 
   // ── Finalize — check if all groups are now complete ───────────
+  await flushLiveProgress(true)
+
   const updatedLedger = await getGroupLedger(runId, cwd)
   const allSucceeded = Object.values(updatedLedger).every((e) =>
     e.status === "succeeded" || e.status === "applied" || e.status === "skipped"
@@ -2695,6 +2077,11 @@ async function resumeWorktreeDispatch(
 
   if (resumeFailures.length > 0) {
     // Some resume groups still failed — update phase to partial
+    emitWorkflowUpdate(`Resume dispatch failed: ${resumeFailures.join("; ")}`, {
+      status: "failed",
+      completedGroups: 0,
+      elapsedSeconds: Math.round((Date.now() - dispatchStartTime) / 1000),
+    })
     await updateRun(runId, {
       phase: "partial",
       metadata: {
@@ -2702,6 +2089,19 @@ async function resumeWorktreeDispatch(
         partialRunNote: `${resumeFailures.length} resumed group(s) failed. Successful groups preserved.`,
       },
     } as any, cwd).catch(() => {})
+    try {
+      const { updateStateIndexEntry, getChangeLifecycle, upsertChangeLifecycle } = await import("pi-zflow-artifacts/state-index")
+      await updateStateIndexEntry(runId, { status: "partial" }, cwd)
+      const lifecycle = await getChangeLifecycle(changeId, cwd)
+      if (lifecycle) {
+        await upsertChangeLifecycle({
+          ...lifecycle,
+          lastPhase: "partial",
+        }, cwd)
+      }
+    } catch {
+      // Best-effort
+    }
     await writeGroupStatusSummary(runId, changeId, cwd).catch(() => "")
     throw new Error(
       `Resume: ${resumeFailures.length} group(s) still failed: ${resumeFailures.join("; ")}`,
@@ -2709,6 +2109,11 @@ async function resumeWorktreeDispatch(
   }
 
   if (allSucceeded) {
+    emitWorkflowUpdate("Resume dispatch complete; applying successful group patches.", {
+      status: "completed",
+      completedGroups: runPlan.tasks.length,
+      elapsedSeconds: Math.round((Date.now() - dispatchStartTime) / 1000),
+    })
     const applyResult = await applySuccessfulGroupPatches(runId, changeId, cwd, false)
     const finalLedger = await getGroupLedger(runId, cwd)
     const allApplied = Object.values(finalLedger).every((e) => e.status === "applied" || e.status === "skipped")
@@ -2719,7 +2124,33 @@ async function resumeWorktreeDispatch(
         `Use /zflow-change-implement ${changeId} --apply-successful to inspect/apply, or --force-apply-successful to bypass semantic-coupling checks.`,
       )
     }
+    return
   }
+
+  emitWorkflowUpdate("Resume rerun groups completed; continuing with newly eligible downstream groups.", {
+    status: "running",
+    completedGroups: Object.values(await getGroupLedger(runId, cwd)).filter((entry) =>
+      entry.status === "succeeded" || entry.status === "applied" || entry.status === "skipped",
+    ).length,
+    elapsedSeconds: Math.round((Date.now() - dispatchStartTime) / 1000),
+  })
+
+  await runWorktreeDispatchAndFinalize(
+    runId,
+    changeId,
+    planVersion,
+    dispatchService,
+    {
+      cwd,
+      force: options?.force,
+      orchestratorTarget: options?.orchestratorTarget,
+      onWorkflowUpdate: options?.onWorkflowUpdate,
+      onSubagentUpdate: options?.onSubagentUpdate,
+      onRateLimitNotice: options?.onRateLimitNotice,
+      sleep: options?.sleep,
+      progressPersistIntervalMs: options?.progressPersistIntervalMs,
+    },
+  )
 }
 
 function classifyFailedGroup(
@@ -2809,6 +2240,161 @@ function normalizeDispatchVerification(
     status,
     command: verification.command,
     output: verification.output,
+    classification: verification.classification,
+    attempts: verification.attempts,
+  }
+}
+
+function collectDependencyClosure(
+  groups: ReadonlyArray<{ id: string; dependencies: string[] }>,
+  targetId: string,
+): string[] {
+  const byId = new Map(groups.map((group) => [group.id, group]))
+  const closure = new Set<string>()
+  const stack = [...(byId.get(targetId)?.dependencies ?? [])]
+
+  while (stack.length > 0) {
+    const next = stack.pop()!
+    if (closure.has(next)) continue
+    closure.add(next)
+    const group = byId.get(next)
+    if (group) {
+      for (const dep of group.dependencies) {
+        if (!closure.has(dep)) stack.push(dep)
+      }
+    }
+  }
+
+  return [...closure]
+}
+
+async function materializeDependencyLineageRef(
+  runId: string,
+  repoRoot: string,
+  targetGroup: { id: string; dependencies: string[] },
+  allGroups: Array<{ id: string; files: string[]; dependencies: string[]; parallelizable: boolean }>,
+  cwd?: string,
+): Promise<{ ref: string; headCommit: string; dependencyGroupIds: string[]; worktreePath: string } | null> {
+  const dependencyGroupIds = collectDependencyClosure(allGroups, targetGroup.id)
+  if (dependencyGroupIds.length === 0) return null
+
+  const { readRun, updateRun } = await import("pi-zflow-artifacts")
+  const { resolveRunDir } = await import("pi-zflow-artifacts/artifact-paths")
+  const { default: path } = await import("node:path")
+  const run = await readRun(runId, cwd)
+  const existing = (run.lineageRefs ?? []).find((entry) => entry.groupId === targetGroup.id && entry.status === "materialized")
+
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const execFileAsync = promisify(execFile)
+
+  if (existing) {
+    try {
+      await execFileAsync("git", ["rev-parse", "--verify", existing.ref], { cwd: repoRoot })
+      return {
+        ref: existing.ref,
+        headCommit: existing.headCommit ?? existing.baseCommit,
+        dependencyGroupIds: existing.dependencyGroupIds,
+        worktreePath: existing.worktreePath ?? path.join(resolveRunDir(runId, cwd), `lineage-${targetGroup.id}`),
+      }
+    } catch {
+      // Rebuild stale lineage refs.
+    }
+  }
+
+  const dependencyGroups = allGroups.filter((group) => dependencyGroupIds.includes(group.id))
+  if (dependencyGroups.length === 0) return null
+
+  const patchesDir = path.join(resolveRunDir(runId, cwd), "patches")
+  const ledger = await getGroupLedger(runId, cwd)
+  const patchMap = new Map<string, string>()
+  for (const dependencyGroupId of dependencyGroupIds) {
+    const ledgerPatchPath = selectCanonicalGroupPatchPath(ledger[dependencyGroupId])
+    const patchPath = ledgerPatchPath ?? path.join(patchesDir, `${dependencyGroupId}.patch`)
+    try {
+      await import("node:fs/promises").then((fs) => fs.access(patchPath))
+      patchMap.set(dependencyGroupId, patchPath)
+    } catch {
+      throw new Error(
+        `Cannot materialize dependency lineage for ${targetGroup.id}: missing patch artifact for dependency ${dependencyGroupId}.`,
+      )
+    }
+  }
+
+  const { runIntegrationMerge } = await import("./integration-merge-strategy.js")
+  const lineageResult = await runIntegrationMerge({
+    runId: `${runId}-lineage-${targetGroup.id}`,
+    repoRoot,
+    snapshot: run.preApplySnapshot ?? {
+      head: run.head,
+      indexState: "clean",
+      recoveryRef: `refs/zflow/recovery/${runId}`,
+    },
+    groups: dependencyGroups,
+    patches: patchMap,
+    cwd,
+  })
+
+  if (!lineageResult.success || !lineageResult.integrationWorktreePath) {
+    throw new Error(
+      lineageResult.error ??
+      `Failed to materialize dependency lineage for ${targetGroup.id}.`,
+    )
+  }
+
+  const { stdout: headCommitRaw } = await execFileAsync("git", ["rev-parse", "HEAD"], {
+    cwd: lineageResult.integrationWorktreePath,
+  })
+  const headCommit = headCommitRaw.trim()
+  const ref = `refs/zflow/lineage/${runId}/${targetGroup.id}`
+  await execFileAsync("git", ["update-ref", ref, headCommit], { cwd: repoRoot })
+
+  const lineageEntry = {
+    id: `lineage-${targetGroup.id}`,
+    groupId: targetGroup.id,
+    dependencyGroupIds,
+    ref,
+    baseCommit: run.head,
+    headCommit,
+    worktreePath: lineageResult.integrationWorktreePath,
+    status: "materialized" as const,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
+
+  const nextLineageRefs = [
+    ...(run.lineageRefs ?? []).filter((entry) => entry.groupId !== targetGroup.id),
+    lineageEntry,
+  ]
+  const nextRetainedArtifacts = [
+    ...(run.retainedArtifacts ?? []),
+  ]
+  if (!nextRetainedArtifacts.some((artifact) => artifact.path === lineageResult.integrationWorktreePath)) {
+    nextRetainedArtifacts.push({
+      type: "worktree",
+      path: lineageResult.integrationWorktreePath,
+      reason: `dependency-lineage materialization for ${targetGroup.id}`,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    })
+  }
+  if (lineageResult.consolidatedPatchPath && !nextRetainedArtifacts.some((artifact) => artifact.path === lineageResult.consolidatedPatchPath)) {
+    nextRetainedArtifacts.push({
+      type: "patch",
+      path: lineageResult.consolidatedPatchPath,
+      reason: `dependency-lineage consolidated patch for ${targetGroup.id}`,
+      expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+    })
+  }
+  await updateRun(runId, {
+    lineageRefs: nextLineageRefs,
+    retainedArtifacts: nextRetainedArtifacts,
+  }, cwd)
+
+  return {
+    ref,
+    headCommit,
+    dependencyGroupIds,
+    worktreePath: lineageResult.integrationWorktreePath,
   }
 }
 
@@ -2863,6 +2449,9 @@ async function runWorktreeDispatchAndFinalize(
     orchestratorTarget?: string
     onWorkflowUpdate?: (message: string) => void
     onSubagentUpdate?: (id: string, update: Partial<Omit<WorkflowSubagentSnapshot, "id" | "startedAt">>) => void
+    onRateLimitNotice?: (message: string) => void
+    sleep?: (ms: number) => Promise<void>
+    progressPersistIntervalMs?: number
   },
 ): Promise<void> {
   const { default: fs } = await import("node:fs/promises")
@@ -2873,6 +2462,13 @@ async function runWorktreeDispatchAndFinalize(
     finalizeWorktreeImplementationRun,
   } = await import("./orchestration.js")
   const { captureGroupResult } = await import("./group-result.js")
+  const {
+    dispatchParallelWithRateLimitRetries,
+    isRateLimitDispatchError,
+  } = await import("./orchestration/implementation/rate-limit.js")
+  const {
+    persistImplementationDispatchSnapshot,
+  } = await import("./orchestration/implementation/live-progress.js")
   const { readRun, updateRun } = await import("pi-zflow-artifacts")
 
   const cwd = options?.cwd ?? process.cwd()
@@ -2881,6 +2477,19 @@ async function runWorktreeDispatchAndFinalize(
   const execFileAsync = promisify(execFile)
   const { stdout: repoRootRaw } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd })
   const repoRoot = repoRootRaw.trim()
+  const { resolveDispatchWorktreeSetup } = await import("./worktree-setup.js")
+  const worktreeSetupResolution = await resolveDispatchWorktreeSetup(repoRoot)
+  if (!worktreeSetupResolution.ok) {
+    throw new Error(worktreeSetupResolution.message ?? "worktree setup requirements were not satisfied")
+  }
+  if (worktreeSetupResolution.hook && dispatchService.capabilities?.worktreeSetupHooks === false) {
+    throw new Error(
+      "Dispatch backend does not support repo-configured worktree setup hooks. " +
+      `Active backend: ${dispatchService.name}. ` +
+      "Remove/disable worktreeSetupHook for repos covered by built-in auto setup, " +
+      "or install a dispatch backend that advertises worktreeSetupHooks=true.",
+    )
+  }
 
   // Read execution groups from the approved plan artifact
   const executionGroupsArtifactPath = resolvePlanArtifactPath(changeId, planVersion, "execution-groups", cwd)
@@ -2895,8 +2504,26 @@ async function runWorktreeDispatchAndFinalize(
   }
 
   const groups = parseExecutionGroupsMd(executionGroupsMd)
+  const {
+    normalizeImplementationAgentName,
+    resolveImplementationAgentGuidance,
+  } = await import("./orchestration/implementation-agents.js")
+  const implementationAgentGuidance = await resolveImplementationAgentGuidance(cwd)
+  const normalizedGroups = groups.map((group) => {
+    const resolution = normalizeImplementationAgentName(group.agent, implementationAgentGuidance)
+    if (resolution.reason === "role-label" || resolution.changed) {
+      options?.onWorkflowUpdate?.(
+        `Normalizing ${group.id} agent from ${group.agent} to ${resolution.resolved}` +
+        `${resolution.roleLabel ? ` (role label: ${resolution.roleLabel})` : ""}.`,
+      )
+    }
+    return {
+      ...group,
+      agent: resolution.resolved,
+    }
+  })
 
-  if (groups.length === 0) {
+  if (normalizedGroups.length === 0) {
     const preview = executionGroupsMd.slice(0, 500).trim()
     const previewHint = preview.length > 0
       ? `\n\nFile content preview (first 500 chars):\n\`\`\`markdown\n${preview}${executionGroupsMd.length > 500 ? "\n…(truncated)" : ""}\n\`\`\``
@@ -2908,7 +2535,7 @@ async function runWorktreeDispatchAndFinalize(
       `  ## Execution Group 1: descriptive name\n\n` +
       `Followed by:\n` +
       `  **Files:** path/to/file.ts, another/file.ts\n` +
-      `  **Agent:** zflow.implement-routine\n` +
+      `  **Agent:** ${implementationAgentGuidance.defaultAgent}\n` +
       `  **Scoped verification:** the verification command for this group`
     throw new Error(
       `No execution groups found in ${executionGroupsArtifactPath}. ` +
@@ -2918,7 +2545,7 @@ async function runWorktreeDispatchAndFinalize(
     )
   }
 
-  const missingScopedVerification = groups.filter((g) => !g.scopedVerification)
+  const missingScopedVerification = normalizedGroups.filter((g) => !g.scopedVerification)
   if (missingScopedVerification.length > 0) {
     throw new Error(
       "Cannot dispatch implementation: every execution group must define scoped verification. " +
@@ -2938,7 +2565,7 @@ async function runWorktreeDispatchAndFinalize(
   const runPlan = await prepareWorktreeImplementationRun(
     changeId,
     planVersion,
-    groups,
+    normalizedGroups,
     planArtifactPaths,
     {
       cwd,
@@ -2952,7 +2579,7 @@ async function runWorktreeDispatchAndFinalize(
   // ── Initialize durable group status ledger ────────────────────
   const runBefore = await readRun(runId, cwd)
   const existingLedger = runBefore?.metadata?.[GROUP_LEDGER_META_KEY] as Record<string, GroupStatusEntry> | undefined
-  const ledger = buildGroupLedger(groups, existingLedger)
+  const ledger = buildGroupLedger(normalizedGroups, existingLedger)
   await updateRun(runId, {
     metadata: {
       ...(runBefore?.metadata ?? {}),
@@ -2960,355 +2587,681 @@ async function runWorktreeDispatchAndFinalize(
     },
   } as any, cwd)
 
+  // ── Build dependency graph for wave dispatch ────────────────
+  // Groups are dispatched in waves: only groups whose dependencies
+  // have all succeeded are eligible for the current wave. Failed groups
+  // cause dependents to be marked "blocked" rather than running.
+  const depGraph = new Map<string, string[]>()
+  const reverseDepGraph = new Map<string, string[]>()
+  const allGroupIds: string[] = []
+
+  for (const group of runPlan.groups) {
+    allGroupIds.push(group.id)
+    depGraph.set(group.id, group.dependencies.filter(d => d !== "none" && d !== ""))
+    // Build reverse deps
+    for (const dep of group.dependencies) {
+      if (dep === "none" || dep === "") continue
+      if (!reverseDepGraph.has(dep)) reverseDepGraph.set(dep, [])
+      reverseDepGraph.get(dep)!.push(group.id)
+    }
+  }
+
+  /**
+   * Walk the reverse dependency graph to find all groups transitively
+   * blocked by a failed group, and mark them as blocked in the ledger.
+   */
+  const markDependentsBlocked = async (failedGroupId: string): Promise<void> => {
+    const visited = new Set<string>()
+    const queue = [failedGroupId]
+    while (queue.length > 0) {
+      const current = queue.shift()!
+      const dependents = reverseDepGraph.get(current)
+      if (!dependents) continue
+      for (const depId of dependents) {
+        if (visited.has(depId)) continue
+        visited.add(depId)
+        // Only block groups that haven't already succeeded or started
+        const existing = (await readRun(runId, cwd).catch(() => null))
+          ?.metadata?.[GROUP_LEDGER_META_KEY] as Record<string, GroupStatusEntry> | undefined
+        const currentStatus = existing?.[depId]?.status
+        if (currentStatus === "succeeded" || currentStatus === "applied" || currentStatus === "running") continue
+        await updateGroupLedger(runId, depId, {
+          status: "blocked",
+          blockedBy: [...(existing?.[depId]?.blockedBy ?? []), failedGroupId],
+          failureKind: "blocker",
+        }, cwd).catch(() => {})
+        options?.onSubagentUpdate?.(depId, {
+          status: "blocked",
+          lastCommand: `blocked by ${failedGroupId}`,
+        })
+        queue.push(depId)
+      }
+    }
+  }
+
+  /**
+   * Get group IDs that are ready for dispatch in the current wave.
+   * Ready = status is "ready" or explicitly moved to ready state,
+   * and all their dependencies have status "succeeded" or "applied".
+   */
+  const getReadyGroupIds = async (): Promise<string[]> => {
+    const run = await readRun(runId, cwd).catch(() => null)
+    if (!run) return []
+    const ledger = (run.metadata?.[GROUP_LEDGER_META_KEY] ?? {}) as Record<string, GroupStatusEntry>
+    return allGroupIds.filter(gid => {
+      const entry = ledger[gid]
+      if (!entry) return false
+      // Already processed or blocked
+      if (entry.status === "succeeded" || entry.status === "applied" ||
+          entry.status === "running" || entry.status === "failed" ||
+          entry.status === "blocked" || entry.status === "skipped") return false
+      // Check dependencies
+      const deps = depGraph.get(gid)
+      if (!deps || deps.length === 0) return true
+      return deps.every(d => {
+        const depEntry = ledger[d]
+        return depEntry?.status === "succeeded" || depEntry?.status === "applied"
+      })
+    })
+  }
+
   // Dispatch via the dispatch service with worktree: true. Keep worker output
   // under runtime state so repo roots are not polluted with worktree-results/.
   const runDir = resolveRunDir(runId, cwd)
   const worktreeResultsDir = path.join(runDir, "worktree-results")
   await fs.mkdir(worktreeResultsDir, { recursive: true })
+  const readExistingWorkerEvidence = async (groupId: string): Promise<{ path?: string; content?: string }> => {
+    const candidates = [
+      path.join(worktreeResultsDir, `${groupId}-result.md`),
+      path.join(worktreeResultsDir, `${groupId}-resume-result.md`),
+    ]
+    for (const candidate of candidates) {
+      try {
+        const content = await fs.readFile(candidate, "utf-8")
+        if (content.trim()) return { path: candidate, content }
+      } catch {
+        // Ignore missing historical worker outputs.
+      }
+    }
+    return {}
+  }
   const implementModel = await resolveWorkflowModel("zflow.implement-routine")
-  const tasks = runPlan.tasks.map((t, taskIdx) => ({
-    agent: t.agent,
-    task: t.task,
-    model: implementModel.dispatchModel,
-    output: path.join(worktreeResultsDir, `${t.groupId}-result.md`),
-    outputMode: "file-only" as const,
-    onUpdate: (progress: AgentDispatchProgress) => {
+  const sleep = options?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  const progressPersistIntervalMs = Math.max(1000, options?.progressPersistIntervalMs ?? 5000)
+  const dispatchStartedAt = new Date().toISOString()
+  const pendingGroupProgress = new Map<string, Record<string, unknown>>()
+  let pendingDispatchProgress: Record<string, unknown> = {
+    dispatchStartedAt,
+    totalGroups: allGroupIds.length,
+    completedGroups: 0,
+    status: "running",
+  }
+  let liveProgressDirty = false
+  let lastLiveProgressFlushAt = 0
+  let liveProgressFlushPromise: Promise<void> = Promise.resolve()
+
+  const markGroupProgress = (groupId: string, partial: Record<string, unknown>): void => {
+    pendingGroupProgress.set(groupId, {
+      ...(pendingGroupProgress.get(groupId) ?? {}),
+      ...partial,
+    })
+    liveProgressDirty = true
+  }
+
+  const markDispatchProgress = (partial: Record<string, unknown>): void => {
+    pendingDispatchProgress = {
+      ...pendingDispatchProgress,
+      ...partial,
+    }
+    liveProgressDirty = true
+  }
+
+  const flushLiveProgress = async (force = false): Promise<void> => {
+    if (!liveProgressDirty) return liveProgressFlushPromise
+    const now = Date.now()
+    if (!force && now - lastLiveProgressFlushAt < progressPersistIntervalMs) {
+      return liveProgressFlushPromise
+    }
+    lastLiveProgressFlushAt = now
+
+    const groupUpdates = Object.fromEntries(pendingGroupProgress.entries())
+    pendingGroupProgress.clear()
+    const dispatchProgress = { ...pendingDispatchProgress }
+    liveProgressDirty = false
+
+    liveProgressFlushPromise = liveProgressFlushPromise
+      .then(() => persistImplementationDispatchSnapshot(runId, {
+        groupUpdates,
+        dispatchProgress,
+      }, cwd))
+      .catch(() => {})
+
+    return liveProgressFlushPromise
+  }
+
+  const emitWorkflowUpdate = (message: string, partial: Record<string, unknown> = {}): void => {
+    options?.onWorkflowUpdate?.(message)
+    markDispatchProgress({
+      lastWorkflowUpdate: message,
+      ...partial,
+    })
+    void flushLiveProgress()
+  }
+
+  // Auto-detect worktree setup command (pnpm install, npm ci, etc.)
+  const { detectWorktreeSetupCommand } = await import("./orchestration.js")
+
+  // Build the full tasks array once. Each wave will select a subset by index.
+  const tasks = await Promise.all(runPlan.tasks.map(async (t, taskIdx) => {
+    const taskRepoRoot = inferTaskRepoRoot(repoRoot, { claimedFiles: t.claimedFiles })
+    const worktreeSetupCommand = await detectWorktreeSetupCommand(taskRepoRoot)
+
+    return {
+      agent: t.agent,
+      groupId: t.groupId,
+      task: t.task,
+      cwd: taskRepoRoot,
+      model: implementModel.dispatchModel,
+      output: path.join(worktreeResultsDir, `${t.groupId}-result.md`),
+      outputMode: "file-only" as const,
+      scopedVerification: t.scopedVerification,
+      worktreeSetupCommand,
+      claimedFiles: t.claimedFiles,
+      dependencies: t.dependencies,
+      worktreeStrategy: t.worktreeStrategy,
+      onUpdate: (progress: AgentDispatchProgress) => {
       const recentTools = Array.isArray(progress.recentTools) ? progress.recentTools : []
       const recentTool = recentTools[recentTools.length - 1]
       const recentOutput = Array.isArray(progress.recentOutput) ? progress.recentOutput : []
+      const lastCommand = progress.currentTool
+        ? `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}`
+        : recentTool?.tool
+          ? `${recentTool.tool}${recentTool.args ? ` ${recentTool.args}` : ""}`
+          : recentOutput[recentOutput.length - 1] ?? "running"
       options?.onSubagentUpdate?.(t.groupId, {
         agent: t.agent,
         title: runPlan.groups[taskIdx]?.taskPrompt ?? undefined,
         model: implementModel.model ?? "unavailable",
         thinking: implementModel.thinking ?? "unavailable",
         status: progress.status ?? "running",
-        lastCommand: progress.currentTool
-          ? `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}`
-          : recentTool?.tool
-            ? `${recentTool.tool}${recentTool.args ? ` ${recentTool.args}` : ""}`
-            : recentOutput[recentOutput.length - 1] ?? "running",
+        lastCommand,
       })
+      markGroupProgress(t.groupId, {
+        status: progress.status ?? "running",
+        agent: t.agent,
+        taskPrompt: runPlan.groups[taskIdx]?.taskPrompt ?? "",
+        model: implementModel.model ?? "unavailable",
+        thinking: implementModel.thinking ?? "unavailable",
+        currentTool: progress.currentTool,
+        lastCommand,
+        lastProgressAt: new Date().toISOString(),
+      })
+      void flushLiveProgress()
     },
+    }
   }))
+
+  // Map groupId → task index for fast lookup
+  const groupIdToTaskIndex = new Map<string, number>()
+  for (let i = 0; i < runPlan.tasks.length; i++) {
+    groupIdToTaskIndex.set(runPlan.tasks[i]!.groupId, i)
+  }
 
   const WORKTREE_DISPATCH_CONCURRENCY = resolveImplementConcurrency()
   const MAX_OUTPUT_LINES = 5000
   const MAX_OUTPUT_BYTES = 500_000
 
-  for (let taskIdx = 0; taskIdx < runPlan.tasks.length; taskIdx++) {
-    const task = runPlan.tasks[taskIdx]!
-    const initiallyScheduled = taskIdx < WORKTREE_DISPATCH_CONCURRENCY
-    options?.onSubagentUpdate?.(task.groupId, {
-      agent: task.agent,
-      title: runPlan.groups[taskIdx]?.taskPrompt ?? undefined,
-      model: implementModel.model ?? "unavailable",
-      thinking: implementModel.thinking ?? "unavailable",
-      status: initiallyScheduled ? "running" : "queued",
-      lastCommand: initiallyScheduled ? "starting worktree dispatch..." : "queued waiting for dispatch slot",
-    })
-    await updateGroupLedger(runId, task.groupId, {
-      status: initiallyScheduled ? "running" : "queued",
-      agent: task.agent,
-    }, cwd).catch(() => {})
-  }
+  // Leave groups in queued/pending state until their dependencies are
+  // satisfied and they are actually selected for a dispatch wave. This keeps
+  // partial-run metadata honest so resume analysis does not mistake downstream
+  // untouched groups for directly rerunnable work.
 
-  // ── Dispatch with heartbeat ──────────────────────────────────
-  // The dispatch blocks until all worktree tasks complete. Emit periodic
-  // heartbeat progress so the indicator doesn't appear frozen.
-  let heartbeatCount = 0
-  const dispatchStartTime = Date.now()
-  const heartbeat = setInterval(() => {
-    heartbeatCount++
-    const elapsed = Math.round((Date.now() - dispatchStartTime) / 1000)
-    const runningCount = runPlan.tasks.length
-    options?.onWorkflowUpdate?.(
-      `Workers running: ${runningCount} group(s) dispatched, ` +
-      `${heartbeatCount} heartbeat(s), ${elapsed}s elapsed`,
-    )
-  }, 10000)
-  heartbeat.unref?.()
-
-  let dispatchResult
-  try {
-    dispatchResult = await dispatchService.runParallel({
-      tasks,
-      cwd,
-      concurrency: WORKTREE_DISPATCH_CONCURRENCY,
-      worktree: true,
-      maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
-    })
-  } finally {
-    clearInterval(heartbeat)
-  }
-
-  // Classify results: successful groups go into collected; failures are classified
-  // as retryable or blocker. Retryable groups get one bounded re-run via runParallel
-  // (not sequential runAgent) so multiple retries run concurrently.
+  // ── Wave dispatch loop ──────────────────────────────────────
+  // Dispatch groups in dependency-order waves. Each wave runs the
+  // eligible groups in parallel (subject to concurrency limit).
+  const allResults: Array<{ groupId: string; result: DispatchGroupResult; index: number }> = []
   const decisions: FailedGroupDecision[] = []
-  const allResults: Array<DispatchGroupResult> = [...dispatchResult.results]
+  let waveIndex = 0
+  const dispatchStartTime = Date.now()
+  let waveHeartbeat: ReturnType<typeof setInterval> | undefined
 
-  for (let idx = 0; idx < allResults.length; idx++) {
-    const result = allResults[idx]!
-    const task = runPlan.tasks[idx]
-    if (result.ok) {
-      options?.onSubagentUpdate?.(task?.groupId ?? `group-${idx}`, {
-        agent: result.agent,
+  while (true) {
+    const readyGroupIds = await getReadyGroupIds()
+    if (readyGroupIds.length === 0) break
+
+    waveIndex++
+    emitWorkflowUpdate(`Wave ${waveIndex}: dispatching ${readyGroupIds.length} group(s) (${waveIndex === 1 ? "initial" : "dependency"} wave)`, {
+      activeWave: waveIndex,
+      dispatchedGroups: readyGroupIds,
+      completedGroups: allResults.length,
+      elapsedSeconds: Math.round((Date.now() - Date.parse(dispatchStartedAt)) / 1000),
+    })
+
+    // Build task subset for this wave
+    const waveTaskIndices = readyGroupIds.map(gid => {
+      const idx = groupIdToTaskIndex.get(gid)
+      if (idx === undefined) throw new Error(`Group ${gid} not found in task list`)
+      return idx
+    })
+    const waveTasks = await Promise.all(waveTaskIndices.map(async (idx) => {
+      const baseTask = tasks[idx]!
+      const planGroup = runPlan.groups[idx] as unknown as {
+        id: string
+        files: string[]
+        dependencies: string[]
+        parallelizable: boolean
+        baseStrategy?: "head" | "dependency-lineage"
+      }
+      if (baseTask.worktreeStrategy?.baseStrategy !== "dependency-lineage") {
+        return baseTask
+      }
+
+      const lineage = await materializeDependencyLineageRef(
+        runId,
+        repoRoot,
+        planGroup,
+        runPlan.groups as Array<{ id: string; files: string[]; dependencies: string[]; parallelizable: boolean }>,
+        cwd,
+      )
+      if (!lineage) return baseTask
+
+      return {
+        ...baseTask,
+        worktreeStrategy: {
+          ...baseTask.worktreeStrategy,
+          baseStrategy: "dependency-lineage",
+          baseRef: lineage.ref,
+        },
+      }
+    }))
+
+    // Mark wave groups as running
+    for (const gid of readyGroupIds) {
+      const idx = groupIdToTaskIndex.get(gid)!
+      const task = runPlan.tasks[idx]!
+      options?.onSubagentUpdate?.(gid, {
+        agent: task.agent,
         title: runPlan.groups[idx]?.taskPrompt ?? undefined,
-        status: "completed",
-        finishedAt: Date.now(),
-        lastCommand: "agent complete; scoped verification deferred to final verification",
+        model: implementModel.model ?? "unavailable",
+        thinking: implementModel.thinking ?? "unavailable",
+        status: "running",
+        lastCommand: "starting worktree dispatch...",
       })
-      // Update ledger: group succeeded
-      const gId = task?.groupId ?? runPlan.groups[idx]?.id ?? `group-${idx}`
-      await updateGroupLedger(runId, gId, {
-        status: "succeeded",
-        agent: result.agent ?? "zflow.implement-routine",
+      await updateGroupLedger(runId, gid, {
+        status: "running",
+        agent: task.agent,
+        model: implementModel.model ?? "unavailable",
+        thinking: implementModel.thinking ?? "unavailable",
+        startedAt: new Date().toISOString(),
+        lastCommand: "starting worktree dispatch...",
         error: undefined,
         failureKind: undefined,
       }, cwd).catch(() => {})
-    }
-  }
-
-  const failedIndices: number[] = []
-  for (let idx = 0; idx < allResults.length; idx++) {
-    if (!allResults[idx]!.ok) failedIndices.push(idx)
-  }
-
-  if (failedIndices.length > 0) {
-    // ── Phase 1: classify every failed group immediately so UI shows honest state
-    const retryIndices: number[] = []
-    const retryDecisionIndices: number[] = []
-    for (const idx of failedIndices) {
-      const result = allResults[idx]!
-      const group = runPlan.groups[idx]
-      const decision = classifyFailedGroup(group?.id ?? `group-${idx}`, result, 0, IMPLEMENT_GROUP_MAX_RETRIES)
-      decisions.push(decision)
-
-      if (decision.decision === "retry") {
-        retryIndices.push(idx)
-        retryDecisionIndices.push(decisions.length - 1)
-        const task = runPlan.tasks[idx]!
-        options?.onSubagentUpdate?.(task.groupId, {
-          agent: result.agent,
-          title: group?.taskPrompt ?? undefined,
-          status: "retry",
-          finishedAt: undefined,
-          startedAt: Date.now(),
-          lastCommand: "scheduling retry...",
-        })
-        // Update ledger: group retrying
-        const gId = group?.id ?? task.groupId ?? `group-${idx}`
-        await updateGroupLedger(runId, gId, {
-          status: "retrying",
-          retryCount: 1,
-          error: undefined,
-          failureKind: "retryable",
-        }, cwd).catch(() => {})
-      } else {
-        const gId = group?.id ?? `group-${idx}`
-        options?.onSubagentUpdate?.(runPlan.tasks[idx]?.groupId ?? gId, {
-          agent: result.agent,
-          title: group?.taskPrompt ?? undefined,
-          status: "failed",
-          finishedAt: Date.now(),
-          lastCommand: decision.reason,
-        })
-        // Update ledger: group failed (blocker)
-        await updateGroupLedger(runId, gId, {
-          status: "failed",
-          error: decision.error ?? decision.reason,
-          failureKind: "blocker",
-          retryCount: 0,
-        }, cwd).catch(() => {})
-      }
-    }
-
-    // ── Phase 2: dispatch all retries in parallel (not one-at-a-time)
-    // IMPORTANT: retries run WITHOUT worktree isolation (matching the original
-    // runAgent behaviour). The initial dispatch already created worktrees for
-    // these groups; creating new ones would fail because git rejects duplicate
-    // worktree paths. Running retries in the main working directory lets the
-    // agent access the full repo and retry the implementation from scratch.
-    if (retryIndices.length > 0) {
-      const retryTasks = retryIndices.map((idx) => {
-        const task = runPlan.tasks[idx]!
-        const group = runPlan.groups[idx]
-        return {
-          agent: task.agent,
-          task: task.task,
-          model: implementModel.dispatchModel,
-          output: path.join(worktreeResultsDir, `${task.groupId}-retry-result.md`),
-          outputMode: "file-only" as const,
-          onUpdate: (progress: AgentDispatchProgress) => {
-            const recentTools = Array.isArray(progress.recentTools) ? progress.recentTools : []
-            const recentTool = recentTools[recentTools.length - 1]
-            const recentOutput = Array.isArray(progress.recentOutput) ? progress.recentOutput : []
-            options?.onSubagentUpdate?.(task.groupId, {
-              agent: task.agent,
-              title: group?.taskPrompt ?? undefined,
-              model: implementModel.model ?? "unavailable",
-              thinking: implementModel.thinking ?? "unavailable",
-              status: progress.status ?? "running",
-              lastCommand: progress.currentTool
-                ? `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}`
-                : recentTool?.tool
-                  ? `${recentTool.tool}${recentTool.args ? ` ${recentTool.args}` : ""}`
-                  : recentOutput[recentOutput.length - 1] ?? "retrying...",
-            })
-          },
-        }
+      markGroupProgress(gid, {
+        status: "running",
+        agent: task.agent,
+        taskPrompt: runPlan.groups[idx]?.taskPrompt ?? "",
+        model: implementModel.model ?? "unavailable",
+        thinking: implementModel.thinking ?? "unavailable",
+        startedAt: new Date().toISOString(),
+        lastCommand: "starting worktree dispatch...",
+        lastProgressAt: new Date().toISOString(),
       })
+    }
 
-      let retryDispatchResult: Awaited<ReturnType<DispatchService["runParallel"]>>
-      try {
-        retryDispatchResult = await dispatchService.runParallel({
-          tasks: retryTasks,
+    await flushLiveProgress(true)
+
+    // Dispatch this wave
+    const dispatchStartMs = Date.now()
+    let dispatchResult: Awaited<ReturnType<DispatchService["runParallel"]>>
+
+    // Heartbeat for this wave
+    let waveHeartbeatCount = 0
+    waveHeartbeat = setInterval(() => {
+      waveHeartbeatCount++
+      const elapsed = Math.round((Date.now() - dispatchStartTime) / 1000)
+      const ready = readyGroupIds.length
+      const done = allResults.length
+      const total = allGroupIds.length
+      emitWorkflowUpdate(
+        `Wave ${waveIndex}: ${ready} group(s) dispatched, ${done}/${total} complete, ${waveHeartbeatCount} heartbeat(s), ${elapsed}s elapsed`,
+        {
+          activeWave: waveIndex,
+          heartbeatCount: waveHeartbeatCount,
+          dispatchedGroups: readyGroupIds,
+          completedGroups: done,
+          elapsedSeconds: elapsed,
+          status: "running",
+        },
+      )
+    }, 10000)
+    waveHeartbeat.unref?.()
+
+    try {
+      dispatchResult = await dispatchParallelWithRateLimitRetries({
+        dispatchService,
+        maxRetries: IMPLEMENT_RATE_LIMIT_MAX_RETRIES,
+        defaultWaitMs: IMPLEMENT_RATE_LIMIT_DEFAULT_WAIT_MS,
+        input: {
+          tasks: waveTasks,
           cwd,
-          concurrency: WORKTREE_DISPATCH_CONCURRENCY,
+          concurrency: Math.min(WORKTREE_DISPATCH_CONCURRENCY, waveTasks.length),
+          worktree: true,
+          worktreeSetupHook: worktreeSetupResolution.hook,
           maxOutput: { lines: MAX_OUTPUT_LINES, bytes: MAX_OUTPUT_BYTES },
-        })
-      } catch (retryDispatchErr: unknown) {
-        // If the parallel retry dispatch itself throws, treat every retry as a blocker
-        const errMsg = retryDispatchErr instanceof Error ? retryDispatchErr.message : String(retryDispatchErr)
-        for (let rIdx = 0; rIdx < retryIndices.length; rIdx++) {
-          const originalIdx = retryIndices[rIdx]!
-          const decisionIdx = retryDecisionIndices[rIdx]!
-          const group = runPlan.groups[originalIdx]
-          const task = runPlan.tasks[originalIdx]!
-          decisions[decisionIdx] = {
-            ...decisions[decisionIdx]!,
-            decision: "blocker",
-            reason: `Retry dispatch threw: ${errMsg}`,
-          }
-          options?.onSubagentUpdate?.(task.groupId, {
-            agent: task.agent,
-            title: group?.taskPrompt ?? undefined,
-            status: "failed",
-            finishedAt: Date.now(),
-            lastCommand: `retry dispatch threw: ${errMsg}`,
+        },
+        sleep,
+        onRateLimitNotice: async (notice) => {
+          const retryMessage = `${notice.message} ${notice.error ?? ""}`.trim()
+          emitWorkflowUpdate(retryMessage, {
+            status: "retrying",
+            activeWave: waveIndex,
+            heartbeatCount: waveHeartbeatCount,
+            dispatchedGroups: readyGroupIds,
+            completedGroups: allResults.length,
+            elapsedSeconds: Math.round((Date.now() - Date.parse(dispatchStartedAt)) / 1000),
           })
-          await updateGroupLedger(runId, group?.id ?? task.groupId, {
-            status: "failed",
-            error: `Retry dispatch threw: ${errMsg}`,
-            failureKind: "blocker",
-            retryCount: 1,
-          }, cwd).catch(() => {})
-        }
-        // Fall through to blocker check below
-        retryDispatchResult = { ok: false, results: [] }
+          options?.onRateLimitNotice?.(retryMessage)
+          options?.onSubagentUpdate?.(notice.groupId, {
+            agent: notice.task.agent,
+            title: runPlan.groups[groupIdToTaskIndex.get(notice.groupId) ?? 0]?.taskPrompt ?? undefined,
+            model: implementModel.model ?? "unavailable",
+            thinking: implementModel.thinking ?? "unavailable",
+            status: "running",
+            lastCommand: retryMessage,
+          })
+          markGroupProgress(notice.groupId, {
+            status: "retrying",
+            agent: notice.task.agent,
+            model: implementModel.model ?? "unavailable",
+            thinking: implementModel.thinking ?? "unavailable",
+            lastCommand: retryMessage,
+            lastProgressAt: new Date().toISOString(),
+            retryCount: notice.attempt,
+            rateLimitRetryCount: notice.attempt,
+            failureKind: "retryable",
+          })
+          await flushLiveProgress(true)
+        },
+      })
+    } finally {
+      clearInterval(waveHeartbeat)
+      waveHeartbeat = undefined
+      await flushLiveProgress(true)
+    }
+
+    // Process wave results
+    const waveElapsed = Math.round((Date.now() - dispatchStartMs) / 1000)
+    emitWorkflowUpdate(`Wave ${waveIndex} completed in ${waveElapsed}s: ${dispatchResult.results.filter(r => r.ok).length} succeeded, ${dispatchResult.results.filter(r => !r.ok).length} failed`, {
+      activeWave: waveIndex,
+      completedGroups: allResults.length,
+      elapsedSeconds: Math.round((Date.now() - Date.parse(dispatchStartedAt)) / 1000),
+    })
+
+    for (let i = 0; i < dispatchResult.results.length; i++) {
+      const r = dispatchResult.results[i]!
+      const gid = readyGroupIds[i]
+      const idx = waveTaskIndices[i]
+      const group = runPlan.groups[idx]
+      if (!gid || idx === undefined) continue
+
+      const verification = normalizeDispatchVerification(r.verification)
+      const existingEvidence = await readExistingWorkerEvidence(gid)
+      const rawOutput = (!r.rawOutput || !r.rawOutput.trim()) && r.outputPath
+        ? await fs.readFile(r.outputPath, "utf-8").catch(() => r.rawOutput)
+        : (r.rawOutput?.trim() ? r.rawOutput : existingEvidence.content)
+      const acceptedNoop = acceptImplementationNoopResult({
+        ok: r.ok,
+        error: r.error,
+        rawOutput,
+        verification,
+      })
+      const acceptedExistingEvidence = acceptAlreadyImplementedEvidenceResult({
+        ok: r.ok,
+        error: r.error,
+        rawOutput,
+        verification,
+      })
+      const acceptedResult = acceptedNoop.accepted ? acceptedNoop : acceptedExistingEvidence
+      const effectiveVerification = acceptedResult.accepted && verification?.status === "fail"
+        ? {
+            ...verification,
+            status: "pass" as const,
+            output: verification.output ?? acceptedResult.reason,
+          }
+        : verification
+      const resultForWorkflow = acceptedResult.accepted
+        ? {
+            ...r,
+            ok: true,
+            error: undefined,
+            patchPath: undefined,
+            worktreePath: undefined,
+            changedFiles: group?.files ?? r.changedFiles,
+            verification: effectiveVerification,
+          }
+        : r
+      const dispatchFailed = !resultForWorkflow.ok || (effectiveVerification?.status === "fail" && !acceptedResult.accepted)
+      const rateLimitRetryCount = dispatchResult.retryCounts?.[gid] ?? 0
+      allResults.push({ groupId: gid, result: resultForWorkflow, index: idx })
+
+      if (!dispatchFailed) {
+        const successMessage = acceptedResult.accepted
+          ? (acceptedResult.reason ?? "implementation already present; verification passed")
+          : effectiveVerification?.status === "pass"
+            ? "agent complete; scoped verification passed"
+            : "agent complete; scoped verification deferred to final verification"
+        options?.onSubagentUpdate?.(gid, {
+          agent: resultForWorkflow.agent ?? tasks[idx]?.agent,
+          title: group?.taskPrompt ?? undefined,
+          status: "completed",
+          finishedAt: Date.now(),
+          lastCommand: successMessage,
+        })
+        await updateGroupLedger(runId, gid, {
+          status: acceptedResult.accepted ? "applied" : "succeeded",
+          appliedToPrimary: acceptedResult.accepted ? true : undefined,
+          agent: resultForWorkflow.agent ?? "zflow.implement-routine",
+          error: undefined,
+          failureKind: undefined,
+          patchPath: acceptedResult.accepted ? undefined : resultForWorkflow.patchPath,
+          implementationEvidencePath: acceptedResult.accepted ? (r.outputPath ?? existingEvidence.path) : undefined,
+          completionMode: acceptedResult.accepted ? (acceptedNoop.accepted ? "noop-evidence" : "worker-evidence") : (resultForWorkflow.patchPath ? "patch" : undefined),
+          changedFiles: resultForWorkflow.changedFiles ?? group?.files,
+          scopedVerification: effectiveVerification,
+          retryCount: rateLimitRetryCount,
+          rateLimitRetryCount,
+          lastCommand: successMessage,
+          lastProgressAt: new Date().toISOString(),
+        }, cwd).catch(() => {})
+        continue
       }
 
-      // ── Phase 3: map retry results back to original indices.
-      // Guard against result/expectation length mismatches — if the backend
-      // returned fewer results than tasks (e.g. internal error), mark every
-      // unmapped retry as a blocker so it doesn't silently hang.
-      const mappedSet = new Set<number>()
-      for (let rIdx = 0; rIdx < retryDispatchResult.results.length; rIdx++) {
-        const originalIdx = retryIndices[rIdx]
-        const decisionIdx = retryDecisionIndices[rIdx]
-        if (originalIdx === undefined || decisionIdx === undefined) continue
-        mappedSet.add(rIdx)
-        const group = runPlan.groups[originalIdx]
-        const task = runPlan.tasks[originalIdx]!
-        const rResult = retryDispatchResult.results[rIdx]!
-        const mappedResult: DispatchGroupResult = {
-          ...rResult,
-          agent: rResult.agent ?? task.agent,
-        }
-        allResults[originalIdx] = mappedResult
+      const currentFixAttempts = (await readRun(runId, cwd).catch(() => null))
+        ?.metadata?.[GROUP_LEDGER_META_KEY]?.[gid]?.fixAttempts ?? 0
 
-        if (rResult.ok) {
-          decisions[decisionIdx] = { ...decisions[decisionIdx]!, decision: "retry", reason: "Retry succeeded." }
-          options?.onSubagentUpdate?.(task.groupId, {
-            agent: rResult.agent ?? task.agent,
-            title: group?.taskPrompt ?? undefined,
+      const fixShouldRun = currentFixAttempts < MAX_FIX_ATTEMPTS_PER_GROUP &&
+        group && group.files && group.files.length > 0
+
+      if (fixShouldRun) {
+        emitWorkflowUpdate(`Attempting fix for ${gid} (attempt ${currentFixAttempts + 1}/${MAX_FIX_ATTEMPTS_PER_GROUP})`)
+        await updateGroupLedger(runId, gid, {
+          status: "retrying",
+          fixAttempts: currentFixAttempts + 1,
+        }, cwd).catch(() => {})
+
+        const fixResult = await attemptGroupFix(
+          gid,
+          group?.taskPrompt ?? "",
+          group?.files ?? [],
+          r.agent ?? "zflow.implement-routine",
+          verification ? { ...r, verification } : r,
+          dispatchService,
+          {
+            runId,
+            cwd,
+            repoRoot,
+            changeId,
+            planVersion,
+            worktreeResultsDir,
+            worktreeSetupHook: worktreeSetupResolution.hook,
+            onSubagentUpdate: options?.onSubagentUpdate,
+            onWorkflowUpdate: options?.onWorkflowUpdate,
+            implementModel,
+          },
+        )
+
+        if (fixResult.fixed) {
+          const mergedResult = mergeSuccessfulFixResult(r, fixResult.dispatchResult)
+          const mergedVerification = normalizeDispatchVerification(mergedResult.verification)
+          const resultEntry = allResults.find((entry) => entry.groupId === gid)
+          if (resultEntry) {
+            resultEntry.result = mergedResult
+          }
+          options?.onSubagentUpdate?.(gid, {
+            agent: mergedResult.agent ?? tasks[idx]?.agent,
+            title: `fix: ${gid} (attempt ${currentFixAttempts + 1})`,
             status: "completed",
             finishedAt: Date.now(),
-            lastCommand: "agent complete; scoped verification deferred to final verification",
+            lastCommand: `fix succeeded${fixResult.fixPatchPath ? `; fix patch: ${fixResult.fixPatchPath}` : ""}`,
           })
-          // Update ledger: retry succeeded
-          await updateGroupLedger(runId, group?.id ?? task.groupId, {
+          await updateGroupLedger(runId, gid, {
             status: "succeeded",
-            agent: rResult.agent ?? task.agent,
+            agent: mergedResult.agent ?? "zflow.implement-routine",
             error: undefined,
             failureKind: undefined,
+            patchPath: fixResult.fixPatchPath ?? mergedResult.patchPath,
+            changedFiles: mergedResult.changedFiles ?? group?.files,
+            scopedVerification: mergedVerification
+              ? {
+                  ...mergedVerification,
+                  outputPath: fixResult.verificationOutputPath,
+                }
+              : undefined,
+            fixResult: "succeeded",
+            fixClassification: fixResult.fixClassification,
+            fixPatchPath: fixResult.fixPatchPath,
           }, cwd).catch(() => {})
-        } else {
-          decisions[decisionIdx] = classifyFailedGroup(group?.id ?? `group-${originalIdx}`, mappedResult, 1, IMPLEMENT_GROUP_MAX_RETRIES)
-          options?.onSubagentUpdate?.(task.groupId, {
-            agent: rResult.agent ?? task.agent,
-            title: group?.taskPrompt ?? undefined,
-            status: "failed",
-            finishedAt: Date.now(),
-            lastCommand: rResult.error ?? "retry failed",
-          })
-          // Update ledger: retry failed
-          await updateGroupLedger(runId, group?.id ?? task.groupId, {
-            status: "failed",
-            error: rResult.error ?? "retry failed",
-            failureKind: "blocker",
-            retryCount: 1,
-          }, cwd).catch(() => {})
+          continue
         }
+
+        emitWorkflowUpdate(`Fix attempt ${currentFixAttempts + 1} for ${gid} failed: ${fixResult.error ?? "unknown fix failure"}`)
       }
 
-      // Mark any retries that weren't mapped (backend returned fewer results)
-      for (let rIdx = 0; rIdx < retryIndices.length; rIdx++) {
-        if (mappedSet.has(rIdx)) continue
-        const originalIdx = retryIndices[rIdx]!
-        const decisionIdx = retryDecisionIndices[rIdx]!
-        const group = runPlan.groups[originalIdx]
-        const task = runPlan.tasks[originalIdx]!
-        decisions[decisionIdx] = {
-          ...decisions[decisionIdx]!,
-          decision: "blocker",
-          reason: `Retry produced no result for ${group?.id ?? `group-${originalIdx}`} — backend may have crashed`,
-        }
-        options?.onSubagentUpdate?.(task.groupId, {
-          agent: task.agent,
-          title: group?.taskPrompt ?? undefined,
-          status: "failed",
-          finishedAt: Date.now(),
-          lastCommand: "retry produced no result — backend may have crashed",
-        })
-        await updateGroupLedger(runId, group?.id ?? task.groupId, {
-          status: "failed",
-          error: "Retry produced no result — backend may have crashed",
-          failureKind: "blocker",
-          retryCount: 1,
-        }, cwd).catch(() => {})
+      const failureReason = verification?.status === "fail"
+        ? `${gid}: scoped verification failed`
+        : r.error ?? "Group dispatch failed"
+      const failureKind = isRateLimitDispatchError(failureReason) ? "retryable" : "blocker"
+      decisions.push({
+        groupId: gid,
+        agent: r.agent ?? "zflow.implement-routine",
+        attempt: currentFixAttempts,
+        decision: "blocker",
+        reason: failureReason,
+        error: failureReason,
+      })
+      options?.onSubagentUpdate?.(tasks[idx]?.groupId ?? gid, {
+        agent: r.agent ?? tasks[idx]?.agent,
+        title: group?.taskPrompt ?? undefined,
+        status: "failed",
+        finishedAt: Date.now(),
+        lastCommand: failureReason,
+      })
+      await updateGroupLedger(runId, gid, {
+        status: "failed",
+        error: failureReason,
+        failureKind,
+        scopedVerification: verification,
+        fixAttempts: currentFixAttempts,
+        fixResult: fixShouldRun ? "failed" : undefined,
+        retryCount: rateLimitRetryCount,
+        rateLimitRetryCount,
+        lastCommand: failureReason,
+        lastProgressAt: new Date().toISOString(),
+      }, cwd).catch(() => {})
+      await markDependentsBlocked(gid)
+    }
+  }
+
+  emitWorkflowUpdate(`All waves complete. ${allResults.filter(r => r.result.ok).length}/${allGroupIds.length} groups succeeded. Checking for blockers...`, {
+    activeWave: waveIndex,
+    completedGroups: allResults.filter((entry) => entry.result.ok).length,
+    elapsedSeconds: Math.round((Date.now() - Date.parse(dispatchStartedAt)) / 1000),
+  })
+
+  // ── Check for blocked/failed groups after all waves ─────────
+  const finalRun = await readRun(runId, cwd).catch(() => null)
+  const finalLedger = (finalRun?.metadata?.[GROUP_LEDGER_META_KEY] ?? {}) as Record<string, GroupStatusEntry>
+  const finalBlocked = Object.values(finalLedger).filter(e => e.status === "blocked")
+  const finalFailed = Object.values(finalLedger).filter(e => e.status === "failed")
+
+  // ── Store verification output files for all groups ──────────
+  for (const entry of allResults) {
+    if (entry.result.verification?.output) {
+      const verPath = path.join(worktreeResultsDir, `${entry.groupId}-verification.txt`)
+      try {
+        await fs.writeFile(verPath, entry.result.verification.output, "utf-8")
+      } catch {
+        // Best-effort
       }
     }
   }
 
-  const blockers = decisions.filter((d) => d.decision === "blocker")
-  if (blockers.length > 0) {
+  // If there are blockers, write failure report and throw
+  if (finalFailed.length > 0 || finalBlocked.length > 0) {
+    markDispatchProgress({
+      status: "failed",
+      completedGroups: allResults.filter((entry) => entry.result.ok).length,
+      elapsedSeconds: Math.round((Date.now() - Date.parse(dispatchStartedAt)) / 1000),
+    })
+    await flushLiveProgress(true)
     const reportPath = path.join(worktreeResultsDir, "failure-report.json")
-    await fs.writeFile(reportPath, JSON.stringify({ decisions, allResults: allResults.map(r => ({ agent: r.agent, ok: r.ok, error: r.error })) }, null, 2))
+    await fs.writeFile(reportPath, JSON.stringify({
+      decisions,
+      allResults: allResults.map(r => ({
+        agent: r.result.agent,
+        ok: r.result.ok,
+        error: r.result.error,
+        verificationCommand: r.result.verification?.command,
+        verificationOutputPath: r.result.verification?.output
+          ? path.join(worktreeResultsDir, `${r.groupId}-verification.txt`)
+          : undefined,
+        verificationExitCode: r.result.verification?.status === "fail" ? 1 : r.result.verification?.status === "pass" ? 0 : undefined,
+      })),
+      blockedGroups: finalBlocked.map(g => ({ groupId: g.groupId, blockedBy: g.blockedBy })),
+    }, null, 2))
 
-    // ── Write group-status-summary and update phase to partial ──
-    // Even though some groups failed, preserve succeeded group data
-    // so the user can resume or apply successful groups independently.
     const summaryPath = await writeGroupStatusSummary(runId, changeId, cwd).catch(() => reportPath)
     await updateRun(runId, {
       phase: "partial",
       metadata: {
-        ...((await readRun(runId, cwd)).metadata ?? {}),
-        partialRunNote: `${blockers.length} group(s) failed. Successful groups preserved. Use --resume to retry failed groups or --apply-successful to apply successful groups.`,
+        ...(finalRun?.metadata ?? {}),
+        partialRunNote: `${finalFailed.length} group(s) failed, ${finalBlocked.length} group(s) blocked. Successful groups preserved.`,
         groupStatusSummaryPath: summaryPath,
       },
     } as any, cwd)
 
+    const errorParts: string[] = []
+    if (finalFailed.length > 0) {
+      errorParts.push(`${finalFailed.length} group(s) failed: ${finalFailed.map(g => `${g.groupId}: ${g.error ?? "unknown"}`).join("; ")}`)
+    }
+    if (finalBlocked.length > 0) {
+      errorParts.push(`${finalBlocked.length} group(s) blocked by failed dependencies: ${finalBlocked.map(g => `${g.groupId} (blocked by ${g.blockedBy?.join(", ") ?? "unknown"})`).join("; ")}`)
+    }
+
     await recordDispatchFailurePolicy(runId, cwd, decisions, reportPath, "partial")
     throw new Error(
-      `${blockers.length} group(s) could not be dispatched after ${IMPLEMENT_GROUP_MAX_RETRIES} retry: ` +
-      blockers.map((d) => `${d.groupId}: ${d.reason}`).join("; ") +
+      `Implementation dispatch failed:\n` +
+      errorParts.join("\n") +
       `\nFailure report: ${reportPath}` +
       `\nGroup status summary: ${summaryPath}`,
     )
   }
 
-  options?.onWorkflowUpdate?.("All subagents finished; collecting worker results. Scoped verification is deferred to the final verification phase.")
+  // ── All groups succeeded — collect worktree results ────────
+  emitWorkflowUpdate("All subagents finished; collecting worker results. Scoped verification is deferred to the final verification phase.", {
+    status: "running",
+  })
 
   // Collect group results from dispatch outputs
   const groupResults = []
@@ -3316,85 +3269,159 @@ async function runWorktreeDispatchAndFinalize(
   const patchesDir = path.join(runDir, "patches")
   await fs.mkdir(patchesDir, { recursive: true })
 
-  for (let idx = 0; idx < allResults.length; idx++) {
-    const r = allResults[idx]!
-    const group = runPlan.groups[idx]
+  for (const entry of allResults) {
+    const { result: r, index: idx, groupId } = entry
+    const group = runPlan.groups.find(g => g.id === groupId)
     if (!group) continue
 
     if (!r.ok) {
       continue
     }
 
-    const verification = normalizeDispatchVerification(r.verification)
+    let resultToCapture = r
+    let verification = normalizeDispatchVerification(resultToCapture.verification)
 
-    // If the bridge explicitly reported failed scoped verification, fail the group.
+    // If the bridge explicitly reported failed scoped verification, attempt fix loop.
     // Missing verification (bridge no longer runs it) = deferred to final verification, not a blocker.
     if (verification && verification.status === "fail") {
-      const failure = `${group.id}: scoped verification failed`
-      postDispatchFailures.push(failure)
-      options?.onSubagentUpdate?.(group.id, {
-        status: "failed",
-        finishedAt: Date.now(),
-        lastCommand: failure,
-      })
-      await updateGroupLedger(runId, group.id, {
-        status: "failed",
-        error: failure,
-        failureKind: "blocker",
-        scopedVerification: verification,
-      }, cwd).catch(() => {})
-      continue
+      const currentFixAttempts = (await readRun(runId, cwd).catch(() => null))
+        ?.metadata?.[GROUP_LEDGER_META_KEY]?.[group.id]?.fixAttempts ?? 0
+
+      const fixShouldRun = currentFixAttempts < MAX_FIX_ATTEMPTS_PER_GROUP
+      if (fixShouldRun) {
+        emitWorkflowUpdate(`Attempting fix for ${group.id} (attempt ${currentFixAttempts + 1}/${MAX_FIX_ATTEMPTS_PER_GROUP})`)
+        await updateGroupLedger(runId, group.id, {
+          status: "retrying",
+          fixAttempts: currentFixAttempts + 1,
+        }, cwd).catch(() => {})
+
+        const fixResult = await attemptGroupFix(
+          group.id,
+          group?.taskPrompt ?? "",
+          group?.files ?? [],
+          resultToCapture.agent ?? "zflow.implement-routine",
+          resultToCapture,
+          dispatchService,
+          {
+            runId,
+            cwd,
+            repoRoot,
+            changeId,
+            planVersion,
+            worktreeResultsDir,
+            worktreeSetupHook: worktreeSetupResolution.hook,
+            onSubagentUpdate: options?.onSubagentUpdate,
+            onWorkflowUpdate: options?.onWorkflowUpdate,
+            implementModel,
+          },
+        )
+
+        if (fixResult.fixed) {
+          resultToCapture = mergeSuccessfulFixResult(resultToCapture, fixResult.dispatchResult)
+          verification = normalizeDispatchVerification(resultToCapture.verification)
+          options?.onSubagentUpdate?.(group.id, {
+            agent: resultToCapture.agent ?? tasks[idx]?.agent,
+            title: `fix: ${group.id} (attempt ${currentFixAttempts + 1})`,
+            status: "completed",
+            finishedAt: Date.now(),
+            lastCommand: "fix succeeded via post-dispatch fix",
+          })
+          await updateGroupLedger(runId, group.id, {
+            status: "succeeded",
+            agent: resultToCapture.agent ?? "zflow.implement-routine",
+            error: undefined,
+            failureKind: undefined,
+            patchPath: fixResult.fixPatchPath ?? resultToCapture.patchPath,
+            changedFiles: resultToCapture.changedFiles ?? group.files,
+            scopedVerification: verification
+              ? {
+                  ...verification,
+                  outputPath: fixResult.verificationOutputPath,
+                }
+              : undefined,
+            fixResult: "succeeded",
+            fixClassification: fixResult.fixClassification,
+            fixPatchPath: fixResult.fixPatchPath,
+          }, cwd).catch(() => {})
+        } else {
+          emitWorkflowUpdate(`Fix attempt ${currentFixAttempts + 1} for ${group.id} failed: ${fixResult.error ?? "unknown"}`)
+        }
+      }
+
+      if (verification?.status === "fail") {
+        const failure = `${group.id}: scoped verification failed`
+        postDispatchFailures.push(failure)
+        options?.onSubagentUpdate?.(group.id, {
+          status: "failed",
+          finishedAt: Date.now(),
+          lastCommand: failure,
+        })
+        await updateGroupLedger(runId, group.id, {
+          status: "failed",
+          error: failure,
+          failureKind: "blocker",
+          scopedVerification: verification,
+          fixAttempts: currentFixAttempts,
+          fixResult: currentFixAttempts > 0 ? "failed" : undefined,
+        }, cwd).catch(() => {})
+        continue
+      }
     }
 
-    // When the bridge does not provide verification (undefined), treat as
-    // "skipped — deferred to final verification" so group capture/apply-back
-    // can still proceed.
     const scopedVerification = verification ?? {
       status: "skipped" as const,
       command: undefined,
       output: "Scoped verification deferred to the final verification phase.",
     }
 
-    if (r.worktreePath) {
+    if (resultToCapture.worktreePath) {
       groupResults.push(await captureGroupResult({
         groupId: group.id,
         agent: tasks[idx]?.agent ?? group.agent ?? "unknown",
-        worktreePath: r.worktreePath,
+        worktreePath: resultToCapture.worktreePath,
         runId,
         repoRoot,
+        baseCommit: resultToCapture.baseCommit,
+        headCommit: resultToCapture.headCommit,
         scopedFiles: group.files,
         verification: scopedVerification,
         cwd,
       }))
-      // Update ledger: capture patch/changedFiles data
       await updateGroupLedger(runId, group.id, {
-        worktreePath: r.worktreePath,
-        changedFiles: r.changedFiles ?? group.files,
+        worktreePath: resultToCapture.worktreePath,
+        changedFiles: resultToCapture.changedFiles ?? group.files,
         scopedVerification,
       }, cwd).catch(() => {})
       continue
     }
 
-    if (r.patchPath) {
+    if (resultToCapture.verification?.output) {
+      const verPath = path.join(worktreeResultsDir, `${group.id}-verification.txt`)
+      await fs.writeFile(verPath, resultToCapture.verification.output, "utf-8").catch(() => {})
+      scopedVerification.outputPath = verPath
+    }
+
+    if (resultToCapture.patchPath) {
       const destPatchPath = path.join(patchesDir, `${group.id}.patch`)
-      if (path.resolve(r.patchPath) !== path.resolve(destPatchPath)) {
-        await fs.copyFile(r.patchPath, destPatchPath)
+      if (path.resolve(resultToCapture.patchPath) !== path.resolve(destPatchPath)) {
+        await fs.copyFile(resultToCapture.patchPath, destPatchPath)
       }
 
       const run = await readRun(runId, cwd)
       const groupMeta = {
         groupId: group.id,
         agent: tasks[idx]?.agent ?? group.agent ?? "unknown",
-        worktreePath: r.worktreePath ?? "(provided patch)",
-        baseCommit: run.head,
-        headCommit: run.head,
-        changedFiles: r.changedFiles ?? group.files,
+        worktreePath: resultToCapture.worktreePath ?? "(provided patch)",
+        baseCommit: resultToCapture.baseCommit ?? run.head,
+        headCommit: resultToCapture.headCommit ?? run.head,
+        changedFiles: resultToCapture.changedFiles ?? group.files,
         uncommittedChanges: [],
         patchPath: destPatchPath,
         scopedVerification: {
           status: scopedVerification.status,
           command: scopedVerification.command,
           output: scopedVerification.output,
+          outputPath: scopedVerification.outputPath,
         },
         retained: false,
       }
@@ -3414,34 +3441,29 @@ async function runWorktreeDispatchAndFinalize(
         verification: scopedVerification,
         retained: false,
       })
-      // Update ledger: capture patch/changedFiles data
       await updateGroupLedger(runId, group.id, {
         patchPath: destPatchPath,
-        changedFiles: r.changedFiles ?? group.files,
+        changedFiles: resultToCapture.changedFiles ?? group.files,
         scopedVerification,
       }, cwd).catch(() => {})
       continue
     }
 
-    // Fallback: dispatch ran without worktree isolation (e.g. because the
-    // backend's worktree path is broken). The agent made changes directly in
-    // the working directory. Record the group as completed in-place — the
-    // apply-back step will skip it (no patch file to apply) and verification
-    // will run against the working directory.
     const run = await readRun(runId, cwd)
     const groupMeta = {
       groupId: group.id,
       agent: tasks[idx]?.agent ?? group.agent ?? "unknown",
       worktreePath: "(in-place — no worktree isolation)",
-      baseCommit: run.head,
-      headCommit: run.head,
-      changedFiles: r.changedFiles ?? group.files,
+      baseCommit: resultToCapture.baseCommit ?? run.head,
+      headCommit: resultToCapture.headCommit ?? run.head,
+      changedFiles: resultToCapture.changedFiles ?? group.files,
       uncommittedChanges: [],
       patchPath: undefined as string | undefined,
       scopedVerification: {
         status: scopedVerification.status,
         command: scopedVerification.command,
         output: scopedVerification.output,
+        outputPath: scopedVerification.outputPath,
       },
       retained: false,
     }
@@ -3449,9 +3471,8 @@ async function runWorktreeDispatchAndFinalize(
     if (existingIndex >= 0) run.groups[existingIndex] = groupMeta
     else run.groups.push(groupMeta)
     await updateRun(runId, { groups: run.groups }, cwd)
-    // Update ledger: capture changedFiles data for fallback path
     await updateGroupLedger(runId, group.id, {
-      changedFiles: r.changedFiles ?? group.files,
+      changedFiles: resultToCapture.changedFiles ?? group.files,
       scopedVerification,
     }, cwd).catch(() => {})
     groupResults.push({
@@ -3497,7 +3518,9 @@ async function runWorktreeDispatchAndFinalize(
     )
   }
 
-  options?.onWorkflowUpdate?.("Applying completed group patches back to the primary worktree")
+  emitWorkflowUpdate("Applying completed group patches back to the primary worktree", {
+    status: "running",
+  })
 
   // Finalize: apply patches back, check deviations
   await finalizeWorktreeImplementationRun(
@@ -3527,11 +3550,22 @@ async function runWorktreeDispatchAndFinalize(
   }
   await writeGroupStatusSummary(runId, changeId, cwd).catch(() => "")
 
-  options?.onWorkflowUpdate?.("Apply-back complete; dispatch artifacts are ready for final verification")
+  emitWorkflowUpdate("Apply-back complete; dispatch artifacts are ready for final verification", {
+    status: "completed",
+    completedGroups: allGroupIds.length,
+    elapsedSeconds: Math.round((Date.now() - Date.parse(dispatchStartedAt)) / 1000),
+  })
+
+  markDispatchProgress({
+    status: "completed",
+    completedGroups: allGroupIds.length,
+    elapsedSeconds: Math.round((Date.now() - Date.parse(dispatchStartedAt)) / 1000),
+  })
+  await flushLiveProgress(true)
 
   console.info(
     `[zflow] Worktree dispatch completed via "${dispatchService.name}". ` +
-    `${dispatchResult.results.filter(r => r.ok).length}/${dispatchResult.results.length} groups succeeded.`,
+    `${allResults.filter(r => r.result.ok).length}/${allGroupIds.length} groups succeeded.`,
   )
 }
 
@@ -4817,6 +4851,10 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
   pi.on("tool_call", async (event, ctx) => {
     const { isToolCallEventType } = await import("@earendil-works/pi-coding-agent")
 
+    if (!isWorkflowToolGuardActive()) {
+      return {}
+    }
+
     // ── Guard "write" and "edit" tool calls ───────────────────
     if (isToolCallEventType("write", event) || isToolCallEventType("edit", event)) {
       // Determine the target path from the tool input
@@ -4842,9 +4880,12 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         // Not in a git repo — use cwd as project root
       }
 
+      const { loadRepoZflowConfig } = await import("./repo-config.js")
+      const repoConfig = await loadRepoZflowConfig(projectRoot)
       const options: GuardOptions = {
         projectRoot,
         runtimeStateDir: resolveRuntimeStateDir(process.cwd()),
+        bashPolicy: repoConfig.config.bashGuard,
       }
 
       const result = guardWrite(targetPath, { ...options, intent: currentGuardIntent })
@@ -4872,9 +4913,12 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         // Not in a git repo — use cwd as project root
       }
 
+      const { loadRepoZflowConfig } = await import("./repo-config.js")
+      const repoConfig = await loadRepoZflowConfig(projectRoot)
       const options: GuardOptions = {
         projectRoot,
         runtimeStateDir: resolveRuntimeStateDir(process.cwd()),
+        bashPolicy: repoConfig.config.bashGuard,
       }
 
       const result = guardBashCommand(command, { ...options, intent: currentGuardIntent })
@@ -5026,6 +5070,155 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
     },
   })
 
+  // ── Command: /zflow-change-plan ───────────────────────────────
+
+  pi.registerCommand("zflow-change-plan", {
+    description: "Create or update the durable plan.md entrypoint for a change",
+    handler: async (args: string, ctx: InterviewableContext): Promise<void> => {
+      let parsedArgs = parseChangePlanArgs(args)
+      let changeDescription = parsedArgs.explicitReference
+        ? parsedArgs.notes.trim()
+        : (parsedArgs.notes || parsedArgs.changeSeed).trim()
+
+      if (!parsedArgs.changeSeed || !changeDescription) {
+        const prompted = await promptForChangePlanInput(ctx)
+        if (!prompted?.changeDescription) {
+          ctx.ui.notify(
+            "Usage: /zflow-change-plan <description|change-id|path> [-- notes]",
+            "warning",
+          )
+          return
+        }
+
+        if (prompted.preferredChangeId) {
+          parsedArgs = {
+            changeSeed: prompted.preferredChangeId,
+            notes: prompted.changeDescription,
+            explicitReference: true,
+          }
+        } else if (parsedArgs.explicitReference && parsedArgs.changeSeed) {
+          parsedArgs = {
+            changeSeed: parsedArgs.changeSeed,
+            notes: prompted.changeDescription,
+            explicitReference: true,
+          }
+        } else {
+          parsedArgs = {
+            changeSeed: prompted.changeDescription,
+            notes: prompted.changeDescription,
+            explicitReference: false,
+          }
+        }
+        changeDescription = prompted.changeDescription
+      }
+
+      const referencedPath = parsedArgs.explicitReference
+        ? parsedArgs.changeSeed
+        : extractChangePlanReference(changeDescription)
+
+      const progress = createWorkflowProgressIndicator(pi, ctx, parsedArgs.changeSeed, {
+        command: "zflow-change-plan",
+        initialMessage: "Collecting change context and drafting a detailed durable plan.md",
+      })
+
+      try {
+        progress.updatePhaseCard(
+          "resolve-change-plan-input",
+          "Resolve change input",
+          "Deriving durable change id from command input",
+          "running",
+        )
+
+        const changeId = deriveChangePlanId(parsedArgs.changeSeed, parsedArgs.explicitReference)
+        if (!changeId) {
+          progress.updatePhaseCard(
+            "resolve-change-plan-input",
+            "Resolve change input",
+            `Could not derive a semantic changeId from: ${parsedArgs.changeSeed}`,
+            "failed",
+          )
+          progress.stop("zflow-change-plan failed", "failed")
+          ctx.ui.notify(
+            `Could not derive a semantic changeId from: ${parsedArgs.changeSeed}`,
+            "warning",
+          )
+          return
+        }
+
+        progress.updatePhaseCard(
+          "resolve-change-plan-input",
+          "Resolve change input",
+          `Derived changeId: ${changeId}`,
+          "completed",
+        )
+        progress.updatePhaseCard(
+          "draft-durable-plan",
+          "Draft durable plan",
+          `Building detailed docs/zflow-changes/${changeId}/plan.md`,
+          "running",
+        )
+
+        const result = await runChangePlanWorkflow({
+          cwd: ctx.cwd,
+          changeId,
+          changeSeed: parsedArgs.changeSeed,
+          changeDescription,
+          changeReferencePath: referencedPath ?? undefined,
+          explicitReference: parsedArgs.explicitReference,
+          sourceMode: referencedPath && isRuneContextReference(referencedPath)
+            ? "runecontext"
+            : "adhoc",
+          onProgress: (message) => progress.update(message),
+          onAgentProgress: (agentProgress) => {
+            progress.updateSubagent("change-plan-drafter", {
+              agent: "planner",
+              title: "Draft durable plan.md",
+              status: "running",
+              lastCommand: agentProgress.currentTool
+                ? `${agentProgress.currentTool}${agentProgress.currentToolArgs ? ` ${agentProgress.currentToolArgs}` : ""}`
+                : agentProgress.recentTools?.at(-1)?.tool,
+            })
+            progress.update(`planner: ${agentProgress.status ?? "running"}`)
+          },
+        })
+
+        progress.updateSubagent("change-plan-drafter", {
+          agent: "planner",
+          title: "Draft durable plan.md",
+          status: "completed",
+        })
+        progress.updatePhaseCard(
+          "draft-durable-plan",
+          "Draft durable plan",
+          `${result.existingPlanUpdated ? "Updated" : "Created"} ${result.planDocPath}`,
+          "completed",
+        )
+        progress.stop("zflow-change-plan finished", "completed")
+
+        ctx.ui.notify(
+          `${result.existingPlanUpdated ? "📝 Updated" : "📝 Created"} durable plan entrypoint for \"${changeId}\".`,
+          "info",
+        )
+        ctx.ui.notify(`Plan entrypoint: ${result.planDocPath}`, "info")
+        if (!parsedArgs.explicitReference) {
+          ctx.ui.notify(`Derived changeId: ${changeId}`, "info")
+        }
+        ctx.ui.notify(
+          `Review and refine ${result.planDocPath}, then run /zflow-change-prepare ${changeId} to generate versioned change docs.`,
+          "info",
+        )
+      } catch (error) {
+        progress.updateSubagent("change-plan-drafter", {
+          agent: "planner",
+          title: "Draft durable plan.md",
+          status: "failed",
+        })
+        progress.stop("zflow-change-plan failed", "failed")
+        throw error
+      }
+    },
+  })
+
   // ── Command: /zflow-change-prepare ────────────────────────────
 
   pi.registerCommand("zflow-change-prepare", {
@@ -5034,7 +5227,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       const parsedArgs = parseChangePrepareArgs(args)
       const changePath = parsedArgs.changePath
       if (!changePath) {
-        ctx.ui.notify("Usage: /zflow-change-prepare <change-path>", "warning")
+        ctx.ui.notify("Usage: /zflow-change-prepare <change-id|change-folder|plan-file>", "warning")
         return
       }
 
@@ -5069,6 +5262,13 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       }
 
       const workflowModel = await resolveWorkflowModel("zflow.planner-frontier")
+      const profileResolutionOptions: PrepareWorkflowOptions["profileResolutionOptions"] = {
+        repoRoot: ctx.cwd,
+      }
+      if (ctx.modelRegistry) {
+        const { createPiModelRegistryAdapter } = await import("pi-zflow-profiles")
+        profileResolutionOptions.registry = createPiModelRegistryAdapter(ctx.modelRegistry)
+      }
       ctx.ui.notify(`📋 Preparing change plan for "${changePath}"...`)
       const progress = createWorkflowProgressIndicator(pi, ctx, changePath, {
         command: "zflow-change-prepare",
@@ -5085,6 +5285,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           cwd: ctx.cwd,
           forceAdHoc: parsedArgs.forceAdHoc,
           prepareNotes: parsedArgs.notes,
+          profileResolutionOptions,
           onProgress: (message, type) => {
             progress.update(message)
             ctx.ui.notify(message, type)
@@ -5224,6 +5425,19 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           return
         }
 
+        const durableVersions = await listPublishedDurablePlanVersions(result.changeId, { cwd: ctx.cwd })
+        await writeDurablePlanDoc(
+          result.changeId,
+          {
+            status: reviewResult.pass ? "reviewed" : "validated",
+            currentVersion: result.planVersion,
+          },
+          {
+            cwd: ctx.cwd,
+            publishedVersions: durableVersions,
+          },
+        )
+
         ctx.ui.notify(
           `✅ Durable plan artifacts published to: ${publishResult.durableDir}`,
           "info",
@@ -5285,6 +5499,18 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         switch (interviewResult.decision) {
           case "approve": {
             await approvePlanVersion(result.changeId, result.planVersion, ctx.cwd)
+            await writeDurablePlanDoc(
+              result.changeId,
+              {
+                status: "approved",
+                currentVersion: result.planVersion,
+                approvedVersion: result.planVersion,
+              },
+              {
+                cwd: ctx.cwd,
+                publishedVersions: await listPublishedDurablePlanVersions(result.changeId, { cwd: ctx.cwd }),
+              },
+            )
             ctx.ui.notify(
               `✅ Plan "${result.changeId}" version ${result.planVersion} approved.`,
               "info",
@@ -5307,6 +5533,17 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           case "revise": {
             await bumpPlanVersion(result.changeId, ctx.cwd)
             await advancePlanLifecycle(result.changeId, "draft", ctx.cwd)
+            await writeDurablePlanDoc(
+              result.changeId,
+              {
+                status: "draft",
+                currentVersion: result.planVersion,
+              },
+              {
+                cwd: ctx.cwd,
+                publishedVersions: await listPublishedDurablePlanVersions(result.changeId, { cwd: ctx.cwd }),
+              },
+            )
             ctx.ui.notify(
               `📝 Revision requested for "${result.changeId}". ` +
               (interviewResult.revisionNotes
@@ -5320,6 +5557,17 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             await updatePlanState(result.changeId, {
               lifecycleState: "cancelled",
             }, ctx.cwd)
+            await writeDurablePlanDoc(
+              result.changeId,
+              {
+                status: "cancelled",
+                currentVersion: result.planVersion,
+              },
+              {
+                cwd: ctx.cwd,
+                publishedVersions: await listPublishedDurablePlanVersions(result.changeId, { cwd: ctx.cwd }),
+              },
+            )
             ctx.ui.notify(
               `🛑 Plan "${result.changeId}" version ${result.planVersion} cancelled by user.`,
               "warning",
@@ -5366,6 +5614,9 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
   pi.registerCommand("zflow-resolve-apply-back", {
     description: "Resolve a failed apply-back using a subagent and preserved integration worktree",
     handler: async (args: string, ctx: InterviewableContext): Promise<void> => {
+      setActiveWorkflowMode("change-implement")
+      const cleanupMode = (): void => { resetWorkflowState() }
+
       const runId = args.trim().split(/\s+/).filter(Boolean)[0]
       if (!runId) {
         ctx.ui?.notify?.(
@@ -5374,6 +5625,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           "and applies the verified consolidated patch to the primary worktree.",
           "warning",
         )
+        cleanupMode()
         return
       }
 
@@ -5404,6 +5656,8 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           `Apply-back subagent resolution failed: ${message}`,
           "error",
         )
+      } finally {
+        cleanupMode()
       }
     },
   })
@@ -5676,7 +5930,10 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
                     cwd: ctx.cwd,
                     force,
                     orchestratorTarget: workflowIntercomTarget,
+                    targetGroupIds: reconciliation.groupsNeedingRerun.map((group) => group.groupId),
+                    onWorkflowUpdate: (message) => implProgress.update(message),
                     onSubagentUpdate: (id, update) => implProgress.updateSubagent(id, update),
+                    onRateLimitNotice: (message) => ctx.ui.notify(message, "warning"),
                   },
                 )
 
@@ -5907,6 +6164,124 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
               implProgress.updatePhaseCard("workflow-complete", finalCardTitle, `Phase: ${postResult.phase}, status: ${postResult.status}`, finalCardStatus)
               implProgress.updatePhaseCard("workflow-complete", finalCardTitle, buildWorkflowFinalNextStepsLine(postResult, changeInput), finalCardStatus)
               implProgress.stop(finalCardTitle)
+            } else if (reconciliation.reviewNeeded) {
+              // ── Review-only continuation ──────────────────────────
+              // Verification is already current — skip directly to code review.
+              // Persist a durable breadcrumb before starting so we don't get
+              // stuck in "executing" if the process exits unexpectedly.
+              try {
+                const { default: startFs } = await import("node:fs/promises")
+                const { readRun, updateRun } = await import("pi-zflow-artifacts")
+                const curRun = await readRun(partialRunId, ctx.cwd)
+                await updateRun(partialRunId, {
+                  metadata: {
+                    ...(curRun.metadata ?? {}),
+                    reviewStartedAt: new Date().toISOString(),
+                  },
+                } as any, ctx.cwd)
+              } catch {
+                // Best-effort — continue anyway
+              }
+
+              const reviewModel = await resolveWorkflowModel("zflow.implement-routine")
+              const reviewProgress = createWorkflowProgressIndicator(pi, ctx, changeInput, {
+                command: "zflow-change-implement",
+                model: reviewModel.model ?? "unavailable",
+                thinking: reviewModel.thinking ?? "unavailable",
+                initialMessage: "Verification is up-to-date. Running code review...",
+                statusId: "zflow-implement",
+                widgetId: "zflow-implement-progress",
+              })
+              const updateReviewCard = (message: string): void => {
+                const normalized = message.toLowerCase()
+                if (normalized.includes("code review passed")) {
+                  reviewProgress.updatePhaseCard("code-review", "Code Review", message, "completed")
+                  reviewProgress.updatePhaseCard("post-code-review", "Post Code Review", "Preparing final workflow completion", "running")
+                  return
+                }
+                if (normalized.includes("code review found") || normalized.includes("review failed")) {
+                  reviewProgress.updatePhaseCard("code-review", "Code Review", message, "failed")
+                  reviewProgress.updatePhaseCard("post-code-review", "Post Code Review", "Review failed; preparing next steps", "failed")
+                  return
+                }
+                if (normalized.includes("persisting completed") || normalized.includes("workflow completion persisted")) {
+                  reviewProgress.updatePhaseCard("post-code-review", "Post Code Review", message, normalized.includes("persisted") ? "completed" : "running")
+                  return
+                }
+                reviewProgress.updatePhaseCard("code-review", "Code Review", message, "running")
+              }
+              updateReviewCard("Starting code review on applied implementation")
+              const onReviewerUpdate = (reviewerUpdate: {
+                reviewerName: string; agentName: string
+                status: "queued" | "running" | "completed" | "failed"
+                model?: string; thinking?: string
+                currentTool?: string; lastCommand?: string
+              }): void => {
+                reviewProgress.updateReviewer(reviewerUpdate.reviewerName, reviewerUpdate)
+              }
+
+              try {
+                const reviewResult = await finalizeCodeReview(partialRunId, ctx.cwd, onReviewerUpdate)
+
+                if (reviewResult.pass) {
+                  updateReviewCard("✅ Code review passed. Completing workflow...")
+                  await completeWorkflow(resumeChangeId, partialRunId, ctx.cwd)
+                  updateReviewCard("Workflow completion persisted")
+                  ctx.ui.notify(
+                    `✅ Workflow completed for change "${resumeChangeId}".`,
+                    "info",
+                  )
+                  reviewProgress.updatePhaseCard("workflow-complete", "Workflow Complete", "Completed", "completed")
+                  reviewProgress.stop("Workflow Complete")
+                } else {
+                  updateReviewCard(`⚠️ Code review found issues`)
+                  const reviewRecoveryLine = reviewResult.infrastructureFailure
+                    ? `  ${reviewResult.recoveryHint ?? "Run /zflow-setup-agents or /zflow-update-agents, then resume the workflow."}`
+                    : "  Use /zflow-change-fix to address findings, then resume."
+                  ctx.ui.notify(
+                    `⚠️ Code review found issues: ${reviewResult.summary}\n` +
+                    (reviewResult.findingsPath
+                      ? `  Review findings: ${reviewResult.findingsPath}\n`
+                      : "") +
+                    reviewRecoveryLine,
+                    "warning",
+                  )
+
+                  // Mark phase as review-failed and keep lifecycle/index in sync
+                  const { setRunPhase } = await import("pi-zflow-artifacts")
+                  await setRunPhase(partialRunId, "review-failed", ctx.cwd).catch(() => {})
+                  try {
+                    const { updateStateIndexEntry, getChangeLifecycle, upsertChangeLifecycle } = await import("pi-zflow-artifacts/state-index")
+                    await updateStateIndexEntry(partialRunId, { status: "review-failed" }, ctx.cwd)
+                    const lifecycle = await getChangeLifecycle(resumeChangeId, ctx.cwd)
+                    if (lifecycle) {
+                      await upsertChangeLifecycle({
+                        ...lifecycle,
+                        lastPhase: "review-failed",
+                      }, ctx.cwd)
+                    }
+                  } catch {
+                    // Best-effort state sync
+                  }
+                  reviewProgress.updatePhaseCard(
+                    "workflow-complete",
+                    "Workflow Needs Attention",
+                    reviewResult.infrastructureFailure
+                      ? "Review infrastructure failed; setup agents/config and resume"
+                      : "Review failed; use /zflow-change-fix",
+                    "failed",
+                  )
+                  reviewProgress.stop("Review found issues")
+                }
+              } catch (err: unknown) {
+                updateReviewCard("Code review encountered an error")
+                ctx.ui.notify(
+                  `Code review failed: ${err instanceof Error ? err.message : String(err)}`,
+                  "error",
+                )
+                reviewProgress.updatePhaseCard("workflow-complete", "Workflow Needs Attention", "Code review error; inspect logs", "failed")
+                reviewProgress.stop("Code review failed")
+              }
             }
 
             cleanupMode()
@@ -6085,6 +6460,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             orchestratorTarget: workflowIntercomTarget,
             onWorkflowUpdate: updatePostImplementationCard,
             onSubagentUpdate: (id, update) => implProgress.updateSubagent(id, update),
+            onRateLimitNotice: (message) => ctx.ui.notify(message, "warning"),
           })
 
           // 3a. Check apply-back status after dispatch. If apply-back conflicted
@@ -6262,6 +6638,9 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
   pi.registerCommand("zflow-change-fix", {
     description: "Apply fixes for code-review or verification failures. Loads findings, selects fixes, applies them, and verifies.",
     handler: async (args: string, ctx: InterviewableContext): Promise<void> => {
+      setActiveWorkflowMode("change-implement")
+      const cleanupMode = (): void => { resetWorkflowState() }
+
       const parts = args.trim().split(/\s+/)
       const applyMode = parts.includes("--apply")
       const planOnly = parts.includes("--plan-only")
@@ -6273,6 +6652,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           "  Loads review findings, presents fix options, applies fixes, and verifies.",
           "warning",
         )
+        cleanupMode()
         return
       }
 
@@ -6294,9 +6674,24 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
         fixProgress.updatePhaseCard("review-findings", "Review Findings",
           "Loading review findings and plan state...", "running")
 
-        const { parseReviewFindings, buildFixSelectionQuestions, buildFixPlan } =
-          await import("./orchestration.js")
-        const { findings, rawPath } = await parseReviewFindings(ctx.cwd)
+        const {
+          parseReviewFindings,
+          assertFindingsMatchChange,
+          buildFixSelectionQuestions,
+          buildFixPlan,
+        } = await import("./orchestration.js")
+        const { findings, rawPath, metadata } = await parseReviewFindings(ctx.cwd)
+
+        try {
+          assertFindingsMatchChange(changeId, metadata, rawPath)
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err)
+          fixProgress.updatePhaseCard("review-findings", "Review Findings",
+            msg, "failed")
+          ctx.ui.notify(msg, "error")
+          fixProgress.stop("Findings mismatch — cannot fix", "failed")
+          return
+        }
 
         if (findings.length === 0) {
           fixProgress.updatePhaseCard("review-findings", "Review Findings",
@@ -6390,11 +6785,10 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
             `Selected ${selectedFindings.length} finding(s). Proceeding to apply...`, "completed")
         }
 
-        // ═══ Phase 3: Fix dispatch ════════════════════════════════
-        fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestrator",
-          `Model: ${fixModel.model ?? "unavailable"}. Planning...`, "running")
+        // ═══ Phase 3: Direct fix orchestration ═════════════════════
+        fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestration",
+          `Model: ${fixModel.model ?? "unavailable"}. Planning direct worker batches...`, "running")
 
-        const fixRunId = `fix-${changeId}-${Date.now().toString(36)}`
         const planResult = await runChangeFixWorkflow({
           changeId,
           ...(selectedFindingIndices ? { findingIndices: selectedFindingIndices } : {}),
@@ -6403,141 +6797,84 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
 
         if (!dispatchService) {
           ctx.ui.notify("⚠️ No dispatch service available to apply fixes.", "error")
-          fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestrator",
+          fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestration",
             "No dispatch service.", "failed")
           fixProgress.stop("Cannot apply fixes", "failed")
           return
         }
 
-        fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestrator",
-          `Dispatching via ${dispatchService.name}.`, "running")
-
-        // Cleanup old artifacts from prior runs (best-effort)
-        try {
-          const { ensureScratchScriptsDir } = await import("./orchestration.js")
-          await ensureScratchScriptsDir(fixRunId, ctx.cwd)
-        } catch { /* best-effort */ }
-
-        // ═══ Phase 4: Fix orchestrator agent ═══════════════════════
-        // Build the orchestrator task prompt from parsed findings
-        const { resolveCodeReviewFindingsPath, resolveRunDir } =
-          await import("pi-zflow-artifacts/artifact-paths")
-        const findingsPath = resolveCodeReviewFindingsPath(ctx.cwd)
-        const runDir = resolveRunDir(fixRunId, ctx.cwd)
-        const rawReviewerDir = `${runDir}/review-artifacts`
-        const workflowIntercomTarget = ensureWorkflowIntercomTarget(pi, ctx, "fix", changeId)
-        const orchTask = await buildFixOrchestratorTaskPrompt(
-          changeId,
-          planResult,
-          findingsPath,
-          rawReviewerDir,
-          ctx.cwd,
-          workflowIntercomTarget,
-        )
-
-        const orchModel = await resolveWorkflowModel("zflow.fix-orchestrator")
-        const effectiveOrchModel = orchModel.model ?? fixModel.model
-        const orchId = `fix-orch-${Date.now().toString(36)}`
-        fixProgress.updateSubagent(orchId, {
-          agent: "zflow.fix-orchestrator",
-          title: "Fix Orchestrator",
-          model: effectiveOrchModel ?? "unavailable",
-          thinking: orchModel.thinking ?? fixModel.thinking ?? "unavailable",
-          status: "running",
-          startedAt: Date.now(),
-          lastCommand: "Analyzing findings and planning fix strategy...",
-        })
-        fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestrator",
-          `Orchestrator dispatched with ${planResult.parsedFindings.length} finding(s). Will dispatch per-finding fix workers and validate each.`,
-          "running")
+        fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestration",
+          `Dispatching direct fix workers via ${dispatchService.name}.`, "running")
 
         try {
-          const orchResult = await dispatchService.runAgent({
-            agent: "zflow.fix-orchestrator",
-            task: orchTask,
+          const { runDirectFixWorkflow } = await import("./orchestration.js")
+          const directResult = await runDirectFixWorkflow({
+            changeId,
+            fixResult: planResult,
+            dispatchService,
             cwd: ctx.cwd,
-            ...(effectiveOrchModel ? { model: effectiveOrchModel } : {}),
-            ...(orchModel.thinking ? { thinking: orchModel.thinking } : {}),
-            onUpdate: (progress) => {
-              if (progress.currentTool) {
-                const args = progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""
-                fixProgress.updateSubagent(orchId, {
-                  lastCommand: `${progress.currentTool}${args}`,
-                })
-              }
-              if (progress.phase) {
-                fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestrator",
-                  `Phase: ${progress.phase}. Tool: ${progress.currentTool ?? "reading"}. ` +
-                  `Findings processed: ${progress.findingsProcessed ?? 0}/${planResult.parsedFindings.length}.`,
-                  "running")
-              }
+            workerAgent: "zflow.implement-routine",
+            workerModel: fixModel.dispatchModel ?? fixModel.model,
+            workerThinking: fixModel.thinking,
+            onBatchStart: async (batch) => {
+              fixProgress.updatePhaseCard(
+                "fix-workers",
+                "Fix Workers",
+                `Starting ${batch.batchId} (${batch.findings.length} finding(s)) for ${batch.files.join(", ") || "unscoped findings"}.`,
+                "running",
+              )
+              fixProgress.updateSubagent(batch.batchId, {
+                agent: batch.workerAgent,
+                title: `Fix Worker — ${batch.fileKey}`,
+                model: fixModel.model ?? "unavailable",
+                thinking: fixModel.thinking ?? "unavailable",
+                status: "running",
+                startedAt: Date.now(),
+                lastCommand: `Starting ${batch.findings.map((finding) => finding.findingId).join(", ")}`,
+              })
+            },
+            onBatchUpdate: async (batch, progress) => {
+              const currentTool = progress.currentTool
+              const args = progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""
+              fixProgress.updateSubagent(batch.batchId, {
+                lastCommand: currentTool
+                  ? `${currentTool}${args}`
+                  : progress.recentOutput?.[progress.recentOutput.length - 1] ?? `Processing ${batch.batchId}`,
+              })
+            },
+            onBatchComplete: async (batch, result) => {
+              fixProgress.updateSubagent(batch.batchId, {
+                status: result.ok ? "completed" : "failed",
+                finishedAt: Date.now(),
+                lastCommand: result.ok
+                  ? `Completed ${batch.findings.map((finding) => finding.findingId).join(", ")}`
+                  : (result.error ?? "worker failed"),
+              })
             },
           })
 
-          if (orchResult.ok) {
-            fixProgress.updateSubagent(orchId, {
-              status: "completed",
-              finishedAt: Date.now(),
-              lastCommand: "Orchestration complete.",
-            })
-            fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestrator",
-              "Fix orchestration complete. Reading satisfaction report...", "completed")
+          const fixedCount = directResult.fixed.length
+          const unresolvedCount = directResult.unresolved.length
+          const satisfactionSummary = `Fixed: ${fixedCount}, Unresolved: ${unresolvedCount}. Full report: ${directResult.reportPath}`
 
-            // Try to read the satisfaction report for a summary
-            let satisfactionSummary = "See orchestrator output for details."
-            let unresolvedCount = 0
-            try {
-              const { default: fs3 } = await import("node:fs/promises")
-              const { resolvePlanVersionDir } = await import("pi-zflow-artifacts/artifact-paths")
-              const versionDir = resolvePlanVersionDir(changeId, planResult.planVersion, ctx.cwd)
-              const reportPath = `${versionDir}/fix-orchestration-report.md`
-              try {
-                const reportContent = await fs3.readFile(reportPath, "utf-8")
-                const fixedMatch = reportContent.match(/## Fixed\n([\s\S]*?)(?=\n## |$)/)
-                const unresolvedMatch = reportContent.match(/## Unresolved\n([\s\S]*?)(?=\n## |$)/)
-                const fixedCount = fixedMatch ? fixedMatch[1].split("\n").filter(l => l.trim().startsWith("-")).length : 0
-                unresolvedCount = unresolvedMatch ? unresolvedMatch[1].split("\n").filter(l => l.trim().startsWith("-")).length : 0
-                satisfactionSummary = `Fixed: ${fixedCount}, Unresolved: ${unresolvedCount}. Full report: ${reportPath}`
-              } catch {
-                satisfactionSummary = `Orchestrator output: ${orchResult.outputPath ?? "(inline)"}`
-              }
-            } catch { /* best-effort */ }
-
-            fixProgress.updatePhaseCard("fix-workers", "Fix Workers",
-              satisfactionSummary, unresolvedCount > 0 ? "failed" : "completed")
-            fixProgress.updatePhaseCard("verification", "Verification",
-              planResult.verificationCommand
-                ? `Verify: \`${planResult.verificationCommand}\``
-                : "Re-verify manually.", "completed")
-            fixProgress.updatePhaseCard("workflow-complete", "Workflow Complete",
-              satisfactionSummary, unresolvedCount > 0 ? "failed" : "completed")
-            fixProgress.stop(unresolvedCount > 0 ? "Fix workflow complete — some findings unresolved" : "Fix workflow completed")
-          } else {
-            fixProgress.updateSubagent(orchId, {
-              status: "failed",
-              finishedAt: Date.now(),
-              lastCommand: orchResult.error ?? "Unknown",
-            })
-            fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestrator",
-              `Orchestrator failed: ${orchResult.error ?? "unknown"}`,
-              "failed")
-            fixProgress.updatePhaseCard("fix-workers", "Fix Workers", "Orchestrator failed.", "failed")
-            fixProgress.updatePhaseCard("workflow-complete", "Workflow Needs Attention",
-              "Fix orchestrator failed — inspect output.", "failed")
-            fixProgress.stop("Fix orchestrator failed", "failed")
-          }
+          fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestration",
+            `Direct orchestration dispatched ${directResult.batchCount} worker batch(es).`, "completed")
+          fixProgress.updatePhaseCard("fix-workers", "Fix Workers",
+            satisfactionSummary, unresolvedCount > 0 ? "failed" : "completed")
+          fixProgress.updatePhaseCard("verification", "Verification",
+            directResult.verificationCommand
+              ? `Verify: \`${directResult.verificationCommand}\``
+              : "Re-verify manually.", "completed")
+          fixProgress.updatePhaseCard("workflow-complete", unresolvedCount > 0 ? "Workflow Needs Attention" : "Workflow Complete",
+            satisfactionSummary, unresolvedCount > 0 ? "failed" : "completed")
+          fixProgress.stop(unresolvedCount > 0 ? "Fix workflow complete — some findings unresolved" : "Fix workflow completed")
         } catch (dispatchErr: unknown) {
           const msg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr)
-          fixProgress.updateSubagent(orchId, {
-            status: "failed",
-            finishedAt: Date.now(),
-            lastCommand: msg,
-          })
-          fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestrator",
+          fixProgress.updatePhaseCard("fix-orchestrator", "Fix Orchestration",
             `Error: ${msg}`, "failed")
           fixProgress.updatePhaseCard("fix-workers", "Fix Workers", `Error: ${msg}`, "failed")
           fixProgress.updatePhaseCard("workflow-complete", "Workflow Needs Attention",
-            `Fix dispatch failed: ${msg}`, "failed")
+            `Direct fix dispatch failed: ${msg}`, "failed")
           fixProgress.stop("Fix failed", "failed")
         }
       } catch (err: unknown) {
@@ -6545,6 +6882,8 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           `Fix workflow failed: ${err instanceof Error ? err.message : String(err)}`,
           "failed",
         )
+      } finally {
+        cleanupMode()
       }
     },
   })

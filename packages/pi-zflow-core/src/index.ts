@@ -111,6 +111,12 @@ export type {
 // Re-export dispatch service types (Phase 9 — subagent dispatch contract)
 export type {
   DispatchService,
+  DispatchCapabilities,
+  DispatchWorktreeSetupHook,
+  TaskWorktreeStrategy,
+  WorktreeExecutionMode,
+  WorkspaceConcurrencyMode,
+  WorktreeBaseStrategy,
   AgentDispatchInput,
   AgentDispatchResult,
   ParallelTaskInput,
@@ -118,7 +124,47 @@ export type {
   ParallelDispatchInput,
   ParallelDispatchResult,
 } from "./dispatch-service.js"
-export { DISPATCH_SERVICE_CAPABILITY } from "./dispatch-service.js"
+export { DISPATCH_SERVICE_CAPABILITY, LEGACY_DISPATCH_CAPABILITIES } from "./dispatch-service.js"
+
+// Re-export task repo-root inference helpers
+export {
+  inferClaimedFileRepoRoots,
+  inferTaskRepoRoot,
+} from "./task-repo-root.js"
+
+// Re-export external path dependency materialisation helpers
+export {
+  normalizeExternalPathDependenciesConfig,
+  hasExternalPathDependencies,
+  materializeExternalPathDependencies,
+} from "./external-path-dependencies.js"
+export type {
+  ExternalPathDependencyMode,
+  ExternalPathDependenciesConfig,
+  ExternalPathDependencyCandidate,
+  MaterializedExternalPathDependency,
+  MaterializeExternalPathDependenciesOptions,
+  MaterializeExternalPathDependenciesResult,
+} from "./external-path-dependencies.js"
+export type {
+  InferTaskRepoRootOptions,
+} from "./task-repo-root.js"
+
+// Re-export rate-limit retry helpers for dispatch workflows
+export {
+  DEFAULT_RATE_LIMIT_WAIT_MS,
+  isRateLimitDispatchError,
+  extractRateLimitWaitText,
+  parseRetryDelayMs,
+  extractRateLimitRetryDelayMs,
+  formatRetryDelay,
+  runAgentWithRateLimitRetries,
+} from "./rate-limit.js"
+export type {
+  AgentRateLimitRetryNotice,
+  RunAgentWithRateLimitRetriesOptions,
+  RunAgentWithRateLimitRetriesResult,
+} from "./rate-limit.js"
 
 // Re-export diagnostic helpers
 // Also importable directly from "pi-zflow-core/diagnostics"

@@ -6,31 +6,12 @@
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
-  "exports": {
-    ".": "./src/index.ts",
-    "./package.json": "./package.json"
-  },
-  "keywords": [
-    "pi-package",
-    "pi-zflow"
-  ],
+  "exports": {".": "./src/index.ts", "./package.json": "./package.json"},
+  "scripts": {"build": "echo nothing to build", "test": "npx tsx --test test/*.test.ts"},
+  "keywords": ["pi-package", "pi-zflow"],
   "license": "MIT",
-  "dependencies": {
-    "pi-subagents": "github:ZebulonRouseFrantzich/pi-subagents-zflow#e45ef36cb29dd2ae1d0347aa86f2ca479327d4ba",
-    "pi-zflow-core": "0.1.0"
-  },
-  "bundledDependencies": [
-    "pi-subagents"
-  ],
-  "peerDependencies": {
-    "@earendil-works/pi-agent-core": "*",
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "typebox": "*"
-  },
-  "pi": {
-    "extensions": [
-      "./extensions"
-    ]
-  }
+  "dependencies": {"pi-subagents": "github:ZebulonRouseFrantzich/pi-subagents-zflow#e45ef36cb29dd2ae1d0347aa86f2ca479327d4ba", "pi-zflow-core": "0.1.0"},
+  "bundledDependencies": ["pi-subagents"],
+  "peerDependencies": {"@earendil-works/pi-agent-core": "*", "@earendil-works/pi-ai": "*", "@earendil-works/pi-coding-agent": "*", "typebox": "*"},
+  "pi": {"extensions": ["./extensions"]}
 }

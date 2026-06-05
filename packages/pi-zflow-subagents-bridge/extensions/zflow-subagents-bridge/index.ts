@@ -28,6 +28,7 @@
  */
 
 import * as crypto from "node:crypto"
+import { execFileSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
@@ -37,14 +38,28 @@ import { getZflowRegistry } from "pi-zflow-core/registry"
 import type { CapabilityClaim } from "pi-zflow-core/registry"
 import {
   DISPATCH_SERVICE_CAPABILITY,
+  LEGACY_DISPATCH_CAPABILITIES,
+  type DispatchCapabilities,
   type DispatchService,
   type AgentDispatchInput,
   type AgentDispatchResult,
   type ParallelDispatchInput,
   type ParallelDispatchResult,
+  type ParallelTaskInput,
   type ParallelTaskResult,
+  type DispatchWorktreeSetupHook,
+  type TaskWorktreeStrategy,
 } from "pi-zflow-core/dispatch-service"
-import { PI_ZFLOW_SUBAGENTS_BRIDGE_VERSION } from "pi-zflow-core"
+import {
+  ACTIVE_PROFILE_PATH,
+  PI_ZFLOW_SUBAGENTS_BRIDGE_VERSION,
+  inferTaskRepoRoot,
+  runWorktreeSetupHook,
+  runAgentWithRateLimitRetries,
+  hasExternalPathDependencies,
+  materializeExternalPathDependencies,
+  type WorktreeSetupHookConfig,
+} from "pi-zflow-core"
 
 /**
  * Well-known capability name for the dispatch service.
@@ -66,6 +81,10 @@ const UNAVAILABLE_GUIDANCE =
 
 class UnavailableDispatchService implements DispatchService {
   readonly name = "pi-zflow-subagents-bridge:unavailable"
+  readonly capabilities: DispatchCapabilities = {
+    ...LEGACY_DISPATCH_CAPABILITIES,
+    isolatedWorktrees: false,
+  }
   private readonly reason?: string
 
   constructor(reason?: string) {
@@ -95,14 +114,37 @@ class UnavailableDispatchService implements DispatchService {
     }))
     return { ok: false, results }
   }
+
+  async listAgents(): Promise<Array<string | { name?: string }>> {
+    return []
+  }
 }
 
 // ── Operational backend (wraps pi-subagents-zflow) ────────────────
 
 type BackendVerification = NonNullable<ParallelTaskResult["verification"]>
 
+type BackendParallelTaskInput = {
+  agent: string
+  groupId?: string
+  task: string
+  cwd?: string
+  model?: string
+  output?: string | false
+  outputMode?: "inline" | "file-only"
+  maxOutput?: { lines?: number; bytes?: number }
+  onUpdate?: (progress: unknown) => void
+  scopedVerification?: string
+  worktreeSetupCommand?: string | null
+  claimedFiles?: string[]
+  dependencies?: string[]
+  worktreeStrategy?: TaskWorktreeStrategy
+}
+
 interface BackendDispatchService {
   readonly name?: string
+  readonly capabilities?: Partial<DispatchCapabilities>
+  listAgents?(cwd?: string): Promise<Array<string | { name?: string }>>
   runAgent(input: {
     agent: string
     task: string
@@ -119,37 +161,95 @@ interface BackendDispatchService {
     rawOutput: string
     outputPath?: string
     savedOutputPath?: string
+    attemptedModels?: string[]
+    modelAttempts?: Array<{
+      model: string
+      success: boolean
+      exitCode?: number | null
+      error?: string
+    }>
   }>
   runParallel(input: {
-    tasks: Array<{
-      agent: string
-      task: string
-      cwd?: string
-      model?: string
-      output?: string | false
-      outputMode?: "inline" | "file-only"
-      maxOutput?: { lines?: number; bytes?: number }
-      onUpdate?: (progress: unknown) => void
-    }>
+    tasks: BackendParallelTaskInput[]
     cwd?: string
     concurrency?: number
     worktree?: boolean
+    worktreeSetupHook?: DispatchWorktreeSetupHook
     maxOutput?: { lines?: number; bytes?: number }
   }): Promise<{
     ok: boolean
     results: Array<{
       agent: string
+      groupId?: string
       ok: boolean
       error?: string
       rawOutput: string
       outputPath?: string
       savedOutputPath?: string
       worktreePath?: string
+      workspaceId?: string
+      baseCommit?: string
+      headCommit?: string
       patchPath?: string
       changedFiles?: string[]
       verification?: BackendVerification
     }>
   }>
+}
+
+function normalizeBackendCapabilities(
+  capabilities?: Partial<DispatchCapabilities>,
+): DispatchCapabilities {
+  return {
+    ...LEGACY_DISPATCH_CAPABILITIES,
+    ...(capabilities ?? {}),
+  }
+}
+
+function requiresSharedSerialized(task: ParallelTaskInput): boolean {
+  return task.worktreeStrategy?.mode === "shared-staging" &&
+    (task.worktreeStrategy.workspaceConcurrency ?? "serialized") === "serialized"
+}
+
+function requiresSharedConcurrent(task: ParallelTaskInput): boolean {
+  return task.worktreeStrategy?.mode === "shared-staging" &&
+    (task.worktreeStrategy.workspaceConcurrency ?? "serialized") === "concurrent"
+}
+
+function requiresBaseRef(task: ParallelTaskInput): boolean {
+  return Boolean(task.worktreeStrategy?.baseRef) || task.worktreeStrategy?.baseStrategy === "dependency-lineage"
+}
+
+function describeMissingCapabilities(
+  input: ParallelDispatchInput,
+  capabilities: DispatchCapabilities,
+): string | null {
+  if (input.worktreeSetupHook && !capabilities.worktreeSetupHooks) {
+    return "worktree setup hooks"
+  }
+  if (input.tasks.some(requiresSharedConcurrent) && !capabilities.sharedWorkspaceConcurrent) {
+    return "shared concurrent worktree clusters"
+  }
+  if (input.tasks.some(requiresSharedSerialized) && !capabilities.sharedWorkspaceSerialized) {
+    return "shared serialized worktree clusters"
+  }
+  if (input.tasks.some(requiresBaseRef) && !capabilities.baseRefWorktrees) {
+    return "dependency-lineage/base-ref worktrees"
+  }
+  return null
+}
+
+function requiresCompatWorktreeTaskCwds(input: ParallelDispatchInput): boolean {
+  if (!input.worktree) return false
+  const sharedCwd = safeGetCwd(input.cwd)
+  if (hasExternalPathDependencies(sharedCwd)) return true
+  return input.tasks.some((task) => {
+    if (!task.cwd) return false
+    const taskCwd = path.isAbsolute(task.cwd)
+      ? task.cwd
+      : path.resolve(sharedCwd, task.cwd)
+    return path.resolve(taskCwd) !== path.resolve(sharedCwd) || hasExternalPathDependencies(taskCwd)
+  })
 }
 
 /**
@@ -161,30 +261,121 @@ interface BackendDispatchService {
  */
 class SubagentsDispatchService implements DispatchService {
   readonly name: string
+  readonly capabilities: DispatchCapabilities
   private backend: BackendDispatchService
+  private advancedFallback?: BackendDispatchService
+  private primaryCapabilities: DispatchCapabilities
+  private fallbackCapabilities?: DispatchCapabilities
 
-  constructor(backend: BackendDispatchService) {
+  constructor(
+    backend: BackendDispatchService,
+    options?: { fallback?: BackendDispatchService; capabilities?: Partial<DispatchCapabilities> },
+  ) {
     this.backend = backend
+    this.advancedFallback = options?.fallback
+    const primaryCapabilities = normalizeBackendCapabilities(options?.capabilities ?? backend.capabilities)
+    const fallbackCapabilities = options?.fallback
+      ? normalizeBackendCapabilities(options.fallback.capabilities)
+      : undefined
+    this.primaryCapabilities = primaryCapabilities
+    this.fallbackCapabilities = fallbackCapabilities
+    this.capabilities = fallbackCapabilities
+      ? {
+          isolatedWorktrees: primaryCapabilities.isolatedWorktrees || fallbackCapabilities.isolatedWorktrees,
+          sharedWorkspaceSerialized: primaryCapabilities.sharedWorkspaceSerialized || fallbackCapabilities.sharedWorkspaceSerialized,
+          sharedWorkspaceConcurrent: primaryCapabilities.sharedWorkspaceConcurrent || fallbackCapabilities.sharedWorkspaceConcurrent,
+          baseRefWorktrees: primaryCapabilities.baseRefWorktrees || fallbackCapabilities.baseRefWorktrees,
+          worktreeSetupHooks: primaryCapabilities.worktreeSetupHooks || fallbackCapabilities.worktreeSetupHooks,
+        }
+      : primaryCapabilities
     this.name = `pi-zflow-subagents-bridge:${backend.name ?? "operational"}`
   }
 
   async runAgent(input: AgentDispatchInput): Promise<AgentDispatchResult> {
     try {
-      const result = await this.backend.runAgent({
-        agent: input.agent,
-        task: input.task,
-        cwd: input.cwd,
-        model: input.model,
-        output: input.output,
-        outputMode: input.outputMode,
-        maxOutput: input.maxOutput,
-        onUpdate: input.onUpdate,
+      // Prefer the compat backend for single-agent runs when available because
+      // it preserves model-attempt details from pi-subagents foreground
+      // execution. That lets zflow surface provider 429 usage-limit failures
+      // instead of a later placeholder fallback error.
+      const backend = this.advancedFallback ?? this.backend
+      const rateLimitNotices: string[] = []
+      const runWithModel = async (modelOverride: string | undefined) => runAgentWithRateLimitRetries({
+        dispatchService: {
+          name: this.name,
+          runAgent: async (dispatchInput) => {
+            const backendResult = await backend.runAgent({
+              agent: dispatchInput.agent,
+              task: dispatchInput.task,
+              cwd: dispatchInput.cwd,
+              model: dispatchInput.model,
+              output: dispatchInput.output,
+              outputMode: dispatchInput.outputMode,
+              maxOutput: dispatchInput.maxOutput,
+              onUpdate: dispatchInput.onUpdate,
+            })
+            return {
+              ok: backendResult.ok,
+              rawOutput: backendResult.rawOutput,
+              outputPath: backendResult.outputPath ?? backendResult.savedOutputPath,
+              error: resolveMeaningfulSingleError(backendResult),
+            }
+          },
+          runParallel: async () => ({ ok: false, results: [] }),
+        },
+        input: {
+          ...input,
+          ...(modelOverride ? { model: modelOverride } : {}),
+        },
+        onRateLimitNotice: async (notice) => {
+          rateLimitNotices.push(notice.message)
+          input.onUpdate?.({
+            agent: input.agent,
+            status: "running",
+            lastActivityAt: Date.now(),
+            recentOutput: [notice.message],
+          })
+        },
       })
+
+      let currentModel = input.model
+      let result = await runWithModel(currentModel)
+      if (!result.ok && isUnsupportedDeveloperRoleDispatchError(result.error)) {
+        const fallbackModels = await loadAgentFallbackModelCandidates(input.agent, currentModel)
+        for (const fallbackModel of fallbackModels) {
+          const compatibilityNotice =
+            `⚠️ Agent ${input.agent} hit a provider compatibility error on model ${currentModel ?? "(default)"}. ` +
+            `Retrying with fallback model ${fallbackModel}.`
+          input.onUpdate?.({
+            agent: input.agent,
+            status: "running",
+            lastActivityAt: Date.now(),
+            recentOutput: [compatibilityNotice],
+          })
+          await persistAgentFallbackModel(input.agent, fallbackModel).catch(() => {})
+          currentModel = fallbackModel
+          const fallbackResult = await runWithModel(fallbackModel)
+          result = fallbackResult
+          if (fallbackResult.ok) {
+            break
+          }
+          if (!isUnsupportedDeveloperRoleDispatchError(fallbackResult.error)) {
+            break
+          }
+        }
+      }
+
       return {
         ok: result.ok,
         rawOutput: result.rawOutput,
-        outputPath: result.outputPath ?? result.savedOutputPath,
+        outputPath: result.outputPath,
         error: result.error,
+        rateLimitRetries: result.totalRateLimitRetries > 0
+          ? {
+              retryCount: result.retryCount,
+              totalRateLimitRetries: result.totalRateLimitRetries,
+              notices: [...rateLimitNotices],
+            }
+          : undefined,
       }
     } catch (err) {
       return {
@@ -195,11 +386,61 @@ class SubagentsDispatchService implements DispatchService {
     }
   }
 
+  async listAgents(cwd?: string): Promise<Array<string | { name?: string }>> {
+    if (typeof this.advancedFallback?.listAgents === "function") {
+      return this.advancedFallback.listAgents(cwd)
+    }
+    if (typeof this.backend.listAgents === "function") {
+      return this.backend.listAgents(cwd)
+    }
+    return []
+  }
+
   async runParallel(input: ParallelDispatchInput): Promise<ParallelDispatchResult> {
+    if (this.advancedFallback && requiresCompatWorktreeTaskCwds(input)) {
+      return this.invokeParallel(this.advancedFallback, input)
+    }
+
+    const requestedUnsupported = describeMissingCapabilities(input, this.primaryCapabilities)
+    if (requestedUnsupported) {
+      if (this.advancedFallback) {
+        const stillUnsupported = describeMissingCapabilities(
+          input,
+          this.fallbackCapabilities ?? normalizeBackendCapabilities(this.advancedFallback.capabilities),
+        )
+        if (!stillUnsupported) {
+          return this.invokeParallel(this.advancedFallback, input)
+        }
+      }
+
+      return {
+        ok: false,
+        results: input.tasks.map((t) => ({
+          agent: t.agent,
+          groupId: t.groupId,
+          rawOutput: "",
+          ok: false,
+          error: `Dispatch backend does not support ${requestedUnsupported}. ` +
+            `Supported by active backend: isolated=${this.capabilities.isolatedWorktrees}, ` +
+            `shared-serialized=${this.capabilities.sharedWorkspaceSerialized}, ` +
+            `shared-concurrent=${this.capabilities.sharedWorkspaceConcurrent}, ` +
+            `base-ref=${this.capabilities.baseRefWorktrees}, hooks=${this.capabilities.worktreeSetupHooks}.`,
+        })),
+      }
+    }
+
+    return this.invokeParallel(this.backend, input)
+  }
+
+  private async invokeParallel(
+    backend: BackendDispatchService,
+    input: ParallelDispatchInput,
+  ): Promise<ParallelDispatchResult> {
     try {
-      const result = await this.backend.runParallel({
+      const result = await backend.runParallel({
         tasks: input.tasks.map((t) => ({
           agent: t.agent,
+          groupId: t.groupId,
           task: t.task,
           cwd: t.cwd,
           model: t.model,
@@ -207,21 +448,31 @@ class SubagentsDispatchService implements DispatchService {
           outputMode: t.outputMode,
           maxOutput: input.maxOutput,
           onUpdate: t.onUpdate,
+          scopedVerification: t.scopedVerification,
+          worktreeSetupCommand: t.worktreeSetupCommand,
+          claimedFiles: t.claimedFiles,
+          dependencies: t.dependencies,
+          worktreeStrategy: t.worktreeStrategy,
         })),
         cwd: input.cwd,
         concurrency: input.concurrency,
         worktree: input.worktree,
+        worktreeSetupHook: input.worktreeSetupHook,
         maxOutput: input.maxOutput,
       })
       return {
         ok: result.ok,
-        results: result.results.map((r) => ({
+        results: result.results.map((r, index) => ({
           agent: r.agent,
+          groupId: r.groupId ?? input.tasks[index]?.groupId,
           rawOutput: r.rawOutput,
           outputPath: r.outputPath ?? r.savedOutputPath,
           ok: r.ok,
           error: r.error,
           worktreePath: r.worktreePath,
+          workspaceId: r.workspaceId,
+          baseCommit: r.baseCommit,
+          headCommit: r.headCommit,
           patchPath: r.patchPath,
           changedFiles: r.changedFiles,
           verification: r.verification,
@@ -232,6 +483,7 @@ class SubagentsDispatchService implements DispatchService {
         ok: false,
         results: input.tasks.map((t) => ({
           agent: t.agent,
+          groupId: t.groupId,
           rawOutput: "",
           ok: false,
           error: `Parallel dispatch error: ${err instanceof Error ? err.message : String(err)}`,
@@ -258,6 +510,14 @@ interface CompatAgentProgress {
 interface CompatSingleResult {
   exitCode: number
   error?: string
+  model?: string
+  attemptedModels?: string[]
+  modelAttempts?: Array<{
+    model: string
+    success: boolean
+    exitCode?: number | null
+    error?: string
+  }>
   finalOutput?: string
   savedOutputPath?: string
 }
@@ -272,12 +532,26 @@ interface CompatRunSyncOptions {
   onUpdate?: (update: { details?: { progress?: unknown[] } }) => void
 }
 
+interface CompatWorktreeInfo {
+  path: string
+  agentCwd: string
+  branch: string
+  index: number
+  syntheticPaths?: string[]
+}
+
+interface CompatWorktreeSetup {
+  cwd: string
+  baseCommit: string
+  worktrees: CompatWorktreeInfo[]
+}
+
 interface CompatModules {
   discoverAgents: (cwd: string, scope?: "user" | "project" | "both") => { agents: unknown[] }
   runSync: (runtimeCwd: string, agents: unknown[], agentName: string, task: string, options: CompatRunSyncOptions) => Promise<CompatSingleResult>
-  createWorktrees: (cwd: string, runId: string, count: number, options?: { agents?: string[] }) => { worktrees: Array<{ agentCwd: string }> }
-  diffWorktrees: (setup: unknown, agents: string[], diffsDir: string) => Array<{ index: number; patchPath: string; filesChanged: number }>
-  cleanupWorktrees: (setup: unknown) => void
+  createWorktrees: (cwd: string, runId: string, count: number, options?: { agents?: string[] }) => CompatWorktreeSetup
+  diffWorktrees: (setup: CompatWorktreeSetup, agents: string[], diffsDir: string) => Array<{ index: number; patchPath: string; filesChanged: number }>
+  cleanupWorktrees: (setup: CompatWorktreeSetup) => void
 }
 
 function generateRunId(): string {
@@ -338,6 +612,144 @@ function safeGetCwd(override?: string): string {
   return process.cwd()
 }
 
+function normalizeWorktreeStrategy(
+  strategy?: TaskWorktreeStrategy,
+): Required<Pick<TaskWorktreeStrategy, "mode" | "workspaceConcurrency" | "baseStrategy">> & Omit<TaskWorktreeStrategy, "mode" | "workspaceConcurrency" | "baseStrategy"> {
+  return {
+    mode: strategy?.mode ?? "isolated",
+    workspaceConcurrency: strategy?.workspaceConcurrency ?? "serialized",
+    baseStrategy: strategy?.baseStrategy ?? "head",
+    workspaceId: strategy?.workspaceId,
+    baseRef: strategy?.baseRef,
+    executionRationale: strategy?.executionRationale,
+  }
+}
+
+/** Preserve exact bytes from git commands (needed for patch content). */
+function gitOutputRaw(cwd: string, args: string[]): string {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 10 * 1024 * 1024,
+  })
+}
+
+/** Trimmed variant for commands where trailing whitespace is harmless (rev-parse, --name-only). */
+function gitOutputTrimmed(cwd: string, args: string[]): string {
+  return gitOutputRaw(cwd, args).trimEnd()
+}
+
+function gitOutputSafeRaw(cwd: string, args: string[]): string {
+  try {
+    return gitOutputRaw(cwd, args)
+  } catch {
+    return ""
+  }
+}
+
+function gitOutputSafeTrimmed(cwd: string, args: string[]): string {
+  try {
+    return gitOutputTrimmed(cwd, args)
+  } catch {
+    return ""
+  }
+}
+
+function resetWorktreeToBaseRef(worktreePath: string, baseRef: string): string {
+  execFileSync("git", ["reset", "--hard", baseRef], {
+    cwd: worktreePath,
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 10 * 1024 * 1024,
+  })
+  return gitOutputTrimmed(worktreePath, ["rev-parse", "HEAD"])
+}
+
+/**
+ * Validate a patch file by attempting to apply it against a base commit's tree.
+ * Uses a temporary index to avoid modifying the actual working tree or index.
+ * Throws if the patch is structurally invalid.
+ */
+function validatePatchFile(worktreePath: string, patchPath: string, baseRef: string): void {
+  const tmpIndex = path.join(os.tmpdir(), `zflow-validate-${crypto.randomUUID()}`)
+  try {
+    execFileSync("git", ["read-tree", "--reset", baseRef], {
+      cwd: worktreePath,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, GIT_INDEX_FILE: tmpIndex },
+      maxBuffer: 10 * 1024 * 1024,
+    })
+    execFileSync("git", ["apply", "--cached", "--check", "--binary", patchPath], {
+      cwd: worktreePath,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, GIT_INDEX_FILE: tmpIndex },
+      maxBuffer: 10 * 1024 * 1024,
+    })
+  } catch (err: unknown) {
+    const execErr = err as { stderr?: Buffer | string; status?: number; message?: string }
+    const stderr = execErr.stderr ? String(execErr.stderr) : execErr.message ?? "unknown error"
+    throw new Error(
+      `Bridge produced invalid patch artifact at ${patchPath}: git apply --check failed.\n` +
+      `Stderr: ${stderr.trimEnd()}\n` +
+      `This indicates the bridge generated a malformed patch.`,
+    )
+  } finally {
+    try { fs.unlinkSync(tmpIndex) } catch { /* cleanup errors ignored */ }
+  }
+}
+
+function writePatchFromRange(worktreePath: string, patchPath: string, baseRef: string): { changedFiles: string[]; headCommit: string } {
+  const headCommit = gitOutputTrimmed(worktreePath, ["rev-parse", "HEAD"])
+  const patch = gitOutputSafeRaw(worktreePath, ["diff", "--binary", baseRef, "HEAD"])
+  fs.mkdirSync(path.dirname(patchPath), { recursive: true })
+  fs.writeFileSync(patchPath, patch ? `${patch}${patch.endsWith("\n") ? "" : "\n"}` : "", "utf-8")
+  if (patch && patch.trim()) {
+    validatePatchFile(worktreePath, patchPath, baseRef)
+  }
+  const changedFilesOut = gitOutputSafeTrimmed(worktreePath, ["diff", "--name-only", baseRef, "HEAD"])
+  const changedFiles = changedFilesOut ? changedFilesOut.split("\n").filter(Boolean) : []
+  return { changedFiles, headCommit }
+}
+
+function checkpointSharedWorkspace(worktreePath: string, message: string): string {
+  execFileSync("git", ["add", "-A"], {
+    cwd: worktreePath,
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 10 * 1024 * 1024,
+  })
+  execFileSync("git", ["commit", "--allow-empty", "-m", message], {
+    cwd: worktreePath,
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 10 * 1024 * 1024,
+  })
+  return gitOutputTrimmed(worktreePath, ["rev-parse", "HEAD"])
+}
+
+async function maybeRunCompatWorktreeSetupHook(
+  hookConfig: DispatchWorktreeSetupHook | undefined,
+  repoRoot: string,
+  worktree: CompatWorktreeInfo,
+  runId: string,
+  agent: string | undefined,
+  baseCommit: string,
+): Promise<void> {
+  if (!hookConfig) return
+  const result = await runWorktreeSetupHook(hookConfig as WorktreeSetupHookConfig, {
+    worktreeRoot: worktree.path,
+    repoRoot,
+    ref: worktree.branch,
+    meta: {
+      runId,
+      agent: agent ?? "unknown",
+      index: String(worktree.index),
+      baseCommit,
+    },
+  })
+  if (!result.success) {
+    throw new Error(result.message)
+  }
+}
+
 function findAgent(agents: unknown[], name: string): { name: string } | undefined {
   return agents.find((agent) => {
     const agentName = (agent as { name?: unknown }).name
@@ -377,6 +789,148 @@ function forwardCompatProgress(
   }
 }
 
+function isUsageLimitError(error: string | undefined): boolean {
+  if (!error) return false
+  return /\b429\b/i.test(error) ||
+    /usage limit reached/i.test(error) ||
+    /rate limit/i.test(error)
+}
+
+function extractUsageLimitWaitTime(error: string | undefined): string | undefined {
+  if (!error) return undefined
+  const patterns = [
+    /resets?\s+in\s+([^.!?\n]+)/i,
+    /retry(?:ing)?\s+after\s+([^.!?\n]+)/i,
+    /retry(?:ing)?\s+in\s+([^.!?\n]+)/i,
+    /try again in\s+([^.!?\n]+)/i,
+    /wait\s+([^.!?\n]+?)\s+before/i,
+  ]
+  for (const pattern of patterns) {
+    const match = error.match(pattern)
+    const wait = match?.[1]?.trim()
+    if (wait) return wait
+  }
+  return undefined
+}
+
+function resolveMeaningfulSingleError(result: {
+  error?: string
+  modelAttempts?: Array<{
+    model: string
+    success: boolean
+    exitCode?: number | null
+    error?: string
+  }>
+}): string | undefined {
+  const usageLimitAttempt = result.modelAttempts?.find((attempt) => !attempt.success && isUsageLimitError(attempt.error))
+  if (!usageLimitAttempt) return result.error
+
+  const providerMessage = usageLimitAttempt.error?.trim() ?? "429 usage limit reached."
+  const waitTime = extractUsageLimitWaitTime(providerMessage)
+  const modelLabel = usageLimitAttempt.model ? ` for model \"${usageLimitAttempt.model}\"` : ""
+  if (waitTime) {
+    return `429 usage limit reached${modelLabel}. Wait time: ${waitTime}. Provider message: ${providerMessage}`
+  }
+  return `429 usage limit reached${modelLabel}. Provider message: ${providerMessage}`
+}
+
+const THINKING_SUFFIX_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"])
+
+function stripKnownThinkingSuffix(model: string | undefined): string | undefined {
+  if (!model) return undefined
+  const trimmed = model.trim()
+  const colonIdx = trimmed.lastIndexOf(":")
+  if (colonIdx === -1) return trimmed
+  const suffix = trimmed.slice(colonIdx + 1).toLowerCase()
+  if (!THINKING_SUFFIX_LEVELS.has(suffix)) return trimmed
+  return trimmed.slice(0, colonIdx)
+}
+
+function isUnsupportedDeveloperRoleDispatchError(error: string | undefined): boolean {
+  if (!error) return false
+  return (/messages?[\s\S]*role/i.test(error) || /\"role\"/i.test(error)) &&
+    /input should be 'system', 'user', 'assistant' or 'tool'/i.test(error) &&
+    (/\bdeveloper\b/i.test(error) || /\"input\"\s*:\s*\"developer\"/i.test(error))
+}
+
+function resolveAgentFallbackModelCandidates(
+  activeProfileCache: {
+    profileName?: string
+    agentBindings?: Record<string, { lane?: string; resolvedModel?: string }>
+  } | null | undefined,
+  profileDoc: Record<string, { lanes?: Record<string, { preferredModels?: string[] }> }> | null | undefined,
+  agentName: string,
+  currentModel?: string,
+): string[] {
+  const binding = activeProfileCache?.agentBindings?.[agentName]
+  const laneName = binding?.lane
+  const profileName = activeProfileCache?.profileName
+  if (!laneName || !profileName) return []
+
+  const preferredModels = profileDoc?.[profileName]?.lanes?.[laneName]?.preferredModels
+  if (!Array.isArray(preferredModels) || preferredModels.length === 0) return []
+
+  const normalizedCurrent = stripKnownThinkingSuffix(currentModel ?? binding?.resolvedModel)
+  const normalizedPreferred = preferredModels.map((model) => stripKnownThinkingSuffix(model) ?? model)
+  const currentIdx = normalizedCurrent ? normalizedPreferred.findIndex((model) => model === normalizedCurrent) : -1
+  const tail = currentIdx >= 0 ? preferredModels.slice(currentIdx + 1) : preferredModels
+  return [...new Set(tail.filter((model) => stripKnownThinkingSuffix(model) !== normalizedCurrent))]
+}
+
+async function readJsonFile<T>(filePath: string): Promise<T | null> {
+  try {
+    const raw = await fs.promises.readFile(filePath, "utf-8")
+    return JSON.parse(raw) as T
+  } catch {
+    return null
+  }
+}
+
+async function loadAgentFallbackModelCandidates(agentName: string, currentModel?: string): Promise<string[]> {
+  const activeProfile = await readJsonFile<{
+    profileName?: string
+    sourcePath?: string
+    agentBindings?: Record<string, { lane?: string; resolvedModel?: string }>
+  }>(ACTIVE_PROFILE_PATH)
+  if (!activeProfile?.sourcePath) return []
+  const profileDoc = await readJsonFile<Record<string, { lanes?: Record<string, { preferredModels?: string[] }> }>>(activeProfile.sourcePath)
+  return resolveAgentFallbackModelCandidates(activeProfile, profileDoc, agentName, currentModel)
+}
+
+async function persistAgentFallbackModel(agentName: string, successfulModel: string): Promise<void> {
+  const activeProfile = await readJsonFile<{
+    profileName?: string
+    sourcePath?: string
+    resolvedAt?: string
+    agentBindings?: Record<string, { lane?: string; resolvedModel?: string }>
+    resolvedLanes?: Record<string, { model?: string; reason?: string }>
+  }>(ACTIVE_PROFILE_PATH)
+  if (!activeProfile?.agentBindings || !activeProfile.resolvedLanes) return
+
+  const binding = activeProfile.agentBindings[agentName]
+  const laneName = binding?.lane
+  if (!binding || !laneName || !activeProfile.resolvedLanes[laneName]) return
+
+  const previousModel = binding.resolvedModel ?? activeProfile.resolvedLanes[laneName]?.model ?? "unknown"
+  for (const candidateBinding of Object.values(activeProfile.agentBindings)) {
+    if (candidateBinding?.lane === laneName) {
+      candidateBinding.resolvedModel = successfulModel
+    }
+  }
+  activeProfile.resolvedLanes[laneName] = {
+    ...activeProfile.resolvedLanes[laneName],
+    model: successfulModel,
+    reason: `Runtime fallback after provider rejected developer-role messages on \"${previousModel}\". Re-routed to \"${successfulModel}\".`,
+  }
+  activeProfile.resolvedAt = new Date().toISOString()
+
+  const dir = path.dirname(ACTIVE_PROFILE_PATH)
+  const tmpPath = path.join(dir, `.tmp-${Date.now().toString(36)}-active-profile.json`)
+  await fs.promises.mkdir(dir, { recursive: true })
+  await fs.promises.writeFile(tmpPath, JSON.stringify(activeProfile, null, 2), "utf-8")
+  await fs.promises.rename(tmpPath, ACTIVE_PROFILE_PATH)
+}
+
 function mapCompatSingleResult(result: CompatSingleResult): {
   ok: boolean
   exitCode: number
@@ -384,14 +938,23 @@ function mapCompatSingleResult(result: CompatSingleResult): {
   rawOutput: string
   outputPath?: string
   savedOutputPath?: string
+  attemptedModels?: string[]
+  modelAttempts?: Array<{
+    model: string
+    success: boolean
+    exitCode?: number | null
+    error?: string
+  }>
 } {
   return {
     ok: result.exitCode === 0 && !result.error,
     exitCode: result.exitCode,
-    error: result.error,
+    error: resolveMeaningfulSingleError(result),
     rawOutput: result.finalOutput ?? "",
     savedOutputPath: result.savedOutputPath,
     outputPath: result.savedOutputPath,
+    attemptedModels: result.attemptedModels,
+    modelAttempts: result.modelAttempts,
   }
 }
 
@@ -465,6 +1028,14 @@ async function createCompatZflowDispatchService(): Promise<BackendDispatchServic
     }
   }
 
+  const listAgents = async (cwd?: string) => {
+    const resolvedCwd = safeGetCwd(cwd)
+    const { agents } = resolveAgents(resolvedCwd)
+    return agents
+      .map((agent) => (agent as { name?: unknown }).name)
+      .filter((name): name is string => typeof name === "string" && name.trim().length > 0)
+  }
+
   const runAgent = async (input: Parameters<BackendDispatchService["runAgent"]>[0]) => {
     const cwd = safeGetCwd(input.cwd)
     const { agents, error: discoveryError } = resolveAgents(cwd)
@@ -495,7 +1066,7 @@ async function createCompatZflowDispatchService(): Promise<BackendDispatchServic
     if (discoveryError || agents.length === 0) {
       return {
         ok: false,
-        results: input.tasks.map((task) => ({ agent: task.agent, ok: false, error: discoveryError ?? "No agents discovered", rawOutput: "" })),
+        results: input.tasks.map((task) => ({ agent: task.agent, groupId: task.groupId, ok: false, error: discoveryError ?? "No agents discovered", rawOutput: "" })),
       }
     }
     for (const task of input.tasks) {
@@ -505,6 +1076,7 @@ async function createCompatZflowDispatchService(): Promise<BackendDispatchServic
           ok: false,
           results: input.tasks.map((t) => ({
             agent: t.agent,
+            groupId: t.groupId,
             ok: false,
             error: t.agent === task.agent
               ? `Unknown agent "${task.agent}". Available: ${available}`
@@ -523,8 +1095,558 @@ async function createCompatZflowDispatchService(): Promise<BackendDispatchServic
 
   return {
     name: "pi-subagents-compat:operational",
+    capabilities: {
+      isolatedWorktrees: true,
+      sharedWorkspaceSerialized: true,
+      sharedWorkspaceConcurrent: false,
+      baseRefWorktrees: true,
+      worktreeSetupHooks: true,
+    },
+    listAgents,
     runAgent,
     runParallel,
+  }
+}
+
+const COMPAT_EXCLUDED_STAGE_PATHS = ["node_modules", ".wrangler"]
+
+interface CompatWorkspacePlan {
+  workspaceId: string
+  repoCwd: string
+  mode: "isolated" | "shared-staging"
+  workspaceConcurrency: "serialized" | "concurrent"
+  baseRef?: string
+  taskIndexes: number[]
+}
+
+function resolveCompatTaskRepoCwd(sharedCwd: string, task: BackendParallelTaskInput): string {
+  return inferTaskRepoRoot(sharedCwd, {
+    cwd: task.cwd,
+    claimedFiles: task.claimedFiles,
+  })
+}
+
+function buildCompatWorkspacePlans(sharedCwd: string, tasks: BackendParallelTaskInput[]): CompatWorkspacePlan[] {
+  const plans = new Map<string, CompatWorkspacePlan>()
+
+  for (let index = 0; index < tasks.length; index++) {
+    const task = tasks[index]!
+    const strategy = normalizeWorktreeStrategy(task.worktreeStrategy)
+    if (strategy.mode === "shared-staging" && !strategy.workspaceId) {
+      throw new Error(
+        `Task ${task.groupId ?? index} requested shared-staging without a workspaceId.`,
+      )
+    }
+    const repoCwd = resolveCompatTaskRepoCwd(sharedCwd, task)
+    const workspaceId = strategy.mode === "shared-staging"
+      ? strategy.workspaceId!
+      : (task.groupId ?? `task-${index}`)
+    const planKey = `${repoCwd}::${workspaceId}`
+
+    const existing = plans.get(planKey)
+    if (existing) {
+      existing.taskIndexes.push(index)
+      if (strategy.baseRef && existing.baseRef && existing.baseRef !== strategy.baseRef) {
+        throw new Error(
+          `Shared workspace \"${workspaceId}\" received conflicting base refs (${existing.baseRef} vs ${strategy.baseRef}). ` +
+          `Shared workspaces must agree on a single base ref.`,
+        )
+      }
+      if (strategy.baseRef && !existing.baseRef) existing.baseRef = strategy.baseRef
+      continue
+    }
+
+    plans.set(planKey, {
+      workspaceId,
+      repoCwd,
+      mode: strategy.mode,
+      workspaceConcurrency: strategy.workspaceConcurrency,
+      baseRef: strategy.baseRef,
+      taskIndexes: [index],
+    })
+  }
+
+  return [...plans.values()]
+}
+
+function topoSortWorkspaceTaskIndexes(
+  tasks: BackendParallelTaskInput[],
+  taskIndexes: number[],
+): number[] {
+  if (taskIndexes.length <= 1) return [...taskIndexes]
+  const idToIndex = new Map<string, number>()
+  for (const index of taskIndexes) {
+    const groupId = tasks[index]?.groupId
+    if (groupId) idToIndex.set(groupId, index)
+  }
+
+  const inDegree = new Map<number, number>()
+  const adjacency = new Map<number, number[]>()
+  for (const index of taskIndexes) {
+    inDegree.set(index, 0)
+    adjacency.set(index, [])
+  }
+
+  for (const index of taskIndexes) {
+    const deps = tasks[index]?.dependencies ?? []
+    for (const dep of deps) {
+      const depIndex = idToIndex.get(dep)
+      if (depIndex === undefined) continue
+      adjacency.get(depIndex)?.push(index)
+      inDegree.set(index, (inDegree.get(index) ?? 0) + 1)
+    }
+  }
+
+  const ready = taskIndexes.filter((index) => (inDegree.get(index) ?? 0) === 0)
+  const ordered: number[] = []
+  while (ready.length > 0) {
+    ready.sort((a, b) => a - b)
+    const next = ready.shift()!
+    ordered.push(next)
+    for (const neighbor of adjacency.get(next) ?? []) {
+      const degree = (inDegree.get(neighbor) ?? 1) - 1
+      inDegree.set(neighbor, degree)
+      if (degree === 0) ready.push(neighbor)
+    }
+  }
+
+  return ordered.length === taskIndexes.length ? ordered : [...taskIndexes]
+}
+
+function stageAllCompatChanges(worktreePath: string): void {
+  execFileSync("git", ["add", "-A"], {
+    cwd: worktreePath,
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 10 * 1024 * 1024,
+  })
+  for (const excludedPath of COMPAT_EXCLUDED_STAGE_PATHS) {
+    try {
+      execFileSync("git", ["reset", "HEAD", "--", excludedPath], {
+        cwd: worktreePath,
+        stdio: ["ignore", "pipe", "pipe"],
+        maxBuffer: 10 * 1024 * 1024,
+      })
+    } catch {
+      // Ignore absent excluded paths.
+    }
+  }
+}
+
+function captureCompatPatchAgainstBase(
+  worktreePath: string,
+  baseCommit: string,
+  patchPath: string,
+): { changedFiles: string[]; headCommit: string } {
+  stageAllCompatChanges(worktreePath)
+  const patch = gitOutputSafeRaw(worktreePath, ["diff", "--cached", "--binary", baseCommit])
+  fs.mkdirSync(path.dirname(patchPath), { recursive: true })
+  fs.writeFileSync(patchPath, patch ? `${patch}${patch.endsWith("\n") ? "" : "\n"}` : "", "utf-8")
+  if (patch && patch.trim()) {
+    validatePatchFile(worktreePath, patchPath, baseCommit)
+  }
+  const changedFilesOut = gitOutputSafeTrimmed(worktreePath, ["diff", "--cached", "--name-only", baseCommit])
+  const changedFiles = changedFilesOut ? changedFilesOut.split("\n").filter(Boolean) : []
+  const headCommit = gitOutputTrimmed(worktreePath, ["rev-parse", "HEAD"])
+  return { changedFiles, headCommit }
+}
+
+function looksLikeExecutableScopedVerificationLine(command: string): boolean {
+  const trimmed = command.trim()
+  if (!trimmed) return false
+  return /^(?:cd\s+|npm\s+|yarn\s+|pnpm\s+|npx\s+|node\s+|python\s+|python3\s+|pytest\b|make\s+|just\s+|cargo\s+|go\s+|bash\s+|sh\s+|git\s+|\.\/|\.\.\/|\/|[A-Za-z_][A-Za-z0-9_]*=)/.test(trimmed) ||
+    trimmed.includes("&&") ||
+    trimmed.includes("||")
+}
+
+function inferScopedVerificationRepoPrefix(claimedFiles?: string[]): string | undefined {
+  if (!claimedFiles || claimedFiles.length === 0) return undefined
+  const prefixes = claimedFiles
+    .map((file) => file.split(/[\\/]+/).filter(Boolean)[0])
+    .filter((prefix): prefix is string => Boolean(prefix))
+  if (prefixes.length === 0) return undefined
+  const [first] = prefixes
+  if (!first) return undefined
+  return prefixes.every((prefix) => prefix === first) ? first : undefined
+}
+
+function normalizeScopedVerificationLineForCwd(
+  command: string,
+  cwd: string,
+  claimedFiles?: string[],
+): string {
+  const trimmed = command.trim()
+  const cdMatch = trimmed.match(/^cd\s+([^;&]+?)\s*&&\s*(.+)$/)
+  if (!cdMatch) return trimmed
+
+  const rawTarget = cdMatch[1]!.trim().replace(/^['"]|['"]$/g, "").replace(/[\\/]+$/, "")
+  const remainder = cdMatch[2]!.trim()
+  const cwdBase = path.basename(cwd)
+  if (rawTarget === cwdBase || rawTarget === `./${cwdBase}`) {
+    return remainder
+  }
+
+  const repoPrefix = inferScopedVerificationRepoPrefix(claimedFiles)
+  if (repoPrefix && (rawTarget === repoPrefix || rawTarget === `./${repoPrefix}`)) {
+    const targetFromCwd = path.resolve(cwd, rawTarget)
+    if (!fs.existsSync(targetFromCwd)) {
+      return remainder
+    }
+  }
+
+  return trimmed
+}
+
+function extractExecutableScopedVerificationCommands(
+  command: string | undefined,
+  cwd: string,
+  claimedFiles?: string[],
+): string[] {
+  if (!command || !command.trim()) return []
+  return command
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => looksLikeExecutableScopedVerificationLine(line))
+    .map((line) => normalizeScopedVerificationLineForCwd(line, cwd, claimedFiles))
+    .filter(Boolean)
+}
+
+interface ScopedVerificationAttempt {
+  cwd: string
+  command: string
+}
+
+function looksLikePathToken(token: string): boolean {
+  if (!token || token.startsWith("-")) return false
+  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) return false
+  return token.includes("/") || token.includes("\\")
+}
+
+function splitLooseShellWords(command: string): string[] {
+  return command.match(/"[^"]*"|'[^']*'|\S+/g) ?? []
+}
+
+function unquoteShellWord(word: string): string {
+  return word.replace(/^['"]|['"]$/g, "")
+}
+
+function classifyScopedVerificationFailureOutput(
+  output: string | undefined,
+): "environment" | "command-misconfigured" | "implementation" {
+  if (!output) return "implementation"
+  if (
+    /Could not read package\.json/i.test(output) ||
+    /ENOENT: no such file or directory, open .*package\.json/i.test(output) ||
+    /No tests found/i.test(output) ||
+    /Pattern: .* - 0 matches/i.test(output)
+  ) {
+    return "command-misconfigured"
+  }
+  if (
+    /ENOENT: no such file or directory, open '\/home\/[^']+\.opscompassdev\/tokens\.json'/i.test(output) ||
+    /path '\/home\/[^']+\.opscompassdev\/tokens\.json'/i.test(output) ||
+    /missing credentials/i.test(output) ||
+    /authentication required/i.test(output)
+  ) {
+    return "environment"
+  }
+  return "implementation"
+}
+
+function looksLikeRetryableScopedVerificationFailure(output: string | undefined): boolean {
+  if (!output) return false
+  return classifyScopedVerificationFailureOutput(output) === "command-misconfigured"
+}
+
+function buildScopedVerificationCommandAttempts(
+  command: string,
+  cwd: string,
+): ScopedVerificationAttempt[] {
+  const attempts: ScopedVerificationAttempt[] = [{ cwd, command }]
+  if (!/^(?:npm|yarn|pnpm)\s+test\b|^(?:npx\s+jest|jest)\b/i.test(command.trim())) {
+    return attempts
+  }
+
+  const words = splitLooseShellWords(command)
+  const pathTokens = words
+    .map((word) => unquoteShellWord(word))
+    .filter((word) => looksLikePathToken(word))
+
+  const seen = new Set<string>([`${path.resolve(cwd)}::${command}`])
+  for (const token of pathTokens) {
+    const absoluteTarget = path.resolve(cwd, token)
+    if (!fs.existsSync(absoluteTarget)) continue
+
+    let currentDir = fs.statSync(absoluteTarget).isDirectory()
+      ? absoluteTarget
+      : path.dirname(absoluteTarget)
+
+    while (currentDir !== cwd && currentDir.startsWith(`${path.resolve(cwd)}${path.sep}`)) {
+      if (fs.existsSync(path.join(currentDir, "package.json"))) {
+        const rewrittenToken = path.relative(currentDir, absoluteTarget)
+        if (rewrittenToken && rewrittenToken !== token) {
+          const rewrittenCommand = command.replace(token, rewrittenToken)
+          const dedupeKey = `${path.resolve(currentDir)}::${rewrittenCommand}`
+          if (!seen.has(dedupeKey)) {
+            seen.add(dedupeKey)
+            attempts.push({ cwd: currentDir, command: rewrittenCommand })
+          }
+        }
+      }
+      const parentDir = path.dirname(currentDir)
+      if (parentDir === currentDir) break
+      currentDir = parentDir
+    }
+  }
+
+  return attempts
+}
+
+function formatScopedVerificationAttempt(attempt: ScopedVerificationAttempt, baseCwd: string): string {
+  if (path.resolve(attempt.cwd) === path.resolve(baseCwd)) return attempt.command
+  const relativeCwd = path.relative(baseCwd, attempt.cwd) || "."
+  return `cd ${relativeCwd} && ${attempt.command}`
+}
+
+function runCompatScopedVerification(
+  command: string | undefined,
+  cwd: string,
+  claimedFiles?: string[],
+): {
+  status: "pass" | "fail" | "skipped"
+  command?: string
+  output?: string
+  classification?: "environment" | "command-misconfigured" | "implementation"
+  attempts?: Array<{
+    cwd?: string
+    command: string
+    status: "pass" | "fail"
+    output?: string
+    classification?: "environment" | "command-misconfigured" | "implementation"
+  }>
+} | undefined {
+  const commands = extractExecutableScopedVerificationCommands(command, cwd, claimedFiles)
+  if (commands.length === 0) return undefined
+
+  const outputs: string[] = []
+  const attemptRecords: Array<{
+    cwd?: string
+    command: string
+    status: "pass" | "fail"
+    output?: string
+    classification?: "environment" | "command-misconfigured" | "implementation"
+  }> = []
+
+  for (const executable of commands) {
+    const attempts = buildScopedVerificationCommandAttempts(executable, cwd)
+
+    for (let attemptIndex = 0; attemptIndex < attempts.length; attemptIndex++) {
+      const attempt = attempts[attemptIndex]!
+      try {
+        const output = execFileSync("bash", ["-c", attempt.command], {
+          cwd: attempt.cwd,
+          encoding: "utf-8",
+          maxBuffer: 50 * 1024,
+          timeout: 300_000,
+        })
+        const trimmedOutput = output.trim()
+        attemptRecords.push({
+          cwd: attempt.cwd,
+          command: attempt.command,
+          status: "pass",
+          output: trimmedOutput || undefined,
+        })
+        if (trimmedOutput) {
+          outputs.push(trimmedOutput)
+        }
+        break
+      } catch (err: unknown) {
+        const execErr = err as {
+          stdout?: Buffer | string
+          stderr?: Buffer | string
+          message?: string
+        }
+        const parts: string[] = []
+        if (execErr.stdout) parts.push(execErr.stdout.toString().trim())
+        if (execErr.stderr) parts.push(execErr.stderr.toString().trim())
+        if (!parts.length && execErr.message) parts.push(execErr.message)
+        const failureOutput = parts.join("\n---stderr---\n").substring(0, 50 * 1024)
+        const classification = classifyScopedVerificationFailureOutput(failureOutput)
+        attemptRecords.push({
+          cwd: attempt.cwd,
+          command: attempt.command,
+          status: "fail",
+          output: failureOutput,
+          classification,
+        })
+        const canRetry = attemptIndex < attempts.length - 1 && looksLikeRetryableScopedVerificationFailure(failureOutput)
+        if (canRetry) {
+          outputs.push(
+            `Scoped verification retry ${attemptIndex + 1}/${attempts.length - 1} failed for ` +
+            `${formatScopedVerificationAttempt(attempt, cwd)}\n${failureOutput}`,
+          )
+          continue
+        }
+        return {
+          status: "fail",
+          command: commands.join("\n"),
+          classification,
+          attempts: attemptRecords,
+          output: [
+            ...outputs,
+            `Scoped verification failed for ${formatScopedVerificationAttempt(attempt, cwd)}`,
+            failureOutput,
+          ].join("\n\n").substring(0, 50 * 1024),
+        }
+      }
+    }
+  }
+
+  return {
+    status: "pass",
+    command: commands.join("\n"),
+    attempts: attemptRecords,
+    output: outputs.join("\n\n").substring(0, 50 * 1024),
+  }
+}
+
+function materializeCompatExternalPathDependencies(repoRoot: string, worktree: CompatWorktreeInfo): void {
+  const result = materializeExternalPathDependencies({ repoRoot, worktreeRoot: worktree.agentCwd })
+  if (result.materialized.length === 0) return
+  worktree.syntheticPaths = [
+    ...(worktree.syntheticPaths ?? []),
+    ...result.materialized.map((dependency) => dependency.targetPath),
+  ]
+  const summary = result.materialized
+    .map((dependency) => `${dependency.packageName ?? dependency.dependencyPath} -> ${dependency.targetPath}`)
+    .join("; ")
+  console.warn(`[zflow] Materialized external path dependencies for worktree: ${summary}`)
+}
+
+function makePathTreeWritable(target: string): void {
+  if (!fs.existsSync(target)) return
+  const stat = fs.lstatSync(target)
+  if (stat.isSymbolicLink()) return
+  if (stat.isDirectory()) {
+    fs.chmodSync(target, 0o755)
+    for (const entry of fs.readdirSync(target)) {
+      makePathTreeWritable(path.join(target, entry))
+    }
+  } else {
+    fs.chmodSync(target, 0o644)
+  }
+}
+
+function cleanupCompatSyntheticPaths(setup: CompatWorktreeSetup): void {
+  for (const worktree of setup.worktrees) {
+    for (const syntheticPath of worktree.syntheticPaths ?? []) {
+      try {
+        makePathTreeWritable(syntheticPath)
+        fs.rmSync(syntheticPath, { recursive: true, force: true })
+      } catch {
+        // Best-effort cleanup.
+      }
+    }
+  }
+}
+
+function runCompatWorktreeSetupCommand(
+  command: string | null | undefined,
+  cwd: string,
+): void {
+  if (!command || !command.trim()) return
+  try {
+    execFileSync("bash", ["-c", command.trim()], {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 120_000,
+    })
+  } catch (err: unknown) {
+    const execErr = err as {
+      stdout?: Buffer | string
+      stderr?: Buffer | string
+      message?: string
+    }
+    const parts: string[] = []
+    if (execErr.stdout) parts.push(execErr.stdout.toString().trim())
+    if (execErr.stderr) parts.push(execErr.stderr.toString().trim())
+    if (!parts.length && execErr.message) parts.push(execErr.message)
+    throw new Error(`Worktree setup failed: ${parts.join("\n---stderr---\n") || "unknown error"}`)
+  }
+}
+
+function prefixChangedFilesForSharedCwd(
+  sharedCwd: string,
+  taskRepoCwd: string,
+  changedFiles: string[],
+): string[] {
+  const repoPrefix = path.relative(sharedCwd, taskRepoCwd)
+  if (!repoPrefix || repoPrefix === ".") return changedFiles
+  return changedFiles.map((file) => path.join(repoPrefix, file))
+}
+
+async function runCompatTaskInWorkspace(
+  task: BackendParallelTaskInput,
+  taskIndex: number,
+  workspaceId: string,
+  worktree: CompatWorktreeInfo,
+  runId: string,
+  agents: unknown[],
+  modules: CompatModules,
+  sharedCwd: string,
+  taskRepoCwd: string,
+  baseCommit: string,
+  patchPath: string,
+): Promise<ParallelTaskResult> {
+  task.onUpdate?.({
+    agent: task.agent,
+    status: "running",
+    recentOutput: [`starting ${workspaceId} dispatch...`],
+    lastActivityAt: Date.now(),
+  })
+
+  try {
+    materializeCompatExternalPathDependencies(taskRepoCwd, worktree)
+    runCompatWorktreeSetupCommand(task.worktreeSetupCommand, worktree.agentCwd)
+    const resolvedAgent = findAgent(agents, task.agent)!
+    const result = await modules.runSync(worktree.agentCwd, agents, resolvedAgent.name, task.task, {
+      runId: `${runId}-${taskIndex}`,
+      cwd: worktree.agentCwd,
+      modelOverride: task.model,
+      outputPath: task.output === false ? undefined : (typeof task.output === "string" ? task.output : undefined),
+      outputMode: task.outputMode === "file-only" ? "file-only" : undefined,
+      maxOutput: task.maxOutput,
+      onUpdate: forwardCompatProgress(task.agent, task.onUpdate),
+    })
+
+    const verification = runCompatScopedVerification(task.scopedVerification, worktree.agentCwd, task.claimedFiles)
+    const { changedFiles, headCommit } = captureCompatPatchAgainstBase(worktree.agentCwd, baseCommit, patchPath)
+    const normalizedChangedFiles = prefixChangedFilesForSharedCwd(sharedCwd, taskRepoCwd, changedFiles)
+
+    return {
+      agent: task.agent,
+      groupId: task.groupId,
+      rawOutput: result.finalOutput ?? "",
+      outputPath: result.savedOutputPath,
+      ok: result.exitCode === 0 && !result.error,
+      error: result.error,
+      workspaceId,
+      baseCommit,
+      headCommit,
+      patchPath,
+      changedFiles: normalizedChangedFiles,
+      verification,
+    }
+  } catch (err) {
+    return {
+      agent: task.agent,
+      groupId: task.groupId,
+      rawOutput: "",
+      ok: false,
+      error: `Worktree dispatch error: ${err instanceof Error ? err.message : String(err)}`,
+      workspaceId,
+      baseCommit,
+    }
   }
 }
 
@@ -535,72 +1657,114 @@ async function runParallelWithCompatWorktrees(
   modules: CompatModules,
 ): Promise<Awaited<ReturnType<BackendDispatchService["runParallel"]>>> {
   const runId = generateRunId()
-  const count = input.tasks.length
-  let worktreeSetup: unknown | undefined
+  const workspacePlans = buildCompatWorkspacePlans(cwd, input.tasks)
+  const clusterCount = workspacePlans.length
+  const worktreeSetups: Array<{ setup: CompatWorktreeSetup; planRunId: string } | undefined> = new Array(clusterCount)
+
   try {
-    worktreeSetup = modules.createWorktrees(cwd, runId, count, { agents: input.tasks.map((task) => task.agent) })
-    const setup = worktreeSetup as { worktrees: Array<{ agentCwd: string }> }
-    const concurrencyLimit = Math.max(1, Math.min(input.concurrency ?? count, count))
-    const runQueue = input.tasks.map((task, index) => async () => {
-      const agentCwd = setup.worktrees[index]!.agentCwd
-      // Emit starting progress before the agent run so the UI transitions
-      // from "queued" to "running" immediately, even before runSync emits
-      // its first progress event.
-      task.onUpdate?.({
-        agent: task.agent,
-        status: "running",
-        recentOutput: ["starting worktree dispatch..."],
-        lastActivityAt: Date.now(),
+    for (let clusterIndex = 0; clusterIndex < workspacePlans.length; clusterIndex++) {
+      const plan = workspacePlans[clusterIndex]!
+      const representativeTask = input.tasks[plan.taskIndexes[0]!]!
+      const planRunId = `${runId}-${clusterIndex}`
+      const setup = modules.createWorktrees(plan.repoCwd, planRunId, 1, {
+        agents: [representativeTask.agent],
       })
-      try {
-        const resolvedAgent = findAgent(agents, task.agent)!
-        const result = await modules.runSync(agentCwd, agents, resolvedAgent.name, task.task, {
-          runId: `${runId}-${index}`,
-          cwd: agentCwd,
-          modelOverride: task.model,
-          outputPath: task.output === false ? undefined : (typeof task.output === "string" ? task.output : undefined),
-          outputMode: task.outputMode === "file-only" ? "file-only" : undefined,
-          maxOutput: task.maxOutput,
-          onUpdate: forwardCompatProgress(task.agent, task.onUpdate),
-        })
-        return {
-          agent: task.agent,
-          ok: result.exitCode === 0 && !result.error,
-          error: result.error,
-          rawOutput: result.finalOutput ?? "",
-          savedOutputPath: result.savedOutputPath,
-          outputPath: result.savedOutputPath,
-          verification: undefined,
+      const worktree = setup.worktrees[0]!
+      worktreeSetups[clusterIndex] = { setup, planRunId }
+      await maybeRunCompatWorktreeSetupHook(
+        input.worktreeSetupHook,
+        setup.cwd,
+        worktree,
+        planRunId,
+        representativeTask.agent,
+        setup.baseCommit,
+      )
+      if (plan.baseRef) {
+        resetWorktreeToBaseRef(worktree.path, plan.baseRef)
+      }
+    }
+
+    const results: Array<ParallelTaskResult | undefined> = new Array(input.tasks.length)
+    const concurrencyLimit = Math.max(1, Math.min(input.concurrency ?? clusterCount, clusterCount))
+    const diffsDir = path.join(cwd, ".zflow", "worktree-diffs", runId)
+    fs.mkdirSync(diffsDir, { recursive: true })
+
+    const clusterRuns = workspacePlans.map((plan, clusterIndex) => async () => {
+      const setupEntry = worktreeSetups[clusterIndex]!
+      const worktree = setupEntry.setup.worktrees[0]!
+      const orderedTaskIndexes = topoSortWorkspaceTaskIndexes(input.tasks, plan.taskIndexes)
+      let currentBaseCommit = plan.baseRef ? gitOutputTrimmed(worktree.path, ["rev-parse", "HEAD"]) : setupEntry.setup.baseCommit
+      let blockedByFailure: string | undefined
+
+      for (const taskIndex of orderedTaskIndexes) {
+        const task = input.tasks[taskIndex]!
+        if (blockedByFailure) {
+          results[taskIndex] = {
+            agent: task.agent,
+            groupId: task.groupId,
+            rawOutput: "",
+            ok: false,
+            error: `Shared workspace cluster \"${plan.workspaceId}\" halted because ${blockedByFailure} failed.`,
+            workspaceId: plan.workspaceId,
+            baseCommit: currentBaseCommit,
+          }
+          continue
         }
-      } catch (err) {
-        return {
-          agent: task.agent,
-          ok: false,
-          error: `Worktree dispatch error: ${err instanceof Error ? err.message : String(err)}`,
-          rawOutput: "",
+
+        const patchPath = path.join(diffsDir, `${task.groupId ?? `task-${taskIndex}`}.patch`)
+        const taskResult = await runCompatTaskInWorkspace(
+          task,
+          taskIndex,
+          plan.workspaceId,
+          worktree,
+          setupEntry.planRunId,
+          agents,
+          modules,
+          cwd,
+          plan.repoCwd,
+          currentBaseCommit,
+          patchPath,
+        )
+        results[taskIndex] = taskResult
+
+        if (!taskResult.ok) {
+          blockedByFailure = task.groupId ?? `task-${taskIndex}`
+          continue
+        }
+
+        if (plan.mode === "shared-staging") {
+          currentBaseCommit = checkpointSharedWorkspace(
+            worktree.agentCwd,
+            `[zflow-shared] ${plan.workspaceId}: ${task.groupId ?? `task-${taskIndex}`}`,
+          )
+          results[taskIndex] = {
+            ...taskResult,
+            headCommit: currentBaseCommit,
+          }
         }
       }
     })
 
-    const taskResults: Awaited<ReturnType<BackendDispatchService["runParallel"]>>["results"] =
-      await runTasksWithRollingConcurrency(runQueue, concurrencyLimit)
+    await runTasksWithRollingConcurrency(clusterRuns, concurrencyLimit)
 
-    const diffsDir = `${cwd}/.zflow/worktree-diffs/${runId}`
-    try {
-      fs.mkdirSync(diffsDir, { recursive: true })
-      const diffs = modules.diffWorktrees(worktreeSetup, input.tasks.map((task) => task.agent), diffsDir)
-      for (const diff of diffs) {
-        if (diff.index < taskResults.length) taskResults[diff.index]!.patchPath = diff.patchPath
-      }
-    } catch {
-      // Best-effort diff capture.
+    const finalizedResults = input.tasks.map((task, index) => results[index] ?? ({
+      agent: task.agent,
+      groupId: task.groupId,
+      rawOutput: "",
+      ok: false,
+      error: "Task did not produce a result.",
+    }))
+
+    return {
+      ok: finalizedResults.every((result) => result.ok),
+      results: finalizedResults,
     }
-
-    return { ok: taskResults.every((result) => result.ok), results: taskResults }
   } finally {
-    if (worktreeSetup) {
+    for (const setupEntry of worktreeSetups) {
+      if (!setupEntry) continue
       try {
-        modules.cleanupWorktrees(worktreeSetup)
+        cleanupCompatSyntheticPaths(setupEntry.setup)
+        modules.cleanupWorktrees(setupEntry.setup)
       } catch {
         // Best-effort cleanup.
       }
@@ -636,11 +1800,13 @@ async function runParallelCompatConcurrent(
       })
       return {
         agent: task.agent,
+        groupId: task.groupId,
         ...mapCompatSingleResult(result),
       }
     } catch (err) {
       return {
         agent: task.agent,
+        groupId: task.groupId,
         ok: false,
         error: `Dispatch error: ${err instanceof Error ? err.message : String(err)}`,
         rawOutput: "",
@@ -689,26 +1855,57 @@ export default async function activateZflowSubagentsBridgeExtension(_pi: Extensi
   // ── Provide the service ─────────────────────────────────────────
 
   let service: DispatchService
+  let compatBackend: BackendDispatchService | undefined
+  let compatError: unknown | undefined
 
-  // Prefer the fork-provided backend when available. Pi git installs may load
-  // this package without its npm dependencies, so fall back to a compatibility
-  // backend built from the installed pi-subagents internals before reporting
-  // dispatch as unavailable.
+  try {
+    compatBackend = await createCompatZflowDispatchService()
+  } catch (err) {
+    compatError = err
+  }
+
+  // Prefer the fork-provided backend for legacy isolated dispatches, while
+  // keeping the compat backend available as a fallback for richer zflow-owned
+  // worktree features (hooks, shared serialized staging, base-ref worktrees).
   try {
     const { createZflowDispatchService } = await import("pi-subagents/zflow-bridge")
     const backend = createZflowDispatchService()
-    service = new SubagentsDispatchService(backend)
+    service = new SubagentsDispatchService(backend, {
+      fallback: compatBackend,
+      capabilities: {
+        isolatedWorktrees: true,
+        sharedWorkspaceSerialized: false,
+        sharedWorkspaceConcurrent: false,
+        baseRefWorktrees: false,
+        worktreeSetupHooks: false,
+      },
+    })
   } catch (forkErr) {
-    try {
-      const backend = await createCompatZflowDispatchService()
-      service = new SubagentsDispatchService(backend)
-    } catch (compatErr) {
+    if (compatBackend) {
+      service = new SubagentsDispatchService(compatBackend)
+    } else {
       service = new UnavailableDispatchService(
         `fork import failed: ${forkErr instanceof Error ? forkErr.message : String(forkErr)}; ` +
-        `compat import failed: ${compatErr instanceof Error ? compatErr.message : String(compatErr)}`,
+        `compat import failed: ${compatError instanceof Error ? compatError.message : String(compatError)}`,
       )
     }
   }
 
   registry.provide(DISPATCH_SERVICE_CAPABILITY, service)
+}
+
+// ── Test-only exports ──────────────────────────────────────────────
+/** @internal Exported for unit testing only. */
+export {
+  validatePatchFile,
+  writePatchFromRange,
+  captureCompatPatchAgainstBase,
+  isUsageLimitError,
+  extractUsageLimitWaitTime,
+  isUnsupportedDeveloperRoleDispatchError,
+  resolveAgentFallbackModelCandidates,
+  resolveMeaningfulSingleError,
+  buildScopedVerificationCommandAttempts,
+  extractExecutableScopedVerificationCommands,
+  normalizeScopedVerificationLineForCwd,
 }

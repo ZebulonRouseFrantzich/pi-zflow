@@ -4,7 +4,7 @@
 
 Use this prompt helper to capture and document architectural or design decisions that arise during planning or implementation. This is useful when a decision is made that should be recorded for future reference but does not warrant a full change request.
 
-This is a **drafting helper**, not the canonical automation flow. Decision capture is a manual refinement step; the formal `/zflow-change-prepare` and `/zflow-change-implement` workflows (when available) handle decision tracking as part of the artifact lifecycle.
+This is a **drafting helper**, not the canonical automation flow. Decision capture is a manual refinement step; the formal `/zflow-change-plan`, `/zflow-change-prepare`, and `/zflow-change-implement` workflows handle decision tracking as part of the artifact lifecycle.
 
 ## Usage
 
@@ -29,5 +29,5 @@ This is a **drafting helper**, not the canonical automation flow. Decision captu
 
 ## Related
 
-- Change preparation: `/zflow-draft-change-prepare`
+- Change preparation: `/zflow-change-plan`, `/zflow-change-prepare`
 - Change implementation draft: `/zflow-draft-change-implement`

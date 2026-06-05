@@ -16,7 +16,42 @@
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { execFileSync } from "node:child_process"
+import { randomUUID } from "node:crypto"
 import { resolveRunDir, resolveRunStatePath } from "./artifact-paths.js"
+
+const runStateWriteLocks = new Map<string, Promise<void>>()
+
+async function withRunStateWriteLock<T>(runPath: string, fn: () => Promise<T>): Promise<T> {
+  const previous = runStateWriteLocks.get(runPath) ?? Promise.resolve()
+  let release!: () => void
+  const current = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const chained = previous.then(() => current, () => current)
+  runStateWriteLocks.set(runPath, chained)
+
+  await previous.catch(() => undefined)
+  try {
+    return await fn()
+  } finally {
+    release()
+    if (runStateWriteLocks.get(runPath) === chained) {
+      runStateWriteLocks.delete(runPath)
+    }
+  }
+}
+
+async function writeJsonAtomically(filePath: string, value: unknown): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true })
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`
+  try {
+    await fs.writeFile(tmpPath, `${JSON.stringify(value, null, 2)}\n`, "utf-8")
+    await fs.rename(tmpPath, filePath)
+  } catch (error) {
+    await fs.rm(tmpPath, { force: true }).catch(() => undefined)
+    throw error
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -106,6 +141,7 @@ export interface GroupRunMetadata {
     status: "pass" | "fail" | "skipped" | "missing"
     command?: string
     output?: string
+    outputPath?: string
   }
   /** Whether this group's artifacts should be retained. */
   retained: boolean
@@ -123,6 +159,39 @@ export interface RetainedArtifact {
   reason: string
   /** ISO timestamp when the artifact expires. */
   expiresAt: string
+}
+
+/**
+ * Planned or active shared workspace cluster metadata.
+ *
+ * This is durable run-state scaffolding for richer orchestration strategies.
+ */
+export interface WorkspaceClusterMetadata {
+  workspaceId: string
+  mode: "isolated" | "shared-staging"
+  workspaceConcurrency: "serialized" | "concurrent"
+  groupIds: string[]
+  status: "planned" | "running" | "completed" | "failed"
+  worktreePath?: string
+  baseRef?: string
+  createdAt: string
+  updatedAt: string
+}
+
+/**
+ * Durable metadata for a materialized dependency-lineage ref.
+ */
+export interface LineageRefMetadata {
+  id: string
+  groupId: string
+  dependencyGroupIds: string[]
+  ref: string
+  baseCommit: string
+  headCommit?: string
+  worktreePath?: string
+  status: "planned" | "materialized" | "stale"
+  createdAt: string
+  updatedAt: string
 }
 
 /**
@@ -153,6 +222,10 @@ export interface RunJson {
   verification: VerificationStatus
   /** Retained artifact entries. */
   retainedArtifacts: RetainedArtifact[]
+  /** Planned or active workspace clusters for this run. */
+  workspaceClusters: WorkspaceClusterMetadata[]
+  /** Materialized dependency-lineage refs for this run. */
+  lineageRefs: LineageRefMetadata[]
   /** ISO timestamp when the run was created. */
   createdAt: string
   /** ISO timestamp when the run was last updated. */
@@ -235,17 +308,15 @@ export async function createRun(
     applyBack: { status: "pending" },
     verification: { status: "pending" },
     retainedArtifacts: [],
+    workspaceClusters: [],
+    lineageRefs: [],
     createdAt: now,
     updatedAt: now,
   }
 
-  // Create the run directory
+  // Create the run directory and write atomically.
   await fs.mkdir(runDir, { recursive: true })
-
-  // Write atomically using a temp file
-  const tmpPath = runPath + ".tmp"
-  await fs.writeFile(tmpPath, JSON.stringify(run, null, 2), "utf-8")
-  await fs.rename(tmpPath, runPath)
+  await writeJsonAtomically(runPath, run)
 
   return run
 }
@@ -280,19 +351,18 @@ export async function updateRun(
   partial: Partial<RunJson>,
   cwd?: string,
 ): Promise<RunJson> {
-  const run = await readRun(runId, cwd)
-  const updated: RunJson = {
-    ...run,
-    ...partial,
-    updatedAt: new Date().toISOString(),
-  }
-
   const runPath = resolveRunStatePath(runId, cwd)
-  const tmpPath = runPath + ".tmp"
-  await fs.writeFile(tmpPath, JSON.stringify(updated, null, 2), "utf-8")
-  await fs.rename(tmpPath, runPath)
+  return withRunStateWriteLock(runPath, async () => {
+    const run = await readRun(runId, cwd)
+    const updated: RunJson = {
+      ...run,
+      ...partial,
+      updatedAt: new Date().toISOString(),
+    }
 
-  return updated
+    await writeJsonAtomically(runPath, updated)
+    return updated
+  })
 }
 
 /**

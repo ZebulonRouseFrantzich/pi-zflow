@@ -53,6 +53,8 @@ export interface ResumeReconciliation {
   groupsNeedingRerun: GroupResumeStatus[]
   /** Groups that are already applied to primary. */
   alreadyAppliedGroups: GroupResumeStatus[]
+  /** Queued groups still blocked on unmet dependency reruns. */
+  waitingOnDependencies: GroupResumeStatus[]
   /** Whether apply-back was completed or needs retry. */
   applyBackNeeded: boolean
   /** Whether apply-back should use the smart cascade (always true now). */
@@ -85,6 +87,19 @@ async function fileExists(filePath: string): Promise<boolean> {
 }
 
 /**
+ * Compare two ISO timestamps.
+ * Returns true if `a` is strictly before `b`.
+ * Returns false if either is missing, empty, or invalid.
+ */
+function isTimestampBefore(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false
+  const ta = new Date(a).getTime()
+  const tb = new Date(b).getTime()
+  if (isNaN(ta) || isNaN(tb)) return false
+  return ta < tb
+}
+
+/**
  * Normalized group status from run.json groups array vs groupLedger.
  *
  * The run.json has both:
@@ -96,6 +111,8 @@ async function fileExists(filePath: string): Promise<boolean> {
 interface NormalizedGroupState {
   status: string
   patchPath?: string
+  implementationEvidencePath?: string
+  completionMode?: string
   appliedToPrimary: boolean
   scopedVerificationPassed: boolean
 }
@@ -118,6 +135,8 @@ async function buildGroupState(
   if (ledgerEntry) {
     const status = (ledgerEntry.status as string) ?? ""
     const patchPath = ledgerEntry.patchPath as string | undefined
+    const implementationEvidencePath = ledgerEntry.implementationEvidencePath as string | undefined
+    const completionMode = ledgerEntry.completionMode as string | undefined
     const appliedToPrimary = (ledgerEntry.appliedToPrimary as boolean) ?? false
     const scopedVerification = ledgerEntry.scopedVerification as
       | { status?: string }
@@ -125,7 +144,7 @@ async function buildGroupState(
     const scopedVerificationPassed =
       scopedVerification?.status === "pass" || status === "applied"
 
-    return { status, patchPath, appliedToPrimary, scopedVerificationPassed }
+    return { status, patchPath, implementationEvidencePath, completionMode, appliedToPrimary, scopedVerificationPassed }
   }
 
   // Fall back to run.groups[]
@@ -139,6 +158,16 @@ async function buildGroupState(
     groupMeta.scopedVerification?.status === "pass"
 
   return { status, patchPath, appliedToPrimary, scopedVerificationPassed }
+}
+
+async function hasAcceptedImplementationEvidence(
+  state: NormalizedGroupState,
+): Promise<boolean> {
+  if (!state.implementationEvidencePath) return false
+  if (state.completionMode !== "worker-evidence" && state.completionMode !== "noop-evidence") {
+    return false
+  }
+  return fileExists(state.implementationEvidencePath)
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +263,7 @@ export async function reconcileResumeState(
   const reusableGroups: GroupResumeStatus[] = []
   const groupsNeedingRerun: GroupResumeStatus[] = []
   const alreadyAppliedGroups: GroupResumeStatus[] = []
+  const waitingOnDependencies: GroupResumeStatus[] = []
 
   for (const group of currentGroups) {
     const state = await buildGroupState(runId, group.id, cwd)
@@ -259,16 +289,19 @@ export async function reconcileResumeState(
     if (state.patchPath) {
       patchExists = await fileExists(state.patchPath)
     }
+    const evidenceAccepted = await hasAcceptedImplementationEvidence(state)
 
-    if (!distrustAppliedLedger && (state.appliedToPrimary || state.status === "applied" || state.status === "skipped")) {
+    if (!distrustAppliedLedger && (state.appliedToPrimary || state.status === "applied" || state.status === "skipped" || evidenceAccepted)) {
       alreadyAppliedGroups.push({
         groupId: group.id,
         canReuse: true,
         reason:
           state.status === "skipped"
             ? "Group was skipped in previous run."
-            : "Group patch already applied to primary tree.",
-        patchPath: state.patchPath,
+            : evidenceAccepted
+              ? "Group was accepted using preserved worker evidence; no rerun required."
+              : "Group patch already applied to primary tree.",
+        patchPath: state.patchPath ?? state.implementationEvidencePath,
         patchVerified: true,
         alreadyApplied: true,
       })
@@ -287,7 +320,8 @@ export async function reconcileResumeState(
         alreadyApplied: false,
       })
     } else {
-      // Cannot reuse — needs rerun
+      // Cannot reuse — either this exact group must rerun, or it is simply
+      // waiting behind an upstream dependency rerun and should stay queued.
       let reason: string
       if (!state.patchPath) {
         reason = "No patch artifact path recorded."
@@ -299,14 +333,46 @@ export async function reconcileResumeState(
         reason = "Cannot reuse — state does not meet reuse criteria."
       }
 
-      groupsNeedingRerun.push({
-        groupId: group.id,
-        canReuse: false,
-        reason,
-        patchPath: state.patchPath,
-        patchVerified: state.scopedVerificationPassed,
-        alreadyApplied: false,
-      })
+      if ((state.status === "ready" || state.status === "queued" || state.status === "pending") && group.dependencies.length > 0) {
+        const dependencyStates = await Promise.all(
+          group.dependencies.map(async (dependencyId) => ({
+            dependencyId,
+            state: await buildGroupState(runId, dependencyId, cwd),
+          })),
+        )
+        const unmetDependencies = dependencyStates
+          .filter(({ state }) => !(state?.appliedToPrimary || state?.status === "applied" || state?.status === "succeeded" || state?.status === "skipped"))
+          .map(({ dependencyId }) => dependencyId)
+
+        if (unmetDependencies.length > 0) {
+          waitingOnDependencies.push({
+            groupId: group.id,
+            canReuse: false,
+            reason: `Waiting on dependency groups (${unmetDependencies.join(", ")}) before it can run.`,
+            patchPath: state.patchPath,
+            patchVerified: state.scopedVerificationPassed,
+            alreadyApplied: false,
+          })
+        } else {
+          groupsNeedingRerun.push({
+            groupId: group.id,
+            canReuse: false,
+            reason: "Dependencies are satisfied, but this group has not been dispatched successfully yet.",
+            patchPath: state.patchPath,
+            patchVerified: state.scopedVerificationPassed,
+            alreadyApplied: false,
+          })
+        }
+      } else {
+        groupsNeedingRerun.push({
+          groupId: group.id,
+          canReuse: false,
+          reason,
+          patchPath: state.patchPath,
+          patchVerified: state.scopedVerificationPassed,
+          alreadyApplied: false,
+        })
+      }
     }
   }
 
@@ -335,27 +401,78 @@ export async function reconcileResumeState(
   // Always prefer cascade
   const applyBackCanUseCascade = true
 
-  // Determine verification/review need based on phase history
+  // ── Inspect persisted run metadata for smarter staleness detection ──
+  const codeReviewRaw = (run as any).codeReview as Record<string, unknown> | undefined
+  const verificationStatus = run.verification?.status
+  const verificationCompletedAt = run.verification?.completedAt
+  const applyBackCompletedAt = run.applyBack?.completedAt
+  const codeReviewPass = codeReviewRaw?.pass as boolean | undefined
+  const codeReviewCompletedAt = codeReviewRaw?.completedAt as string | undefined
+
+  // Determine if verification is stale (apply-back completed after verification)
+  const verificationStale = !!(
+    applyBackCompletedAt && verificationCompletedAt &&
+    isTimestampBefore(verificationCompletedAt, applyBackCompletedAt)
+  )
+
+  // Determine if code review is stale (verification completed after code review)
+  const codeReviewStale = !!(
+    verificationCompletedAt && codeReviewCompletedAt &&
+    isTimestampBefore(codeReviewCompletedAt, verificationCompletedAt)
+  )
+
+  // Verification is considered current if status is passed/failed and not stale.
+  // Review should only proceed when verification specifically passed.
+  const verificationCurrent = !!(
+    (verificationStatus === "passed" || verificationStatus === "failed") &&
+    !verificationStale
+  )
+  const verificationPassedCurrent = verificationStatus === "passed" && !verificationStale
+
+  // ── Determine verification need ──
+  // Cases:
+  // - Phase forces re-verify (verification-failed)
+  // - completed phase implies full re-run
+  // - Apply-back completed after verification means verification is stale
+  // - Groups are applied but verification never ran (pending/in-progress)
   const verificationNeeded =
     previousPhase === "verification-failed" ||
-    previousPhase === "review-failed" ||
     previousPhase === "completed" ||
-    (previousPhase !== "verification-failed" && allApplied)
+    verificationStale ||
+    (allApplied && (!verificationStatus || verificationStatus === "pending" || verificationStatus === "in-progress"))
 
-  const reviewNeeded = previousPhase === "review-failed"
+  // ── Determine review need ──
+  // Cases:
+  // - Phase explicitly says review-failed
+  // - Verification is current and no code review was done
+  // - Code review exists but is stale (older than verification)
+  // - Code review exists, is current, but failed (needs rerun)
+  let reviewNeeded = previousPhase === "review-failed"
+  if (!reviewNeeded && verificationPassedCurrent) {
+    if (!codeReviewRaw) {
+      reviewNeeded = true
+    } else if (codeReviewStale) {
+      reviewNeeded = true
+    } else if (codeReviewPass === false) {
+      // Code review exists, is current, but failed — needs attention
+      reviewNeeded = true
+    }
+  }
 
-  // Determine the recommended next step
+  // ── Determine the recommended next step ──
   let recommendedNextStep: ResumeReconciliation["recommendedNextStep"]
   if (anyNeedRerun) {
     recommendedNextStep = "rerun-groups"
   } else if (applyBackNeeded) {
     recommendedNextStep = "apply-back"
-  } else if (previousPhase === "verification-failed") {
+  } else if (verificationNeeded) {
     recommendedNextStep = "verify"
-  } else if (previousPhase === "review-failed") {
+  } else if (reviewNeeded) {
     recommendedNextStep = "review"
+  } else if (allApplied && verificationPassedCurrent && codeReviewPass === true) {
+    recommendedNextStep = "complete"
   } else if (allApplied) {
-    recommendedNextStep = "verify"
+    recommendedNextStep = "inspect"
   } else {
     recommendedNextStep = "inspect"
   }
@@ -364,6 +481,7 @@ export async function reconcileResumeState(
   const totalGroups = currentGroups.length
   const reusableCount = reusableGroups.length
   const rerunCount = groupsNeedingRerun.length
+  const waitingCount = waitingOnDependencies.length
   const appliedCount = alreadyAppliedGroups.length
 
   const parts: string[] = [
@@ -371,6 +489,7 @@ export async function reconcileResumeState(
     "",
     `- ${reusableCount}/${totalGroups} group(s) reusable (patches available).`,
     `- ${rerunCount}/${totalGroups} group(s) need rerun.`,
+    `- ${waitingCount}/${totalGroups} group(s) are still waiting on dependency reruns.`,
     `- ${appliedCount}/${totalGroups} group(s) already applied.`,
     "",
   ]
@@ -386,6 +505,14 @@ export async function reconcileResumeState(
   if (rerunCount > 0) {
     parts.push("Groups needing rerun:")
     for (const g of groupsNeedingRerun) {
+      parts.push(`  - ${g.groupId}: ${g.reason}`)
+    }
+    parts.push("")
+  }
+
+  if (waitingCount > 0) {
+    parts.push("Groups waiting on dependencies:")
+    for (const g of waitingOnDependencies) {
       parts.push(`  - ${g.groupId}: ${g.reason}`)
     }
     parts.push("")
@@ -411,6 +538,7 @@ export async function reconcileResumeState(
     reusableGroups,
     groupsNeedingRerun,
     alreadyAppliedGroups,
+    waitingOnDependencies,
     applyBackNeeded,
     applyBackCanUseCascade,
     verificationNeeded,

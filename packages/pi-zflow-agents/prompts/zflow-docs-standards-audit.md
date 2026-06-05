@@ -30,4 +30,4 @@ The audit checks for:
 ## Related
 
 - Standards template: `/zflow-standards-template`
-- Change preparation: `/zflow-draft-change-prepare`
+- Change preparation: `/zflow-change-plan`, `/zflow-change-prepare`

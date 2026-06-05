@@ -37,6 +37,51 @@ import {
 import type { CoverageReport } from "./coverage-verifier.js"
 
 // ---------------------------------------------------------------------------
+// Patch-corruption diagnostics (private local helpers to avoid cycle risk)
+// ---------------------------------------------------------------------------
+
+/**
+ * Detect whether a `git apply` failure message indicates a corrupt/malformed
+ * patch artifact rather than a legitimate merge conflict.
+ */
+function isCorruptPatchError(stderr: string): boolean {
+  const corruptIndicators = [
+    "No valid patches in input",
+    "corrupt patch at line",
+    "bad git-diff",
+    "invalid mode in patch line",
+    "unrecognized input",
+    "fragment doesn't start",
+  ]
+  return corruptIndicators.some((pattern) => stderr.includes(pattern))
+}
+
+/**
+ * Format an error message for a failed `git apply` inside a synthetic commit.
+ *
+ * Includes group id, patch path, original git error, plus a corruption hint
+ * when the stderr suggests a malformed patch artifact.
+ */
+function formatSyntheticCommitError(
+  groupId: string,
+  patchPath: string,
+  stderr: string,
+): string {
+  const lines: string[] = [
+    `Failed to create synthetic commit for group "${groupId}"`,
+    `Patch path: ${patchPath}`,
+  ]
+  if (isCorruptPatchError(stderr)) {
+    lines.push(
+      "The patch artifact appears to be malformed or corrupted. " +
+      "This may indicate a patch capture or bridge serialization issue upstream.",
+    )
+  }
+  lines.push(`Git apply error: ${stderr}`)
+  return lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -470,7 +515,8 @@ export async function runIntegrationMerge(
       )
     } catch (err: unknown) {
       failingGroup = groupId
-      mergeError = `Failed to create synthetic commit for group "${groupId}": ${err instanceof Error ? err.message : String(err)}`
+      const errMsg = err instanceof Error ? err.message : String(err)
+      mergeError = formatSyntheticCommitError(groupId, patchPath, errMsg)
       break
     }
 

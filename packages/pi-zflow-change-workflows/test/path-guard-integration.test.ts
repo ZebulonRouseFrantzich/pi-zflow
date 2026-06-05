@@ -394,10 +394,10 @@ describe("path-guard integration — guardBashCommand", () => {
       `Expected export to be blocked, got: ${result.message}`)
   })
 
-  it("blocks cd command", () => {
+  it("allows repo-safe cd command", () => {
     const result = guardBashCommand("cd src", makeOptions())
-    assert.ok(!result.allowed,
-      `Expected cd to be blocked, got: ${result.message}`)
+    assert.ok(result.allowed,
+      `Expected repo-safe cd to be allowed, got: ${result.message}`)
   })
 
   it("blocks npx command", () => {
@@ -516,10 +516,22 @@ describe("path-guard integration — guardBashCommand", () => {
       `Expected tail to be allowed, got: ${result.message}`)
   })
 
-  it("blocks piped read-only commands (no chaining allowed)", () => {
+  it("allows piped read-only commands when every segment is repo-safe", () => {
     const result = guardBashCommand("git diff | head -50", makeOptions())
+    assert.ok(result.allowed,
+      `Expected piped read-only commands to be allowed, got: ${result.message}`)
+  })
+
+  it("allows chained read-only commands that stay inside the repo", () => {
+    const result = guardBashCommand("cd src && rg TODO ./", makeOptions())
+    assert.ok(result.allowed,
+      `Expected chained read-only commands to be allowed, got: ${result.message}`)
+  })
+
+  it("blocks read-only commands that target paths outside allowed roots", () => {
+    const result = guardBashCommand("cat /etc/passwd", makeOptions())
     assert.ok(!result.allowed,
-      `Expected piped read-only commands to be blocked, got: ${result.message}`)
+      `Expected read-only access outside repo roots to be blocked, got: ${result.message}`)
   })
 
   it("allows echo with redirection to allowed path", () => {
@@ -529,6 +541,58 @@ describe("path-guard integration — guardBashCommand", () => {
     )
     assert.ok(result.allowed,
       `Expected echo with redirection to allowed path to be allowed, got: ${result.message}`)
+  })
+
+  it("honors repo bashGuard allowExecutables overrides", () => {
+    const result = guardBashCommand(
+      "curl https://example.com",
+      makeOptions({
+        bashPolicy: {
+          allowExecutables: ["curl"],
+        },
+      }),
+    )
+    assert.ok(result.allowed,
+      `Expected allowExecutables override to allow curl, got: ${result.message}`)
+  })
+
+  it("still path-checks curl output writes even when curl is allowlisted", () => {
+    const result = guardBashCommand(
+      "curl -o /tmp/out https://example.com",
+      makeOptions({
+        bashPolicy: {
+          allowExecutables: ["curl"],
+        },
+      }),
+    )
+    assert.ok(!result.allowed,
+      `Expected curl -o outside allowed roots to remain blocked, got: ${result.message}`)
+  })
+
+  it("honors repo bashGuard denyExecutables overrides", () => {
+    const result = guardBashCommand(
+      "git status",
+      makeOptions({
+        bashPolicy: {
+          denyExecutables: ["git"],
+        },
+      }),
+    )
+    assert.ok(!result.allowed,
+      `Expected denyExecutables override to block git, got: ${result.message}`)
+  })
+
+  it("honors repo bashGuard allowReadOnlyChaining=false", () => {
+    const result = guardBashCommand(
+      "git diff | head -50",
+      makeOptions({
+        bashPolicy: {
+          allowReadOnlyChaining: false,
+        },
+      }),
+    )
+    assert.ok(!result.allowed,
+      `Expected allowReadOnlyChaining=false to block chaining, got: ${result.message}`)
   })
 })
 

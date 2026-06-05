@@ -14,6 +14,7 @@
 
 import { execSync, execFileSync } from "node:child_process"
 
+import { resolveCodeReviewFindingsPath } from "pi-zflow-artifacts"
 import { getZflowRegistry } from "pi-zflow-core/registry"
 import { DISPATCH_SERVICE_CAPABILITY, type DispatchService } from "pi-zflow-core/dispatch-service"
 
@@ -29,10 +30,13 @@ import {
   addFindingTraceability,
   chooseCodeReviewTier,
   buildManifestFromTier,
+  consolidateCodeReviewFindings,
+  parsePersistedCodeReviewFindings,
   type CodeReviewTierContext,
   type CodeReviewFinding,
   type PrReviewFinding,
   type PrReviewFindingsInput,
+  type FocusedFixReviewContext,
 } from "./findings.js"
 
 import {
@@ -342,6 +346,8 @@ export interface CodeReviewInput {
   onReviewUpdate?: (update: ReviewerUpdate) => void
   /** Working directory for runtime-state resolution. */
   cwd?: string
+  /** Optional focused follow-up review context for post-fix reruns. */
+  focusReview?: FocusedFixReviewContext
 }
 
 /**
@@ -362,6 +368,12 @@ export interface CodeReviewResult {
   reviewersExecuted: number
   /** Coverage notes. */
   coverageNotes: string[]
+  /** Structured review-infrastructure status, when the review could not run cleanly. */
+  reviewInfrastructure?: {
+    status: "ok" | "failed"
+    summary?: string
+    recoveryHint?: string
+  }
 }
 
 /**
@@ -475,9 +487,114 @@ function isRequiredCodeReviewer(reviewerName: string): boolean {
   return reviewerName === "correctness" || reviewerName === "integration" || reviewerName === "security"
 }
 
+function normalizeListedAgentName(entry: string | { name?: unknown }): string | undefined {
+  if (typeof entry === "string") return entry.trim() || undefined
+  if (typeof entry?.name === "string") return entry.name.trim() || undefined
+  return undefined
+}
+
+function uniqueStrings(values: Iterable<string | undefined>): string[] {
+  return [...new Set([...values].filter((value): value is string => Boolean(value && value.trim().length > 0)))]
+}
+
+async function discoverDispatchAgents(
+  dispatchService: DispatchService,
+  cwd?: string,
+): Promise<{ agents?: string[]; error?: string }> {
+  if (typeof dispatchService.listAgents !== "function") return {}
+
+  try {
+    const listed = await dispatchService.listAgents(cwd)
+    return {
+      agents: uniqueStrings((listed ?? []).map(normalizeListedAgentName)),
+    }
+  } catch (err) {
+    return {
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+}
+
+function buildMissingReviewerAgentError(agentName: string, availableAgents: string[]): string {
+  const available = availableAgents.length > 0 ? availableAgents.join(", ") : "(none discovered)"
+  return `Required reviewer agent "${agentName}" is not discoverable in the active dispatch environment. ` +
+    `Available: ${available}. Run /zflow-setup-agents or /zflow-update-agents in this Pi environment, then re-run the review.`
+}
+
+function classifyReviewInfrastructure(
+  manifest: ReviewerManifest,
+): { status: "failed"; summary: string; recoveryHint?: string } | undefined {
+  const blockedRequiredReviewers = manifest.reviewers.filter(
+    (reviewer) => isRequiredCodeReviewer(reviewer.name) && reviewer.status !== "executed",
+  )
+  if (blockedRequiredReviewers.length === 0) return undefined
+
+  const details = blockedRequiredReviewers.map((reviewer) => reviewer.detail ?? "")
+
+  if (details.some((detail) => /not discoverable|Unknown agent|No agents discovered/i.test(detail))) {
+    return {
+      status: "failed",
+      summary:
+        "Required code-review agents were not discoverable in the active dispatch environment. " +
+        "This is a review-environment failure, not a clean zero-finding review.",
+      recoveryHint:
+        "Run /zflow-setup-agents or /zflow-update-agents in this Pi environment, then re-run the review.",
+    }
+  }
+
+  if (details.some((detail) => /No usable resolved model/i.test(detail))) {
+    return {
+      status: "failed",
+      summary:
+        "Required code-review lanes/models were not resolved for the active profile. " +
+        "This is a review-configuration failure, not a clean zero-finding review.",
+      recoveryHint:
+        "Resolve the active zflow profile/lane bindings for the review agents, then re-run the review.",
+    }
+  }
+
+  if (details.some((detail) => /no dispatch service available/i.test(detail))) {
+    return {
+      status: "failed",
+      summary:
+        "No review dispatch service was available. This is a review-infrastructure failure, " +
+        "not a clean zero-finding review.",
+    }
+  }
+
+  return {
+    status: "failed",
+    summary:
+      `Required code reviewers did not execute successfully (${blockedRequiredReviewers.map((reviewer) => reviewer.name).join(", ")}). ` +
+      "This is a review execution failure, not a clean zero-finding review.",
+    recoveryHint: "Inspect the reviewer artifacts and dispatch backend diagnostics, then re-run the review.",
+  }
+}
+
 interface AgentModelInfo {
   model?: string
   thinking?: string
+}
+
+function buildRateLimitCoverageNotes(
+  label: string,
+  metadata: { retryCount?: number; totalRateLimitRetries?: number; notices?: string[] } | undefined,
+): string[] {
+  if (!metadata || (metadata.totalRateLimitRetries ?? 0) <= 0) return []
+  const notes: string[] = [
+    `${label} recovered after ${metadata.totalRateLimitRetries} provider rate-limit retr${metadata.totalRateLimitRetries === 1 ? "y" : "ies"}.`,
+  ]
+  for (const notice of metadata.notices ?? []) {
+    notes.push(`${label} rate-limit notice: ${notice}`)
+  }
+  return notes
+}
+
+function isUsableResolvedModel(model: string | null | undefined): model is string {
+  if (!model) return false
+  const normalized = model.trim().toLowerCase()
+  if (!normalized) return false
+  return normalized !== "placeholder" && !normalized.startsWith("placeholder:")
 }
 
 async function resolveProfileModelForAgent(agentName: string): Promise<string | undefined> {
@@ -491,17 +608,32 @@ async function resolveAgentModelInfo(agentName: string): Promise<AgentModelInfo>
       getResolvedAgentBinding?: (agentName: string) => Promise<{ resolvedModel?: string | null; lane?: string } | null>
       getResolvedLane?: (laneName: string) => Promise<{ thinking?: string } | null>
     }>("profiles")
-    if (!profileService) return {}
-    const binding = await profileService.getResolvedAgentBinding?.(agentName)
-    if (!binding) return {}
-    let thinking: string | undefined
-    if (binding.lane && profileService.getResolvedLane) {
-      const lane = await profileService.getResolvedLane(binding.lane)
-      if (lane) thinking = lane.thinking
+
+    const bindingFromRegistry = await profileService?.getResolvedAgentBinding?.(agentName)
+    const registryThinking = bindingFromRegistry?.lane && profileService?.getResolvedLane
+      ? (await profileService.getResolvedLane(bindingFromRegistry.lane))?.thinking
+      : undefined
+
+    if (bindingFromRegistry && isUsableResolvedModel(bindingFromRegistry.resolvedModel)) {
+      return {
+        model: bindingFromRegistry.resolvedModel,
+        thinking: registryThinking,
+      }
     }
+
+    // Fallback to the file-backed active profile cache API.
+    const { getResolvedAgentBinding, getResolvedLane } = await import("pi-zflow-profiles")
+    const binding = await getResolvedAgentBinding(agentName)
+    if (!binding || !isUsableResolvedModel(binding.resolvedModel)) {
+      return {
+        thinking: registryThinking,
+      }
+    }
+
+    const lane = binding.lane ? await getResolvedLane(binding.lane) : null
     return {
-      model: binding.resolvedModel ?? undefined,
-      thinking,
+      model: binding.resolvedModel,
+      thinking: lane?.thinking ?? registryThinking,
     }
   } catch {
     return {}
@@ -602,6 +734,15 @@ export async function runCodeReview(
   const reviewerOutputs: Record<string, string> = {}
   const coverageNotes: string[] = [`Tier: ${tier}`, `Base ref: ${baseRef}`]
   if (input.targetPath) coverageNotes.push(`Target path: ${input.targetPath}`)
+  if (input.focusReview) {
+    coverageNotes.push(`Focused review mode: ${input.focusReview.mode}`)
+    if (input.focusReview.targetFiles && input.focusReview.targetFiles.length > 0) {
+      coverageNotes.push(`Focused files: ${input.focusReview.targetFiles.join(", ")}`)
+    }
+    if (input.focusReview.targetFamilies && input.focusReview.targetFamilies.length > 0) {
+      coverageNotes.push(`Focused families: ${input.focusReview.targetFamilies.join(", ")}`)
+    }
+  }
 
   // Diff coverage note
   if (diffContent.length === 0) {
@@ -616,6 +757,7 @@ export async function runCodeReview(
     diffBundle: diffContent,
     verificationStatus: input.verificationStatus,
     tier,
+    focusReview: input.focusReview,
   }
 
   if (input.reviewerRunner) {
@@ -686,12 +828,24 @@ export async function runCodeReview(
     const dispatchService = getZflowRegistry().optional<DispatchService>(DISPATCH_SERVICE_CAPABILITY)
 
     if (dispatchService) {
+      const discovery = await discoverDispatchAgents(dispatchService, cwd)
+      if (discovery.error) {
+        coverageNotes.push(`Reviewer agent discovery via "${dispatchService.name}" failed: ${discovery.error}`)
+      }
+      const availableDispatchAgents = discovery.agents && discovery.agents.length > 0
+        ? discovery.agents
+        : undefined
+
       // Pre-resolve model/thinking for all reviewers
       const reviewerAgentInfo = new Map<string, AgentModelInfo>()
+      const reviewerPreflightErrors = new Map<string, string>()
       for (const name of reviewerNames) {
         const agentName = toCodeReviewAgentName(name)
         const info = await resolveAgentModelInfo(agentName)
         reviewerAgentInfo.set(name, info)
+        if (availableDispatchAgents && !availableDispatchAgents.includes(agentName)) {
+          reviewerPreflightErrors.set(name, buildMissingReviewerAgentError(agentName, availableDispatchAgents))
+        }
         emitReviewerUpdate(input.onReviewUpdate, name, agentName, "queued", {
           model: info.model,
           thinking: info.thinking,
@@ -708,16 +862,31 @@ export async function runCodeReview(
             thinking: agentInfo.thinking,
             lastCommand: "starting",
           })
+          const preflightError = reviewerPreflightErrors.get(name)
+          if (preflightError) {
+            const output: ReviewerOutput = { findings: [], rawOutput: `dispatch error: ${preflightError}` }
+            return { name, agentName, agentInfo, prompt: "", output, ok: false, error: preflightError }
+          }
+
           const prompt = await buildInternalReviewPrompt(name, internalCtx)
           let output: ReviewerOutput
           let dispatchOk = true
           let dispatchError: string | undefined
+
+          if (!agentInfo.model) {
+            dispatchOk = false
+            dispatchError = `No usable resolved model found for reviewer agent "${agentName}". ` +
+              `The active zflow profile may be missing this lane or still unresolved.`
+            output = { findings: [], rawOutput: `dispatch error: ${dispatchError}` }
+            return { name, agentName, agentInfo, prompt, output, ok: dispatchOk, error: dispatchError }
+          }
+
           try {
             const raw = await dispatchService.runAgent({
               agent: agentName,
               task: prompt,
               cwd,
-              ...(agentInfo.model ? { model: agentInfo.model } : {}),
+              model: agentInfo.model,
               onUpdate: (progress) => {
                 if (!input.onReviewUpdate) return
                 const currentTool = progress.currentTool
@@ -734,6 +903,9 @@ export async function runCodeReview(
                 })
               },
             })
+            for (const note of buildRateLimitCoverageNotes(`Reviewer "${name}"`, raw.rateLimitRetries)) {
+              coverageNotes.push(note)
+            }
             if (raw.ok) {
               output = parseReviewerOutput(raw.rawOutput)
             } else {
@@ -833,47 +1005,59 @@ export async function runCodeReview(
     await persistReviewerRawOutput(manifest.runId, name, rawOutput, cwd)
   }
 
-  // Step 6: Synthesise — prefer zflow.synthesizer agent via dispatch service
-  //
-  // Phase 9: Try to find a dispatch service to invoke the zflow.synthesizer
-  // agent for consolidation. If no dispatch service is available, fall back
-  // to local severity computation.
+  // Step 6: Deterministically consolidate reviewer findings into canonical findings
+  const rawFindings: CodeReviewFinding[] = allFindings.map((entry) => entry.finding)
+  let previousFindingsContent = ""
+  try {
+    const fp = resolveCodeReviewFindingsPath(cwd)
+    previousFindingsContent = await import("node:fs/promises").then((fs) => fs.readFile(fp, "utf-8"))
+  } catch {
+    previousFindingsContent = ""
+  }
+  const previousFindings = parsePersistedCodeReviewFindings(previousFindingsContent)
+  const canonicalFindings = consolidateCodeReviewFindings(rawFindings, previousFindings)
+  const duplicateCount = Math.max(0, rawFindings.length - canonicalFindings.length)
+  if (duplicateCount > 0) {
+    coverageNotes.push(`Canonical consolidation merged ${duplicateCount} overlapping reviewer finding(s).`)
+  }
+
+  // Step 7: Synthesise severity/recommendation only — canonical findings stay deterministic.
   const hasDispatchService = getZflowRegistry().has(DISPATCH_SERVICE_CAPABILITY)
   let synthesizerOutput: string | null = null
   let synthesizerParsed: boolean = false
 
-  if (hasDispatchService && allFindings.length > 0 && reviewerNames.length > 0) {
+  if (hasDispatchService && canonicalFindings.length > 0 && reviewerNames.length > 0) {
     try {
       const dispatchService = getZflowRegistry().get<{ name: string; runAgent: Function }>(DISPATCH_SERVICE_CAPABILITY)
       if (dispatchService && typeof dispatchService.runAgent === "function") {
-        // Build a synthesizer prompt from the reviewer outputs
-        const synthInput = allFindings.map(f =>
-          `Reviewer: ${f.reviewerName}\nSeverity: ${f.finding.severity}\nTitle: ${f.finding.title}\nEvidence: ${f.finding.evidence || f.finding.recommendation}`
+        const synthInput = canonicalFindings.map((finding) =>
+          `Severity: ${finding.severity}\nTitle: ${finding.title}\nFamily: ${finding.findingFamily ?? "unknown"}\nCanonical key: ${finding.canonicalKey ?? "unknown"}\nEvidence: ${finding.evidence || finding.recommendation}`
         ).join("\n---\n")
 
         const synthesizerModel = await resolveProfileModelForAgent("zflow.synthesizer")
         const synthResult = await dispatchService.runAgent({
           agent: "zflow.synthesizer",
-          task: `Synthesize the following code review findings and produce consolidated results with support/dissent/coverage:\n\n${synthInput}`,
+          task: `Synthesize severity/recommendation for the following canonical code review findings. Do not create new findings; reason over the provided canonical list.\n\n${synthInput}`,
           cwd,
           ...(synthesizerModel ? { model: synthesizerModel } : {}),
         })
 
+        for (const note of buildRateLimitCoverageNotes("Synthesizer", synthResult.rateLimitRetries)) {
+          coverageNotes.push(note)
+        }
         synthesizerOutput = synthResult.rawOutput
-        coverageNotes.push(`Synthesizer dispatched via "${dispatchService.name}" (zflow.synthesizer)`)
+        coverageNotes.push(`Synthesizer dispatched via "${dispatchService.name}" (zflow.synthesizer)`) 
       }
     } catch (err) {
       coverageNotes.push(`Synthesizer dispatch attempted but failed: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
 
-  // Compute local severity from collected findings (used as fallback or reference)
   const localSeverity = { critical: 0, major: 0, minor: 0, nit: 0 }
-  for (const { finding } of allFindings) {
+  for (const finding of canonicalFindings) {
     localSeverity[finding.severity]++
   }
 
-  // Try to parse synthesizer output as authoritative; fall back to local
   let severity = localSeverity
   let recommendation: "GO" | "NO-GO" | "CONDITIONAL-GO" = evaluateRecommendation(localSeverity)
   if (synthesizerOutput) {
@@ -882,14 +1066,9 @@ export async function runCodeReview(
       severity = parsed.severity
       recommendation = parsed.recommendation
       synthesizerParsed = true
-      coverageNotes.push(
-        `Synthesizer: authoritative result used (severity overridden from synthesizer output)`,
-      )
+      coverageNotes.push(`Synthesizer: authoritative result used (severity overridden from synthesizer output)`)
     } else {
-      coverageNotes.push(
-        `Synthesizer output could not be parsed as structured JSON — ` +
-        `falling back to local severity computation.`,
-      )
+      coverageNotes.push(`Synthesizer output could not be parsed as structured JSON — falling back to local severity computation.`)
     }
   } else {
     coverageNotes.push("Synthesizer: local severity computation (no zflow.synthesizer dispatch)")
@@ -900,18 +1079,24 @@ export async function runCodeReview(
     .map((r) => r.name)
   if (failedRequiredReviewers.length > 0) {
     recommendation = "NO-GO"
-    coverageNotes.push(
-      `Fail-closed: required reviewer(s) failed: ${failedRequiredReviewers.join(", ")}.`,
-    )
+    coverageNotes.push(`Fail-closed: required reviewer(s) failed: ${failedRequiredReviewers.join(", ")}.`)
   } else if (manifest.reviewers.length > 0 && manifest.reviewers.every((r) => r.status !== "executed")) {
     recommendation = "NO-GO"
     coverageNotes.push("Fail-closed: no code reviewers executed.")
   }
 
-  // Step 7: Persist findings
-  const codeReviewFindings: CodeReviewFinding[] = allFindings.map(f => f.finding)
+  const reviewersExecuted = manifest.reviewers.filter((r) => r.status === "executed").length
+  const reviewInfrastructure = classifyReviewInfrastructure(manifest)
+  if (reviewInfrastructure?.summary) {
+    coverageNotes.push(`Review infrastructure: ${reviewInfrastructure.summary}`)
+  }
+  if (reviewInfrastructure?.recoveryHint) {
+    coverageNotes.push(`Recovery hint: ${reviewInfrastructure.recoveryHint}`)
+  }
+
+  // Step 8: Persist canonical findings with traceability and focused-review context
   const findingsWithTraceability = addFindingTraceability(
-    codeReviewFindings,
+    canonicalFindings,
     manifest.runId,
     cwd,
   )
@@ -927,7 +1112,13 @@ export async function runCodeReview(
     reviewedFiles: input.modifiedFiles ?? [],
     verificationContext: `Verification status: ${input.verificationStatus}`,
     findings: findingsWithTraceability,
+    coverageNotes,
+    recommendation,
+    reviewersExecuted,
+    reviewInfrastructureSummary: reviewInfrastructure?.summary,
+    reviewInfrastructureHint: reviewInfrastructure?.recoveryHint,
     cwd,
+    focusReview: input.focusReview,
   })
 
   return {
@@ -936,8 +1127,9 @@ export async function runCodeReview(
     severity,
     recommendation,
     findingsPath,
-    reviewersExecuted: manifest.reviewers.filter(r => r.status === "executed").length,
+    reviewersExecuted,
     coverageNotes,
+    reviewInfrastructure: reviewInfrastructure ?? { status: "ok" },
   }
 }
 

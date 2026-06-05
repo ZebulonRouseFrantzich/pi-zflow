@@ -275,6 +275,7 @@ describe("ensureImplementationTasksArtifact", () => {
       assert.strictEqual(created, true)
       const content = await fs.readFile(result.artifactPaths.implementationTasks, "utf-8")
       assert.ok(content.includes("# Implementation Tasks"))
+      assert.ok(content.includes("zflow-synthesized-artifact: implementation-tasks"))
       assert.ok(content.includes("## Group 1: Update authentication service"))
       assert.ok(content.includes("src/auth/service.ts"))
       assert.ok(content.includes("npm test -- src/auth/service.test.ts"))
@@ -371,6 +372,7 @@ describe("ensureImplementationTasksArtifact", () => {
 
       assert.strictEqual(created, true)
       const content = await fs.readFile(result.artifactPaths.implementationTasks, "utf-8")
+      assert.ok(content.includes("zflow-synthesized-artifact: implementation-tasks"))
       assert.ok(content.includes("## Group 1a: harden Worker ZITADEL environment parsing"))
       assert.ok(content.includes("apps/cloudflare-api/src/api/env.ts"))
       assert.ok(content.includes("pnpm --dir apps/cloudflare-api typecheck"))
@@ -829,10 +831,12 @@ describe("completeWorkflow", () => {
       const planState = JSON.parse(await fs.readFile(planStatePath, "utf-8"))
       assert.strictEqual(planState.lifecycleState, "completed")
 
-      // Verify run.json phase
+      // Verify run.json phase and final bookkeeping
       const runStatePath = resolveRunStatePath(result.runId, repoRoot)
       const runJson = JSON.parse(await fs.readFile(runStatePath, "utf-8"))
       assert.strictEqual(runJson.phase, "completed")
+      assert.deepStrictEqual(runJson.nextSteps ?? [], [], "completed run should not retain stale nextSteps")
+      assert.strictEqual(runJson.applyBack.status, "completed", "pending applyBack should be normalized on completion")
 
       // Verify state-index
       const index = await loadStateIndex(repoRoot)
@@ -841,6 +845,10 @@ describe("completeWorkflow", () => {
       )
       assert.ok(planEntry, "plan entry should exist")
       assert.strictEqual(planEntry!.status, "completed")
+      const lifecycle = index.changes["test-complete"]
+      assert.ok(lifecycle, "change lifecycle should exist")
+      assert.strictEqual(lifecycle.lastPhase, "completed")
+      assert.ok(!lifecycle.unfinishedRuns.includes(result.runId), "completed run should be removed from unfinishedRuns")
     } finally {
       await removeTestRepo(repoRoot)
     }

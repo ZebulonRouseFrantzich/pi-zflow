@@ -28,6 +28,20 @@ const PI_HOST_PEERS = new Set([
   "@earendil-works/pi-tui",
   "typebox",
 ])
+const FOUNDATION_DEPS = {
+  "pi-rtk-optimizer": "0.8.0",
+  "pi-web-access": "0.10.7",
+  "pi-interview": "0.8.7",
+  "pi-mono-sentinel": "1.11.0",
+  "pi-mono-context-guard": "1.7.3",
+  "pi-mono-multi-edit": "1.7.3",
+  "pi-mono-auto-fix": "0.3.1",
+} as const
+const COMPAT_ALIASES = {
+  "@mariozechner/pi-ai": "npm:@earendil-works/pi-ai@0.75.5",
+  "@mariozechner/pi-coding-agent": "npm:@earendil-works/pi-coding-agent@0.75.5",
+  "@mariozechner/pi-tui": "npm:@earendil-works/pi-tui@0.75.5",
+} as const
 
 function readJson(file: string): any {
   return JSON.parse(fs.readFileSync(file, "utf8"))
@@ -110,5 +124,33 @@ describe("workspace package manifests", () => {
         assert.ok(root.pi.extensions.includes(`packages/${pkg}/extensions`), `root manifest should expose ${pkg} extensions`)
       }
     }
+
+    for (const [dep, version] of Object.entries(FOUNDATION_DEPS)) {
+      assert.equal(root.dependencies?.[dep], version, `root dependency ${dep} must be pinned`)
+    }
+    for (const [dep, version] of Object.entries(COMPAT_ALIASES)) {
+      assert.equal(root.dependencies?.[dep], version, `root compatibility alias ${dep} must be pinned`)
+    }
+
+    assert.ok(root.pi.extensions.includes("node_modules/pi-rtk-optimizer/index.ts"), "root manifest should expose pi-rtk-optimizer")
+    assert.ok(root.pi.extensions.includes("node_modules/pi-web-access/index.ts"), "root manifest should expose pi-web-access")
+    assert.ok(root.pi.skills.includes("node_modules/pi-web-access/skills"), "root manifest should expose pi-web-access skills")
+  })
+
+  test("umbrella bundles default external foundation packages", () => {
+    const umbrella = readJson(path.join(PACKAGE_DIR, "pi-zflow", "package.json"))
+    const bundled = new Set(umbrella.bundledDependencies ?? [])
+
+    for (const [dep, version] of Object.entries(FOUNDATION_DEPS)) {
+      assert.equal(umbrella.dependencies?.[dep], version, `umbrella dependency ${dep} must be pinned`)
+      assert.ok(bundled.has(dep), `umbrella must bundle ${dep}`)
+    }
+    for (const [dep, version] of Object.entries(COMPAT_ALIASES)) {
+      assert.equal(umbrella.dependencies?.[dep], version, `umbrella compatibility alias ${dep} must be pinned`)
+    }
+
+    assert.ok(umbrella.pi.extensions.includes("node_modules/pi-rtk-optimizer/index.ts"), "umbrella should expose pi-rtk-optimizer")
+    assert.ok(umbrella.pi.extensions.includes("node_modules/pi-web-access/index.ts"), "umbrella should expose pi-web-access")
+    assert.ok(umbrella.pi.skills.includes("node_modules/pi-web-access/skills"), "umbrella should expose pi-web-access skills")
   })
 })

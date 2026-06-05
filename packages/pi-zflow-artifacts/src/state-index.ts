@@ -55,7 +55,20 @@ export interface ChangeLifecycle {
   /** Unique change identifier (kebab-case). */
   changeId: string
   /** Last known phase of the change workflow. */
-  lastPhase: "draft" | "validated" | "reviewed" | "approved" | "executing" | "drifted" | "superseded" | "completed" | "cancelled"
+  lastPhase:
+    | "draft"
+    | "validated"
+    | "reviewed"
+    | "approved"
+    | "executing"
+    | "partial"
+    | "apply-back-conflicted"
+    | "verification-failed"
+    | "review-failed"
+    | "drifted"
+    | "superseded"
+    | "completed"
+    | "cancelled"
   /** Run IDs that are not yet completed or abandoned. */
   unfinishedRuns: string[]
   /** Worktree paths retained for inspection. */

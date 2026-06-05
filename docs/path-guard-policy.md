@@ -13,6 +13,7 @@ prevents writes to sensitive or unauthorised locations. This document defines:
 2. The **inputs** the path guard needs from configuration and runtime context.
 3. The **write-intent distinction** (planner vs implementer).
 4. The **default sentinel policy** shipped with pi-zflow-core.
+5. The **workflow-scoped bash guard** and repo-local bash policy overrides.
 
 ## Allowlist-first model
 
@@ -161,6 +162,32 @@ The `/zflow-change-implement` workflow calls `canWrite()` before every file
 write, edit, or destructive bash command. This is the primary enforcement
 point for the allowlist-first model.
 
+Important scope rule:
+
+- The change-workflows bash guard is enforced only while a zflow workflow mode
+  is active (for example `change-prepare` or `change-implement`).
+- Ordinary non-zflow conversations should keep the normal Pi bash experience.
+- Inside an active workflow, bash remains constrained by repo/worktree roots,
+  blocked patterns, and the workflow intent.
+
+Repo-local bash guard overrides may be declared in `.pi/zflow/config.json`
+(or `pi-zflow.config.json`) under a `bashGuard` key:
+
+```jsonc
+{
+  "bashGuard": {
+    "allowCommandPrefixes": ["awk ", "sed -n"],
+    "denyCommandPrefixes": ["curl ", "wget "],
+    "allowExecutables": ["curl"],
+    "denyExecutables": ["python", "node"],
+    "allowReadOnlyChaining": true
+  }
+}
+```
+
+These overrides only affect the workflow-scoped bash guard. They do not weaken
+planner artifact boundaries or the core write-path checks.
+
 **File**: `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/path-guard.ts`
 
 ```ts
@@ -210,5 +237,6 @@ Key exports:
 - `packages/pi-zflow-core/config/sentinel-policy.default.json` — Default policy
 - `packages/pi-zflow-core/config/sentinel-policy.schema.json` — JSON Schema
 - `packages/pi-zflow-plan-mode/extensions/zflow-plan-mode/bash-policy.ts` — Phase 2 bash policy (stub)
-- `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/path-guard.ts` — Phase 7 path guard (stub)
+- `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/path-guard.ts` — Phase 7 path guard (workflow-scoped)
+- `packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/repo-config.ts` — repo-local `bashGuard` / `worktreeSetupHook` config loading
 - `docs/architecture/package-ownership.md` — Overlap-avoidance policy

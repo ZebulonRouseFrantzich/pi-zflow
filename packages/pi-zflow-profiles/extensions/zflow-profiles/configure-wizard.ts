@@ -40,10 +40,8 @@ import type {
 
 import {
   loadProfiles,
-  resolveProfileSource,
+  resolveUserProfilePath,
   normalizeProfileDefinition,
-  fileExists,
-  parseProfilesFileJson,
 } from "./profiles.js"
 
 import {
@@ -81,6 +79,65 @@ interface WizardContext {
   done: (result: WizardEditState | null) => void
   /** Called after each stage to persist progress. */
   onProgress: (state: WizardEditState) => void
+}
+
+export function resolveConfigureWizardPaths(writePath?: string): {
+  finalWritePath: string
+  wipPath: string
+} {
+  const finalWritePath = writePath ?? resolveUserProfilePath()
+  return {
+    finalWritePath,
+    wipPath: path.join(path.dirname(finalWritePath), ".zflow-profile-configure-wip.json"),
+  }
+}
+
+export function buildProfilesForWizardWrite(
+  state: WizardEditState,
+  existingProfiles: ProfilesFile | NormalizedProfilesFile = {},
+  existingProfile?: NormalizedProfileDefinition | null,
+): ProfilesFile {
+  const profileDef = buildProfileDefinition(state, existingProfile ?? undefined)
+  return {
+    ...(existingProfiles as Record<string, unknown> ?? {}) as ProfilesFile,
+    [state.profileName]: profileDef,
+  }
+}
+
+export async function writeProfilesFileAtomic(filePath: string, profiles: ProfilesFile): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true })
+  const tmpPath = filePath + ".tmp"
+  try {
+    await fs.writeFile(tmpPath, JSON.stringify(profiles, null, 2), "utf8")
+    await fs.rename(tmpPath, filePath)
+  } catch (err) {
+    try { await fs.unlink(tmpPath) } catch { /* ignore */ }
+    throw err
+  }
+}
+
+export async function persistWizardProfileDraft(
+  state: WizardEditState,
+  options?: {
+    writePath?: string
+    wipPath?: string
+    existingProfiles?: ProfilesFile | NormalizedProfilesFile
+    existingProfile?: NormalizedProfileDefinition | null
+  },
+): Promise<void> {
+  const paths = resolveConfigureWizardPaths(options?.writePath)
+  const wipPath = options?.wipPath ?? paths.wipPath
+  const finalWritePath = options?.writePath ?? paths.finalWritePath
+
+  await fs.mkdir(path.dirname(wipPath), { recursive: true })
+  await fs.writeFile(wipPath, JSON.stringify(state, null, 2), "utf8")
+
+  const profilesToWrite = buildProfilesForWizardWrite(
+    state,
+    options?.existingProfiles,
+    options?.existingProfile,
+  )
+  await writeProfilesFileAtomic(finalWritePath, profilesToWrite)
 }
 
 /**
@@ -149,7 +206,7 @@ class ConfigureWizard {
       (this.stage === "lanes" && stage === "agents") ||
       (this.stage === "agents" && stage === "review")
     ) {
-      this.ctx.onProgress(this.state)
+      this.emitProgress()
     }
     this.stage = stage
     this.activeSelectList = null
@@ -161,6 +218,10 @@ class ConfigureWizard {
   private finish(result: WizardEditState | null): void {
     this.stage = "done"
     this.ctx.done(result)
+  }
+
+  private emitProgress(): void {
+    this.ctx.onProgress(this.state)
   }
 
   // ── Input handling ────────────────────────────────────────────
@@ -414,6 +475,7 @@ class ConfigureWizard {
     this.laneEditingModel = false
     this.activeSelectList = null
     this.laneModelsForProvider = []
+    this.emitProgress()
     this.invalidate()
     this.ctx.tui.requestRender()
   }
@@ -505,6 +567,7 @@ class ConfigureWizard {
     }
     this.laneEditingThinking = false
     this.activeSelectList = null
+    this.emitProgress()
     this.invalidate()
     this.ctx.tui.requestRender()
   }
@@ -541,6 +604,7 @@ class ConfigureWizard {
     }
     this.agentEditingLane = false
     this.activeSelectList = null
+    this.emitProgress()
     this.invalidate()
     this.ctx.tui.requestRender()
   }
@@ -571,6 +635,7 @@ class ConfigureWizard {
     }
     this.agentEditingThinking = false
     this.activeSelectList = null
+    this.emitProgress()
     this.invalidate()
     this.ctx.tui.requestRender()
   }
@@ -1018,19 +1083,15 @@ export async function launchConfigureWizard(
     return
   }
 
-  // 3. Load existing profile
+  // 3. Load existing global profile (or bundled fallback when none exists yet)
   let existingProfile: NormalizedProfileDefinition | null = null
   let existingProfiles: NormalizedProfilesFile = {}
-  let profileSourcePath: string | null = null
   let profileNames: string[] = ["default"]
+  const { finalWritePath, wipPath } = resolveConfigureWizardPaths()
 
   try {
-    const repoRoot = ctx.cwd ?? process.cwd()
-    const gitDir = (await import("pi-zflow-core/runtime-paths")).resolveGitDir(repoRoot)
-    const projectRoot = gitDir ? path.dirname(gitDir) : repoRoot
-    const loaded = await loadProfiles(projectRoot)
+    const loaded = await loadProfiles()
     existingProfiles = loaded.profiles
-    profileSourcePath = loaded.source
     profileNames = Object.keys(loaded.profiles)
     if (profileNames.length > 0) {
       existingProfile = loaded.profiles[profileNames[0]] ?? null
@@ -1048,16 +1109,7 @@ export async function launchConfigureWizard(
     ? profileNames[0] // Default to first; wizard welcome screen can change this
     : (profileNames[0] ?? "default")
 
-  // 5. Determine write path for auto-save and final output
-  const repoRoot = ctx.cwd ?? process.cwd()
-  const gitDir = (await import("pi-zflow-core/runtime-paths")).resolveGitDir(repoRoot)
-  const projectRoot = gitDir ? path.dirname(gitDir) : repoRoot
-  let finalWritePath = profileSourcePath && !profileSourcePath.includes("node_modules")
-    ? profileSourcePath
-    : path.join(projectRoot, ".pi", "zflow-profiles.json")
-  const wipPath = path.join(projectRoot, ".pi", ".zflow-profile-configure-wip.json")
-
-  // 5a. Try loading partial progress from a previous interrupted session
+  // 5. Try loading partial progress from a previous interrupted session
   let resumedState: WizardEditState | null = null
   try {
     const wipRaw = await fs.readFile(wipPath, "utf8")
@@ -1077,20 +1129,25 @@ export async function launchConfigureWizard(
     )
   }
 
-  // 5b. Initialise wizard state (from resume or fresh)
+  // 6. Initialise wizard state (from resume or fresh)
   const wizardState = resumedState ?? initWizardState(profileName, existingProfile, providerGroups)
 
-  // 5c. Auto-save callback — persists partial progress after each stage
+  // 7. Auto-save callback — persists partial progress and updates the global
+  // profile definition on every meaningful wizard change.
   async function saveProgress(state: WizardEditState): Promise<void> {
     try {
-      await fs.mkdir(path.dirname(wipPath), { recursive: true })
-      await fs.writeFile(wipPath, JSON.stringify(state, null, 2), "utf8")
+      await persistWizardProfileDraft(state, {
+        writePath: finalWritePath,
+        wipPath,
+        existingProfiles,
+        existingProfile,
+      })
     } catch {
       // Best-effort; don't interrupt the wizard for save failures
     }
   }
 
-  // 6. Launch the TUI wizard overlay
+  // 8. Launch the TUI wizard overlay
   const result = await ctx.ui.custom<WizardEditState | null>(
     (tui, theme, _kb, done) => {
       const wizard = new ConfigureWizard(wizardState, providerGroups, profileNames, {
@@ -1123,32 +1180,29 @@ export async function launchConfigureWizard(
     },
   )
 
-  // 7. User cancelled — clean up WIP progress file
+  // 9. User cancelled — clean up WIP progress file. Draft changes have already
+  // been written to the global profile as the user progressed through the wizard.
   if (!result) {
     try { await fs.unlink(wipPath) } catch { /* ignore */ }
-    ctx.ui.notify("Configuration cancelled. Progress was not saved.", "info")
+    ctx.ui.notify(
+      "Configuration cancelled. Any completed selections were already written to:\n" +
+        `  ${finalWritePath}`,
+      "info",
+    )
     return
   }
 
-  // 8. Build and write the profile JSON
-  const profileDef = buildProfileDefinition(result, existingProfile ?? undefined)
-  const profilesToWrite: ProfilesFile = {
-    ...(existingProfiles as Record<string, unknown> ?? {}) as unknown as ProfilesFile,
-    [result.profileName]: profileDef,
-  }
-
-  // Ensure directory exists
-  await fs.mkdir(path.dirname(finalWritePath), { recursive: true })
-
-  // Write atomically
-  const tmpPath = finalWritePath + ".tmp"
+  // 10. Build and write the final profile JSON
   try {
-    await fs.writeFile(tmpPath, JSON.stringify(profilesToWrite, null, 2), "utf8")
-    await fs.rename(tmpPath, finalWritePath)
+    await persistWizardProfileDraft(result, {
+      writePath: finalWritePath,
+      wipPath,
+      existingProfiles,
+      existingProfile,
+    })
     // Remove WIP progress file on successful final write
     try { await fs.unlink(wipPath) } catch { /* ignore */ }
   } catch (err) {
-    try { await fs.unlink(tmpPath) } catch { /* ignore */ }
     ctx.ui.notify(
       `Failed to write profile: ${err instanceof Error ? err.message : String(err)}`,
       "error",

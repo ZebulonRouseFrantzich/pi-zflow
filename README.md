@@ -14,7 +14,7 @@ pi-zflow is a monorepo of individually installable Pi packages:
 | `pi-zflow-plan-mode`        | Pi extension        | Ad-hoc read-only planning mode, `/zflow-plan` commands                                                     |
 | `pi-zflow-agents`           | Pi extension        | Custom agent markdown, chains, skills, prompts, setup/update commands                                      |
 | `pi-zflow-review`           | Pi extension        | Plan/code/PR review workflows, `/zflow-review-code`, `/zflow-review-pr`                                    |
-| `pi-zflow-change-workflows` | Pi extension        | Formal prepare/implement orchestration, `/zflow-change-prepare`, `/zflow-change-implement`, `/zflow-clean` |
+| `pi-zflow-change-workflows` | Pi extension        | Formal plan/prepare/implement orchestration, `/zflow-change-plan`, `/zflow-change-prepare`, `/zflow-change-implement`, `/zflow-clean` |
 | `pi-zflow-runecontext`      | Pi extension        | RuneContext integration                                                                                    |
 | `pi-zflow-compaction`       | Pi extension        | Proactive compaction hooks                                                                                 |
 | `pi-zflow-subagents-bridge` | Pi extension        | Dispatch adapter capability and diagnostics for subagent/worktree execution                                |
@@ -28,7 +28,7 @@ The repository root is a valid Pi package entrypoint. Install the full suite dir
 pi install git:github.com/ZebulonRouseFrantzich/pi-zflow@<commit-or-tag>
 ```
 
-Pi will clone the repo, run `npm install`, and load the root `pi` manifest, which exposes the workspace package extensions plus the bundled skills and prompt templates. Agent and chain assets are still installed through `/zflow-setup-agents` because Pi package manifests do not have native `agents` or `chains` keys.
+Pi will clone the repo, run `npm install`, and load the root `pi` manifest, which exposes the workspace package extensions plus the bundled skills and prompt templates. The root install also bundles and loads the default compatible external foundation extensions used by pi-zflow: `pi-rtk-optimizer`, `pi-web-access`, `pi-interview`, `pi-mono-sentinel`, `pi-mono-context-guard`, `pi-mono-multi-edit`, and `pi-mono-auto-fix`. For legacy third-party extensions that still import `@mariozechner/*` host packages, pi-zflow uses exact compatibility aliases to pinned `@earendil-works/*` host packages rather than vendoring by default. Agent and chain assets are still installed through `/zflow-setup-agents` because Pi package manifests do not have native `agents` or `chains` keys.
 
 ### Dispatch backend status
 
@@ -105,7 +105,7 @@ package independently, following the staged approach in `package-split-details.m
 
 ### Pin policy
 
-**No floating `latest` pins.** Every dependency in the foundation stack and every child package reference must have an exact version or exact git ref. This applies to:
+**No floating `latest` pins.** Every dependency in the foundation stack and every child package reference must have an exact version or exact git ref. For third-party Pi packages, pi-zflow defaults to **exact version pins first**, uses **exact git SHAs for forks** when compatibility patches are required, and reserves **vendoring** for exceptional cases where upstream is incompatible, unmaintained, or too security-critical to leave outside the repository. This applies to:
 
 - `package.json` `dependencies` in all packages
 - Installation commands in bootstrap scripts
@@ -362,12 +362,19 @@ Runtime state lives outside the working tree. See `docs/foundation-versions.md` 
 
 ### Durable vs runtime artifact distinction
 
-`/zflow-change-prepare` produces two categories of output:
+The change workflow now has a durable plan entrypoint plus versioned prepared docs:
 
-- **Durable change documents** — the four canonical plan artifacts
-  (`design.md`, `execution-groups.md`, `standards.md`, `verification.md`)
-  are copied into the working tree after validation and review, under
-  `docs/zflow-changes/<change-id>/<version>/`. These files are intended
+- **Durable plan entrypoint** — `/zflow-change-plan` creates or updates
+  `docs/zflow-changes/<change-id>/plan.md`. It accepts a freeform change
+  description, an explicit change id, or a change path, prompts for a
+  description when needed, explores the repository, and drafts a detailed
+  single `plan.md` for human review before full change preparation.
+
+- **Durable change documents** — `/zflow-change-prepare` accepts a change id,
+  change folder, or direct `plan.md` path. It reads the reviewed draft
+  `plan.md` when present, then publishes the five canonical plan artifacts
+  (`design.md`, `execution-groups.md`, `standards.md`, `verification.md`, `implementation-tasks.md`)
+  under `docs/zflow-changes/<change-id>/<version>/`. These files are intended
   for review, commit, and PR discussion — they survive session restarts
   and can be shared with collaborators.
 
@@ -457,7 +464,7 @@ planner agents — they cannot use `edit`, `write`, or mutation-capable `bash`.
 | ------------- | ------ | ----------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | `changeId`    | string | `assertSafeChangeId()` — kebab-case, alphanumeric + hyphens only  | Uniquely identifies the change (e.g. `add-auth-flow` or `fix-cache-race`) |
 | `planVersion` | string | Must match `/^v\d+$/` (e.g. `v1`, `v2`)                           | Plans start at `v1`; replanning increments                                |
-| `artifact`    | string | One of: `design`, `execution-groups`, `standards`, `verification` | The four mandatory plan artifact types                                    |
+| `artifact`    | string | One of: `design`, `execution-groups`, `standards`, `verification`, `implementation-tasks` | The five mandatory plan artifact types                                    |
 | `content`     | string | Markdown body (no additional validation beyond size limits)       | Full markdown content of the artifact                                     |
 
 ### Destination path
@@ -477,7 +484,7 @@ Example:
 | Rule                        | Enforcement                                                                                                                                                                                          |
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Path confinement**        | The destination must normalise under `<runtime-state-dir>/plans/{changeId}/{planVersion}/`. Path separators in `changeId`, `..` traversal, and arbitrary directory names in `artifact` are rejected. |
-| **Artifact type allowlist** | Only the four approved artifact kinds (`design`, `execution-groups`, `standards`, `verification`) are accepted. Any other value is rejected.                                                         |
+| **Artifact type allowlist** | Only the five approved artifact kinds (`design`, `execution-groups`, `standards`, `verification`, `implementation-tasks`) are accepted. Any other value is rejected.                                 |
 | **Overwrite policy**        | Only approved plan artifacts may be overwritten. Non-artifact files under `<runtime-state-dir>/plans/` are protected.                                                                                |
 | **Atomic write**            | Content is written to a `.tmp` file first, then renamed to the target path. Partial writes are never visible.                                                                                        |
 | **Metadata recording**      | After a successful write, the artifact hash (SHA-256) and mtime are recorded in the plan's runtime metadata (`plan-state.json`).                                                                     |
@@ -490,7 +497,7 @@ function writePlanArtifact({ changeId, planVersion, artifact, content }) {
   assertSafeChangeId(changeId); // kebab-case only
   assert(/^v\d+$/.test(planVersion)); // v1, v2, ...
   assert(
-    ["design", "execution-groups", "standards", "verification"].includes(
+    ["design", "execution-groups", "standards", "verification", "implementation-tasks"].includes(
       artifact,
     ),
   );
@@ -513,6 +520,28 @@ function writePlanArtifact({ changeId, planVersion, artifact, content }) {
   mode is active, by `pi.setActiveTools()`.
 - Implementers must never write to plan artifact paths. This is enforced by
   the path guard (`path-guard.ts`) with `canWrite()` intent distinction.
+
+### `execution-groups.md` advanced execution fields
+
+`execution-groups.md` supports explicit, planner-authored execution strategy
+metadata for non-default orchestration cases. The safe defaults are:
+
+- `Execution mode: isolated`
+- `Workspace concurrency: serialized`
+- `Base strategy: head`
+
+Advanced fields are optional and should be used sparingly:
+
+- `Execution mode: isolated | shared-staging`
+- `Workspace ID: <id>` — required when using `shared-staging`
+- `Workspace concurrency: serialized | concurrent`
+- `Base strategy: head | dependency-lineage`
+- `Execution rationale: <reason>` — required for any non-default strategy
+
+The current zflow backend supports isolated worktrees, shared serialized staging,
+and dependency-lineage/base-ref worktrees. `shared-staging` with `concurrent`
+workspace execution is parsed and validated, but remains capability-gated and
+fails fast unless the active backend explicitly supports it.
 
 ## Worktree setup hooks
 
@@ -712,7 +741,7 @@ Each layer is delivered by a different mechanism and serves a distinct purpose.
 | ----------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
 | Pi default        | Built into Pi                                                 | Dynamic tool listings, guidelines, documentation paths, global rules                                                                                                                               | Every session                                         |
 | Root constitution | `APPEND_SYSTEM.md` (not `SYSTEM.md`)                          | Compact orchestrator constitution: tool discipline, truthfulness taxonomy, safety rules, workflow boundaries, context discipline, engineering judgment, platform-documentation-awareness invariant | Orchestrator and subagents that inherit system prompt |
-| Mode fragments    | Injected by extension at mode entry                           | Role-specific behaviour for `/zflow-plan`, `/zflow-change-prepare`, `/zflow-change-implement`, `/zflow-review-pr`, `/zflow-clean`                                                                  | Active during specific modes                          |
+| Mode fragments    | Injected by extension at mode entry                           | Role-specific behaviour for `/zflow-plan`, `/zflow-change-plan`, `/zflow-change-prepare`, `/zflow-change-implement`, `/zflow-review-pr`, `/zflow-clean`                                           | Active during specific modes                          |
 | Runtime reminders | Injected by extension on events                               | Short factual reminders for active plan mode, approved plan loaded, drift detected, compaction handoff, tool denied, external file change, verification status                                     | On specific state transitions                         |
 | Agent prompts     | Agent markdown body (frontmatter `systemPromptMode: replace`) | Narrow role contract for each `zflow.*` agent; replaces rather than appends                                                                                                                        | The specific agent only                               |
 

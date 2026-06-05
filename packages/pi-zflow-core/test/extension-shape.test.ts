@@ -8,9 +8,10 @@
  * that export a function (not an object with an `activate()` method), because
  * Pi extensions are factory functions called with `ExtensionAPI`.
  *
- * Pi discovers extensions by scanning the listed directories for subdirectories
- * containing an `index.ts`. So `./extensions` means it finds all subdirectories
- * like `./extensions/zflow-artifacts/index.ts`, `./extensions/zflow-profiles/index.ts`,
+ * Pi discovers extensions either by direct file entrypoints (for example
+ * `./index.ts`) or by scanning listed directories for subdirectories containing
+ * an `index.ts`. So `./extensions` means it finds all subdirectories like
+ * `./extensions/zflow-artifacts/index.ts`, `./extensions/zflow-profiles/index.ts`,
  * etc.
  */
 
@@ -24,20 +25,25 @@ import { fileURLToPath } from "node:url"
 const workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..")
 
 /**
- * Discover all extension index.ts files under a given extensions directory.
+ * Discover all extension entrypoints from a manifest path.
  *
- * Pi scans each listed extension directory for subdirectories containing
- * an index.ts. This function mirrors that discovery logic.
+ * Pi supports both direct file entrypoints and directory-based discovery.
+ * This function mirrors that behavior.
  */
-function discoverExtensionIndexPaths(extDir: string): string[] {
+function discoverExtensionIndexPaths(extPath: string): string[] {
   const paths: string[] = []
 
-  if (!existsSync(extDir)) return paths
+  if (!existsSync(extPath)) return paths
 
-  const entries = readdirSync(extDir, { withFileTypes: true })
+  const stats = statSync(extPath)
+  if (stats.isFile()) {
+    return [extPath]
+  }
+
+  const entries = readdirSync(extPath, { withFileTypes: true })
   for (const entry of entries) {
     if (entry.isDirectory()) {
-      const indexPath = resolve(extDir, entry.name, "index.ts")
+      const indexPath = resolve(extPath, entry.name, "index.ts")
       if (existsSync(indexPath)) {
         paths.push(indexPath)
       }
@@ -111,8 +117,11 @@ describe("extension shape", () => {
           // In monorepo layout, the extensions path is relative to the package root
           fullExtDir = resolve(actualPkgDir, ...parts.slice(1))
         } else {
-          // Fallback: resolve relative to the umbrella package
-          fullExtDir = resolve(dirname(umbrellaManifest), extPath)
+          const workspaceNodeModulesPath = resolve(workspaceRoot, extPath)
+          const umbrellaLocalPath = resolve(dirname(umbrellaManifest), extPath)
+          fullExtDir = existsSync(workspaceNodeModulesPath)
+            ? workspaceNodeModulesPath
+            : umbrellaLocalPath
         }
       }
 
@@ -122,6 +131,11 @@ describe("extension shape", () => {
         `No extension index.ts found under ${fullExtDir} (umbrella path ${extPath})`)
 
       totalExtensions += indexPaths.length
+
+      const isExternalNodeModulesPath = extPath.startsWith("node_modules/") && !existsSync(resolve(workspaceRoot, extPath.replace(/^node_modules\//, "packages/")))
+      if (isExternalNodeModulesPath) {
+        continue
+      }
 
       for (const indexPath of indexPaths) {
         const mod = await import(indexPath)
@@ -152,6 +166,11 @@ describe("extension shape", () => {
         `No extension index.ts found under ${fullExtDir} (root path ${extPath})`)
 
       totalExtensions += indexPaths.length
+
+      const isExternalNodeModulesPath = extPath.startsWith("node_modules/") && !existsSync(resolve(workspaceRoot, extPath.replace(/^node_modules\//, "packages/")))
+      if (isExternalNodeModulesPath) {
+        continue
+      }
 
       for (const indexPath of indexPaths) {
         const mod = await import(indexPath)

@@ -18,6 +18,10 @@ import {
   formatCoverageNotes,
   formatFindingsBySeverity,
   persistCodeReviewFindings,
+  consolidateCodeReviewFindings,
+  parsePersistedCodeReviewFindings,
+  buildFindingFamily,
+  buildCanonicalFindingKey,
   chooseCodeReviewTier,
   resolveReviewerArtifactDir,
   persistReviewerRawOutput,
@@ -269,6 +273,70 @@ void describe("formatFindingsBySeverity", () => {
   })
 })
 
+void describe("consolidateCodeReviewFindings", () => {
+  it("merges overlapping reviewer findings into a canonical finding and carries recurrence metadata", () => {
+    const base = makeFinding({
+      severity: "major",
+      title: "Pagination parameters lack validation",
+      file: "src/api.ts",
+      expectedBehavior: "Reject invalid limit/offset",
+      fixRequirements: "Validate numeric pagination values",
+      reviewerSupport: ["correctness"],
+    })
+    const duplicate = makeFinding({
+      severity: "critical",
+      title: "Pagination parameters lack numeric validation",
+      file: "src/api.ts",
+      expectedBehavior: "Reject invalid limit/offset",
+      fixRequirements: "Validate numeric pagination values",
+      reviewerSupport: ["security"],
+      recommendation: "Validate before passing to ORM",
+    })
+    const previous = [{
+      findingId: "finding-2",
+      title: "Pagination parameters lack validation",
+      severity: "major" as const,
+      file: "src/api.ts",
+      findingFamily: buildFindingFamily(base),
+      canonicalKey: buildCanonicalFindingKey(base),
+      recurrenceCount: 2,
+      previousOccurrenceIds: ["finding-1"],
+    }]
+
+    const consolidated = consolidateCodeReviewFindings([base, duplicate], previous)
+
+    assert.equal(consolidated.length, 1)
+    assert.equal(consolidated[0].severity, "critical")
+    assert.deepEqual(consolidated[0].reviewerSupport.sort(), ["correctness", "security"])
+    assert.equal(consolidated[0].findingFamily, buildFindingFamily(base))
+    assert.equal(consolidated[0].canonicalKey, buildCanonicalFindingKey(base))
+    assert.equal(consolidated[0].recurrenceCount, 3)
+    assert.ok(consolidated[0].previousOccurrenceIds?.includes("finding-2"))
+  })
+
+  it("parses persisted canonical finding metadata from markdown", () => {
+    const parsed = parsePersistedCodeReviewFindings([
+      "## Major Findings",
+      "",
+      "### Pagination parameters lack validation",
+      "**Finding ID**: finding-3",
+      "**File**: src/api.ts",
+      "**Root cause**: pagination",
+      "**Finding family**: pagination:validation",
+      "**Canonical key**: pagination:validation::src/api.ts",
+      "**Recurrence count**: 2",
+      "**Previous occurrences**: `finding-1`, `finding-2`",
+      "**Evidence**: test",
+    ].join("\n"))
+
+    assert.equal(parsed.length, 1)
+    assert.equal(parsed[0].findingId, "finding-3")
+    assert.equal(parsed[0].findingFamily, "pagination:validation")
+    assert.equal(parsed[0].canonicalKey, "pagination:validation::src/api.ts")
+    assert.equal(parsed[0].recurrenceCount, 2)
+  })
+})
+
 // ── persistCodeReviewFindings ──────────────────────────────────
 
 void describe("persistCodeReviewFindings", () => {
@@ -313,6 +381,9 @@ void describe("persistCodeReviewFindings", () => {
       reviewers: ["correctness", "integration", "security"],
       reviewedFiles: ["src/auth.ts", "src/middleware.ts"],
       verificationContext: "All tests passed (42/42). Lint clean.",
+      recommendation: "CONDITIONAL-GO",
+      reviewersExecuted: 2,
+      coverageNotes: ["Tier: standard", "Diff bundle: 1234 bytes (source: run-patches)."],
       findings: [
         {
           severity: "major",
@@ -365,6 +436,7 @@ void describe("persistCodeReviewFindings", () => {
     assert.ok(content.includes("**Run ID**: rev-"))
     assert.ok(content.includes("## Reviewed Changes"))
     assert.ok(content.includes("## Verification Context"))
+    assert.ok(content.includes("## Review Outcome"))
     assert.ok(content.includes("## Coverage Notes"))
     assert.ok(content.includes("## Findings Summary"))
   })
@@ -388,6 +460,24 @@ void describe("persistCodeReviewFindings", () => {
     assert.ok(content.includes("All tests passed (42/42). Lint clean."))
   })
 
+  it("should include review outcome details", async () => {
+    const input = makeInput({
+      recommendation: "NO-GO",
+      reviewersExecuted: 0,
+      reviewInfrastructureSummary: "Required code-review agents were not discoverable in the active dispatch environment.",
+      reviewInfrastructureHint: "Run /zflow-setup-agents or /zflow-update-agents in this Pi environment, then re-run the review.",
+    })
+    const filePath = await persistCodeReviewFindings(input)
+    createdFiles.push(filePath)
+    const content = await fs.readFile(filePath, "utf-8")
+
+    assert.ok(content.includes("- Recommendation: NO-GO"))
+    assert.ok(content.includes("- Reviewers executed: 0/3"))
+    assert.ok(content.includes("- Infrastructure status: failed"))
+    assert.ok(content.includes("Required code-review agents were not discoverable"))
+    assert.ok(content.includes("Run /zflow-setup-agents or /zflow-update-agents"))
+  })
+
   it("should include coverage notes from manifest", async () => {
     const input = makeInput()
     const filePath = await persistCodeReviewFindings(input)
@@ -398,6 +488,8 @@ void describe("persistCodeReviewFindings", () => {
     assert.ok(content.includes("integration: ✅ executed"))
     assert.ok(content.includes("security: ⚠️ skipped"))
     assert.ok(content.includes("no security concerns found"))
+    assert.ok(content.includes("Tier: standard"))
+    assert.ok(content.includes("Diff bundle: 1234 bytes"))
   })
 
   it("should include findings summary table", async () => {

@@ -18,6 +18,7 @@ import { execFileSync } from "node:child_process"
 import {
   runChangePrepareWorkflow,
   runPrepareAgentsIfAvailable,
+  writeDurablePlanDoc,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 import type {
   PrepareAgentDispatchResult,
@@ -26,6 +27,54 @@ import type {
 import { resolvePlanStatePath, resolvePlanVersionDir, resolveRepoMapPath, resolveReconnaissancePath } from "pi-zflow-artifacts/artifact-paths"
 import { getZflowRegistry, resetZflowRegistry } from "pi-zflow-core/registry"
 import { DISPATCH_SERVICE_CAPABILITY } from "pi-zflow-core/dispatch-service"
+
+const COMPLETE_PLAN_BODY = [
+  "## Summary",
+  "",
+  "Use a durable plan entrypoint and preserve immutable version directories for prepared artifacts.",
+  "",
+  "## Goals / Success Criteria",
+  "",
+  "- Prepare consumes plan.md context.",
+  "- Versioned docs remain immutable.",
+  "",
+  "## Scope In",
+  "",
+  "- Durable plan.md loading during prepare.",
+  "",
+  "## Scope Out",
+  "",
+  "- Source implementation for the target business change.",
+  "",
+  "## Relevant codebase areas",
+  "",
+  "- packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts",
+  "- docs/zflow-changes/durable-plan-dispatch/plan.md",
+  "",
+  "## Constraints",
+  "",
+  "- Keep .zflow runtime-only.",
+  "",
+  "## Decisions",
+  "",
+  "- plan.md is the durable intake doc.",
+  "",
+  "## Risks / Unknowns",
+  "",
+  "- Planner dispatch must receive durable plan context explicitly.",
+  "",
+  "## Proposed execution outline",
+  "",
+  "1. Read durable plan.md.\n2. Feed it into planner dispatch.\n3. Generate versioned docs.",
+  "",
+  "## Verification approach",
+  "",
+  "- Run targeted prepare-agent dispatch tests.",
+  "",
+  "## Open questions",
+  "",
+  "- None.",
+].join("\n")
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -145,6 +194,124 @@ describe("runPrepareAgentsIfAvailable — fake service path", () => {
       assert.match(receivedInput.task, /changeId `test-zflow-dispatch`/)
       assert.match(receivedInput.task, /Change input path: docs\/change\.md/)
       assert.match(receivedInput.task, /Additional user notes: normal idea file/)
+    } finally {
+      await removeTestRepo(repoRoot)
+    }
+  })
+
+  test("canonicalizes role labels into real implementation agents in generated artifacts", async () => {
+    resetZflowRegistry()
+
+    const repoRoot = await createTestRepo()
+    try {
+      const registry = getZflowRegistry()
+      let receivedInput: any = null
+      registry.claim({
+        capability: DISPATCH_SERVICE_CAPABILITY,
+        version: "0.1.0",
+        provider: "test-dispatch",
+        sourcePath: import.meta.url,
+      })
+      registry.provide(DISPATCH_SERVICE_CAPABILITY, {
+        name: "test-dispatch",
+        listAgents: async () => ["planner", "worker"],
+        runAgent: async (input: any) => {
+          receivedInput = input
+          const versionDir = resolvePlanVersionDir("test-canonicalize-agents", "v1", repoRoot)
+          await fs.mkdir(versionDir, { recursive: true })
+          await fs.writeFile(path.join(versionDir, "design.md"), "# Design\n\nDetailed design body.\n", "utf-8")
+          await fs.writeFile(path.join(versionDir, "execution-groups.md"), [
+            "# Execution Groups",
+            "",
+            "## Group 1: Backend work",
+            "",
+            "- **Files:** src/backend.ts",
+            "- **Owner agent:** backend-api",
+            "- **Dependencies:** none",
+            "- **Scoped verification:** npm test -- backend",
+            "- **Parallelizable:** true",
+            "",
+          ].join("\n"), "utf-8")
+          await fs.writeFile(path.join(versionDir, "standards.md"), "# Standards\n\nDetailed standards body.\n", "utf-8")
+          await fs.writeFile(path.join(versionDir, "verification.md"), "# Verification\n\n```bash\nnpm test -- backend\n```\n", "utf-8")
+          await fs.writeFile(path.join(versionDir, "implementation-tasks.md"), [
+            "# Implementation Tasks",
+            "",
+            "## Group 1: Backend work",
+            "",
+            "Group ID: `group-1`  ",
+            "Assigned agent: `backend-api`  ",
+            "Dependencies: none",
+            "",
+            "### Objective",
+            "Implement backend work.",
+            "",
+            "### Scope",
+            "Included: backend work only.",
+            "",
+            "### Likely files touched",
+            "- src/backend.ts",
+            "",
+            "### Context to read first",
+            "- src/backend.ts",
+            "",
+            "### Implementation checklist",
+            "1. Read the code.",
+            "2. Make the change.",
+            "",
+            "### Pseudocode / implementation sketch",
+            "- Update the backend path.",
+            "",
+            "### Acceptance criteria",
+            "- Backend verification passes.",
+            "",
+            "### Scoped verification",
+            "- npm test -- backend",
+            "",
+            "### Self-check before completion",
+            "- Confirm only backend scope changed.",
+            "",
+            "### Drift triggers",
+            "- Missing backend file.",
+          ].join("\n"), "utf-8")
+          return { ok: true, rawOutput: "done", outputPath: path.join(versionDir, "planner-frontier-output.md") }
+        },
+        runParallel: async () => ({ ok: true, results: [] }),
+      })
+      registry.claim({
+        capability: "profiles",
+        version: "0.1.0",
+        provider: "test-profiles",
+        sourcePath: import.meta.url,
+      })
+      registry.provide("profiles", {
+        getResolvedAgentBinding: async (agentName: string) => ({
+          agent: agentName,
+          resolvedModel: "openai-codex/gpt-5.4",
+        }),
+      })
+
+      await runChangePrepareWorkflow({ cwd: repoRoot, changeId: "test-canonicalize-agents" })
+      const result = await runPrepareAgentsIfAvailable("test-canonicalize-agents", "v1", repoRoot)
+
+      assert.strictEqual(result.dispatched, true)
+      assert.match(receivedInput.task, /Use ONLY these real implementation agent names in `\*\*Agent:\*\*`: `worker`/)
+      assert.match(receivedInput.task, /Do NOT put role labels like `backend-api`, `sdk-client`, or `cli-integrations` in `\*\*Agent:\*\*`/)
+
+      const versionDir = resolvePlanVersionDir("test-canonicalize-agents", "v1", repoRoot)
+      const executionGroups = await fs.readFile(path.join(versionDir, "execution-groups.md"), "utf-8")
+      assert.match(executionGroups, /\*\*Role label:\*\* backend-api/)
+      assert.match(executionGroups, /\*\*Agent:\*\* worker/)
+      assert.doesNotMatch(executionGroups, /\*\*Owner agent:\*\* backend-api/)
+
+      const implementationTasks = await fs.readFile(path.join(versionDir, "implementation-tasks.md"), "utf-8")
+      assert.match(implementationTasks, /Assigned role label: `backend-api`/)
+      assert.match(implementationTasks, /Assigned agent: `worker`/)
+
+      const planStatePath = resolvePlanStatePath("test-canonicalize-agents", repoRoot)
+      const planState = JSON.parse(await fs.readFile(planStatePath, "utf-8"))
+      assert.deepStrictEqual(planState.runtimeMetadata.availableImplementationAgents, ["worker"])
+      assert.deepStrictEqual(planState.runtimeMetadata.canonicalRoleLabels, ["backend-api", "sdk-client", "cli-integrations"])
     } finally {
       await removeTestRepo(repoRoot)
     }
@@ -383,6 +550,114 @@ describe("runChangePrepareWorkflow — agent dispatch wiring", () => {
       // The returned object still has repoMapPath/reconnaissancePath
       assert.ok(result.initialPlanState.runtimeMetadata!.repoMapPath, "repoMapPath should still exist in returned object")
       assert.ok(result.initialPlanState.runtimeMetadata!.reconnaissancePath, "reconnaissancePath should still exist in returned object")
+    } finally {
+      await removeTestRepo(repoRoot)
+    }
+  })
+
+  test("includes durable plan.md context in planner dispatch tasks", async () => {
+    resetZflowRegistry()
+
+    const repoRoot = await createTestRepo()
+    let receivedInput: any = null
+    try {
+      const registry = getZflowRegistry()
+      registry.claim({
+        capability: DISPATCH_SERVICE_CAPABILITY,
+        version: "0.1.0",
+        provider: "test-dispatch",
+        sourcePath: import.meta.url,
+      })
+      registry.provide(DISPATCH_SERVICE_CAPABILITY, {
+        name: "test-dispatch",
+        runAgent: async (input: any) => {
+          receivedInput ??= input
+          const versionDir = resolvePlanVersionDir("durable-plan-dispatch", "v1", repoRoot)
+          await fs.mkdir(versionDir, { recursive: true })
+          await fs.writeFile(
+            path.join(versionDir, "design.md"),
+            "# Design\n\nThis design preserves the durable plan entrypoint and keeps immutable version directories for prepared artifacts.",
+            "utf-8",
+          )
+          await fs.writeFile(
+            path.join(versionDir, "execution-groups.md"),
+            [
+              "# Execution Groups",
+              "",
+              "## Group 1: Durable plan plumbing",
+              "",
+              "- **Files:** docs/zflow-changes/durable-plan-dispatch/plan.md, packages/pi-zflow-change-workflows/extensions/zflow-change-workflows/orchestration.ts",
+              "- **Scoped verification:** npx tsx --test packages/pi-zflow-change-workflows/test/draft-plan-doc.test.ts",
+              "- **Agent:** zflow.implement-routine",
+              "- **Dependencies:** none",
+              "- **Parallelizable:** false",
+              "",
+              "Update prepare to consume durable plan.md context while preserving immutable versioned outputs.",
+            ].join("\n"),
+            "utf-8",
+          )
+          await fs.writeFile(
+            path.join(versionDir, "standards.md"),
+            "# Standards\n\nKeep plan.md human-reviewable, keep .zflow runtime-only, and keep prepared versions immutable.",
+            "utf-8",
+          )
+          await fs.writeFile(
+            path.join(versionDir, "verification.md"),
+            "# Verification\n\n```bash\nnpx tsx --test packages/pi-zflow-change-workflows/test/draft-plan-doc.test.ts\n```",
+            "utf-8",
+          )
+          await fs.writeFile(
+            path.join(versionDir, "implementation-tasks.md"),
+            [
+              "# Implementation Tasks",
+              "",
+              "## Group 1: Durable plan plumbing",
+              "",
+              "### Objective",
+              "Consume plan.md during prepare without replacing immutable version directories.",
+              "",
+              "### Checklist",
+              "1. Read durable plan.md.",
+              "2. Feed its content into planner dispatch.",
+              "3. Preserve versioned prepared docs.",
+            ].join("\n"),
+            "utf-8",
+          )
+          return { ok: true, rawOutput: "done" }
+        },
+        runParallel: async () => ({ ok: true, results: [] }),
+      })
+      registry.claim({
+        capability: "profiles",
+        version: "0.1.0",
+        provider: "test-profiles",
+        sourcePath: import.meta.url,
+      })
+      registry.provide("profiles", {
+        getResolvedAgentBinding: async (agentName: string) => ({
+          agent: agentName,
+          resolvedModel: "openai-codex/gpt-5.4",
+        }),
+      })
+
+      const durablePlanPath = await writeDurablePlanDoc("durable-plan-dispatch", {
+        changeId: "durable-plan-dispatch",
+      }, {
+        repoRoot,
+        bodyContent: COMPLETE_PLAN_BODY,
+      })
+
+      const result = await runChangePrepareWorkflow({
+        cwd: repoRoot,
+        changeId: "durable-plan-dispatch",
+        prepareNotes: "manual note",
+      })
+
+      const planState = JSON.parse(await fs.readFile(result.planStatePath, "utf-8"))
+      assert.strictEqual(planState.runtimeMetadata.durablePlanDocPath, durablePlanPath)
+      assert.match(receivedInput.task, /Durable draft plan.md path:/)
+      assert.match(receivedInput.task, /Use a durable plan entrypoint and preserve immutable version directories for prepared artifacts\./)
+      assert.match(receivedInput.task, /manual note/)
     } finally {
       await removeTestRepo(repoRoot)
     }

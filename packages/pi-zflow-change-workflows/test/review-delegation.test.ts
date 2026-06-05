@@ -13,6 +13,7 @@ import * as os from "node:os"
 import { execFileSync } from "node:child_process"
 
 import { getZflowRegistry, resetZflowRegistry } from "pi-zflow-core"
+import { updateRun } from "pi-zflow-artifacts"
 import { resolvePlanStatePath, resolvePlanArtifactPath, resolveRunStatePath, resolveStateIndexPath } from "pi-zflow-artifacts/artifact-paths"
 import { loadStateIndex } from "pi-zflow-artifacts/state-index"
 
@@ -257,6 +258,132 @@ describe("finalizeCodeReview — registry delegation", () => {
       assert.strictEqual(codeReviewResult.pass, true)
       assert.strictEqual(codeReviewResult.findingsPath, "/tmp/stub-code-review.md")
       assert.ok(codeReviewResult.summary)
+    } finally {
+      await removeTestRepo(repoRoot)
+    }
+  })
+
+  test("uses authoritative persisted findings severity when runCodeReview severity disagrees", async () => {
+    const repoRoot = await createTestRepo()
+    try {
+      await runChangePrepareWorkflow({
+        cwd: repoRoot,
+        changeId: "test-code-review-authoritative-severity",
+      })
+      await approvePlanVersion("test-code-review-authoritative-severity", "v1", repoRoot)
+
+      const implResult = await runChangeImplementWorkflow({
+        cwd: repoRoot,
+        changeId: "test-code-review-authoritative-severity",
+      })
+
+      const stubFindingsPath = path.join(repoRoot, ".zflow", "review", "stub-findings.md")
+      await fs.mkdir(path.dirname(stubFindingsPath), { recursive: true })
+      await fs.writeFile(stubFindingsPath, [
+        "# Code Review Findings",
+        "",
+        "## Findings Summary",
+        "",
+        "| Severity | Count |",
+        "| -------- | ----- |",
+        "| Critical | 0 |",
+        "| Major    | 0 |",
+        "| Minor    | 3 |",
+        "| Nit      | 1 |",
+      ].join("\n"), "utf-8")
+
+      const registry = getZflowRegistry()
+      registry.claim({ capability: "review", version: "0.1.0", provider: "test" })
+      registry.provide("review", {
+        runCodeReview() {
+          return Promise.resolve({
+            findingsPath: stubFindingsPath,
+            tier: "standard",
+            severity: { critical: 0, major: 0, minor: 9, nit: 9 },
+            recommendation: "GO" as const,
+            coverageNotes: ["Stub code review completed."],
+            manifest: { mode: "code-review", tier: "standard", reviewers: [] },
+          })
+        },
+      })
+
+      const codeReviewResult = await finalizeCodeReview(implResult.runId, repoRoot)
+      assert.strictEqual(codeReviewResult.pass, true)
+
+      const runJson = JSON.parse(await fs.readFile(resolveRunStatePath(implResult.runId, repoRoot), "utf-8"))
+      assert.deepStrictEqual(runJson.codeReview.severity, { critical: 0, major: 0, minor: 3, nit: 1 })
+      assert.ok(String(runJson.codeReview.summary).includes("3 minor, 1 nit"))
+    } finally {
+      await removeTestRepo(repoRoot)
+    }
+  })
+
+  test("uses ledger-backed nested-repo files to build review context when groups are empty", async () => {
+    const repoRoot = await createTestRepo()
+    try {
+      await runChangePrepareWorkflow({
+        cwd: repoRoot,
+        changeId: "test-code-review-ledger-context",
+      })
+      await approvePlanVersion("test-code-review-ledger-context", "v1", repoRoot)
+      const implResult = await runChangeImplementWorkflow({
+        cwd: repoRoot,
+        changeId: "test-code-review-ledger-context",
+      })
+
+      const nestedRepoRoot = path.join(repoRoot, "customer-accessible-apis")
+      await fs.mkdir(nestedRepoRoot, { recursive: true })
+      execFileSync("git", ["init"], { cwd: nestedRepoRoot, encoding: "utf-8", stdio: "pipe" })
+      execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: nestedRepoRoot, encoding: "utf-8", stdio: "pipe" })
+      execFileSync("git", ["config", "user.name", "Test User"], { cwd: nestedRepoRoot, encoding: "utf-8", stdio: "pipe" })
+      await fs.mkdir(path.join(nestedRepoRoot, "src"), { recursive: true })
+      await fs.writeFile(path.join(nestedRepoRoot, "src", "feature.ts"), "export const value = 1\n", "utf-8")
+      execFileSync("git", ["add", "."], { cwd: nestedRepoRoot, encoding: "utf-8", stdio: "pipe" })
+      execFileSync("git", ["commit", "-m", "initial nested"], { cwd: nestedRepoRoot, encoding: "utf-8", stdio: "pipe" })
+      await fs.writeFile(path.join(nestedRepoRoot, "src", "feature.ts"), "export const value = 2\n", "utf-8")
+
+      await updateRun(implResult.runId, {
+        groups: [],
+        metadata: {
+          groupLedger: {
+            "group-g1": {
+              groupId: "group-g1",
+              status: "applied",
+              changedFiles: ["customer-accessible-apis/src/feature.ts"],
+              appliedToPrimary: true,
+            },
+          },
+        },
+      } as any, repoRoot)
+
+      const registry = getZflowRegistry()
+      registry.claim({ capability: "review", version: "0.1.0", provider: "test" })
+      const calls: Array<Record<string, unknown>> = []
+      registry.provide("review", {
+        runCodeReview(input: unknown) {
+          calls.push(input as Record<string, unknown>)
+          return Promise.resolve({
+            findingsPath: "/tmp/ledger-review.md",
+            tier: "standard",
+            severity: { critical: 0, major: 0, minor: 0, nit: 0 },
+            coverageNotes: ["Review completed."],
+            manifest: { mode: "code-review", tier: "standard", reviewers: [] },
+            recommendation: "GO" as const,
+            reviewersExecuted: 3,
+            reviewInfrastructure: { status: "ok" as const },
+          })
+        },
+      })
+
+      const result = await finalizeCodeReview(implResult.runId, repoRoot)
+      assert.strictEqual(result.pass, true)
+      assert.strictEqual(calls.length, 1)
+      const input = calls[0]!
+      assert.deepStrictEqual(input.modifiedFiles, ["customer-accessible-apis/src/feature.ts"])
+      assert.ok(Array.isArray(input.modifiedDirectories))
+      assert.ok((input.modifiedDirectories as string[]).includes("customer-accessible-apis/src"))
+      assert.ok(typeof input.diffBundle === "string" && String(input.diffBundle).includes("diff --git"), "expected synthesized worktree diff bundle")
+      assert.strictEqual(input.diffSource, "primary-worktree-diff")
     } finally {
       await removeTestRepo(repoRoot)
     }

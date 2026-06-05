@@ -231,6 +231,27 @@ describe("coalesceConnectedGroups", () => {
 
     assert.deepEqual(coalesced.map(g => g.id), ["group-1", "group-2", "group-3", "group-4"])
   })
+
+  test("does not implicitly coalesce planner-declared shared-staging groups", () => {
+    const groups = [
+      {
+        ...makeGroup("group-a", ["src/shared.ts"], [], "zflow.implement-routine", "Shared task A", "pnpm test -- a"),
+        executionMode: "shared-staging" as const,
+        workspaceId: "auth-cluster",
+        workspaceConcurrency: "serialized" as const,
+      },
+      {
+        ...makeGroup("group-b", ["src/shared.ts"], [], "zflow.implement-routine", "Shared task B", "pnpm test -- b"),
+        executionMode: "shared-staging" as const,
+        workspaceId: "auth-cluster",
+        workspaceConcurrency: "serialized" as const,
+      },
+    ]
+
+    const coalesced = coalesceConnectedGroups(groups)
+
+    assert.deepEqual(coalesced.map(g => g.id), ["group-a", "group-b"])
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -273,6 +294,25 @@ describe("buildWorktreeDispatchPlan", () => {
 
     assert.deepEqual(tasks[0].claimedFiles, ["src/a.ts", "src/b.ts"])
     assert.deepEqual(tasks[1].claimedFiles, ["src/c.ts"])
+  })
+
+  test("propagates dependencies and worktree strategy metadata", () => {
+    const groups = [{
+      ...makeGroup("group-1", ["src/a.ts"], ["group-0"], "zflow.implement-routine", "Shared staged task", "npm test"),
+      executionMode: "shared-staging" as const,
+      workspaceId: "auth-cluster",
+      workspaceConcurrency: "serialized" as const,
+      baseStrategy: "dependency-lineage" as const,
+      executionRationale: "needs shared type context",
+    }]
+    const config = makeConfig()
+    const tasks = buildWorktreeDispatchPlan(groups, config)
+
+    assert.deepEqual(tasks[0].dependencies, ["group-0"])
+    assert.equal(tasks[0].worktreeStrategy?.mode, "shared-staging")
+    assert.equal(tasks[0].worktreeStrategy?.workspaceId, "auth-cluster")
+    assert.equal(tasks[0].worktreeStrategy?.workspaceConcurrency, "serialized")
+    assert.equal(tasks[0].worktreeStrategy?.baseStrategy, "dependency-lineage")
   })
 
   test("each task has a scopedVerification when provided", () => {
@@ -355,6 +395,36 @@ describe("parseExecutionGroupsMd", () => {
     assert.deepStrictEqual(groups[0].dependencies, ["group-0"])
     assert.equal(groups[0].scopedVerification, "npm test -- src/auth/")
     assert.equal(groups[0].parallelizable, true)
+    assert.equal(groups[0].executionMode, "isolated")
+    assert.equal(groups[0].workspaceConcurrency, "serialized")
+    assert.equal(groups[0].baseStrategy, "head")
+  })
+
+  test("parses advanced execution strategy fields", () => {
+    const content = [
+      "## Group 2: Shared route + handler work",
+      "",
+      "- **Files:** src/routes.ts, src/handler.ts",
+      "- **Agent:** zflow.implement-hard",
+      "- **Dependencies:** group-1",
+      "- **Scoped verification:** npm test -- route-handler",
+      "- **Parallelizable:** false",
+      "- **Execution mode:** shared-staging",
+      "- **Workspace ID:** auth-route-cluster",
+      "- **Workspace concurrency:** concurrent",
+      "- **Base strategy:** dependency-lineage",
+      "- **Execution rationale:** backend route and frontend handler need shared type feedback before apply-back",
+      "",
+    ].join("\n")
+
+    const groups = parseExecutionGroupsMd(content)
+
+    assert.equal(groups.length, 1)
+    assert.equal(groups[0].executionMode, "shared-staging")
+    assert.equal(groups[0].workspaceId, "auth-route-cluster")
+    assert.equal(groups[0].workspaceConcurrency, "concurrent")
+    assert.equal(groups[0].baseStrategy, "dependency-lineage")
+    assert.match(groups[0].executionRationale ?? "", /shared type feedback/)
   })
 
   test("parses multiple groups", () => {
@@ -383,6 +453,63 @@ describe("parseExecutionGroupsMd", () => {
     assert.equal(groups[1].id, "group-2")
     assert.equal(groups[1].agent, "zflow.implement-hard")
     assert.deepStrictEqual(groups[1].dependencies, ["group-1"])
+  })
+
+  test("preserves G-prefixed dependency ids for Group G headings", () => {
+    const content = [
+      "# Execution Groups",
+      "",
+      "### Group G1 — Backend logic",
+      "",
+      "- **Files:** src/backend.ts",
+      "- **Agent:** worker",
+      "- **Dependencies:** none",
+      "- **Verification:** npm test -- backend",
+      "",
+      "### Group G2 — Endpoint wrapper",
+      "",
+      "- **Files:** src/wrapper.ts",
+      "- **Agent:** worker",
+      "- **Dependencies:** G1",
+      "- **Verification:** npm test -- wrapper",
+      "",
+    ].join("\n")
+
+    const groups = parseExecutionGroupsMd(content)
+
+    assert.equal(groups.length, 2)
+    assert.equal(groups[0].id, "group-g1")
+    assert.equal(groups[1].id, "group-g2")
+    assert.deepStrictEqual(groups[1].dependencies, ["group-g1"])
+  })
+
+  test("parses bold 'Files touched' headers and ignores prose-only verification bullets", () => {
+    const content = [
+      "# Execution Groups",
+      "",
+      "### Group G2 — Endpoint wrapper",
+      "",
+      "- **Files touched (≤7):**",
+      "  1. `customer-accessible-apis/functionapps/license-manager/get-oracle-current-entitlements/get-oracle-current-entitlements.ts`",
+      "  2. `customer-accessible-apis/functionapps/license-manager/get-oracle-current-entitlements/function.json`",
+      "- **Dependencies:** `G1`",
+      "- **Scoped verification:**",
+      "  - `cd customer-accessible-apis && yarn tsc-all`",
+      "  - manual request validation against function signatures for required `company` and `accountId` parameters",
+      "  - Both endpoints build successfully and expose the intended read-only Oracle payloads.",
+      "",
+    ].join("\n")
+
+    const groups = parseExecutionGroupsMd(content)
+
+    assert.equal(groups.length, 1)
+    assert.equal(groups[0].id, "group-g2")
+    assert.deepStrictEqual(groups[0].dependencies, ["group-g1"])
+    assert.deepStrictEqual(groups[0].files, [
+      "customer-accessible-apis/functionapps/license-manager/get-oracle-current-entitlements/get-oracle-current-entitlements.ts",
+      "customer-accessible-apis/functionapps/license-manager/get-oracle-current-entitlements/function.json",
+    ])
+    assert.equal(groups[0].scopedVerification, "cd customer-accessible-apis && yarn tsc-all")
   })
 
   test("returns empty array for empty content", () => {

@@ -7,8 +7,21 @@
  */
 import { describe, it, afterEach, mock } from "node:test"
 import * as assert from "node:assert/strict"
+import * as fs from "node:fs"
+import * as os from "node:os"
+import * as path from "node:path"
 
 import activateZflowSubagentsBridgeExtension from "../extensions/zflow-subagents-bridge/index.js"
+import {
+  buildScopedVerificationCommandAttempts,
+  extractExecutableScopedVerificationCommands,
+  extractUsageLimitWaitTime,
+  isUnsupportedDeveloperRoleDispatchError,
+  isUsageLimitError,
+  normalizeScopedVerificationLineForCwd,
+  resolveAgentFallbackModelCandidates,
+  resolveMeaningfulSingleError,
+} from "../extensions/zflow-subagents-bridge/index.js"
 import { resetZflowRegistry } from "pi-zflow-core"
 import {
   DISPATCH_SERVICE_CAPABILITY,
@@ -59,6 +72,10 @@ describe("pi-zflow-subagents-bridge extension activation", () => {
     )
     assert.equal(typeof service.runAgent, "function")
     assert.equal(typeof service.runParallel, "function")
+    assert.ok(service.capabilities, "dispatch capabilities should be exposed")
+    assert.equal(typeof service.capabilities?.isolatedWorktrees, "boolean")
+    assert.equal(typeof service.capabilities?.sharedWorkspaceSerialized, "boolean")
+    assert.equal(typeof service.capabilities?.baseRefWorktrees, "boolean")
   })
 
   it("does not register commands", async () => {
@@ -179,5 +196,236 @@ describe("pi-zflow-subagents-bridge dispatch service behavior", () => {
 
     assert.equal(result.ok, false)
     assert.equal(result.results.length, 0)
+  })
+
+  it("fails fast for unsupported shared-concurrent worktree requests", async () => {
+    const service = await getService()
+
+    const result = await service.runParallel({
+      worktree: true,
+      tasks: [{
+        groupId: "group-1",
+        agent: "nonexistent-agent-xyz",
+        task: "Task 1",
+        worktreeStrategy: {
+          mode: "shared-staging",
+          workspaceId: "shared-auth",
+          workspaceConcurrency: "concurrent",
+        },
+      }],
+    })
+
+    assert.equal(result.ok, false)
+    assert.equal(result.results.length, 1)
+    assert.match(result.results[0]?.error ?? "", /shared concurrent worktree clusters/)
+  })
+})
+
+describe("pi-zflow-subagents-bridge scoped verification helpers", () => {
+  it("strips redundant nested-repo cd prefixes", () => {
+    assert.equal(
+      normalizeScopedVerificationLineForCwd(
+        "cd customer-accessible-apis && yarn tsc-all",
+        "/tmp/pi-worktree-123/customer-accessible-apis",
+      ),
+      "yarn tsc-all",
+    )
+  })
+
+  it("strips repo-prefix cd commands when compat worktrees use synthetic temp directories", () => {
+    assert.equal(
+      normalizeScopedVerificationLineForCwd(
+        "cd opscompass-api-client && npm test -- --runInBand license-manager-oracle-entitlements",
+        "/tmp/pi-worktree-e84d7553-0",
+        [
+          "opscompass-api-client/api/license-manager/license-manager.ts",
+          "opscompass-api-client/api/license-manager/oracle-entitlements.ts",
+        ],
+      ),
+      "npm test -- --runInBand license-manager-oracle-entitlements",
+    )
+  })
+
+  it("keeps only executable scoped verification lines", () => {
+    assert.deepEqual(
+      extractExecutableScopedVerificationCommands(
+        [
+          "cd customer-accessible-apis && yarn tsc-all",
+          "manual payload review to confirm field parity",
+          "Oracle endpoints compile and remain read-only.",
+          "npm test -- --runInBand api/license-manager",
+        ].join("\n"),
+        "/tmp/pi-worktree-123/customer-accessible-apis",
+      ),
+      [
+        "yarn tsc-all",
+        "npm test -- --runInBand api/license-manager",
+      ],
+    )
+  })
+
+  it("normalizes temp-root compat verification commands using claimed file prefixes", () => {
+    assert.deepEqual(
+      extractExecutableScopedVerificationCommands(
+        [
+          "cd opscompass-api-client && npm test -- --runInBand license-manager-oracle-entitlements",
+          "manual audit to confirm existing MSSQL names remain unchanged",
+          "cd opscompass-api-client && npm test -- --runInBand license-manager-mssql-parity",
+        ].join("\n"),
+        "/tmp/pi-worktree-e84d7553-0",
+        [
+          "opscompass-api-client/api/license-manager/license-manager.ts",
+          "opscompass-api-client/tests/api/license-manager-oracle-entitlements.test.ts",
+        ],
+      ),
+      [
+        "npm test -- --runInBand license-manager-oracle-entitlements",
+        "npm test -- --runInBand license-manager-mssql-parity",
+      ],
+    )
+  })
+
+  it("builds retry attempts for nested package test commands", () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-zflow-bridge-attempts-"))
+    fs.mkdirSync(path.join(tempRoot, "cli", "test"), { recursive: true })
+    fs.writeFileSync(path.join(tempRoot, "package.json"), "{}\n", "utf-8")
+    fs.writeFileSync(path.join(tempRoot, "cli", "package.json"), "{}\n", "utf-8")
+    fs.writeFileSync(path.join(tempRoot, "cli", "test", "license-manager-oracle.test.js"), "test\n", "utf-8")
+
+    assert.deepEqual(
+      buildScopedVerificationCommandAttempts(
+        "npm test -- --runInBand cli/test/license-manager-oracle.test.js",
+        tempRoot,
+      ),
+      [
+        {
+          cwd: tempRoot,
+          command: "npm test -- --runInBand cli/test/license-manager-oracle.test.js",
+        },
+        {
+          cwd: path.join(tempRoot, "cli"),
+          command: "npm test -- --runInBand test/license-manager-oracle.test.js",
+        },
+      ],
+    )
+  })
+})
+
+describe("pi-zflow-subagents-bridge usage-limit diagnostics", () => {
+  it("detects provider 429 usage-limit errors", () => {
+    assert.equal(
+      isUsageLimitError("429 Monthly usage limit reached. Resets in 13 days."),
+      true,
+    )
+    assert.equal(
+      isUsageLimitError("Rate limit exceeded for this account."),
+      true,
+    )
+    assert.equal(
+      isUsageLimitError("Model \"placeholder:high\" not found."),
+      false,
+    )
+  })
+
+  it("extracts wait time when provider includes it", () => {
+    assert.equal(
+      extractUsageLimitWaitTime("429 Monthly usage limit reached. Resets in 13 days."),
+      "13 days",
+    )
+    assert.equal(
+      extractUsageLimitWaitTime("Rate limit exceeded. Retry after 45 minutes."),
+      "45 minutes",
+    )
+    assert.equal(
+      extractUsageLimitWaitTime("No wait time here."),
+      undefined,
+    )
+  })
+
+  it("detects developer-role incompatibility provider errors", () => {
+    assert.equal(
+      isUnsupportedDeveloperRoleDispatchError(
+        "422 invalid input error: messages[0].role Input should be 'system', 'user', 'assistant' or 'tool' input developer",
+      ),
+      true,
+    )
+    assert.equal(isUnsupportedDeveloperRoleDispatchError("422 invalid input error"), false)
+  })
+
+  it("derives fallback models from the active profile lane ordering", () => {
+    const fallbacks = resolveAgentFallbackModelCandidates(
+      {
+        profileName: "default",
+        agentBindings: {
+          "zflow.review-correctness": {
+            lane: "review-correctness",
+            resolvedModel: "azure-ai-foundry/Kimi-K2.6",
+          },
+        },
+      },
+      {
+        default: {
+          lanes: {
+            "review-correctness": {
+              preferredModels: [
+                "azure-ai-foundry/Kimi-K2.6",
+                "azure-ai-foundry/DeepSeek-V4-Pro",
+                "azure-openai-responses/gpt-5.3-codex",
+              ],
+            },
+          },
+        },
+      },
+      "zflow.review-correctness",
+      "azure-ai-foundry/Kimi-K2.6",
+    )
+
+    assert.deepEqual(fallbacks, [
+      "azure-ai-foundry/DeepSeek-V4-Pro",
+      "azure-openai-responses/gpt-5.3-codex",
+    ])
+  })
+
+  it("surfaces the first usage-limit attempt instead of placeholder fallback", () => {
+    const error = resolveMeaningfulSingleError({
+      error: 'Error: Model "placeholder:high" not found. Use --list-models to see available models.',
+      modelAttempts: [
+        {
+          model: "opencode-go/deepseek-v4-pro",
+          success: false,
+          exitCode: 1,
+          error: "429 Monthly usage limit reached. Resets in 13 days.",
+        },
+        {
+          model: "placeholder",
+          success: false,
+          exitCode: 1,
+          error: 'Error: Model "placeholder:high" not found. Use --list-models to see available models.',
+        },
+      ],
+    })
+
+    assert.match(error ?? "", /429 usage limit reached/)
+    assert.match(error ?? "", /Wait time: 13 days/)
+    assert.match(error ?? "", /opencode-go\/deepseek-v4-pro/)
+  })
+
+  it("falls back to the original error when no usage-limit attempt exists", () => {
+    const error = resolveMeaningfulSingleError({
+      error: 'Error: Model "placeholder:high" not found. Use --list-models to see available models.',
+      modelAttempts: [
+        {
+          model: "placeholder",
+          success: false,
+          exitCode: 1,
+          error: 'Error: Model "placeholder:high" not found. Use --list-models to see available models.',
+        },
+      ],
+    })
+
+    assert.equal(
+      error,
+      'Error: Model "placeholder:high" not found. Use --list-models to see available models.',
+    )
   })
 })

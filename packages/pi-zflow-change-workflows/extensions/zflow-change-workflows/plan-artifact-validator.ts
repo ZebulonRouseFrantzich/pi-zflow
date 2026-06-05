@@ -100,31 +100,78 @@ const GROUP_SHORT_HEADING_RE = /^#{1,4}\s+G([A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)\
 const GROUP_EXEC_HEADING_RE = /^#{1,4}\s+Execution\s+Group\s+([A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)\s*(?::|[—-])\s+.+$/im
 
 // ── Required field patterns for execution groups ─────────────────
+//
+// Note: All field regexes below match normalized field labels with
+// bold markers already stripped. The normalizeFieldBold() helper is
+// applied to each group section BEFORE field matching, so the regexes
+// do not need to handle asterisk/bold variants.
+
+/**
+ * Pattern to normalize bold markers around field labels.
+ *
+ * LLMs sometimes write fields with the colon inside the bold markers:
+ *   **Execution mode:** isolated   ← colon inside bold (common LLM output)
+ * Instead of the canonical:
+ *   **Execution mode:** isolated   ← colon after bold (expected by regex)
+ *
+ * This normalizer strips leading ** and trailing ** before/after
+ * the colon on field-label lines, so all field regexes can use simple
+ * "FieldName:" patterns without worrying about bold variants.
+ */
+function normalizeFieldBold(section: string): string {
+  // Match optional bullet prefixes plus bolded field labels such as:
+  //   - **Execution mode:** isolated
+  //   **Files touched (≤7):**
+  // and rewrite them to plain `FieldName: ` form while preserving the bullet.
+  // Uses [^\S\n] (non-newline whitespace) instead of \s to avoid
+  // consuming newlines and collapsing adjacent field lines together.
+  return section.replace(
+    /^(\s*(?:[-*+]|\d+\.)\s+)?\*{1,2}([^*\n:][^:\n]*?)\*{0,2}:[^\S\n]*(\*{0,2})[^\S\n]*/gm,
+    (_, prefix = "", fieldName) => `${prefix}${fieldName.trim()}: `,
+  )
+}
 
 /**
  * Patterns to detect the files section heading.
  */
-const FILES_HEADER_RE = /^\*{0,2}Files?(?:\/paths)?\*{0,2}:|^\*{0,2}Primary\s+files?(?:\/paths)?\s+touched\*{0,2}:/im
+const FILES_HEADER_RE = /^(?:\s*(?:[-*+]|\d+\.)\s+)?(?:Files?(?:\s+touched)?(?:\/paths)?(?:\s*\([^)]*\))?|Primary\s+files?(?:\/paths)?\s+touched):/im
 
 /**
  * Pattern to detect scoped verification with a concrete value (not TBD/empty).
+ * Uses [^\S\n] (non-newline whitespace) instead of \s to avoid consuming
+ * newlines when the field value is empty or missing.
  */
-const SCOPED_VERIFICATION_RE = /\*{0,2}Scoped\s+verification:\*{0,2}[^\S\n]*(.*)$/im
+const SCOPED_VERIFICATION_RE = /Scoped\s+verification:[^\S\n]*(.*)$/im
 
 /**
  * Pattern to detect agent field.
  */
-const AGENT_RE = /\*{0,2}Agent\*{0,2}:\s*(.+)$/im
+const AGENT_RE = /(?:Owner\s+agent|Agent|Owner):[^\S\n]*(.+)$/im
 
 /**
  * Pattern to detect dependencies field.
  */
-const DEPENDENCIES_RE = /\*{0,2}Dependencies\*{0,2}:\s*(.+)$/im
+const DEPENDENCIES_RE = /Dependencies:[^\S\n]*(.+)$/im
 
 /**
  * Pattern to detect parallelizable field.
  */
-const PARALLELIZABLE_RE = /\*{0,2}Parallelizable\*{0,2}:\s*(.+)$/im
+const PARALLELIZABLE_RE = /Parallelizable:[^\S\n]*(.+)$/im
+
+/** Pattern to detect execution mode field. */
+const EXECUTION_MODE_RE = /Execution\s+mode:[^\S\n]*(.+)$/im
+
+/** Pattern to detect workspace id field. */
+const WORKSPACE_ID_RE = /Workspace\s+ID:[^\S\n]*(.+)$/im
+
+/** Pattern to detect workspace concurrency field. */
+const WORKSPACE_CONCURRENCY_RE = /Workspace\s+concurrency:[^\S\n]*(.+)$/im
+
+/** Pattern to detect base strategy field. */
+const BASE_STRATEGY_RE = /Base\s+strategy:[^\S\n]*(.+)$/im
+
+/** Pattern to detect execution rationale field. */
+const EXECUTION_RATIONALE_RE = /Execution\s+rationale:[^\S\n]*(.+)$/im
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -138,6 +185,41 @@ function isPlaceholderOrEmpty(value: string): boolean {
   if (upper === "TBD" || upper === "TODO" || upper === "NONE" || upper === "[]") return true
   if (PLACEHOLDER_PATTERNS.some((p) => p.test(trimmed))) return true
   return false
+}
+
+/**
+ * Check which failed plan artifacts exist on disk.
+ *
+ * Returns the subset of failedResults that exist on disk, plus a list
+ * of artifact names that are missing entirely. Useful for deciding
+ * whether a repair dispatch should regenerate missing artifacts or
+ * only fix formatting issues in existing ones.
+ */
+async function checkArtifactExistence(
+  changeId: string,
+  planVersion: string,
+  failedResults: ArtifactValidationResult[],
+  cwd?: string,
+): Promise<{
+  existing: ArtifactValidationResult[]
+  missingArtifacts: string[]
+}> {
+  const { default: fs } = await import("node:fs/promises")
+  const { resolvePlanArtifactPath } = await import("pi-zflow-artifacts/artifact-paths")
+
+  const existing: ArtifactValidationResult[] = []
+  const missingArtifacts: string[] = []
+
+  for (const failed of failedResults) {
+    try {
+      await fs.access(resolvePlanArtifactPath(changeId, planVersion, failed.artifact, cwd))
+      existing.push(failed)
+    } catch {
+      missingArtifacts.push(failed.artifact)
+    }
+  }
+
+  return { existing, missingArtifacts }
 }
 
 /**
@@ -193,6 +275,17 @@ async function validateExecutionGroups(
     issues.push(`Content too short (${content.trim().length} chars, minimum 100).`)
   }
 
+  const { parseExecutionGroupsMd } = await import("./orchestration.js")
+  const {
+    matchesKnownAgentName,
+    normalizeImplementationAgentName,
+    resolveImplementationAgentGuidance,
+  } = await import("./orchestration/implementation-agents.js")
+  const implementationAgentGuidance = await resolveImplementationAgentGuidance(cwd)
+  const parsedGroupsById = new Map(
+    parseExecutionGroupsMd(content).map((group) => [group.id.replace(/^group-/, "").toLowerCase(), group]),
+  )
+
   // 1. Check for at least one group heading
   const hasStandardHeading = GROUP_HEADING_RE.test(content)
   const hasShortHeading = GROUP_SHORT_HEADING_RE.test(content)
@@ -240,39 +333,61 @@ async function validateExecutionGroups(
     }
     seenIds.add(groupId)
 
+    // Normalize bold markers in field labels before matching
+    // LLMs may write "**FieldName:** value" (colon inside bold) instead
+    // of the expected "**FieldName:** value" (colon after bold). The
+    // normalizer strips leading/trailing ** around the field label so
+    // that all field regexes below can use simple "FieldName:" patterns.
+    const normalizedSection = normalizeFieldBold(section)
+
     // Check Files section
-    if (!FILES_HEADER_RE.test(section)) {
+    if (!FILES_HEADER_RE.test(normalizedSection)) {
       issues.push(`Group "${groupId}" (section ${i + 1}): missing "Files:" or "Primary files/paths touched:" section.`)
     }
 
-    // Check Scoped verification
-    const verificationMatch = section.match(SCOPED_VERIFICATION_RE)
-    if (!verificationMatch) {
+    // Check Scoped verification. Use the parser-derived value when present so
+    // multi-line bullet lists and fenced command blocks stay aligned with the
+    // runtime parser rather than being rejected by a narrower regex.
+    const verificationMatch = normalizedSection.match(SCOPED_VERIFICATION_RE)
+    const parsedGroup = parsedGroupsById.get(groupId)
+    const verificationValue = parsedGroup?.scopedVerification?.trim() ?? verificationMatch?.[1]?.trim() ?? ""
+    if (!verificationMatch && !verificationValue) {
       issues.push(
         `Group "${groupId}" (section ${i + 1}): missing "Scoped verification:" field. ` +
         "Each group must specify a concrete verification command.",
       )
-    } else {
-      const verificationValue = verificationMatch[1].trim()
-      if (isPlaceholderOrEmpty(verificationValue)) {
+    } else if (isPlaceholderOrEmpty(verificationValue)) {
+      issues.push(
+        `Group "${groupId}" (section ${i + 1}): scoped verification "${verificationValue}" is a placeholder. ` +
+        "Provide a concrete command, not TBD or TODO.",
+      )
+    }
+
+    // Check Agent field
+    const agentMatch = normalizedSection.match(AGENT_RE)
+    const agentValue = parsedGroup?.agent?.trim() ?? agentMatch?.[1]?.trim() ?? ""
+    if (!agentValue) {
+      issues.push(
+        `Group "${groupId}" (section ${i + 1}): missing "Agent:" field. ` +
+        "Each group must specify an agent (e.g. worker or zflow.implement-routine).",
+      )
+    } else if (implementationAgentGuidance.availableAgents.length > 0) {
+      const resolution = normalizeImplementationAgentName(agentValue, implementationAgentGuidance)
+      if (resolution.reason === "role-label") {
         issues.push(
-          `Group "${groupId}" (section ${i + 1}): scoped verification "${verificationValue}" is a placeholder. ` +
-          "Provide a concrete command, not TBD or TODO.",
+          `Group "${groupId}" (section ${i + 1}): agent value "${agentValue}" is a role label, not a dispatchable agent. ` +
+          `Move it to "Role label:" and set "Agent:" to "${resolution.resolved}".`,
+        )
+      } else if (!matchesKnownAgentName(resolution.resolved, implementationAgentGuidance.availableAgents)) {
+        issues.push(
+          `Group "${groupId}" (section ${i + 1}): unknown agent "${agentValue}". ` +
+          `Discovered agents for this environment: ${implementationAgentGuidance.availableAgents.join(", ")}.`,
         )
       }
     }
 
-    // Check Agent field
-    const agentMatch = section.match(AGENT_RE)
-    if (!agentMatch || !agentMatch[1].trim()) {
-      issues.push(
-        `Group "${groupId}" (section ${i + 1}): missing "Agent:" field. ` +
-        "Each group must specify an agent (e.g. zflow.implement-routine).",
-      )
-    }
-
     // Check Dependencies field
-    const depMatch = section.match(DEPENDENCIES_RE)
+    const depMatch = normalizedSection.match(DEPENDENCIES_RE)
     if (!depMatch || !depMatch[1].trim()) {
       issues.push(
         `Group "${groupId}" (section ${i + 1}): missing "Dependencies:" field. ` +
@@ -280,12 +395,75 @@ async function validateExecutionGroups(
       )
     }
 
-    // Check Parallelizable field
-    const parallelMatch = section.match(PARALLELIZABLE_RE)
-    if (!parallelMatch || !parallelMatch[1].trim()) {
+    // Check optional Parallelizable field. Legacy/planner output may omit it;
+    // the runtime parser defaults omitted values to true, so validation should
+    // stay aligned with the parser instead of rejecting otherwise-valid groups.
+    const parallelMatch = normalizedSection.match(PARALLELIZABLE_RE)
+    const parallelValue = parallelMatch?.[1]?.trim().toLowerCase()
+    if (parallelValue && !["true", "false", "yes", "no"].includes(parallelValue)) {
       issues.push(
-        `Group "${groupId}" (section ${i + 1}): missing "Parallelizable:" field. ` +
-        "Each group must specify true or false.",
+        `Group "${groupId}" (section ${i + 1}): invalid "Parallelizable:" value "${parallelMatch![1].trim()}". ` +
+        "Use true or false.",
+      )
+    }
+
+    // Check optional advanced execution strategy fields
+    const executionModeValue = parsedGroup?.executionMode ?? normalizedSection.match(EXECUTION_MODE_RE)?.[1]?.trim().toLowerCase() ?? "isolated"
+    const workspaceIdValue = parsedGroup?.workspaceId ?? normalizedSection.match(WORKSPACE_ID_RE)?.[1]?.trim().replace(/^`|`$/g, "")
+    const workspaceConcurrencyValue = parsedGroup?.workspaceConcurrency ?? normalizedSection.match(WORKSPACE_CONCURRENCY_RE)?.[1]?.trim().toLowerCase() ?? "serialized"
+    const baseStrategyValue = parsedGroup?.baseStrategy ?? normalizedSection.match(BASE_STRATEGY_RE)?.[1]?.trim().toLowerCase() ?? "head"
+    const executionRationaleValue = parsedGroup?.executionRationale ?? normalizedSection.match(EXECUTION_RATIONALE_RE)?.[1]?.trim() ?? ""
+
+    if (!["isolated", "shared-staging"].includes(executionModeValue)) {
+      issues.push(
+        `Group "${groupId}" (section ${i + 1}): invalid execution mode "${executionModeValue}". ` +
+        "Use isolated or shared-staging.",
+      )
+    }
+
+    if (!["serialized", "concurrent"].includes(workspaceConcurrencyValue)) {
+      issues.push(
+        `Group "${groupId}" (section ${i + 1}): invalid workspace concurrency "${workspaceConcurrencyValue}". ` +
+        "Use serialized or concurrent.",
+      )
+    }
+
+    if (!["head", "dependency-lineage"].includes(baseStrategyValue)) {
+      issues.push(
+        `Group "${groupId}" (section ${i + 1}): invalid base strategy "${baseStrategyValue}". ` +
+        "Use head or dependency-lineage.",
+      )
+    }
+
+    if (executionModeValue === "shared-staging" && !workspaceIdValue) {
+      issues.push(
+        `Group "${groupId}" (section ${i + 1}): shared-staging groups must declare "Workspace ID:".`,
+      )
+    }
+
+    if (workspaceConcurrencyValue === "concurrent" && executionModeValue !== "shared-staging") {
+      issues.push(
+        `Group "${groupId}" (section ${i + 1}): workspace concurrency "concurrent" requires "Execution mode: shared-staging".`,
+      )
+    }
+
+    if (baseStrategyValue === "dependency-lineage") {
+      const depsValue = depMatch?.[1]?.trim().toLowerCase() ?? ""
+      if (!depsValue || depsValue === "none") {
+        issues.push(
+          `Group "${groupId}" (section ${i + 1}): base strategy "dependency-lineage" requires at least one dependency.`,
+        )
+      }
+    }
+
+    const usesNonDefaultExecution =
+      executionModeValue !== "isolated" ||
+      workspaceConcurrencyValue !== "serialized" ||
+      baseStrategyValue !== "head"
+
+    if (usesNonDefaultExecution && isPlaceholderOrEmpty(executionRationaleValue)) {
+      issues.push(
+        `Group "${groupId}" (section ${i + 1}): non-default execution strategy requires a concrete "Execution rationale:" field.`,
       )
     }
   }
@@ -297,12 +475,197 @@ async function validateExecutionGroups(
   return { valid: false, artifact: "execution-groups", issues, path }
 }
 
+const SYNTHESIZED_IMPLEMENTATION_TASKS_RE = /zflow-synthesized-artifact:\s*implementation-tasks/i
+const FALLBACK_PSEUDOCODE_PATTERNS: RegExp[] = [
+  /read design\.md, standards\.md, verification\.md, and execution-groups\.md/i,
+  /for each likely touched file:/i,
+  /make the smallest change that satisfies the group objective/i,
+  /No files listed in execution-groups\.md/i,
+]
+
+const IMPLEMENTATION_TASK_REQUIRED_SECTIONS: Array<{ label: string; patterns: RegExp[] }> = [
+  { label: "Objective", patterns: [/^#{3,6}\s+Objective\b/im] },
+  { label: "Scope", patterns: [/^#{3,6}\s+Scope\b/im] },
+  { label: "Likely files touched", patterns: [/^#{3,6}\s+Likely files touched\b/im] },
+  { label: "Context to read first", patterns: [/^#{3,6}\s+Context to read first\b/im] },
+  { label: "Implementation checklist", patterns: [/^#{3,6}\s+Implementation checklist\b/im] },
+  { label: "Pseudocode / implementation sketch", patterns: [/^#{3,6}\s+Pseudocode(?:\s*\/\s*implementation sketch|\s*\/\s*examples)?\b/im] },
+  { label: "Acceptance criteria", patterns: [/^#{3,6}\s+Acceptance criteria\b/im] },
+  { label: "Scoped verification", patterns: [/^#{3,6}\s+Scoped verification\b/im] },
+  { label: "Self-check before completion", patterns: [/^#{3,6}\s+Self-check(?:s)?(?: before completion)?\b/im] },
+  { label: "Drift triggers", patterns: [/^#{3,6}\s+Drift triggers?\b/im] },
+]
+
+const TASK_PROMPT_STOP_WORDS = new Set([
+  "the", "and", "with", "from", "that", "this", "into", "only", "then", "when",
+  "must", "will", "have", "has", "for", "your", "group", "update", "implement",
+  "change", "task", "scope", "read", "write", "tests", "test",
+])
+
+function normalizeImplementationTaskGroupKey(value: string): string {
+  const lower = value.toLowerCase()
+  return /^g\d/.test(lower) ? lower.slice(1) : lower
+}
+
+function parseImplementationTaskSections(content: string): Map<string, string> {
+  const sections = new Map<string, string>()
+  const chunks = content.split(/(?=^#{2,4}\s+Group\s+(?:[A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)\s*(?::|[—-])\s+)/m).filter(Boolean)
+
+  for (const chunk of chunks) {
+    const match = chunk.match(/^#{2,4}\s+Group\s+([A-Za-z]?\d+[A-Za-z]?|\d+[A-Za-z]?)\s*(?::|[—-])\s+.+$/im)
+    if (!match) continue
+    sections.set(normalizeImplementationTaskGroupKey(match[1]!), chunk)
+  }
+
+  return sections
+}
+
+function extractSubsectionBody(section: string, patterns: RegExp[]): string {
+  for (const pattern of patterns) {
+    const match = section.match(pattern)
+    if (!match || match.index === undefined) continue
+    const start = match.index + match[0].length
+    const rest = section.slice(start)
+    const nextHeadingIndex = rest.search(/^#{3,6}\s+/m)
+    return (nextHeadingIndex >= 0 ? rest.slice(0, nextHeadingIndex) : rest).trim()
+  }
+  return ""
+}
+
+function collectTaskPromptKeywords(taskPrompt: string): string[] {
+  return taskPrompt
+    .toLowerCase()
+    .split(/[^a-z0-9_/-]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 4 && !TASK_PROMPT_STOP_WORDS.has(token))
+}
+
+async function validateImplementationTasks(
+  changeId: string,
+  planVersion: string,
+  minLength: number,
+  cwd?: string,
+): Promise<ArtifactValidationResult> {
+  const issues: string[] = []
+  const artifactId = "implementation-tasks"
+  const artifactFile = await readArtifact(changeId, planVersion, artifactId, cwd)
+  const filePath = resolvePlanArtifactPath(changeId, planVersion, artifactId, cwd)
+
+  if (!artifactFile) {
+    return {
+      valid: false,
+      artifact: artifactId,
+      issues: [`${artifactId}.md not found at expected path: ${filePath}`],
+      path: filePath,
+    }
+  }
+
+  const { content } = artifactFile
+
+  if (content.trim().length < minLength) {
+    issues.push(
+      `Content too short (${content.trim().length} chars, minimum ${minLength}). ` +
+      "Artifact may contain only placeholder text.",
+    )
+  }
+
+  for (const pattern of PLACEHOLDER_PATTERNS) {
+    if (pattern.test(content)) {
+      issues.push(`Contains placeholder marker (matched: ${pattern.source}). Replace with concrete content.`)
+    }
+  }
+
+  if (SYNTHESIZED_IMPLEMENTATION_TASKS_RE.test(content)) {
+    issues.push(
+      "implementation-tasks.md is marked as a synthesized recovery artifact. " +
+      "Planner-authored implementation tasks are required before approval.",
+    )
+  }
+
+  const { parseExecutionGroupsMd } = await import("./orchestration.js")
+  const executionGroupsArtifact = await readArtifact(changeId, planVersion, "execution-groups", cwd)
+  const executionGroups = executionGroupsArtifact
+    ? parseExecutionGroupsMd(executionGroupsArtifact.content)
+    : []
+
+  const taskSections = parseImplementationTaskSections(content)
+  if (executionGroups.length > 0 && taskSections.size === 0) {
+    issues.push(
+      "implementation-tasks.md has no parseable group sections. Use headings like `## Group 1: Name`.",
+    )
+  }
+
+  const pseudocodeFingerprints: string[] = []
+
+  for (const group of executionGroups) {
+    const groupKey = normalizeImplementationTaskGroupKey(group.id.replace(/^group-/, ""))
+    const section = taskSections.get(groupKey)
+    if (!section) {
+      issues.push(`Missing implementation task section for ${group.id}. Add a heading like \`## Group ${groupKey}: ...\`.`)
+      continue
+    }
+
+    for (const requirement of IMPLEMENTATION_TASK_REQUIRED_SECTIONS) {
+      const present = requirement.patterns.some((pattern) => pattern.test(section))
+      if (!present) {
+        issues.push(`Group \"${groupKey}\": missing section heading \"${requirement.label}\".`)
+      }
+    }
+
+    if (group.files.length > 0 && !group.files.some((file) => section.includes(file))) {
+      issues.push(
+        `Group \"${groupKey}\": task spec does not mention any of the execution-group file paths (${group.files.join(", ")}).`,
+      )
+    }
+
+    const pseudocode = extractSubsectionBody(
+      section,
+      IMPLEMENTATION_TASK_REQUIRED_SECTIONS.find((entry) => entry.label === "Pseudocode / implementation sketch")?.patterns ?? [],
+    )
+
+    if (!pseudocode) {
+      issues.push(`Group \"${groupKey}\": pseudocode / implementation sketch is empty.`)
+      continue
+    }
+
+    if (FALLBACK_PSEUDOCODE_PATTERNS.some((pattern) => pattern.test(pseudocode))) {
+      issues.push(
+        `Group \"${groupKey}\": pseudocode matches fallback boilerplate. Replace it with group-specific implementation logic.`,
+      )
+    }
+
+    const taskKeywords = collectTaskPromptKeywords(group.taskPrompt ?? "")
+    const mentionsConcreteFile = group.files.some((file) => pseudocode.includes(file))
+    const mentionsTaskKeyword = taskKeywords.some((keyword) => pseudocode.toLowerCase().includes(keyword))
+    if (!mentionsConcreteFile && !mentionsTaskKeyword) {
+      issues.push(
+        `Group \"${groupKey}\": pseudocode is too generic. Mention concrete files, symbols, or group-specific flow details.`,
+      )
+    }
+
+    pseudocodeFingerprints.push(
+      pseudocode
+        .toLowerCase()
+        .replace(/\s+/g, " ")
+        .trim(),
+    )
+  }
+
+  if (pseudocodeFingerprints.length > 1 && new Set(pseudocodeFingerprints).size === 1) {
+    issues.push(
+      "All implementation-task pseudocode sections are identical. Each group needs its own concrete implementation sketch.",
+    )
+  }
+
+  if (issues.length === 0) {
+    return { valid: true, artifact: artifactId, issues: [], path: filePath }
+  }
+
+  return { valid: false, artifact: artifactId, issues, path: filePath }
+}
+
 /**
- * Validate a simple (non-execution-groups) artifact.
- *
- * Checks:
- * - File exists and has content above minimum length
- * - No placeholder markers
+ * Validate a simple (non-execution-groups / non-implementation-tasks) artifact.
  */
 async function validateSimpleArtifact(
   changeId: string,
@@ -340,7 +703,6 @@ async function validateSimpleArtifact(
     }
   }
 
-  // Additional checks for verification.md
   if (artifactId === "verification") {
     const hasCodeFence = /```/.test(content)
     if (!hasCodeFence) {
@@ -382,6 +744,10 @@ export async function validateAllPlanArtifacts(
   for (const artifactId of CANONICAL_ARTIFACT_IDS) {
     if (artifactId === "execution-groups") continue // already done
     const minLen = MIN_CONTENT_LENGTHS[artifactId] ?? 50
+    if (artifactId === "implementation-tasks") {
+      results.push(await validateImplementationTasks(changeId, planVersion, minLen, cwd))
+      continue
+    }
     results.push(await validateSimpleArtifact(changeId, planVersion, artifactId, minLen, cwd))
   }
 
@@ -444,6 +810,9 @@ export async function validateSingleArtifact(
   }
 
   const minLen = MIN_CONTENT_LENGTHS[artifactId] ?? 50
+  if (artifactId === "implementation-tasks") {
+    return validateImplementationTasks(changeId, planVersion, minLen, cwd)
+  }
   return validateSimpleArtifact(changeId, planVersion, artifactId, minLen, cwd)
 }
 
@@ -472,6 +841,8 @@ export interface ArtifactRepairResult {
  * @param planVersion - Plan version (e.g. "v1").
  * @param failedResults - The validation results for artifacts that failed.
  * @param cwd - Working directory (optional).
+ * @param missingArtifacts - Optional list of artifact names that don't exist on disk
+ *   and need full creation (not just repair).
  * @returns A prompt string for the planner agent.
  */
 export async function buildRepairPrompt(
@@ -479,6 +850,7 @@ export async function buildRepairPrompt(
   planVersion: string,
   failedResults: ArtifactValidationResult[],
   cwd?: string,
+  missingArtifacts?: string[],
 ): Promise<string> {
   const { default: pathModule } = await import("node:path")
   const { resolvePlanVersionDir } = await import("pi-zflow-artifacts/artifact-paths")
@@ -515,6 +887,20 @@ export async function buildRepairPrompt(
         sections.push(`- ${issue}`)
       }
     }
+    sections.push("")
+  }
+
+  // Add missing artifacts section if any don't exist on disk
+  if (missingArtifacts && missingArtifacts.length > 0) {
+    sections.push("### Missing Artifacts (need full creation)")
+    sections.push("")
+    sections.push("The following artifacts do not exist on disk yet and need to be created from scratch:")
+    for (const name of missingArtifacts) {
+      const artifactPath = pathModule.join(versionDir, `${name}.md`)
+      sections.push(`- **${name}**: ${artifactPath}`)
+    }
+    sections.push("")
+    sections.push("Use zflow_write_plan_artifact to write these files with complete content.")
     sections.push("")
   }
 
@@ -557,6 +943,23 @@ export async function buildRepairPrompt(
   }
 
   sections.push(
+    "### implementation-tasks.md",
+    "",
+    "Required per group:",
+    "- Heading: `## Group X: Name` matching the execution-group ID",
+    "- `### Objective`",
+    "- `### Scope`",
+    "- `### Likely files touched`",
+    "- `### Context to read first`",
+    "- `### Implementation checklist`",
+    "- `### Pseudocode / implementation sketch`",
+    "- `### Acceptance criteria`",
+    "- `### Scoped verification`",
+    "- `### Self-check before completion`",
+    "- `### Drift triggers`",
+    "- No synthesized-marker comments like `zflow-synthesized-artifact`",
+    "- Pseudocode must be group-specific, not identical boilerplate reused for every group",
+    "",
     "### Other artifacts",
     "",
     "- Must contain real content, not placeholders or TODOs.",
@@ -605,13 +1008,18 @@ export async function runArtifactRepair(
     return { repaired: false, remainingIssues: failedResults, attempts: 0 }
   }
 
+  // Check which failed artifacts actually exist on disk. If an artifact
+  // file is missing entirely (e.g. the initial planner dispatch completely
+  // failed before writing it), the repair prompt needs to note that.
+  const { missingArtifacts } = await checkArtifactExistence(changeId, planVersion, failedResults, cwd)
+
   const remaining = [...failedResults]
   let attempts = 0
 
   for (attempts = 1; attempts <= maxAttempts; attempts++) {
     if (remaining.length === 0) break
 
-    const repairPrompt = await buildRepairPrompt(changeId, planVersion, remaining, cwd)
+    const repairPrompt = await buildRepairPrompt(changeId, planVersion, remaining, cwd, missingArtifacts)
     const versionDir = resolvePlanVersionDir(changeId, planVersion, cwd)
     const repairOutputPath = pathModule.join(versionDir, `repair-attempt-${attempts}.md`)
 
