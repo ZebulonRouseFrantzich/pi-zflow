@@ -921,7 +921,7 @@ async function attemptGroupFix(
           })
         },
       }],
-      cwd: options.cwd,
+      cwd: options.repoRoot,
       concurrency: 1,
       worktree: true,
       worktreeSetupHook: options.worktreeSetupHook,

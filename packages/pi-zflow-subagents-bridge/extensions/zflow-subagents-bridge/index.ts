@@ -397,7 +397,12 @@ class SubagentsDispatchService implements DispatchService {
   }
 
   async runParallel(input: ParallelDispatchInput): Promise<ParallelDispatchResult> {
-    if (this.advancedFallback && requiresCompatWorktreeTaskCwds(input)) {
+    // zflow-owned worktree execution needs setup commands, external path
+    // dependency materialisation, patch capture, and cleanup semantics that the
+    // legacy fork backend does not uniformly provide. Prefer the compat backend
+    // for all isolated worktree dispatches when available; keep the fork backend
+    // for non-worktree dispatch.
+    if (this.advancedFallback && input.worktree) {
       return this.invokeParallel(this.advancedFallback, input)
     }
 
@@ -1554,12 +1559,16 @@ function runCompatWorktreeSetupCommand(
   cwd: string,
 ): void {
   if (!command || !command.trim()) return
+  const normalizedCommand = command.trim()
+  const shellCommand = normalizedCommand.startsWith("nix develop --command ")
+    ? `nix develop --command bash -lc ${JSON.stringify(normalizedCommand.slice("nix develop --command ".length))}`
+    : normalizedCommand
   try {
-    execFileSync("bash", ["-c", command.trim()], {
+    execFileSync("bash", ["-lc", shellCommand], {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: 120_000,
+      maxBuffer: 50 * 1024 * 1024,
+      timeout: 600_000,
     })
   } catch (err: unknown) {
     const execErr = err as {
@@ -1619,6 +1628,10 @@ async function runCompatTaskInWorkspace(
       onUpdate: forwardCompatProgress(task.agent, task.onUpdate),
     })
 
+    // Re-run setup immediately before bridge-side verification. Workers may
+    // update package manifests/lockfiles, and verification must observe the
+    // prepared dependency state rather than a stale initial install.
+    runCompatWorktreeSetupCommand(task.worktreeSetupCommand, worktree.agentCwd)
     const verification = runCompatScopedVerification(task.scopedVerification, worktree.agentCwd, task.claimedFiles)
     const { changedFiles, headCommit } = captureCompatPatchAgainstBase(worktree.agentCwd, baseCommit, patchPath)
     const normalizedChangedFiles = prefixChangedFilesForSharedCwd(sharedCwd, taskRepoCwd, changedFiles)
