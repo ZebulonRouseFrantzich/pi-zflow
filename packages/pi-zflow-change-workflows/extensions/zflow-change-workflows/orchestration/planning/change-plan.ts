@@ -38,6 +38,10 @@ export interface ChangePlanWorkflowOptions {
   onProgress?: (message: string, type?: "info" | "warning" | "error") => void
   /** Optional live agent-progress callback. */
   onAgentProgress?: (progress: AgentDispatchProgress) => void
+  /** Optional one-pager input artifact path from grill-me-enhanced intake. */
+  intakeOnePagerInputPath?: string
+  /** Optional prepare-context artifact path from grill-me-enhanced intake. */
+  intakePrepareContextPath?: string
 }
 
 /**
@@ -109,6 +113,8 @@ function buildChangePlanDraftTaskPrompt(input: {
   existingPlanBody?: string
   roleLabels: string[]
   implementationAgents: string[]
+  intakeOnePagerInputPath?: string
+  intakePrepareContextPath?: string
 }): string {
   return [
     `Draft a complete durable change plan body for changeId \`${input.changeId}\`.`,
@@ -117,6 +123,8 @@ function buildChangePlanDraftTaskPrompt(input: {
     `Target durable plan path: ${input.planDocPath}`,
     `Repository map path: ${input.repoMapPath}`,
     `Reconnaissance path: ${input.reconnaissancePath}`,
+    input.intakeOnePagerInputPath ? `One-pager intake input path: ${input.intakeOnePagerInputPath}` : "",
+    input.intakePrepareContextPath ? `Retained prepare-context path: ${input.intakePrepareContextPath}` : "",
     input.changeReferencePath ? `Referenced repo path: ${input.changeReferencePath}` : "",
     input.existingPlanBody
       ? [
@@ -214,6 +222,8 @@ export async function runChangePlanWorkflow(
       existingPlanBody: existingPlanBody || undefined,
       roleLabels: implementationAgentGuidance.roleLabels,
       implementationAgents: implementationAgentGuidance.implementationAgents,
+      intakeOnePagerInputPath: options.intakeOnePagerInputPath,
+      intakePrepareContextPath: options.intakePrepareContextPath,
     }),
     onUpdate: (progress) => {
       options.onAgentProgress?.(progress)

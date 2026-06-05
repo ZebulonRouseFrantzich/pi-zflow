@@ -87,6 +87,7 @@ The idempotent copy logic protects user edits from being silently overwritten.
 - `plan-drift-protocol`
 - `repository-map`
 - `runecontext-workflow`
+- `grill-me-enhanced`
 
 ## Prompt fragments
 

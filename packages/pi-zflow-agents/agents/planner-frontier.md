@@ -10,7 +10,7 @@ fallbackModels: placeholder
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
-skills: change-doc-workflow, runecontext-workflow
+skills: change-doc-workflow, runecontext-workflow, grill-me-enhanced
 maxSubagentDepth: 1
 maxOutput: 12000
 ---

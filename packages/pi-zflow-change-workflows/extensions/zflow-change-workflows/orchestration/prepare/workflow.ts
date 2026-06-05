@@ -4,6 +4,11 @@
 
 import { resolvePlanStatePath, resolvePlanVersionDir } from "pi-zflow-artifacts/artifact-paths"
 import { addStateIndexEntry } from "pi-zflow-artifacts/state-index"
+import {
+  readChangeIntakeArtifacts,
+  resolveChangeIntakeStatePath,
+  writeVersionedIntakeContext,
+} from "pi-zflow-artifacts"
 import { getZflowRegistry } from "pi-zflow-core/registry"
 
 import { buildRepoMap, buildReconnaissance } from "../planning/repo-analysis.js"
@@ -203,6 +208,15 @@ export async function runChangePrepareWorkflow(
     )
   }
   const effectivePrepareNotes = buildPrepareNotesFromDurablePlanDoc(durableDraftPlan, options.prepareNotes)
+  const intakeArtifacts = await readChangeIntakeArtifacts(changeId, cwd)
+  const retainedPrepareContext = intakeArtifacts.prepareContext?.trim() ?? ""
+  const effectivePrepareNotesWithIntake = retainedPrepareContext
+    ? [
+      effectivePrepareNotes,
+      "## Retained intake context",
+      retainedPrepareContext,
+    ].filter(Boolean).join("\n\n")
+    : effectivePrepareNotes
   if (durableDraftPlan) {
     options.onProgress?.(`📝 Loaded durable draft plan from ${durableDraftPlan.path}.`, "info")
     if (durableDraftPlan.frontmatter.sourceMode === "runecontext") {
@@ -479,6 +493,7 @@ export async function runChangePrepareWorkflow(
     repoMapPath: repoMapResult.path,
     reconnaissancePath: reconResult.path,
     ...(durableDraftPlan ? { durablePlanDocPath: durableDraftPlan.path } : {}),
+    ...(intakeArtifacts.state ? { intakeStatePath: resolveChangeIntakeStatePath(changeId, cwd) } : {}),
   }
   try {
     const raw = await fs.readFile(planStatePath, "utf-8")
@@ -499,9 +514,13 @@ export async function runChangePrepareWorkflow(
     "v1",
     cwd,
     options.changePath,
-    effectivePrepareNotes,
+    effectivePrepareNotesWithIntake,
     (message) => options.onProgress?.(message, "info"),
   )
+
+  if (retainedPrepareContext) {
+    await writeVersionedIntakeContext(changeId, "v1", retainedPrepareContext, cwd).catch(() => {})
+  }
   if (agentDispatchResult.dispatched) {
     options.onProgress?.(
       `✅ Planner dispatch completed via ${agentDispatchResult.serviceName}.` +

@@ -119,6 +119,7 @@ describe("zflow-change-workflows extension activation", () => {
     assert.equal(parsed.changeSeed, "oracle-mssql-entitlements-readonly")
     assert.equal(parsed.notes, "initial read-only Oracle draft")
     assert.equal(parsed.explicitReference, true)
+    assert.equal(parsed.depth, "dynamic")
   })
 
   it("allows freeform change descriptions without requiring a path", () => {
@@ -127,6 +128,7 @@ describe("zflow-change-workflows extension activation", () => {
     assert.equal(parsed.changeSeed, "Draft a read-only Oracle and MSSQL entitlements plan")
     assert.equal(parsed.notes, "Draft a read-only Oracle and MSSQL entitlements plan")
     assert.equal(parsed.explicitReference, false)
+    assert.equal(parsed.depth, "dynamic")
   })
 
   it("supports -- notes separator for explicit ids", () => {
@@ -135,6 +137,7 @@ describe("zflow-change-workflows extension activation", () => {
     assert.equal(parsed.changeSeed, "oracle-mssql-entitlements-readonly")
     assert.equal(parsed.notes, "initial read-only Oracle draft")
     assert.equal(parsed.explicitReference, true)
+    assert.equal(parsed.depth, "dynamic")
   })
 
   it("keeps prose with embedded paths as freeform descriptions", () => {
@@ -181,6 +184,7 @@ describe("zflow-change-workflows extension activation", () => {
     assert.equal(parsed.changePath, "docs/change-ideas/cloudflare-target-architecture-combined-spec.md")
     assert.equal(parsed.forceAdHoc, true)
     assert.match(parsed.notes, /normal idea file/)
+    assert.equal(parsed.depth, "dynamic")
   })
 
   it("keeps explicit RuneContext-style paths when no opt-out is present", () => {
@@ -188,5 +192,17 @@ describe("zflow-change-workflows extension activation", () => {
 
     assert.equal(parsed.changePath, "@agent-os/specs/change-123")
     assert.equal(parsed.forceAdHoc, false)
+    assert.equal(parsed.depth, "dynamic")
+  })
+
+  it("parses --depth for change-plan and change-prepare", () => {
+    const planParsed = parseChangePlanArgs("Please draft auth rollout --depth deep")
+    const prepareParsed = parseChangePrepareArgs("feature-x --depth shallow additional notes")
+
+    assert.equal(planParsed.depth, "deep")
+    assert.equal(planParsed.changeSeed, "Please draft auth rollout")
+    assert.equal(prepareParsed.depth, "shallow")
+    assert.equal(prepareParsed.changePath, "feature-x")
+    assert.equal(prepareParsed.notes, "additional notes")
   })
 })

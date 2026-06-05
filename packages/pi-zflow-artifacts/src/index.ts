@@ -30,6 +30,34 @@ export {
 
 export type { ArtifactCleanupMeta } from "./artifact-paths.js"
 
+export {
+  resolveChangeIntakeDir,
+  resolveChangeIntakeStatePath,
+  resolveChangeIntakeLogPath,
+  resolveChangeIntakeCheckpointsDir,
+  resolveChangeIntakeDecisionLogPath,
+  resolveChangeIntakePrepareContextPath,
+  resolveChangeIntakeOnePagerInputPath,
+  resolveVersionedIntakeContextPath,
+  writeChangeIntakeState,
+  readChangeIntakeState,
+  appendChangeIntakeLogEntry,
+  writeChangeIntakeCheckpoint,
+  writeChangeIntakeDecisionLog,
+  writeChangeIntakePrepareContext,
+  writeChangeIntakeOnePagerInput,
+  readChangeIntakeArtifacts,
+  writeVersionedIntakeContext,
+  createInitialChangeIntakeState,
+} from "./intake-artifacts.js"
+
+export type {
+  ChangeIntakeDepthMode,
+  ChangeIntakeState,
+  ChangeIntakeLogEntry,
+  ChangeIntakeArtifacts,
+} from "./intake-artifacts.js"
+
 // Re-export state index helpers
 // Also importable directly from "pi-zflow-artifacts/state-index"
 export {

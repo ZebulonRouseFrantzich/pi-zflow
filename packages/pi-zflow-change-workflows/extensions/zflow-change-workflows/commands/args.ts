@@ -43,6 +43,42 @@ export interface ParsedChangePlanArgs {
   changeSeed: string
   notes: string
   explicitReference: boolean
+  depth: "dynamic" | "shallow" | "standard" | "deep" | "exhaustive"
+}
+
+const CHANGE_INTAKE_DEPTH_VALUES = new Set([
+  "dynamic",
+  "shallow",
+  "standard",
+  "deep",
+  "exhaustive",
+])
+
+function stripDepthFlag(args: string): {
+  remaining: string
+  depth: "dynamic" | "shallow" | "standard" | "deep" | "exhaustive"
+} {
+  const tokens = args.trim().split(/\s+/).filter(Boolean)
+  const kept: string[] = []
+  let depth: "dynamic" | "shallow" | "standard" | "deep" | "exhaustive" = "dynamic"
+
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]
+    if (token === "--depth") {
+      const candidate = (tokens[i + 1] ?? "").toLowerCase()
+      if (CHANGE_INTAKE_DEPTH_VALUES.has(candidate)) {
+        depth = candidate as typeof depth
+        i += 1
+        continue
+      }
+    }
+    kept.push(token)
+  }
+
+  return {
+    remaining: kept.join(" "),
+    depth,
+  }
 }
 
 function looksLikeChangePlanReference(value: string): boolean {
@@ -160,12 +196,14 @@ export function deriveChangePlanId(changeSeed: string, explicitReference: boolea
 }
 
 export function parseChangePlanArgs(args: string): ParsedChangePlanArgs {
-  const trimmed = args.trim()
+  const stripped = stripDepthFlag(args)
+  const trimmed = stripped.remaining.trim()
   if (!trimmed) {
     return {
       changeSeed: "",
       notes: "",
       explicitReference: false,
+      depth: stripped.depth,
     }
   }
 
@@ -177,6 +215,7 @@ export function parseChangePlanArgs(args: string): ParsedChangePlanArgs {
       changeSeed,
       notes,
       explicitReference: looksLikeChangePlanReference(changeSeed),
+      depth: stripped.depth,
     }
   }
 
@@ -188,6 +227,7 @@ export function parseChangePlanArgs(args: string): ParsedChangePlanArgs {
       changeSeed: first,
       notes: rest,
       explicitReference: true,
+      depth: stripped.depth,
     }
   }
 
@@ -196,6 +236,7 @@ export function parseChangePlanArgs(args: string): ParsedChangePlanArgs {
       changeSeed: trimmed,
       notes: "",
       explicitReference: true,
+      depth: stripped.depth,
     }
   }
 
@@ -203,6 +244,7 @@ export function parseChangePlanArgs(args: string): ParsedChangePlanArgs {
     changeSeed: trimmed,
     notes: trimmed,
     explicitReference: false,
+    depth: stripped.depth,
   }
 }
 
@@ -261,6 +303,7 @@ export interface ParsedChangePrepareArgs {
   changePath: string
   forceAdHoc: boolean
   notes: string
+  depth: "dynamic" | "shallow" | "standard" | "deep" | "exhaustive"
 }
 
 /**
@@ -271,7 +314,8 @@ export interface ParsedChangePrepareArgs {
  * normal ad-hoc change-doc handling.
  */
 export function parseChangePrepareArgs(args: string): ParsedChangePrepareArgs {
-  const parts = args.trim().split(/\s+/).filter(Boolean)
+  const stripped = stripDepthFlag(args)
+  const parts = stripped.remaining.trim().split(/\s+/).filter(Boolean)
   const rawPath = parts[0] ?? ""
   const rest = parts.slice(1)
   const notes = rest.filter((part) => part !== "--no-runecontext").join(" ")
@@ -283,5 +327,5 @@ export function parseChangePrepareArgs(args: string): ParsedChangePrepareArgs {
     ? rawPath.slice(1)
     : rawPath
 
-  return { changePath, forceAdHoc, notes }
+  return { changePath, forceAdHoc, notes, depth: stripped.depth }
 }

@@ -205,4 +205,58 @@ describe("runChangePlanWorkflow", () => {
       await fs.rm(repoRoot, { recursive: true, force: true })
     }
   })
+
+  test("passes grill-me-enhanced intake artifact paths to the planner task", async () => {
+    const repoRoot = await createTestRepo()
+    let receivedTask = ""
+    try {
+      const registry = getZflowRegistry()
+      registry.claim({
+        capability: DISPATCH_SERVICE_CAPABILITY,
+        version: "0.1.0",
+        provider: "test-dispatch",
+        sourcePath: import.meta.url,
+      })
+      registry.provide(DISPATCH_SERVICE_CAPABILITY, {
+        name: "test-dispatch",
+        listAgents: async () => ["planner"],
+        runAgent: async (input: any) => {
+          receivedTask = input.task
+          const body = scaffoldDurablePlanDocBody("intake-aware")
+            .replace("_Describe the change, why it is needed, and what it accomplishes._", "Intake-aware plan summary.")
+            .replace("_List the desired outcomes, user-visible success criteria, and technical completion checks._", "- Keep the durable plan concise.")
+            .replace("_What is included in this change._", "- Intake-aware change planning.")
+            .replace("_What is explicitly excluded._", "- Implementation work.")
+            .replace("_Files, modules, services, docs, and neighboring systems that should be inspected or are likely to change._", "- docs/zflow-changes/intake-aware/plan.md")
+            .replace("_Technical, architectural, or process constraints._", "- Preserve retained prepare context.")
+            .replace("_Key decisions and trade-offs made during planning._", "- Use intake artifacts as inputs.")
+            .replace("_Known risks, open questions, and dependencies._", "- None.")
+            .replace("_High-level execution approach, groups, and order._", "1. Read intake artifacts.\n2. Draft the one-pager.")
+            .replace("_Concrete commands, focused tests, manual checks, and pass/fail expectations._", "- Run targeted tests.")
+            .replace("_Any remaining user decisions or unresolved assumptions that could materially change the plan._", "- None.")
+
+          if (typeof input.output === "string") {
+            await fs.mkdir(path.dirname(input.output), { recursive: true })
+            await fs.writeFile(input.output, body, "utf-8")
+          }
+          return { ok: true, rawOutput: "", outputPath: input.output }
+        },
+        runParallel: async () => ({ ok: true, results: [] }),
+      })
+
+      await runChangePlanWorkflow({
+        cwd: repoRoot,
+        changeId: "intake-aware",
+        changeSeed: "intake aware",
+        changeDescription: "Draft a durable plan with intake artifacts.",
+        intakeOnePagerInputPath: path.join(repoRoot, ".zflow", "plans", "intake-aware", "intake", "one-pager-input.md"),
+        intakePrepareContextPath: path.join(repoRoot, ".zflow", "plans", "intake-aware", "intake", "prepare-context.md"),
+      })
+
+      assert.match(receivedTask, /One-pager intake input path:/)
+      assert.match(receivedTask, /Retained prepare-context path:/)
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true })
+    }
+  })
 })

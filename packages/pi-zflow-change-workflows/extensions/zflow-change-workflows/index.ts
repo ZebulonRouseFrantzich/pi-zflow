@@ -75,6 +75,7 @@ export {
 
 import type { InterviewableContext } from "./interview/structured-interview.js"
 import { runStructuredInterview } from "./interview/structured-interview.js"
+import { runGrillMeEnhancedIntake } from "./interview/grill-me-enhanced.js"
 
 export type { InterviewableContext } from "./interview/structured-interview.js"
 
@@ -150,6 +151,10 @@ export type {
 
 import { loadStateIndex, listStateIndexEntries } from "pi-zflow-artifacts/state-index"
 import type { StateIndexEntry } from "pi-zflow-artifacts/state-index"
+import {
+  readChangeIntakeArtifacts,
+  readChangeIntakeState,
+} from "pi-zflow-artifacts"
 
 import {
   discoverUnfinishedWork,
@@ -5185,6 +5190,23 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           "running",
         )
 
+        const intakeResult = await runGrillMeEnhancedIntake(ctx, {
+          cwd: ctx.cwd,
+          changeId,
+          sourceMode: referencedPath && isRuneContextReference(referencedPath)
+            ? "runecontext"
+            : "adhoc",
+          requestedDepth: parsedArgs.depth,
+          changeDescription,
+          changeSeed: parsedArgs.changeSeed,
+          changeReferencePath: referencedPath ?? undefined,
+          onProgress: (message, type) => progress.update(message, type),
+        })
+        ctx.ui.notify(
+          `🧠 grill-me-enhanced captured ${intakeResult.state.resolvedDecisionCount} intake decisions at depth ${intakeResult.state.depthMode}.`,
+          "info",
+        )
+
         const result = await runChangePlanWorkflow({
           cwd: ctx.cwd,
           changeId,
@@ -5195,6 +5217,8 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           sourceMode: referencedPath && isRuneContextReference(referencedPath)
             ? "runecontext"
             : "adhoc",
+          intakeOnePagerInputPath: intakeResult.onePagerInputPath,
+          intakePrepareContextPath: intakeResult.prepareContextPath,
           onProgress: (message) => progress.update(message),
           onAgentProgress: (agentProgress) => {
             progress.updateSubagent("change-plan-drafter", {
@@ -5306,6 +5330,30 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       })
 
       try {
+        if (pathSlug) {
+          const existingIntake = await readChangeIntakeState(pathSlug, ctx.cwd)
+          if (!existingIntake || parsedArgs.notes.trim() || parsedArgs.depth !== "dynamic") {
+            const existingArtifacts = await readChangeIntakeArtifacts(pathSlug, ctx.cwd)
+            const intakeResult = await runGrillMeEnhancedIntake(ctx, {
+              cwd: ctx.cwd,
+              changeId: pathSlug,
+              sourceMode: !parsedArgs.forceAdHoc && isRuneContextReference(changePath)
+                ? "runecontext"
+                : "adhoc",
+              requestedDepth: parsedArgs.depth,
+              changeDescription: parsedArgs.notes.trim() || `Prepare change planning for ${changePath}`,
+              changeSeed: changePath,
+              changeReferencePath: changePath,
+              existingPrepareContext: existingArtifacts.prepareContext,
+              onProgress: (message, type) => progress.update(message, type),
+            })
+            ctx.ui.notify(
+              `🧠 grill-me-enhanced ${existingIntake ? "updated" : "initialized"} retained intake context for "${pathSlug}" at depth ${intakeResult.state.depthMode}.`,
+              "info",
+            )
+          }
+        }
+
         // Step 1: Run the initial prepare workflow (creates plan state, version dir, etc.)
         const result = await runChangePrepareWorkflow({
           changePath,

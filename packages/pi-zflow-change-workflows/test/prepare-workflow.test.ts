@@ -15,6 +15,11 @@ import {
   markPlanVersionState,
   writeDurablePlanDoc,
 } from "../extensions/zflow-change-workflows/orchestration.js"
+import {
+  createInitialChangeIntakeState,
+  writeChangeIntakePrepareContext,
+  writeChangeIntakeState,
+} from "pi-zflow-artifacts"
 import { resetZflowRegistry } from "pi-zflow-core"
 import { getZflowRegistry } from "pi-zflow-core/registry"
 
@@ -295,6 +300,42 @@ describe("runChangePrepareWorkflow", () => {
       const planState = JSON.parse(await fs.readFile(result.planStatePath, "utf-8"))
       assert.strictEqual(planState.runtimeMetadata.durablePlanDocPath, planDocPath)
       assert.strictEqual(result.initialPlanState.runtimeMetadata?.durablePlanDocPath, planDocPath)
+    } finally {
+      await removeTestRepo(repoRoot)
+    }
+  })
+
+  test("carries retained intake context into prepare runtime metadata and version snapshot", async () => {
+    const repoRoot = await createTestRepo()
+    try {
+      await writeDurablePlanDoc("intake-aware-prepare", {
+        changeId: "intake-aware-prepare",
+      }, {
+        repoRoot,
+        bodyContent: COMPLETE_PLAN_BODY,
+      })
+      const prepareContextPath = await writeChangeIntakePrepareContext(
+        "intake-aware-prepare",
+        "# Prepare context\n\n- Preserve interview nuance during prepare.",
+        repoRoot,
+      )
+      await writeChangeIntakeState(createInitialChangeIntakeState({
+        changeId: "intake-aware-prepare",
+        sourceMode: "adhoc",
+        depthMode: "deep",
+        prepareContextPath,
+      }), repoRoot)
+
+      const result = await runChangePrepareWorkflow({
+        cwd: repoRoot,
+        changeId: "intake-aware-prepare",
+      })
+
+      const planState = JSON.parse(await fs.readFile(result.planStatePath, "utf-8"))
+      assert.strictEqual(planState.runtimeMetadata.intakeStatePath.endsWith(path.join("intake", "intake-state.json")), true)
+
+      const intakeSnapshot = await fs.readFile(path.join(path.dirname(result.artifactPaths.design), "intake-context.md"), "utf-8")
+      assert.match(intakeSnapshot, /Preserve interview nuance during prepare/)
     } finally {
       await removeTestRepo(repoRoot)
     }
