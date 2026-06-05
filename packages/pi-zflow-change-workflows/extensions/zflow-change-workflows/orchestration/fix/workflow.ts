@@ -9,6 +9,7 @@ import {
   resolvePlanStatePath,
   resolvePlanVersionDir,
 } from "pi-zflow-artifacts/artifact-paths"
+import { getZflowRegistry } from "pi-zflow-core/registry"
 import { resolveRuntimeStateDir } from "pi-zflow-core/runtime-paths"
 import type {
   AgentDispatchProgress,
@@ -20,6 +21,7 @@ import { migrateLegacyChangeArtifactsIfPresent } from "../implementation/workflo
 import {
   assertFindingsMatchChange,
   buildFixPlan,
+  inferRootCause,
   parseReviewFindings,
   type ParsedFinding,
   type ReviewFindingsMetadata,
@@ -270,6 +272,11 @@ export interface DirectFixBatch {
   findings: ParsedFinding[]
   severity: ParsedFinding["severity"]
   workerAgent: string
+  familyKey: string
+  familyLabel: string
+  rootCause: string
+  recurrenceCount: number
+  isRecurring: boolean
 }
 
 export interface DirectFixFindingOutcome {
@@ -283,6 +290,12 @@ export interface DirectFixFindingOutcome {
   outputPath?: string
 }
 
+export interface GlobalRoundState {
+  round: number
+  maxRounds: number
+  recurrenceByFamily: Record<string, number>
+}
+
 export interface DirectFixWorkflowResult {
   changeId: string
   planVersion: string
@@ -291,6 +304,8 @@ export interface DirectFixWorkflowResult {
   fixed: DirectFixFindingOutcome[]
   unresolved: DirectFixFindingOutcome[]
   verificationCommand?: string
+  globalRoundsUsed: number
+  globalRoundsMax: number
 }
 
 export interface DirectFixWorkflowOptions {
@@ -348,7 +363,7 @@ export function isNoEditFailure(error: string | undefined): boolean {
 
 export interface ZflowFixFindingResult {
   findingId: string
-  status: "fixed" | "already_satisfied" | "blocked" | "partial" | "not_satisfied" | "uncertain"
+  status: "fixed" | "already_satisfied" | "blocked" | "partial" | "not_satisfied" | "uncertain" | "superseded" | "duplicate" | "alternative_satisfied"
   evidence?: string[]
   changedFiles?: string[]
   validation?: string[]
@@ -357,7 +372,7 @@ export interface ZflowFixFindingResult {
 
 export interface ZflowFixResultEnvelope {
   zflowFixResult: {
-    status: "fixed" | "already_satisfied" | "blocked" | "partial" | "not_satisfied" | "uncertain"
+    status: "fixed" | "already_satisfied" | "blocked" | "partial" | "not_satisfied" | "uncertain" | "superseded" | "duplicate" | "alternative_satisfied"
     findings?: ZflowFixFindingResult[]
     evidence?: string[]
     changedFiles?: string[]
@@ -375,6 +390,9 @@ function normalizeStructuredStatus(status: string | undefined): ZflowFixFindingR
     case "partial":
     case "not_satisfied":
     case "uncertain":
+    case "superseded":
+    case "duplicate":
+    case "alternative_satisfied":
       return normalized
     default:
       return undefined
@@ -387,6 +405,10 @@ function hasSubstantiveEvidence(result: ZflowFixFindingResult | ZflowFixResultEn
     result.evidence?.some((entry) => entry.trim()) ||
     result.validation?.some((entry) => entry.trim()),
   )
+}
+
+function isAcceptedNonLiteralStatus(status: ZflowFixFindingResult["status"]): boolean {
+  return status === "superseded" || status === "duplicate" || status === "alternative_satisfied"
 }
 
 function extractBalancedJsonObject(source: string, marker: string): string | undefined {
@@ -493,6 +515,72 @@ function structuredResultForFinding(
   }
 }
 
+function isSatisfiedStructuredStatus(status: ZflowFixFindingResult["status"] | undefined): boolean {
+  return status === "fixed" || status === "already_satisfied" || (status ? isAcceptedNonLiteralStatus(status) : false)
+}
+
+function buildSemanticDisagreementReport(
+  batch: DirectFixBatch,
+  workerEnvelope: ZflowFixResultEnvelope | undefined,
+  checkerEnvelope: ZflowFixResultEnvelope,
+  workerOutputPath: string | undefined,
+  checkerOutputPath: string,
+): string | undefined {
+  if (!workerEnvelope) return undefined
+  const rows: string[] = []
+  for (const finding of batch.findings) {
+    const workerResult = structuredResultForFinding(workerEnvelope, finding)
+    const checkerResult = structuredResultForFinding(checkerEnvelope, finding)
+    if (!isSatisfiedStructuredStatus(workerResult?.status)) continue
+    if (isSatisfiedStructuredStatus(checkerResult?.status)) continue
+    rows.push([
+      `## ${finding.findingId}: ${finding.title}`,
+      "",
+      `- Worker status: ${workerResult?.status ?? "missing"}`,
+      `- Checker status: ${checkerResult?.status ?? "missing"}`,
+      `- Worker reason: ${workerResult?.reason ?? "(none)"}`,
+      `- Checker reason: ${checkerResult?.reason ?? "(none)"}`,
+      `- File: ${finding.file ?? "(not specified)"}`,
+      `- Fix requirements: ${finding.fixRequirements ?? finding.recommendation}`,
+      "",
+    ].join("\n"))
+  }
+  if (rows.length === 0) return undefined
+  return [
+    "# Semantic Fix Disagreement",
+    "",
+    `**Batch**: ${batch.batchId}`,
+    `**Family**: ${batch.familyLabel}`,
+    `**Worker output**: ${workerOutputPath ?? "(unknown)"}`,
+    `**Checker output**: ${checkerOutputPath}`,
+    "",
+    "The fix worker reported the finding as satisfied, but the independent checker did not. Treat this as a semantic decision point: either implement the literal missing requirement, or rerun after documenting an accepted `alternative_satisfied`, `superseded`, or `duplicate` resolution with concrete source evidence.",
+    "",
+    ...rows,
+  ].join("\n")
+}
+
+function collectStructuredChangedFiles(
+  envelope: ZflowFixResultEnvelope | undefined,
+  batch: DirectFixBatch,
+): string[] {
+  if (!envelope) return batch.files
+  const changed = new Set<string>()
+  for (const finding of batch.findings) {
+    const result = structuredResultForFinding(envelope, finding)
+    for (const file of result?.changedFiles ?? []) {
+      if (file.trim()) changed.add(file.trim())
+    }
+  }
+  for (const file of envelope.zflowFixResult.changedFiles ?? []) {
+    if (file.trim()) changed.add(file.trim())
+  }
+  if (changed.size === 0) {
+    for (const file of batch.files) changed.add(file)
+  }
+  return [...changed]
+}
+
 function applyStructuredFixResults(
   batch: DirectFixBatch,
   envelope: ZflowFixResultEnvelope,
@@ -536,6 +624,20 @@ function applyStructuredFixResults(
       continue
     }
 
+    if (isAcceptedNonLiteralStatus(result.status) && hasSubstantiveEvidence(result)) {
+      fixed.push({
+        findingId: finding.findingId,
+        title: finding.title,
+        severity: finding.severity,
+        file: finding.file,
+        status: "already-satisfied",
+        attempts,
+        reason: `${result.status}: ${evidenceSuffix ?? "finding resolved by equivalent, superseding, or duplicate coverage"}`,
+        outputPath,
+      })
+      continue
+    }
+
     unresolved.push({
       findingId: finding.findingId,
       title: finding.title,
@@ -560,7 +662,7 @@ function buildFixSatisfactionCheckerPrompt(
     `# Fix Satisfaction Check for ${changeId}`,
     "",
     "You are a read-only zflow satisfaction checker. Decide whether the current repository state already satisfies the listed review finding(s).",
-    "Do not edit files. Inspect only the source files, plan artifacts, review finding text, and worker output.",
+    "Do not edit files. Inspect only the source files, plan artifacts, review finding text, and worker output. Verify the whole finding family/root cause, not just a worker claim.",
     "",
     "## Required JSON result",
     "",
@@ -569,10 +671,10 @@ function buildFixSatisfactionCheckerPrompt(
     "```json",
     JSON.stringify({
       zflowFixResult: {
-        status: "already_satisfied | not_satisfied | uncertain",
+        status: "fixed | already_satisfied | alternative_satisfied | superseded | duplicate | not_satisfied | uncertain",
         findings: [{
           findingId: "finding-id",
-          status: "already_satisfied | not_satisfied | uncertain",
+          status: "fixed | already_satisfied | alternative_satisfied | superseded | duplicate | not_satisfied | uncertain",
           evidence: ["file/path:line or concrete reason"],
           changedFiles: [],
           validation: ["read-only checks performed"],
@@ -582,7 +684,12 @@ function buildFixSatisfactionCheckerPrompt(
     }, null, 2),
     "```",
     "",
-    "Only use `already_satisfied` when concrete source evidence proves the fix requirements are met. Otherwise use `not_satisfied` or `uncertain`.",
+    "Use `fixed` when the current repository state now satisfies the requirement because of newly-applied changes. Use `already_satisfied` only when the exact requirement was already met before the attempted fix.",
+    "Use `alternative_satisfied` when the literal suggested implementation differs, but concrete source evidence proves the same expected behavior/root cause is now satisfied.",
+    "Use `superseded` when the reviewed code path or operation no longer exists and concrete source evidence shows the current design makes the original failure mode inapplicable while preserving the intended behavior/observability.",
+    "Use `duplicate` when this finding is fully covered by another finding/fix in the same family; cite the sibling finding and source evidence.",
+    "Use `not_satisfied` only when the expected behavior/root cause remains unmet, not merely because an exact suggested symbol/event/name was replaced by an equivalent design.",
+    "Use `uncertain` when evidence is insufficient or ambiguous.",
     "",
     "## Findings",
     "",
@@ -646,6 +753,96 @@ async function runSatisfactionChecker(
   return parseZflowFixResultEnvelope(checkerOutput)
 }
 
+async function runFocusedFixReview(
+  changeId: string,
+  fixResult: FixWorkflowResult,
+  batch: DirectFixBatch,
+  changedFiles: string[],
+  cwd?: string,
+): Promise<{ ok: boolean, summary: string, findingsPath?: string }> {
+  const reviewService = getZflowRegistry().optional<Record<string, Function>>("review")
+  if (!reviewService || typeof reviewService.runCodeReview !== "function") {
+    return { ok: true, summary: "review service unavailable; targeted post-fix review skipped" }
+  }
+
+  const { default: fs } = await import("node:fs/promises")
+  const diffFile = `${resolvePlanVersionDir(changeId, fixResult.planVersion, cwd)}/${batch.batchId}-focused-review.diff`
+  let diffBundle = ""
+  try {
+    const { execFile } = await import("node:child_process")
+    diffBundle = await new Promise<string>((resolve) => {
+      execFile("git", ["diff", "--", ...(changedFiles.length > 0 ? changedFiles : batch.files)], { cwd }, (error, stdout) => {
+        if (error) {
+          resolve("")
+          return
+        }
+        resolve(stdout)
+      })
+    })
+  } catch {
+    diffBundle = ""
+  }
+  try {
+    await fs.writeFile(diffFile, diffBundle, "utf-8")
+  } catch { /* best-effort */ }
+
+  const planningArtifacts = {
+    design: fixResult.planArtifactPaths?.design ?? resolvePlanArtifactPath(changeId, fixResult.planVersion, "design", cwd),
+    executionGroups: fixResult.planArtifactPaths?.executionGroups ?? resolvePlanArtifactPath(changeId, fixResult.planVersion, "execution-groups", cwd),
+    standards: fixResult.planArtifactPaths?.standards ?? resolvePlanArtifactPath(changeId, fixResult.planVersion, "standards", cwd),
+    verification: fixResult.planArtifactPaths?.verification ?? resolvePlanArtifactPath(changeId, fixResult.planVersion, "verification", cwd),
+  }
+
+  try {
+    const result = await (reviewService.runCodeReview as Function)({
+      source: `Implementation of ${changeId}`,
+      repoPath: cwd ?? process.cwd(),
+      branch: "(focused-fix-review)",
+      planningArtifacts,
+      verificationStatus: "passed",
+      diffBundle: diffBundle || undefined,
+      diffSource: diffBundle ? "focused-fix-review" : "focused-fix-review-empty-diff",
+      modifiedFiles: changedFiles.length > 0 ? changedFiles : batch.files,
+      targetPath: changedFiles.length === 1 ? changedFiles[0] : undefined,
+      focusReview: {
+        mode: "fix-follow-up",
+        targetFiles: changedFiles.length > 0 ? changedFiles : batch.files,
+        targetFamilies: [batch.familyKey],
+        priorFindings: batch.findings.map((finding) => ({
+          findingId: finding.findingId,
+          title: finding.title,
+          severity: finding.severity,
+          file: finding.file,
+          findingFamily: finding.findingFamily ?? batch.familyKey,
+          canonicalKey: finding.canonicalKey,
+        })),
+      },
+      cwd,
+    }) as { severity?: { critical: number, major: number }, summary?: string, findingsPath?: string, coverageNotes?: string[] }
+
+    const critical = result.severity?.critical ?? 0
+    const major = result.severity?.major ?? 0
+    if (critical > 0 || major > 0) {
+      return {
+        ok: false,
+        summary: result.summary ?? `targeted post-fix review found ${critical} critical and ${major} major issues`,
+        findingsPath: result.findingsPath,
+      }
+    }
+
+    return {
+      ok: true,
+      summary: result.summary ?? "targeted post-fix review passed",
+      findingsPath: result.findingsPath,
+    }
+  } catch (error) {
+    return {
+      ok: true,
+      summary: `targeted post-fix review unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+}
+
 async function fileExists(path: string): Promise<boolean> {
   try {
     const { default: fs } = await import("node:fs/promises")
@@ -692,40 +889,115 @@ async function cleanupStaleDirectFixArtifacts(versionDir: string, changeDir: str
   } catch { /* best-effort */ }
 }
 
+function normalizeFamilyConcern(finding: ParsedFinding): string {
+  const seed = finding.findingFamily ?? finding.canonicalKey ?? finding.expectedBehavior ?? finding.fixRequirements ?? finding.title
+  return seed
+    .toLowerCase()
+    .replace(/^[a-z-]+:/, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .split("-")
+    .filter(Boolean)
+    .slice(0, 6)
+    .join("-") || "general"
+}
+
+function resolveBatchFamily(finding: ParsedFinding): { familyKey: string, familyLabel: string, rootCause: string } {
+  const rootCause = finding.rootCause ?? inferRootCause(finding)
+  const familyKey = finding.findingFamily ?? `${rootCause}:${normalizeFamilyConcern(finding)}`
+  const familyLabel = familyKey.replace(/:/g, " / ")
+  return { familyKey, familyLabel, rootCause }
+}
+
+function selectWorkerAgentForBatch(batch: Omit<DirectFixBatch, "workerAgent">, defaultAgent: string): string {
+  if (batch.severity === "critical") return "zflow.implement-hard"
+  if (batch.isRecurring) return "zflow.implement-hard"
+  if (batch.files.length > 1) return "zflow.implement-hard"
+  if (batch.findings.length > 3) return "zflow.implement-hard"
+  if (["security", "performance", "architecture", "contract"].includes(batch.rootCause)) return "zflow.implement-hard"
+  return defaultAgent
+}
+
+function batchesConflict(a: DirectFixBatch, b: DirectFixBatch): boolean {
+  if (a.files.length === 0 || b.files.length === 0) return true
+  return a.files.some((file) => b.files.includes(file))
+}
+
+function partitionBatchesIntoWaves(batches: DirectFixBatch[]): DirectFixBatch[][] {
+  const waves: DirectFixBatch[][] = []
+  for (const batch of batches) {
+    let placed = false
+    for (const wave of waves) {
+      if (wave.every((existing) => !batchesConflict(existing, batch))) {
+        wave.push(batch)
+        placed = true
+        break
+      }
+    }
+    if (!placed) {
+      waves.push([batch])
+    }
+  }
+  return waves
+}
+
+export function buildFamilyClusters(findings: ParsedFinding[]): Map<string, ParsedFinding[]> {
+  const grouped = new Map<string, ParsedFinding[]>()
+  for (const finding of findings) {
+    const { familyKey } = resolveBatchFamily(finding)
+    const cluster = grouped.get(familyKey)
+    if (cluster) {
+      cluster.push(finding)
+    } else {
+      grouped.set(familyKey, [finding])
+    }
+  }
+  return grouped
+}
+
 export function buildDirectFixBatches(
   findings: ParsedFinding[],
   workerAgent: string = "zflow.implement-routine",
+  recurrenceByFamily: Record<string, number> = {},
 ): DirectFixBatch[] {
-  const grouped = new Map<string, DirectFixBatch>()
+  const clusters = buildFamilyClusters(findings)
+  const batches: DirectFixBatch[] = []
 
-  for (const finding of findings) {
-    const fileKey = normalizeBatchFileKey(finding)
-    const existing = grouped.get(fileKey)
-    if (existing) {
-      existing.findings.push(finding)
-      if (finding.file && !existing.files.includes(finding.file)) {
-        existing.files.push(finding.file)
-      }
-      if (severityRank(finding.severity) < severityRank(existing.severity)) {
-        existing.severity = finding.severity
-      }
-      continue
+  for (const cluster of clusters.values()) {
+    const first = cluster[0]
+    const { familyKey, familyLabel, rootCause } = resolveBatchFamily(first)
+    const files = [...new Set(cluster.map((finding) => finding.file).filter((file): file is string => Boolean(file)))]
+    const severity = cluster.reduce<ParsedFinding["severity"]>((worst, finding) => {
+      return severityRank(finding.severity) < severityRank(worst) ? finding.severity : worst
+    }, first.severity)
+    const recurrenceCount = Math.max(
+      recurrenceByFamily[familyKey] ?? 0,
+      ...cluster.map((finding) => finding.recurrenceCount ?? 0),
+    )
+    const provisional: Omit<DirectFixBatch, "workerAgent"> = {
+      batchId: `batch-${batches.length + 1}`,
+      fileKey: familyKey,
+      files,
+      findings: cluster,
+      severity,
+      familyKey,
+      familyLabel,
+      rootCause,
+      recurrenceCount,
+      isRecurring: recurrenceCount > 1,
     }
-
-    grouped.set(fileKey, {
-      batchId: `batch-${grouped.size + 1}`,
-      fileKey,
-      files: finding.file ? [finding.file] : [],
-      findings: [finding],
-      severity: finding.severity,
-      workerAgent,
+    batches.push({
+      ...provisional,
+      workerAgent: selectWorkerAgentForBatch(provisional, workerAgent),
     })
   }
 
-  return [...grouped.values()].sort((a, b) => {
+  return batches.sort((a, b) => {
     const sevDiff = severityRank(a.severity) - severityRank(b.severity)
     if (sevDiff !== 0) return sevDiff
-    return a.fileKey.localeCompare(b.fileKey)
+    if (a.recurrenceCount !== b.recurrenceCount) return b.recurrenceCount - a.recurrenceCount
+    if (a.findings.length !== b.findings.length) return b.findings.length - a.findings.length
+    return a.familyKey.localeCompare(b.familyKey)
   })
 }
 
@@ -758,7 +1030,13 @@ function buildDirectFixWorkerTaskPrompt(
     "",
     `You are fixing ${batch.findings.length} review finding(s) for change \`${changeId}\`.`,
     `Work only on this batch: \`${batch.batchId}\`.`,
+    `Finding family: \`${batch.familyKey}\` (${batch.familyLabel})`,
+    `Root cause: ${batch.rootCause}`,
+    `Recurrence count: ${batch.recurrenceCount}`,
     `Primary target files: ${batch.files.length > 0 ? batch.files.map((file) => `\`${file}\``).join(", ") : "(not specified)"}`,
+    batch.isRecurring
+      ? "This family has recurred across review loops. Prefer a deeper, root-cause-complete fix rather than a narrow patch."
+      : "This is the first known fix round for this finding family.",
     "",
     "## Source Change Context (MUST read before editing)",
     "",
@@ -790,8 +1068,18 @@ function buildDirectFixWorkerTaskPrompt(
     if (finding.validation) lines.push(`- Validation: ${finding.validation}`)
     if (finding.suggestedApproach) lines.push(`- Suggested approach: ${finding.suggestedApproach}`)
     if (finding.whyItMatters) lines.push(`- Why it matters: ${finding.whyItMatters}`)
+    if (finding.rootCause) lines.push(`- Root cause: ${finding.rootCause}`)
+    if (finding.findingFamily) lines.push(`- Finding family: ${finding.findingFamily}`)
+    if (finding.canonicalKey) lines.push(`- Canonical key: ${finding.canonicalKey}`)
+    if (typeof finding.recurrenceCount === "number") lines.push(`- Recurrence count: ${finding.recurrenceCount}`)
     const artifactPath = toAbsoluteArtifactPath(runtimeStateDir, finding.artifactPath)
-    if (artifactPath) lines.push(`- Raw reviewer artifact: \`${artifactPath}\``)
+    if (artifactPath) lines.push(`- Primary raw reviewer artifact: \`${artifactPath}\``)
+    for (const extraPath of finding.artifactPaths ?? []) {
+      const absolute = toAbsoluteArtifactPath(runtimeStateDir, extraPath)
+      if (absolute && absolute !== artifactPath) {
+        lines.push(`- Supporting raw reviewer artifact: \`${absolute}\``)
+      }
+    }
     lines.push("")
   }
 
@@ -802,15 +1090,18 @@ function buildDirectFixWorkerTaskPrompt(
     "## Required structured result",
     "",
     "End your final response with a single fenced ```json block using this exact top-level key.",
-    "Use `already_satisfied` when no edit is needed because the current code already satisfies the finding. Include concrete evidence.",
+    "Use `already_satisfied` when no edit is needed because the current code already satisfies the exact finding. Include concrete evidence.",
+    "Use `alternative_satisfied` when you intentionally satisfy the same expected behavior/root cause through a different design than the reviewer suggested; explain why it is equivalent.",
+    "Use `superseded` when the reviewed code path/operation no longer exists and the current design makes the original failure mode inapplicable; cite source evidence.",
+    "Use `duplicate` when another finding/fix in the same family fully covers this one; cite the sibling finding and source evidence.",
     "",
     "```json",
     JSON.stringify({
       zflowFixResult: {
-        status: "fixed | already_satisfied | blocked | partial",
+        status: "fixed | already_satisfied | alternative_satisfied | superseded | duplicate | blocked | partial",
         findings: [{
           findingId: batch.findings[0]?.findingId ?? "finding-id",
-          status: "fixed | already_satisfied | blocked | partial",
+          status: "fixed | already_satisfied | alternative_satisfied | superseded | duplicate | blocked | partial",
           evidence: ["file/path:line or concrete reason"],
           changedFiles: ["file/path.ts"],
           validation: ["command/result or read-only verification"],
@@ -824,12 +1115,12 @@ function buildDirectFixWorkerTaskPrompt(
     "",
     "1. Read the source change documents listed above before editing.",
     "2. Read the raw reviewer artifact(s) for this batch before editing.",
-    "3. Fix ONLY the findings in this batch. Do not expand scope.",
-    "4. Prefer the minimal code change that satisfies the findings and preserves the approved design/standards.",
+    "3. Fix ONLY the findings in this batch, but fix them at the root-cause/family level so the same issue does not survive into the next review loop.",
+    "4. Prefer the minimal code change that satisfies the findings and preserves the approved design/standards. Do not silently leave sibling files in the same finding family inconsistent.",
     "5. Update or add focused tests when behavior changes.",
     "6. Run the most relevant validation/test commands you can for this batch. Use any explicit validation listed above.",
     "7. In your final response, report: changed files, findings addressed, validation run, and any unresolved blocker.",
-    "8. Always include the required structured JSON result block. If you made no edits because the finding was already satisfied, set the relevant finding status to `already_satisfied` and include evidence.",
+    "8. Always include the required structured JSON result block. If you made no edits because the exact finding was already satisfied, set the relevant finding status to `already_satisfied` and include evidence. If you did not implement the literal recommendation because the path is obsolete, duplicated, or equivalently resolved, use `superseded`, `duplicate`, or `alternative_satisfied` with stronger evidence.",
     "",
     ...buildConflictScopeGuidance(),
   )
@@ -843,6 +1134,7 @@ function buildDirectFixReport(
   batchCount: number,
   fixed: DirectFixFindingOutcome[],
   unresolved: DirectFixFindingOutcome[],
+  globalRoundsUsed: number,
 ): string {
   const alreadySatisfied = fixed.filter((f) => f.status === "already-satisfied")
   const actuallyFixed = fixed.filter((f) => f.status === "fixed")
@@ -852,8 +1144,12 @@ function buildDirectFixReport(
     `**Change**: ${changeId}`,
     `**Findings processed**: ${fixResult.parsedFindings.length}`,
     `**Batches used**: ${batchCount}`,
+    `**Global rounds used**: ${globalRoundsUsed}/${fixResult.fixOrchestratorConfig.maxGlobalRounds}`,
     `**Config**: maxAttemptsPerFinding=${fixResult.fixOrchestratorConfig.maxAttemptsPerFinding}, maxGlobalRounds=${fixResult.fixOrchestratorConfig.maxGlobalRounds}`,
     `**Execution mode**: direct command-layer orchestration (no nested fix-orchestrator subagent)`,
+    `**Clustering mode**: canonical finding family/root-cause clustering with backward-compatible fallbacks`,
+    `**Worker routing**: recurring, multi-file, critical, security, contract, architecture, and performance clusters escalate to zflow.implement-hard`,
+    `**Validation mode**: worker output + satisfaction checker + targeted post-fix review when available`,
     "",
     "## Fixed",
     "",
@@ -885,8 +1181,8 @@ function buildDirectFixReport(
       ? `- Verification command: \`${fixResult.verificationCommand}\``
       : "- Verification command: (not resolved)",
     unresolved.length > 0
-      ? "- Result: partial \u2014 unresolved findings remain"
-      : "- Result: worker-level validation completed for all dispatched batches",
+      ? "- Result: partial — unresolved findings remain after independent checks"
+      : "- Result: independent checker/review validation completed for all dispatched batches",
     "",
     "## Reviewer Re-check Recommendation",
     "",
@@ -927,23 +1223,27 @@ export async function runDirectFixWorkflow(
   const changeId = options.changeId
   const fixResult = options.fixResult
   const workerAgent = options.workerAgent ?? "zflow.implement-routine"
-  const batches = buildDirectFixBatches(fixResult.parsedFindings, workerAgent)
   const runtimeStateDir = resolveRuntimeStateDir(cwd)
   const versionDir = resolvePlanVersionDir(changeId, fixResult.planVersion, cwd)
   const changeDir = resolveChangeDir(changeId, cwd)
   const maxAttempts = Math.max(1, fixResult.fixOrchestratorConfig.maxAttemptsPerFinding)
+  const maxRounds = Math.max(1, fixResult.fixOrchestratorConfig.maxGlobalRounds)
   await fs.mkdir(versionDir, { recursive: true })
   await fs.mkdir(changeDir, { recursive: true })
   await cleanupStaleDirectFixArtifacts(versionDir, changeDir)
 
-  const fixed: DirectFixFindingOutcome[] = []
-  const unresolved: DirectFixFindingOutcome[] = []
+  const fixedById = new Map<string, DirectFixFindingOutcome>()
+  const unresolvedById = new Map<string, DirectFixFindingOutcome>()
+  const recurrenceByFamily: Record<string, number> = {}
+  let pendingFindings = [...fixResult.parsedFindings]
+  let totalBatchCount = 0
+  let roundsUsed = 0
 
-  for (const batch of batches) {
+  const runBatch = async (batch: DirectFixBatch): Promise<{ batch: DirectFixBatch, fixed: DirectFixFindingOutcome[], unresolved: DirectFixFindingOutcome[] }> => {
     await options.onBatchStart?.(batch)
     let lastResult: (AgentDispatchResult & { outputPath?: string }) | null = null
-    let structuredResult: ZflowFixResultEnvelope | undefined
-    let finalOutput = ""
+    let workerEnvelope: ZflowFixResultEnvelope | undefined
+    let workerOutput = ""
     let attempt = 0
 
     while (attempt < maxAttempts) {
@@ -953,6 +1253,9 @@ export async function runDirectFixWorkflow(
         : `${versionDir}/${batch.batchId}-attempt-${attempt}.md`
 
       let task = buildDirectFixWorkerTaskPrompt(changeId, fixResult, batch, runtimeStateDir)
+      if (batch.isRecurring) {
+        task += `\n## Recurrence escalation\n- This family has already survived ${batch.recurrenceCount - 1} prior review loop(s). Solve the root cause completely.\n`
+      }
       if (attempt > 1 && lastResult) {
         task += buildRetryPromptSuffix(batch, attempt, lastResult.error, lastResult.outputPath)
       }
@@ -975,89 +1278,81 @@ export async function runDirectFixWorkflow(
           ok: false,
           error: error instanceof Error ? error.message : String(error),
           outputPath,
+          rawOutput: "",
         }
       }
 
       await ensureDispatchOutputFile(lastResult, outputPath, `${batch.batchId} attempt ${attempt}`)
+      workerOutput = await readDispatchOutput(lastResult)
+      workerEnvelope = parseZflowFixResultEnvelope(workerOutput)
 
-      finalOutput = await readDispatchOutput(lastResult)
-      structuredResult = parseZflowFixResultEnvelope(finalOutput)
-      if (structuredResult) {
-        lastResult = { ...lastResult, ok: true, error: undefined }
+      if (workerEnvelope) {
         break
       }
-
-      if (lastResult.ok) break
+      if (lastResult.ok) {
+        break
+      }
     }
 
     await options.onBatchComplete?.(batch, lastResult!)
 
-    const finalResult = lastResult!
-    if (!finalOutput) finalOutput = await readDispatchOutput(finalResult)
-    structuredResult = structuredResult ?? parseZflowFixResultEnvelope(finalOutput)
-
-    if (structuredResult) {
-      const handled = applyStructuredFixResults(
-        batch,
-        structuredResult,
-        fixed,
-        unresolved,
-        attempt,
-        finalResult.outputPath,
-      )
-      for (const finding of batch.findings) {
-        if (!handled.has(finding.findingId)) {
-          unresolved.push({
-            findingId: finding.findingId,
-            title: finding.title,
-            severity: finding.severity,
-            file: finding.file,
-            status: "unresolved",
-            attempts: attempt,
-            reason: "structured fix result omitted this finding",
-            outputPath: finalResult.outputPath,
-          })
-        }
-      }
-      continue
-    }
-
-    if (finalResult.ok) {
-      for (const finding of batch.findings) {
-        fixed.push({
-          findingId: finding.findingId,
-          title: finding.title,
-          severity: finding.severity,
-          file: finding.file,
-          status: "fixed",
-          attempts: attempt,
-          outputPath: finalResult.outputPath,
-        })
-      }
-      continue
-    }
-
+    const fixed: DirectFixFindingOutcome[] = []
+    const unresolved: DirectFixFindingOutcome[] = []
     const checkerOutputPath = `${versionDir}/${batch.batchId}-satisfaction-check.md`
     const checkerResult = await runSatisfactionChecker(
       options,
       changeId,
       fixResult,
       batch,
-      finalOutput || finalResult.error || "",
+      workerOutput || lastResult?.error || "",
       checkerOutputPath,
     )
 
-    if (checkerResult) {
-      const handled = applyStructuredFixResults(
-        batch,
-        checkerResult,
-        fixed,
-        unresolved,
-        attempt,
-        checkerOutputPath,
-      )
+    if (!checkerResult) {
       for (const finding of batch.findings) {
-        if (!handled.has(finding.findingId)) {
+        unresolved.push({
+          findingId: finding.findingId,
+          title: finding.title,
+          severity: finding.severity,
+          file: finding.file,
+          status: "unresolved",
+          attempts: attempt,
+          reason: lastResult?.error ?? "independent checker did not return a structured verdict",
+          outputPath: lastResult?.outputPath ?? checkerOutputPath,
+        })
+      }
+      return { batch, fixed, unresolved }
+    }
+
+    const disagreementReport = buildSemanticDisagreementReport(
+      batch,
+      workerEnvelope,
+      checkerResult,
+      lastResult?.outputPath,
+      checkerOutputPath,
+    )
+    if (disagreementReport) {
+      try {
+        await fs.writeFile(`${versionDir}/${batch.batchId}-semantic-disagreement.md`, disagreementReport, "utf-8")
+      } catch { /* best-effort */ }
+    }
+
+    const handled = applyStructuredFixResults(
+      batch,
+      checkerResult,
+      fixed,
+      unresolved,
+      attempt,
+      checkerOutputPath,
+    )
+
+    const changedFiles = collectStructuredChangedFiles(workerEnvelope ?? checkerResult, batch)
+    const shouldRunFocusedReview = batch.severity === "critical" || batch.severity === "major" || batch.isRecurring || batch.workerAgent === "zflow.implement-hard" || changedFiles.length > 1
+    if (shouldRunFocusedReview && fixed.length > 0 && unresolved.length === 0) {
+      const reviewResult = await runFocusedFixReview(changeId, fixResult, batch, changedFiles, cwd)
+      if (!reviewResult.ok) {
+        for (const finding of batch.findings) {
+          fixed.splice(0, fixed.length)
           unresolved.push({
             findingId: finding.findingId,
             title: finding.title,
@@ -1065,29 +1360,82 @@ export async function runDirectFixWorkflow(
             file: finding.file,
             status: "unresolved",
             attempts: attempt,
-            reason: "satisfaction checker omitted this finding",
-            outputPath: checkerOutputPath,
+            reason: reviewResult.summary,
+            outputPath: reviewResult.findingsPath ?? checkerOutputPath,
           })
         }
       }
-      continue
     }
 
     for (const finding of batch.findings) {
-      unresolved.push({
+      if (!handled.has(finding.findingId) && !fixed.find((entry) => entry.findingId === finding.findingId) && !unresolved.find((entry) => entry.findingId === finding.findingId)) {
+        unresolved.push({
+          findingId: finding.findingId,
+          title: finding.title,
+          severity: finding.severity,
+          file: finding.file,
+          status: "unresolved",
+          attempts: attempt,
+          reason: "independent checker omitted this finding",
+          outputPath: checkerOutputPath,
+        })
+      }
+    }
+
+    return { batch, fixed, unresolved }
+  }
+
+  while (pendingFindings.length > 0 && roundsUsed < maxRounds) {
+    roundsUsed++
+    const batches = buildDirectFixBatches(pendingFindings, workerAgent, recurrenceByFamily)
+    totalBatchCount += batches.length
+    const waves = partitionBatchesIntoWaves(batches)
+    const nextPending: ParsedFinding[] = []
+
+    for (const wave of waves) {
+      const waveResults = wave.length > 1
+        ? await Promise.all(wave.map((batch) => runBatch(batch)))
+        : [await runBatch(wave[0])]
+
+      for (const result of waveResults) {
+        for (const outcome of result.fixed) {
+          fixedById.set(outcome.findingId, outcome)
+          unresolvedById.delete(outcome.findingId)
+        }
+        for (const outcome of result.unresolved) {
+          unresolvedById.set(outcome.findingId, outcome)
+          const originalFinding = result.batch.findings.find((finding) => finding.findingId === outcome.findingId)
+          if (originalFinding) {
+            nextPending.push({
+              ...originalFinding,
+              recurrenceCount: Math.max(originalFinding.recurrenceCount ?? 1, result.batch.recurrenceCount + 1),
+            })
+          }
+        }
+      }
+    }
+
+    pendingFindings = nextPending
+    for (const finding of pendingFindings) {
+      const { familyKey } = resolveBatchFamily(finding)
+      recurrenceByFamily[familyKey] = Math.max(recurrenceByFamily[familyKey] ?? 1, finding.recurrenceCount ?? 2)
+    }
+  }
+
+  const fixed = [...fixedById.values()].sort((a, b) => a.findingId.localeCompare(b.findingId))
+  const unresolved = pendingFindings.length > 0
+    ? pendingFindings.map((finding) => unresolvedById.get(finding.findingId) ?? {
         findingId: finding.findingId,
         title: finding.title,
         severity: finding.severity,
         file: finding.file,
-        status: "unresolved",
-        attempts: attempt,
-        reason: finalResult.error ?? "worker failed",
-        outputPath: finalResult.outputPath,
+        status: "unresolved" as const,
+        attempts: maxAttempts,
+        reason: `global round budget exhausted after ${roundsUsed} round(s)`,
       })
-    }
-  }
+    : [...unresolvedById.values()].sort((a, b) => a.findingId.localeCompare(b.findingId))
 
-  const reportContent = buildDirectFixReport(changeId, fixResult, batches.length, fixed, unresolved)
+  const reportContent = buildDirectFixReport(changeId, fixResult, totalBatchCount, fixed, unresolved, roundsUsed)
   const reportPath = `${versionDir}/fix-orchestration-report.md`
   await fs.writeFile(reportPath, reportContent, "utf-8")
   await fs.writeFile(`${changeDir}/fix-orchestration-report.md`, reportContent, "utf-8")
@@ -1096,10 +1444,12 @@ export async function runDirectFixWorkflow(
     changeId,
     planVersion: fixResult.planVersion,
     reportPath,
-    batchCount: batches.length,
+    batchCount: totalBatchCount,
     fixed,
     unresolved,
     verificationCommand: fixResult.verificationCommand,
+    globalRoundsUsed: roundsUsed,
+    globalRoundsMax: maxRounds,
   }
 }
 export async function runChangeFixWorkflow(

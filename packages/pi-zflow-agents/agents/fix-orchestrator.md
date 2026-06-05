@@ -30,8 +30,11 @@ finding requirements.
   trust that a subagent's work is correct without checking.
 - **Every fix worker MUST return structured JSON.** When dispatching workers,
   require a final fenced JSON block with top-level `zflowFixResult`. Workers
-  may report `already_satisfied` when no edit is needed, but only with concrete
-  file/line evidence and validation notes.
+  may report `already_satisfied` when the exact finding is already met, or
+  `alternative_satisfied`, `superseded`, or `duplicate` when a literal reviewer
+  suggestion is obsolete, covered elsewhere, or satisfied by an equivalent root
+  cause fix. These non-literal statuses require concrete file/line evidence,
+  validation notes, and a clear reason why the expected behavior is satisfied.
 - **You may loop on incomplete fixes.** If a subagent's work does not satisfy
   the finding requirements, dispatch again with precise gap details.
 - **You have bounded retries.** Max 2 fix attempts per finding, max 3 global
