@@ -34,22 +34,22 @@ This means:
 
 ## Decision table — does this repo need a `worktreeSetupHook`?
 
-| Repo trait                                                        | Needs hook?                | Why                                                                                          | Example                                 |
-| ----------------------------------------------------------------- | -------------------------- | -------------------------------------------------------------------------------------------- | --------------------------------------- |
-| Plain TS/JS repo, deps metadata checked in, no generated files    | Usually **no**             | Built-in auto setup can run `npm ci` / `pnpm install --frozen-lockfile` when lockfiles exist | Simple library, CLI tool                |
-| Workspace/monorepo using supported package managers               | Usually **no**             | Built-in auto setup can install dependencies in each worktree                                 | pnpm workspace, npm workspaces          |
-| Repo with `.env.example` → `.env` stub generation                 | **Yes**                    | The app requires repo-specific env bootstrap that should be explicit and reviewable          | Web app, API service                    |
-| Repo that needs code generation (prisma, graphql, protobuf)       | Usually **yes**            | Generated files are `.gitignore`d; the hook must regenerate them                              | Prisma schema → client, GraphQL codegen |
-| Repo with symlinked dependencies (e.g. `npm link` style)          | Often **yes**              | Symlinks break across worktree boundaries; hook must re-hydrate them                          | Local package development               |
-| Repo with custom build bootstrap (e.g. `make bootstrap`, `cmake`) | **Yes**                    | The build system requires setup beyond dependency install                                     | C/C++ project with CMake                |
-| Unknown / undetermined                                            | **No hook by default**     | zflow should not fail closed unless it can identify a custom-bootstrap requirement            | New or unusual project structure        |
+| Repo trait                                                        | Needs hook?            | Why                                                                                          | Example                                 |
+| ----------------------------------------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------- | --------------------------------------- |
+| Plain TS/JS repo, deps metadata checked in, no generated files    | Usually **no**         | Built-in auto setup can run `npm ci` / `pnpm install --frozen-lockfile` when lockfiles exist | Simple library, CLI tool                |
+| Workspace/monorepo using supported package managers               | Usually **no**         | Built-in auto setup can install dependencies in each worktree                                | pnpm workspace, npm workspaces          |
+| Repo with `.env.example` → `.env` stub generation                 | **Yes**                | The app requires repo-specific env bootstrap that should be explicit and reviewable          | Web app, API service                    |
+| Repo that needs code generation (prisma, graphql, protobuf)       | Usually **yes**        | Generated files are `.gitignore`d; the hook must regenerate them                             | Prisma schema → client, GraphQL codegen |
+| Repo with symlinked dependencies (e.g. `npm link` style)          | Often **yes**          | Symlinks break across worktree boundaries; hook must re-hydrate them                         | Local package development               |
+| Repo with custom build bootstrap (e.g. `make bootstrap`, `cmake`) | **Yes**                | The build system requires setup beyond dependency install                                    | C/C++ project with CMake                |
+| Unknown / undetermined                                            | **No hook by default** | zflow should not fail closed unless it can identify a custom-bootstrap requirement           | New or unusual project structure        |
 
 ### Edge cases
 
 | Scenario                                                                                                | Policy                                                                                                                     |
 | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| Repo has no `worktreeSetupHook` but only built-in dependency install is needed                           | ✅ Worker dispatch proceeds using the detected automatic setup command                                                     |
-| Repo has no `worktreeSetupHook` but custom setup is needed                                               | ❌ **Worker dispatch fails immediately** with actionable guidance                                                          |
+| Repo has no `worktreeSetupHook` but only built-in dependency install is needed                          | ✅ Worker dispatch proceeds using the detected automatic setup command                                                     |
+| Repo has no `worktreeSetupHook` but custom setup is needed                                              | ❌ **Worker dispatch fails immediately** with actionable guidance                                                          |
 | Repo has a `worktreeSetupHook` that is stale/broken                                                     | ✅ Worker dispatch proceeds (hook failure = worktree failure); user must fix the hook                                      |
 | Repo has a `worktreeSetupHook` but the hook file is missing from the worktree checkout                  | ❌ **Fail fast** — the hook path is relative to the repo root; if the file isn't committed, it won't exist in the worktree |
 | Repo has a hook configured but the worktree is used for a non-standard purpose (e.g., read-only review) | ✅ Hook is skipped if the worktree is opened in read-only mode (the worker only needs to read, not build)                  |
@@ -161,6 +161,43 @@ To explicitly disable custom-hook enforcement for a repo that does not need cust
 ```jsonc
 {
   "worktreeSetupHook": null,
+}
+```
+
+### External sibling path dependencies
+
+For isolated worktrees, pi-zflow automatically detects Flutter/Dart `pubspec.yaml`
+relative `path:` dependencies that point at sibling repositories/packages. The
+compat dispatch backend copies those manifest-declared package directories into
+the temporary worktree sandbox, preserving the relative layout, before running
+built-in setup commands such as `flutter pub get` or `pnpm install`.
+
+Security defaults:
+
+- only relative manifest-declared paths are considered;
+- auto-detected paths must resolve under a sibling directory of the repo root;
+- realpath checks prevent symlink/traversal escapes;
+- dependencies are copied, not symlinked to the real sibling repo;
+- copied dependency directories are made read-only on a best-effort basis;
+- copied dependencies live outside the primary worktree and are excluded from
+  patch capture/apply-back.
+
+Optional override in repo config:
+
+```jsonc
+{
+  "externalPathDependencies": {
+    "mode": "copy-readonly",
+    "allow": ["../device-firmware"],
+  },
+}
+```
+
+To disable this materialisation entirely:
+
+```jsonc
+{
+  "externalPathDependencies": { "mode": "off" },
 }
 ```
 

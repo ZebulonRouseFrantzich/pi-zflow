@@ -131,6 +131,20 @@ export {
   inferClaimedFileRepoRoots,
   inferTaskRepoRoot,
 } from "./task-repo-root.js"
+
+// Re-export external path dependency materialisation helpers
+export {
+  normalizeExternalPathDependenciesConfig,
+  materializeExternalPathDependencies,
+} from "./external-path-dependencies.js"
+export type {
+  ExternalPathDependencyMode,
+  ExternalPathDependenciesConfig,
+  ExternalPathDependencyCandidate,
+  MaterializedExternalPathDependency,
+  MaterializeExternalPathDependenciesOptions,
+  MaterializeExternalPathDependenciesResult,
+} from "./external-path-dependencies.js"
 export type {
   InferTaskRepoRootOptions,
 } from "./task-repo-root.js"

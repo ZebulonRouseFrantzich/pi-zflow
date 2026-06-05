@@ -11,6 +11,7 @@
 import * as path from "node:path"
 import * as fs from "node:fs/promises"
 import type { WorktreeSetupHookConfig } from "pi-zflow-core/worktree-setup-hook"
+import type { ExternalPathDependenciesConfig } from "pi-zflow-core/external-path-dependencies"
 
 /**
  * Well-known config file names to search for repo-local zflow configuration.
@@ -40,6 +41,7 @@ export interface RepoBashGuardConfig {
 
 export interface RepoZflowConfig {
   worktreeSetupHook?: WorktreeSetupHookConfig | null
+  externalPathDependencies?: ExternalPathDependenciesConfig
   bashGuard?: RepoBashGuardConfig
   [key: string]: unknown
 }
@@ -77,6 +79,18 @@ function normalizeWorktreeSetupHook(value: unknown): WorktreeSetupHookConfig | n
   }
 }
 
+function normalizeExternalPathDependenciesConfig(value: unknown): ExternalPathDependenciesConfig | undefined {
+  if (!value || typeof value !== "object") return undefined
+
+  const candidate = value as Record<string, unknown>
+  const normalized: ExternalPathDependenciesConfig = {
+    mode: candidate.mode === "off" ? "off" : "copy-readonly",
+    allow: normalizeStringArray(candidate.allow),
+  }
+
+  return normalized.allow || normalized.mode !== undefined ? normalized : undefined
+}
+
 function normalizeBashGuardConfig(value: unknown): RepoBashGuardConfig | undefined {
   if (!value || typeof value !== "object") return undefined
 
@@ -109,6 +123,10 @@ function normalizeRepoConfig(raw: Record<string, unknown>): RepoZflowConfig {
 
   if ("worktreeSetupHook" in raw) {
     normalized.worktreeSetupHook = normalizeWorktreeSetupHook(raw.worktreeSetupHook)
+  }
+
+  if ("externalPathDependencies" in raw) {
+    normalized.externalPathDependencies = normalizeExternalPathDependenciesConfig(raw.externalPathDependencies)
   }
 
   if ("bashGuard" in raw) {

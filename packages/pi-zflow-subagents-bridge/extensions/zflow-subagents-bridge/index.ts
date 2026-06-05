@@ -56,6 +56,7 @@ import {
   inferTaskRepoRoot,
   runWorktreeSetupHook,
   runAgentWithRateLimitRetries,
+  materializeExternalPathDependencies,
   type WorktreeSetupHookConfig,
 } from "pi-zflow-core"
 
@@ -1506,6 +1507,46 @@ function runCompatScopedVerification(
   }
 }
 
+function materializeCompatExternalPathDependencies(repoRoot: string, worktree: CompatWorktreeInfo): void {
+  const result = materializeExternalPathDependencies({ repoRoot, worktreeRoot: worktree.agentCwd })
+  if (result.materialized.length === 0) return
+  worktree.syntheticPaths = [
+    ...(worktree.syntheticPaths ?? []),
+    ...result.materialized.map((dependency) => dependency.targetPath),
+  ]
+  const summary = result.materialized
+    .map((dependency) => `${dependency.packageName ?? dependency.dependencyPath} -> ${dependency.targetPath}`)
+    .join("; ")
+  console.warn(`[zflow] Materialized external path dependencies for worktree: ${summary}`)
+}
+
+function makePathTreeWritable(target: string): void {
+  if (!fs.existsSync(target)) return
+  const stat = fs.lstatSync(target)
+  if (stat.isSymbolicLink()) return
+  if (stat.isDirectory()) {
+    fs.chmodSync(target, 0o755)
+    for (const entry of fs.readdirSync(target)) {
+      makePathTreeWritable(path.join(target, entry))
+    }
+  } else {
+    fs.chmodSync(target, 0o644)
+  }
+}
+
+function cleanupCompatSyntheticPaths(setup: CompatWorktreeSetup): void {
+  for (const worktree of setup.worktrees) {
+    for (const syntheticPath of worktree.syntheticPaths ?? []) {
+      try {
+        makePathTreeWritable(syntheticPath)
+        fs.rmSync(syntheticPath, { recursive: true, force: true })
+      } catch {
+        // Best-effort cleanup.
+      }
+    }
+  }
+}
+
 function runCompatWorktreeSetupCommand(
   command: string | null | undefined,
   cwd: string,
@@ -1563,6 +1604,7 @@ async function runCompatTaskInWorkspace(
   })
 
   try {
+    materializeCompatExternalPathDependencies(taskRepoCwd, worktree)
     runCompatWorktreeSetupCommand(task.worktreeSetupCommand, worktree.agentCwd)
     const resolvedAgent = findAgent(agents, task.agent)!
     const result = await modules.runSync(worktree.agentCwd, agents, resolvedAgent.name, task.task, {
@@ -1719,6 +1761,7 @@ async function runParallelWithCompatWorktrees(
     for (const setupEntry of worktreeSetups) {
       if (!setupEntry) continue
       try {
+        cleanupCompatSyntheticPaths(setupEntry.setup)
         modules.cleanupWorktrees(setupEntry.setup)
       } catch {
         // Best-effort cleanup.
