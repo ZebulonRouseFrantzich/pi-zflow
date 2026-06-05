@@ -259,18 +259,59 @@ function chmodWritable(target: string): void {
   }
 }
 
-function copyDirectorySafe(source: string, target: string): void {
+function ensureNoSymlinkAncestors(sandboxRoot: string, targetPath: string): void {
+  const relative = path.relative(sandboxRoot, targetPath)
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`target path escapes sandbox: ${targetPath}`)
+  }
+
+  const segments = relative.split(path.sep).filter(Boolean)
+  let current = sandboxRoot
+  for (const segment of segments.slice(0, -1)) {
+    current = path.join(current, segment)
+    if (!fs.existsSync(current)) {
+      fs.mkdirSync(current, { recursive: true })
+      continue
+    }
+
+    const stat = fs.lstatSync(current)
+    if (stat.isSymbolicLink()) {
+      fs.unlinkSync(current)
+      fs.mkdirSync(current, { recursive: true })
+      continue
+    }
+    if (!stat.isDirectory()) {
+      throw new Error(`target ancestor is not a directory: ${current}`)
+    }
+  }
+}
+
+function removeTargetWithoutFollowingSymlinkAncestor(sandboxRoot: string, targetPath: string): void {
+  ensureNoSymlinkAncestors(sandboxRoot, targetPath)
+  if (!fs.existsSync(targetPath)) return
+  const stat = fs.lstatSync(targetPath)
+  if (stat.isSymbolicLink()) {
+    fs.unlinkSync(targetPath)
+    return
+  }
+  chmodWritable(targetPath)
+  fs.rmSync(targetPath, { recursive: true, force: true })
+}
+
+function copyDirectorySafe(source: string, target: string, sandboxRoot: string): void {
   const stat = fs.lstatSync(source)
   if (stat.isSymbolicLink()) return
   if (stat.isDirectory()) {
+    ensureNoSymlinkAncestors(sandboxRoot, path.join(target, ".placeholder"))
     fs.mkdirSync(target, { recursive: true })
     for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
       if (entry.isDirectory() && SKIPPED_COPY_DIRS.has(entry.name)) continue
-      copyDirectorySafe(path.join(source, entry.name), path.join(target, entry.name))
+      copyDirectorySafe(path.join(source, entry.name), path.join(target, entry.name), sandboxRoot)
     }
     return
   }
   if (stat.isFile()) {
+    ensureNoSymlinkAncestors(sandboxRoot, target)
     fs.mkdirSync(path.dirname(target), { recursive: true })
     fs.copyFileSync(source, target)
   }
@@ -348,9 +389,8 @@ export function materializeExternalPathDependencies(
   const materialized: MaterializedExternalPathDependency[] = []
   for (const candidate of candidatesByTarget.values()) {
     try {
-      chmodWritable(candidate.targetPath)
-      fs.rmSync(candidate.targetPath, { recursive: true, force: true })
-      copyDirectorySafe(candidate.sourcePath, candidate.targetPath)
+      removeTargetWithoutFollowingSymlinkAncestor(sandboxRoot, candidate.targetPath)
+      copyDirectorySafe(candidate.sourcePath, candidate.targetPath, sandboxRoot)
       chmodReadonly(candidate.targetPath)
       materialized.push({ ...candidate, copied: true })
     } catch (error) {

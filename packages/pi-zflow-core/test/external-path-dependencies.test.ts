@@ -88,6 +88,28 @@ describe("external path dependencies", () => {
     }
   })
 
+  test("replaces stale symlink ancestors instead of following them", async () => {
+    const fixture = await makeRepoFixture()
+    const realSiblingSentinel = path.join(fixture.sibling, "packages", "pkg_a", "sentinel.txt")
+    try {
+      const sandboxSibling = path.join(fixture.root, "sandbox", "device-firmware")
+      await fs.symlink(fixture.sibling, sandboxSibling)
+
+      const result = materializeExternalPathDependencies({
+        repoRoot: fixture.repo,
+        worktreeRoot: fixture.worktree,
+      })
+
+      assert.equal(result.materialized.length, 2)
+      assert.equal(fsSync.lstatSync(sandboxSibling).isSymbolicLink(), false)
+      assert.equal(fsSync.existsSync(path.join(sandboxSibling, "packages", "pkg_a", "pubspec.yaml")), true)
+      assert.equal(fsSync.existsSync(realSiblingSentinel), false)
+    } finally {
+      chmodTreeWritable(fixture.root)
+      await fs.rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
   test("can be disabled by config", async () => {
     const fixture = await makeRepoFixture()
     try {
