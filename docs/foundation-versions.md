@@ -37,6 +37,8 @@ All pins must be exact — no `^`, `~`, or `latest` ranges.
 
 ### Required packages
 
+> Third-party package security posture: prefer **exact npm pins** for compatible upstream packages, use **exact git SHAs** for patched forks, and use **vendoring** only for exceptional high-control cases (for example: incompatible upstream, emergency security patching, or effectively unmaintained dependencies).
+
 | Package            | Exact version/ref | Source | Status                                        |
 | ------------------ | ----------------- | ------ | --------------------------------------------- |
 | `pi-subagents`     | `0.24.2`          | npm    | ✅ installed — extension entry point verified |
@@ -53,6 +55,22 @@ All pins must be exact — no `^`, `~`, or `latest` ranges.
 | `pi-mono-context-guard` | `1.7.3`           | npm    | ✅ installed — extension entry point verified |
 | `pi-mono-multi-edit`    | `1.7.3`           | npm    | ✅ installed — extension entry point verified |
 | `pi-mono-auto-fix`      | `0.3.1`           | npm    | ✅ installed — extension entry point verified |
+
+### Fork / vendor policy for third-party Pi packages
+
+| Strategy | When to use it | Current examples |
+| --- | --- | --- |
+| Exact npm pin | Upstream is compatible and actively maintained | `pi-rtk-optimizer`, `pi-web-access`, `pi-interview`, `pi-mono-sentinel`, `pi-mono-context-guard`, `pi-mono-multi-edit`, `pi-mono-auto-fix` |
+| Exact git SHA fork | zflow needs compatibility or behavior patches not available upstream | `pi-subagents` fork used by `pi-zflow-subagents-bridge` |
+| Vendored copy/submodule | Exceptional case only: upstream incompatible, unmaintained, or too security-critical to trust as an unfixed external dependency | none currently approved beyond the `pi-subagents` fork workflow |
+
+`pi-intercom` is **not** bundled by default today because its published `0.6.0` package still peers on legacy `@mariozechner/*` Pi host packages. Treat it as a compatibility exception until an `@earendil-works/*` compatible release or zflow-owned fork is available.
+
+`pi-web-access@0.10.7` is bundled, but its published extension code still imports legacy `@mariozechner/*` host package names. To keep installs reproducible without vendoring, pi-zflow provides exact compatibility aliases to the matching `@earendil-works/*` host packages at install time:
+
+- `@mariozechner/pi-ai` → `@earendil-works/pi-ai@0.75.5`
+- `@mariozechner/pi-coding-agent` → `@earendil-works/pi-coding-agent@0.75.5`
+- `@mariozechner/pi-tui` → `@earendil-works/pi-tui@0.75.5`
 
 ### Optional packages
 

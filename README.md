@@ -28,7 +28,7 @@ The repository root is a valid Pi package entrypoint. Install the full suite dir
 pi install git:github.com/ZebulonRouseFrantzich/pi-zflow@<commit-or-tag>
 ```
 
-Pi will clone the repo, run `npm install`, and load the root `pi` manifest, which exposes the workspace package extensions plus the bundled skills and prompt templates. Agent and chain assets are still installed through `/zflow-setup-agents` because Pi package manifests do not have native `agents` or `chains` keys.
+Pi will clone the repo, run `npm install`, and load the root `pi` manifest, which exposes the workspace package extensions plus the bundled skills and prompt templates. The root install also bundles and loads the default compatible external foundation extensions used by pi-zflow: `pi-rtk-optimizer`, `pi-web-access`, `pi-interview`, `pi-mono-sentinel`, `pi-mono-context-guard`, `pi-mono-multi-edit`, and `pi-mono-auto-fix`. For legacy third-party extensions that still import `@mariozechner/*` host packages, pi-zflow uses exact compatibility aliases to pinned `@earendil-works/*` host packages rather than vendoring by default. Agent and chain assets are still installed through `/zflow-setup-agents` because Pi package manifests do not have native `agents` or `chains` keys.
 
 ### Dispatch backend status
 
@@ -105,7 +105,7 @@ package independently, following the staged approach in `package-split-details.m
 
 ### Pin policy
 
-**No floating `latest` pins.** Every dependency in the foundation stack and every child package reference must have an exact version or exact git ref. This applies to:
+**No floating `latest` pins.** Every dependency in the foundation stack and every child package reference must have an exact version or exact git ref. For third-party Pi packages, pi-zflow defaults to **exact version pins first**, uses **exact git SHAs for forks** when compatibility patches are required, and reserves **vendoring** for exceptional cases where upstream is incompatible, unmaintained, or too security-critical to leave outside the repository. This applies to:
 
 - `package.json` `dependencies` in all packages
 - Installation commands in bootstrap scripts

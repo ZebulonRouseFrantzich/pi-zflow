@@ -25,6 +25,18 @@
     "pi-package",
     "pi-zflow"
   ],
+  "dependencies": {
+    "@mariozechner/pi-ai": "npm:@earendil-works/pi-ai@0.75.5",
+    "@mariozechner/pi-coding-agent": "npm:@earendil-works/pi-coding-agent@0.75.5",
+    "@mariozechner/pi-tui": "npm:@earendil-works/pi-tui@0.75.5",
+    "pi-interview": "0.8.7",
+    "pi-mono-auto-fix": "0.3.1",
+    "pi-mono-context-guard": "1.7.3",
+    "pi-mono-multi-edit": "1.7.3",
+    "pi-mono-sentinel": "1.11.0",
+    "pi-rtk-optimizer": "0.8.0",
+    "pi-web-access": "0.10.7"
+  },
   "pi": {
     "extensions": [
       "packages/pi-zflow/extensions",
@@ -36,10 +48,18 @@
       "packages/pi-zflow-change-workflows/extensions",
       "packages/pi-zflow-runecontext/extensions",
       "packages/pi-zflow-compaction/extensions",
-      "packages/pi-zflow-subagents-bridge/extensions"
+      "packages/pi-zflow-subagents-bridge/extensions",
+      "node_modules/pi-rtk-optimizer/index.ts",
+      "node_modules/pi-web-access/index.ts",
+      "node_modules/pi-interview/index.ts",
+      "node_modules/pi-mono-sentinel/index.ts",
+      "node_modules/pi-mono-context-guard/index.ts",
+      "node_modules/pi-mono-multi-edit/index.ts",
+      "node_modules/pi-mono-auto-fix/index.ts"
     ],
     "skills": [
-      "packages/pi-zflow-agents/skills"
+      "packages/pi-zflow-agents/skills",
+      "node_modules/pi-web-access/skills"
     ],
     "prompts": [
       "packages/pi-zflow-agents/prompts"

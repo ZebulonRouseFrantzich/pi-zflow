@@ -7,9 +7,10 @@
 
 ## Overview
 
-`pi-rtk-optimizer` is an external Pi extension installed globally. It is **not**
-part of the pi-zflow monorepo but is a required runtime dependency for all
-pi-zflow sessions. It hooks into Pi's event system at two points:
+`pi-rtk-optimizer` is an external Pi extension that pi-zflow now bundles and
+loads by default from the umbrella/root install. It is still maintained outside
+this monorepo, but it is a required runtime dependency for all pi-zflow
+sessions. It hooks into Pi's event system at two points:
 
 - **`tool_call`** — Rewrites `bash` commands to `rtk` equivalents or emits suggestions
 - **`tool_result`** — Compacts completed tool output before it enters the context window

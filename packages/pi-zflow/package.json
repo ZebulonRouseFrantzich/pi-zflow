@@ -5,12 +5,112 @@
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
-  "exports": {".": "./src/index.ts", "./package.json": "./package.json"},
-  "keywords": ["pi-package", "pi-zflow", "harness"],
+  "exports": {
+    ".": "./src/index.ts",
+    "./package.json": "./package.json"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-zflow",
+    "harness"
+  ],
   "license": "MIT",
-  "dependencies": {"pi-zflow-core": "0.1.0", "pi-zflow-artifacts": "0.1.0", "pi-zflow-profiles": "0.1.0", "pi-zflow-plan-mode": "0.1.0", "pi-zflow-agents": "0.1.0", "pi-zflow-review": "0.1.0", "pi-zflow-change-workflows": "0.1.0", "pi-zflow-runecontext": "0.1.0", "pi-zflow-compaction": "0.1.0", "pi-zflow-subagents-bridge": "0.1.0"},
-  "bundledDependencies": ["pi-zflow-core", "pi-zflow-artifacts", "pi-zflow-profiles", "pi-zflow-plan-mode", "pi-zflow-agents", "pi-zflow-review", "pi-zflow-change-workflows", "pi-zflow-runecontext", "pi-zflow-compaction", "pi-zflow-subagents-bridge"],
-  "peerDependencies": {"@earendil-works/pi-coding-agent": "*", "@earendil-works/pi-ai": "*", "@earendil-works/pi-agent-core": "*", "@earendil-works/pi-tui": "*", "typebox": "*"},
-  "scripts": {"build": "echo nothing to build"},
-  "pi": {"extensions": ["./extensions", "node_modules/pi-zflow-artifacts/extensions", "node_modules/pi-zflow-profiles/extensions", "node_modules/pi-zflow-plan-mode/extensions", "node_modules/pi-zflow-agents/extensions", "node_modules/pi-zflow-review/extensions", "node_modules/pi-zflow-change-workflows/extensions", "node_modules/pi-zflow-runecontext/extensions", "node_modules/pi-zflow-compaction/extensions", "node_modules/pi-zflow-subagents-bridge/extensions"], "skills": ["node_modules/pi-zflow-agents/skills"], "prompts": ["node_modules/pi-zflow-agents/prompts"]}
+  "dependencies": {
+    "@mariozechner/pi-ai": "npm:@earendil-works/pi-ai@0.75.5",
+    "@mariozechner/pi-coding-agent": "npm:@earendil-works/pi-coding-agent@0.75.5",
+    "@mariozechner/pi-tui": "npm:@earendil-works/pi-tui@0.75.5",
+    "pi-interview": "0.8.7",
+    "pi-mono-auto-fix": "0.3.1",
+    "pi-mono-context-guard": "1.7.3",
+    "pi-mono-multi-edit": "1.7.3",
+    "pi-mono-sentinel": "1.11.0",
+    "pi-rtk-optimizer": "0.8.0",
+    "pi-web-access": "0.10.7",
+    "pi-zflow-agents": "0.1.0",
+    "pi-zflow-artifacts": "0.1.0",
+    "pi-zflow-change-workflows": "0.1.0",
+    "pi-zflow-compaction": "0.1.0",
+    "pi-zflow-core": "0.1.0",
+    "pi-zflow-plan-mode": "0.1.0",
+    "pi-zflow-profiles": "0.1.0",
+    "pi-zflow-review": "0.1.0",
+    "pi-zflow-runecontext": "0.1.0",
+    "pi-zflow-subagents-bridge": "0.1.0"
+  },
+  "bundledDependencies": [
+    "pi-zflow-core",
+    "pi-zflow-artifacts",
+    "pi-zflow-profiles",
+    "pi-zflow-plan-mode",
+    "pi-zflow-agents",
+    "pi-zflow-review",
+    "pi-zflow-change-workflows",
+    "pi-zflow-runecontext",
+    "pi-zflow-compaction",
+    "pi-zflow-subagents-bridge",
+    "pi-rtk-optimizer",
+    "pi-web-access",
+    "pi-interview",
+    "pi-mono-sentinel",
+    "pi-mono-context-guard",
+    "pi-mono-multi-edit",
+    "pi-mono-auto-fix"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "scripts": {
+    "build": "echo nothing to build"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions",
+      "node_modules/pi-zflow-artifacts/extensions",
+      "node_modules/pi-zflow-profiles/extensions",
+      "node_modules/pi-zflow-plan-mode/extensions",
+      "node_modules/pi-zflow-agents/extensions",
+      "node_modules/pi-zflow-review/extensions",
+      "node_modules/pi-zflow-change-workflows/extensions",
+      "node_modules/pi-zflow-runecontext/extensions",
+      "node_modules/pi-zflow-compaction/extensions",
+      "node_modules/pi-zflow-subagents-bridge/extensions",
+      "node_modules/pi-rtk-optimizer/index.ts",
+      "node_modules/pi-web-access/index.ts",
+      "node_modules/pi-interview/index.ts",
+      "node_modules/pi-mono-sentinel/index.ts",
+      "node_modules/pi-mono-context-guard/index.ts",
+      "node_modules/pi-mono-multi-edit/index.ts",
+      "node_modules/pi-mono-auto-fix/index.ts"
+    ],
+    "skills": [
+      "node_modules/pi-zflow-agents/skills",
+      "node_modules/pi-web-access/skills"
+    ],
+    "prompts": [
+      "node_modules/pi-zflow-agents/prompts"
+    ]
+  },
+  "bundleDependencies": [
+    "pi-zflow-core",
+    "pi-zflow-artifacts",
+    "pi-zflow-profiles",
+    "pi-zflow-plan-mode",
+    "pi-zflow-agents",
+    "pi-zflow-review",
+    "pi-zflow-change-workflows",
+    "pi-zflow-runecontext",
+    "pi-zflow-compaction",
+    "pi-zflow-subagents-bridge",
+    "pi-rtk-optimizer",
+    "pi-web-access",
+    "pi-interview",
+    "pi-mono-sentinel",
+    "pi-mono-context-guard",
+    "pi-mono-multi-edit",
+    "pi-mono-auto-fix"
+  ]
 }
