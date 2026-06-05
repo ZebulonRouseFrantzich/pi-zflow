@@ -5246,6 +5246,13 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
       }
 
       const workflowModel = await resolveWorkflowModel("zflow.planner-frontier")
+      const profileResolutionOptions: PrepareWorkflowOptions["profileResolutionOptions"] = {
+        repoRoot: ctx.cwd,
+      }
+      if (ctx.modelRegistry) {
+        const { createPiModelRegistryAdapter } = await import("pi-zflow-profiles")
+        profileResolutionOptions.registry = createPiModelRegistryAdapter(ctx.modelRegistry)
+      }
       ctx.ui.notify(`📋 Preparing change plan for "${changePath}"...`)
       const progress = createWorkflowProgressIndicator(pi, ctx, changePath, {
         command: "zflow-change-prepare",
@@ -5262,6 +5269,7 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           cwd: ctx.cwd,
           forceAdHoc: parsedArgs.forceAdHoc,
           prepareNotes: parsedArgs.notes,
+          profileResolutionOptions,
           onProgress: (message, type) => {
             progress.update(message)
             ctx.ui.notify(message, type)

@@ -15,6 +15,8 @@ import {
   markPlanVersionState,
   writeDurablePlanDoc,
 } from "../extensions/zflow-change-workflows/orchestration.js"
+import { resetZflowRegistry } from "pi-zflow-core"
+import { getZflowRegistry } from "pi-zflow-core/registry"
 
 import type {
   PrepareWorkflowOptions,
@@ -100,6 +102,43 @@ async function removeTestRepo(repoRoot: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 describe("runChangePrepareWorkflow", () => {
+  test("forwards profile resolution options to the profiles service", async () => {
+    const repoRoot = await createTestRepo()
+    resetZflowRegistry()
+    try {
+      let receivedOptions: Record<string, unknown> | undefined
+      const registry = getZflowRegistry()
+      registry.claim({
+        capability: "profiles",
+        version: "0.1.0",
+        provider: "pi-zflow-profiles",
+        sourcePath: "test",
+        compatibilityMode: "compatible",
+      })
+      registry.provide("profiles", {
+        ensureResolved: async (_requiredLanes?: string[], options?: Record<string, unknown>) => {
+          receivedOptions = options
+        },
+      })
+
+      const modelRegistry = { marker: "live-model-registry" }
+      await runChangePrepareWorkflow({
+        cwd: repoRoot,
+        changeId: "test-profile-options",
+        profileResolutionOptions: {
+          repoRoot,
+          registry: modelRegistry,
+        },
+      })
+
+      assert.equal(receivedOptions?.repoRoot, repoRoot)
+      assert.equal(receivedOptions?.registry, modelRegistry)
+    } finally {
+      resetZflowRegistry()
+      await removeTestRepo(repoRoot)
+    }
+  })
+
   test("creates plan-state.json with draft status", async () => {
     const repoRoot = await createTestRepo()
     try {

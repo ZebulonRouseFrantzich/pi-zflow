@@ -35,6 +35,12 @@ export interface PrepareWorkflowOptions {
   forceAdHoc?: boolean
   /** Additional user notes supplied after the change path. */
   prepareNotes?: string
+  /** Profile-resolution options forwarded from the command context. */
+  profileResolutionOptions?: {
+    repoRoot?: string
+    registry?: unknown
+    cachePath?: string
+  }
   /** Optional progress callback for command UIs. */
   onProgress?: (message: string, type?: "info" | "warning" | "error") => void
 }
@@ -72,6 +78,11 @@ export interface PrepareWorkflowResult {
 export async function resolveProfileIfAvailable(
   changeId?: string,
   cwd?: string,
+  profileResolutionOptions?: {
+    repoRoot?: string
+    registry?: unknown
+    cachePath?: string
+  },
 ): Promise<{
   resolved: boolean
   method: "registry-service" | "not-available"
@@ -83,7 +94,11 @@ export async function resolveProfileIfAvailable(
     const profileService = registry.optional<{ ensureResolved?: () => Promise<unknown> }>("profiles")
     if (profileService && typeof profileService.ensureResolved === "function") {
       try {
-        await profileService.ensureResolved()
+        await profileService.ensureResolved(undefined, {
+          repoRoot: profileResolutionOptions?.repoRoot ?? cwd,
+          registry: profileResolutionOptions?.registry,
+          cachePath: profileResolutionOptions?.cachePath,
+        })
 
         if (changeId) {
           try {
@@ -255,7 +270,7 @@ export async function runChangePrepareWorkflow(
     },
   }, cwd)
 
-  const profileResult = await resolveProfileIfAvailable(changeId, cwd)
+  const profileResult = await resolveProfileIfAvailable(changeId, cwd, options.profileResolutionOptions)
   if (!profileResult.resolved) {
     options.onProgress?.(`⚠️ ${profileResult.advisory}`, "warning")
   }
