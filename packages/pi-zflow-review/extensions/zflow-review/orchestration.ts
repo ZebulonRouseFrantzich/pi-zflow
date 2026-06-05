@@ -14,6 +14,7 @@
 
 import { execSync, execFileSync } from "node:child_process"
 
+import { resolveCodeReviewFindingsPath } from "pi-zflow-artifacts"
 import { getZflowRegistry } from "pi-zflow-core/registry"
 import { DISPATCH_SERVICE_CAPABILITY, type DispatchService } from "pi-zflow-core/dispatch-service"
 
@@ -29,10 +30,13 @@ import {
   addFindingTraceability,
   chooseCodeReviewTier,
   buildManifestFromTier,
+  consolidateCodeReviewFindings,
+  parsePersistedCodeReviewFindings,
   type CodeReviewTierContext,
   type CodeReviewFinding,
   type PrReviewFinding,
   type PrReviewFindingsInput,
+  type FocusedFixReviewContext,
 } from "./findings.js"
 
 import {
@@ -342,6 +346,8 @@ export interface CodeReviewInput {
   onReviewUpdate?: (update: ReviewerUpdate) => void
   /** Working directory for runtime-state resolution. */
   cwd?: string
+  /** Optional focused follow-up review context for post-fix reruns. */
+  focusReview?: FocusedFixReviewContext
 }
 
 /**
@@ -728,6 +734,15 @@ export async function runCodeReview(
   const reviewerOutputs: Record<string, string> = {}
   const coverageNotes: string[] = [`Tier: ${tier}`, `Base ref: ${baseRef}`]
   if (input.targetPath) coverageNotes.push(`Target path: ${input.targetPath}`)
+  if (input.focusReview) {
+    coverageNotes.push(`Focused review mode: ${input.focusReview.mode}`)
+    if (input.focusReview.targetFiles && input.focusReview.targetFiles.length > 0) {
+      coverageNotes.push(`Focused files: ${input.focusReview.targetFiles.join(", ")}`)
+    }
+    if (input.focusReview.targetFamilies && input.focusReview.targetFamilies.length > 0) {
+      coverageNotes.push(`Focused families: ${input.focusReview.targetFamilies.join(", ")}`)
+    }
+  }
 
   // Diff coverage note
   if (diffContent.length === 0) {
@@ -742,6 +757,7 @@ export async function runCodeReview(
     diffBundle: diffContent,
     verificationStatus: input.verificationStatus,
     tier,
+    focusReview: input.focusReview,
   }
 
   if (input.reviewerRunner) {
@@ -989,28 +1005,39 @@ export async function runCodeReview(
     await persistReviewerRawOutput(manifest.runId, name, rawOutput, cwd)
   }
 
-  // Step 6: Synthesise — prefer zflow.synthesizer agent via dispatch service
-  //
-  // Phase 9: Try to find a dispatch service to invoke the zflow.synthesizer
-  // agent for consolidation. If no dispatch service is available, fall back
-  // to local severity computation.
+  // Step 6: Deterministically consolidate reviewer findings into canonical findings
+  const rawFindings: CodeReviewFinding[] = allFindings.map((entry) => entry.finding)
+  let previousFindingsContent = ""
+  try {
+    const fp = resolveCodeReviewFindingsPath(cwd)
+    previousFindingsContent = await import("node:fs/promises").then((fs) => fs.readFile(fp, "utf-8"))
+  } catch {
+    previousFindingsContent = ""
+  }
+  const previousFindings = parsePersistedCodeReviewFindings(previousFindingsContent)
+  const canonicalFindings = consolidateCodeReviewFindings(rawFindings, previousFindings)
+  const duplicateCount = Math.max(0, rawFindings.length - canonicalFindings.length)
+  if (duplicateCount > 0) {
+    coverageNotes.push(`Canonical consolidation merged ${duplicateCount} overlapping reviewer finding(s).`)
+  }
+
+  // Step 7: Synthesise severity/recommendation only — canonical findings stay deterministic.
   const hasDispatchService = getZflowRegistry().has(DISPATCH_SERVICE_CAPABILITY)
   let synthesizerOutput: string | null = null
   let synthesizerParsed: boolean = false
 
-  if (hasDispatchService && allFindings.length > 0 && reviewerNames.length > 0) {
+  if (hasDispatchService && canonicalFindings.length > 0 && reviewerNames.length > 0) {
     try {
       const dispatchService = getZflowRegistry().get<{ name: string; runAgent: Function }>(DISPATCH_SERVICE_CAPABILITY)
       if (dispatchService && typeof dispatchService.runAgent === "function") {
-        // Build a synthesizer prompt from the reviewer outputs
-        const synthInput = allFindings.map(f =>
-          `Reviewer: ${f.reviewerName}\nSeverity: ${f.finding.severity}\nTitle: ${f.finding.title}\nEvidence: ${f.finding.evidence || f.finding.recommendation}`
+        const synthInput = canonicalFindings.map((finding) =>
+          `Severity: ${finding.severity}\nTitle: ${finding.title}\nFamily: ${finding.findingFamily ?? "unknown"}\nCanonical key: ${finding.canonicalKey ?? "unknown"}\nEvidence: ${finding.evidence || finding.recommendation}`
         ).join("\n---\n")
 
         const synthesizerModel = await resolveProfileModelForAgent("zflow.synthesizer")
         const synthResult = await dispatchService.runAgent({
           agent: "zflow.synthesizer",
-          task: `Synthesize the following code review findings and produce consolidated results with support/dissent/coverage:\n\n${synthInput}`,
+          task: `Synthesize severity/recommendation for the following canonical code review findings. Do not create new findings; reason over the provided canonical list.\n\n${synthInput}`,
           cwd,
           ...(synthesizerModel ? { model: synthesizerModel } : {}),
         })
@@ -1019,20 +1046,18 @@ export async function runCodeReview(
           coverageNotes.push(note)
         }
         synthesizerOutput = synthResult.rawOutput
-        coverageNotes.push(`Synthesizer dispatched via "${dispatchService.name}" (zflow.synthesizer)`)
+        coverageNotes.push(`Synthesizer dispatched via "${dispatchService.name}" (zflow.synthesizer)`) 
       }
     } catch (err) {
       coverageNotes.push(`Synthesizer dispatch attempted but failed: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
 
-  // Compute local severity from collected findings (used as fallback or reference)
   const localSeverity = { critical: 0, major: 0, minor: 0, nit: 0 }
-  for (const { finding } of allFindings) {
+  for (const finding of canonicalFindings) {
     localSeverity[finding.severity]++
   }
 
-  // Try to parse synthesizer output as authoritative; fall back to local
   let severity = localSeverity
   let recommendation: "GO" | "NO-GO" | "CONDITIONAL-GO" = evaluateRecommendation(localSeverity)
   if (synthesizerOutput) {
@@ -1041,14 +1066,9 @@ export async function runCodeReview(
       severity = parsed.severity
       recommendation = parsed.recommendation
       synthesizerParsed = true
-      coverageNotes.push(
-        `Synthesizer: authoritative result used (severity overridden from synthesizer output)`,
-      )
+      coverageNotes.push(`Synthesizer: authoritative result used (severity overridden from synthesizer output)`)
     } else {
-      coverageNotes.push(
-        `Synthesizer output could not be parsed as structured JSON — ` +
-        `falling back to local severity computation.`,
-      )
+      coverageNotes.push(`Synthesizer output could not be parsed as structured JSON — falling back to local severity computation.`)
     }
   } else {
     coverageNotes.push("Synthesizer: local severity computation (no zflow.synthesizer dispatch)")
@@ -1059,9 +1079,7 @@ export async function runCodeReview(
     .map((r) => r.name)
   if (failedRequiredReviewers.length > 0) {
     recommendation = "NO-GO"
-    coverageNotes.push(
-      `Fail-closed: required reviewer(s) failed: ${failedRequiredReviewers.join(", ")}.`,
-    )
+    coverageNotes.push(`Fail-closed: required reviewer(s) failed: ${failedRequiredReviewers.join(", ")}.`)
   } else if (manifest.reviewers.length > 0 && manifest.reviewers.every((r) => r.status !== "executed")) {
     recommendation = "NO-GO"
     coverageNotes.push("Fail-closed: no code reviewers executed.")
@@ -1076,10 +1094,9 @@ export async function runCodeReview(
     coverageNotes.push(`Recovery hint: ${reviewInfrastructure.recoveryHint}`)
   }
 
-  // Step 7: Persist findings
-  const codeReviewFindings: CodeReviewFinding[] = allFindings.map(f => f.finding)
+  // Step 8: Persist canonical findings with traceability and focused-review context
   const findingsWithTraceability = addFindingTraceability(
-    codeReviewFindings,
+    canonicalFindings,
     manifest.runId,
     cwd,
   )
@@ -1101,6 +1118,7 @@ export async function runCodeReview(
     reviewInfrastructureSummary: reviewInfrastructure?.summary,
     reviewInfrastructureHint: reviewInfrastructure?.recoveryHint,
     cwd,
+    focusReview: input.focusReview,
   })
 
   return {

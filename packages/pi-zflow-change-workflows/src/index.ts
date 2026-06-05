@@ -291,7 +291,9 @@ export {
   runChangeAuditWorkflow,
   runChangeFixWorkflow,
   runDirectFixWorkflow,
+  buildFamilyClusters,
   buildDirectFixBatches,
+  inferRootCause,
 } from "../extensions/zflow-change-workflows/orchestration.js"
 
 export type {
@@ -301,6 +303,7 @@ export type {
   DirectFixFindingOutcome,
   DirectFixWorkflowOptions,
   DirectFixWorkflowResult,
+  GlobalRoundState,
   FixWorkflowOptions,
   FixWorkflowResult,
 } from "../extensions/zflow-change-workflows/orchestration.js"

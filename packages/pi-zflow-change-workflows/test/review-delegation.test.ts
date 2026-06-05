@@ -263,6 +263,61 @@ describe("finalizeCodeReview — registry delegation", () => {
     }
   })
 
+  test("uses authoritative persisted findings severity when runCodeReview severity disagrees", async () => {
+    const repoRoot = await createTestRepo()
+    try {
+      await runChangePrepareWorkflow({
+        cwd: repoRoot,
+        changeId: "test-code-review-authoritative-severity",
+      })
+      await approvePlanVersion("test-code-review-authoritative-severity", "v1", repoRoot)
+
+      const implResult = await runChangeImplementWorkflow({
+        cwd: repoRoot,
+        changeId: "test-code-review-authoritative-severity",
+      })
+
+      const stubFindingsPath = path.join(repoRoot, ".zflow", "review", "stub-findings.md")
+      await fs.mkdir(path.dirname(stubFindingsPath), { recursive: true })
+      await fs.writeFile(stubFindingsPath, [
+        "# Code Review Findings",
+        "",
+        "## Findings Summary",
+        "",
+        "| Severity | Count |",
+        "| -------- | ----- |",
+        "| Critical | 0 |",
+        "| Major    | 0 |",
+        "| Minor    | 3 |",
+        "| Nit      | 1 |",
+      ].join("\n"), "utf-8")
+
+      const registry = getZflowRegistry()
+      registry.claim({ capability: "review", version: "0.1.0", provider: "test" })
+      registry.provide("review", {
+        runCodeReview() {
+          return Promise.resolve({
+            findingsPath: stubFindingsPath,
+            tier: "standard",
+            severity: { critical: 0, major: 0, minor: 9, nit: 9 },
+            recommendation: "GO" as const,
+            coverageNotes: ["Stub code review completed."],
+            manifest: { mode: "code-review", tier: "standard", reviewers: [] },
+          })
+        },
+      })
+
+      const codeReviewResult = await finalizeCodeReview(implResult.runId, repoRoot)
+      assert.strictEqual(codeReviewResult.pass, true)
+
+      const runJson = JSON.parse(await fs.readFile(resolveRunStatePath(implResult.runId, repoRoot), "utf-8"))
+      assert.deepStrictEqual(runJson.codeReview.severity, { critical: 0, major: 0, minor: 3, nit: 1 })
+      assert.ok(String(runJson.codeReview.summary).includes("3 minor, 1 nit"))
+    } finally {
+      await removeTestRepo(repoRoot)
+    }
+  })
+
   test("uses ledger-backed nested-repo files to build review context when groups are empty", async () => {
     const repoRoot = await createTestRepo()
     try {

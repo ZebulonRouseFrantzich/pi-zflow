@@ -222,6 +222,7 @@ export async function completeWorkflow(
   cwd?: string,
 ): Promise<void> {
   const { default: fs } = await import("node:fs/promises")
+  const { getChangeLifecycle, upsertChangeLifecycle } = await import("pi-zflow-artifacts/state-index")
 
   const currentRun = await readRun(runId, cwd)
   if (currentRun.applyBack.status === "conflicted" || currentRun.applyBack.status === "rolled-back" || currentRun.applyBack.status === "failed") {
@@ -230,13 +231,40 @@ export async function completeWorkflow(
     throw new Error(errMsg)
   }
 
+  const completedAt = new Date().toISOString()
+
   const planStatePath = resolvePlanStatePath(changeId, cwd)
   const planState = JSON.parse(await fs.readFile(planStatePath, "utf-8"))
   planState.lifecycleState = "completed"
-  planState.updatedAt = new Date().toISOString()
+  planState.updatedAt = completedAt
   await fs.writeFile(planStatePath, JSON.stringify(planState, null, 2), "utf-8")
 
-  await setRunPhase(runId, "completed", cwd)
+  const metadata = { ...(currentRun.metadata ?? {}) } as Record<string, unknown>
+  const dispatchProgress = metadata.dispatchProgress && typeof metadata.dispatchProgress === "object"
+    ? { ...(metadata.dispatchProgress as Record<string, unknown>) }
+    : undefined
+  if (dispatchProgress) {
+    dispatchProgress.status = "completed"
+    dispatchProgress.updatedAt = completedAt
+    dispatchProgress.lastWorkflowUpdate = "Workflow completed successfully."
+    if (typeof dispatchProgress.totalGroups === "number") {
+      dispatchProgress.completedGroups = dispatchProgress.totalGroups
+    }
+    metadata.dispatchProgress = dispatchProgress
+  }
+
+  await updateRun(runId, {
+    phase: "completed",
+    applyBack: currentRun.applyBack.status === "pending" || currentRun.applyBack.status === "in-progress"
+      ? {
+          ...currentRun.applyBack,
+          status: "completed",
+          completedAt,
+        }
+      : currentRun.applyBack,
+    nextSteps: [],
+    metadata,
+  } as any, cwd)
 
   const index = await loadStateIndex(cwd)
   const runEntry = index.entries.find(
@@ -244,23 +272,32 @@ export async function completeWorkflow(
   )
   if (runEntry) {
     runEntry.status = "completed"
-    runEntry.updatedAt = new Date().toISOString()
+    runEntry.updatedAt = completedAt
   }
   const planEntry = index.entries.find(
     (e) => e.type === "plan" && e.metadata?.changeId === changeId,
   )
   if (planEntry) {
     planEntry.status = "completed"
-    planEntry.updatedAt = new Date().toISOString()
+    planEntry.updatedAt = completedAt
   }
   await fs.writeFile(resolveStateIndexPath(cwd), JSON.stringify(index, null, 2), "utf-8")
+
+  const lifecycle = await getChangeLifecycle(changeId, cwd)
+  if (lifecycle) {
+    await upsertChangeLifecycle({
+      ...lifecycle,
+      lastPhase: "completed",
+      unfinishedRuns: lifecycle.unfinishedRuns.filter((id) => id !== runId),
+    }, cwd)
+  }
 
   try {
     const run = await readRun(runId, cwd)
     if (run.verification && run.verification.status === "failed") {
       await appendFailureLog(
         `Workflow completed with issues for run ${runId}`,
-        `- **Change**: ${changeId}\n- **Verification**: ${run.verification.status}\n- **Completed at**: ${new Date().toISOString()}`,
+        `- **Change**: ${changeId}\n- **Verification**: ${run.verification.status}\n- **Completed at**: ${completedAt}`,
         cwd,
       )
     }

@@ -40,7 +40,10 @@ execute approved plan groups for routine implementation work.
    `patch` parameter) for multi-file groups.
 5. **Run scoped verification** — execute the exact commands listed in the
    plan's verification steps.
-6. **Report** — summarise what was done, what passed/failed, and any
+6. **Check root-cause completeness** — when the task is part of a review-fix
+   loop, verify sibling files in the same finding family are not left in an
+   obviously inconsistent state.
+7. **Report** — summarise what was done, what passed/failed, and any
    observations or residual risks.
 
 ## Deviation protocol

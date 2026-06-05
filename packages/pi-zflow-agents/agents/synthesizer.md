@@ -43,14 +43,11 @@ merge review findings from multiple angles into a single consolidated report.
      and no fix requirements — it's a scope statement, not a finding.
    - Drop noise findings entirely. Do not include them in the report. Note
      count of dropped findings in Coverage Notes.
-3. **Deduplicate.** If two or more reviewers flag the same issue (same file,
-   same concern), keep the most detailed entry and credit all reviewers who
-   identified it.
-4. **Preserve original finding IDs** from each reviewer. When deduplicating,
-   keep the original finding ID and add aliases for consolidated IDs.
-5. **Preserve raw artifact paths** — include the path to each reviewer's raw
-   output artifact for traceability.
-6. **Assign fixPriority** to each finding based on severity:
+3. **Deduplicate into canonical findings.** If two or more reviewers flag the same issue (same file/same concern), keep the most detailed entry and credit all reviewers who identified it.
+4. **Emit root-cause metadata.** Every consolidated finding should carry a root-cause label, a cross-file finding-family label, and a canonical key suitable for recurrence tracking and fix clustering.
+5. **Preserve original finding IDs** from each reviewer. When deduplicating, keep the original finding ID and add aliases for consolidated IDs.
+6. **Preserve raw artifact paths** — include the path to each reviewer's raw output artifact for traceability.
+7. **Assign fixPriority** to each finding based on severity:
    - critical → 1
    - major → 2
    - minor → 3
