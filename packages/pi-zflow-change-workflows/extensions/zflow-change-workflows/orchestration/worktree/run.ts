@@ -274,8 +274,15 @@ export async function finalizeWorktreeImplementationRun(
   let run: RunJson
   try {
     run = await readRun(runId, cwd)
-  } catch {
-    throw new Error(`Run "${runId}" not found. Cannot finalize.`)
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException
+    if (nodeError?.code === "ENOENT") {
+      throw new Error(`Run "${runId}" not found. Cannot finalize.`)
+    }
+    throw new Error(
+      `Run "${runId}" is malformed or unreadable. Cannot finalize. ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    )
   }
 
   const repoRoot = run.repoRoot

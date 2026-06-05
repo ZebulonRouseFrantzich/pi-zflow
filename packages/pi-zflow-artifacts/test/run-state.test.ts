@@ -417,3 +417,38 @@ describe("Recovery ref helpers", () => {
     )
   })
 })
+
+describe("concurrent run updates", () => {
+  before(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-zflow-test-run-race-"))
+    repoRoot = await createTempRepo()
+    setRuntimeStateDir(tmpDir)
+    runId = "race-run"
+    await createRun(runId, repoRoot, "change-race", "v1", repoRoot)
+  })
+
+  after(async () => {
+    clearRuntimeStateDir()
+    await fs.rm(tmpDir, { recursive: true, force: true })
+    await fs.rm(repoRoot, { recursive: true, force: true })
+  })
+
+  test("serializes concurrent updateRun writes and leaves valid JSON", async () => {
+    await Promise.all(Array.from({ length: 25 }, async (_, index) => {
+      await updateRun(runId, {
+        metadata: {
+          index,
+          payload: "x".repeat(256),
+        },
+      } as Partial<RunJson>, repoRoot)
+    }))
+
+    const run = await readRun(runId, repoRoot)
+    assert.equal(run.runId, runId)
+    assert.equal(typeof run.metadata.index, "number")
+
+    const { resolveRunStatePath } = await import("../src/artifact-paths.js")
+    const raw = await fs.readFile(resolveRunStatePath(runId, repoRoot), "utf-8")
+    assert.doesNotThrow(() => JSON.parse(raw))
+  })
+})

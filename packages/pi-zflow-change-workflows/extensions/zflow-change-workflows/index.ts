@@ -1451,6 +1451,14 @@ async function resumeWorktreeDispatch(
   if (!worktreeSetupResolution.ok) {
     throw new Error(worktreeSetupResolution.message ?? "worktree setup requirements were not satisfied")
   }
+  if (worktreeSetupResolution.hook && dispatchService.capabilities?.worktreeSetupHooks === false) {
+    throw new Error(
+      "Dispatch backend does not support repo-configured worktree setup hooks. " +
+      `Active backend: ${dispatchService.name}. ` +
+      "Remove/disable worktreeSetupHook for repos covered by built-in auto setup, " +
+      "or install a dispatch backend that advertises worktreeSetupHooks=true.",
+    )
+  }
 
   // Read existing execution groups from plan artifact
   const executionGroupsArtifactPath = resolvePlanArtifactPath(changeId, planVersion, "execution-groups", cwd)
@@ -2473,6 +2481,14 @@ async function runWorktreeDispatchAndFinalize(
   const worktreeSetupResolution = await resolveDispatchWorktreeSetup(repoRoot)
   if (!worktreeSetupResolution.ok) {
     throw new Error(worktreeSetupResolution.message ?? "worktree setup requirements were not satisfied")
+  }
+  if (worktreeSetupResolution.hook && dispatchService.capabilities?.worktreeSetupHooks === false) {
+    throw new Error(
+      "Dispatch backend does not support repo-configured worktree setup hooks. " +
+      `Active backend: ${dispatchService.name}. ` +
+      "Remove/disable worktreeSetupHook for repos covered by built-in auto setup, " +
+      "or install a dispatch backend that advertises worktreeSetupHooks=true.",
+    )
   }
 
   // Read execution groups from the approved plan artifact
