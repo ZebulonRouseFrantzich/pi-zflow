@@ -17,8 +17,42 @@
 
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
-import { createHash } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { resolvePlanStatePath } from "./artifact-paths.js"
+
+const planStateWriteLocks = new Map<string, Promise<void>>()
+
+async function withPlanStateWriteLock<T>(planStatePath: string, fn: () => Promise<T>): Promise<T> {
+  const previous = planStateWriteLocks.get(planStatePath) ?? Promise.resolve()
+  let release!: () => void
+  const current = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const chained = previous.then(() => current, () => current)
+  planStateWriteLocks.set(planStatePath, chained)
+
+  await previous.catch(() => undefined)
+  try {
+    return await fn()
+  } finally {
+    release()
+    if (planStateWriteLocks.get(planStatePath) === chained) {
+      planStateWriteLocks.delete(planStatePath)
+    }
+  }
+}
+
+async function writeJsonAtomically(filePath: string, value: unknown): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true })
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`
+  try {
+    await fs.writeFile(tmpPath, `${JSON.stringify(value, null, 2)}\n`, "utf-8")
+    await fs.rename(tmpPath, filePath)
+  } catch (error) {
+    await fs.rm(tmpPath, { force: true }).catch(() => undefined)
+    throw error
+  }
+}
 
 /**
  * Compute the SHA-256 hex digest of a string.
@@ -83,55 +117,53 @@ export async function recordArtifactMetadata(
   cwd?: string,
 ): Promise<void> {
   const planStatePath = resolvePlanStatePath(changeId, cwd)
-  const now = Date.now()
+  await withPlanStateWriteLock(planStatePath, async () => {
+    const now = Date.now()
 
-  let planState: Record<string, unknown>
-  try {
-    const raw = await fs.readFile(planStatePath, "utf-8")
-    planState = JSON.parse(raw)
-  } catch {
-    // File doesn't exist yet -- create a minimal structure
-    planState = {
-      changeId,
-      currentVersion: planVersion,
-      approvedVersion: null,
-      lifecycleState: "draft",
-      versions: {},
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+    let planState: Record<string, unknown>
+    try {
+      const raw = await fs.readFile(planStatePath, "utf-8")
+      planState = JSON.parse(raw)
+    } catch {
+      // File doesn't exist yet -- create a minimal structure
+      planState = {
+        changeId,
+        currentVersion: planVersion,
+        approvedVersion: null,
+        lifecycleState: "draft",
+        versions: {},
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }
     }
-  }
 
-  // Ensure the versions map exists
-  if (!planState.versions || typeof planState.versions !== "object") {
-    planState.versions = {}
-  }
-  const versions = planState.versions as Record<string, unknown>
-
-  // Ensure the version entry exists
-  if (!versions[planVersion] || typeof versions[planVersion] !== "object") {
-    versions[planVersion] = {
-      state: "draft",
-      createdAt: new Date().toISOString(),
-      artifacts: {},
+    // Ensure the versions map exists
+    if (!planState.versions || typeof planState.versions !== "object") {
+      planState.versions = {}
     }
-  }
+    const versions = planState.versions as Record<string, unknown>
 
-  const versionEntry = versions[planVersion] as Record<string, unknown>
-  if (!versionEntry.artifacts || typeof versionEntry.artifacts !== "object") {
-    versionEntry.artifacts = {}
-  }
+    // Ensure the version entry exists
+    if (!versions[planVersion] || typeof versions[planVersion] !== "object") {
+      versions[planVersion] = {
+        state: "draft",
+        createdAt: new Date().toISOString(),
+        artifacts: {},
+      }
+    }
 
-  const artifacts = versionEntry.artifacts as Record<string, unknown>
-  artifacts[artifact] = { hash, mtime: now }
+    const versionEntry = versions[planVersion] as Record<string, unknown>
+    if (!versionEntry.artifacts || typeof versionEntry.artifacts !== "object") {
+      versionEntry.artifacts = {}
+    }
 
-  planState.updatedAt = new Date().toISOString()
+    const artifacts = versionEntry.artifacts as Record<string, unknown>
+    artifacts[artifact] = { hash, mtime: now }
 
-  // Create parent directory and write atomically
-  await fs.mkdir(path.dirname(planStatePath), { recursive: true })
-  const tmpPath = planStatePath + ".tmp"
-  await fs.writeFile(tmpPath, JSON.stringify(planState, null, 2), "utf-8")
-  await fs.rename(tmpPath, planStatePath)
+    planState.updatedAt = new Date().toISOString()
+
+    await writeJsonAtomically(planStatePath, planState)
+  })
 }
 
 
