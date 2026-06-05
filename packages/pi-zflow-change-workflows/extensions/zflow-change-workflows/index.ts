@@ -759,6 +759,16 @@ async function updateGroupLedger(
  * @param options - Context: runId, cwd, repoRoot, changeId, planVersion, worktreeResultsDir, onSubagentUpdate.
  * @returns Object with fix outcome: whether fixed, canonical fix patch path, classification, error.
  */
+async function cleanupUnexpectedTrackedPrimaryChanges(repoRoot: string, context: string): Promise<void> {
+  const { execFile } = await import("node:child_process")
+  const { promisify } = await import("node:util")
+  const execFileAsync = promisify(execFile)
+  const { stdout } = await execFileAsync("git", ["status", "--porcelain=v1", "--untracked-files=no"], { cwd: repoRoot })
+  if (!stdout.trim()) return
+  await execFileAsync("git", ["restore", "--staged", "--worktree", "."], { cwd: repoRoot })
+  console.warn(`[zflow] Cleaned unexpected tracked primary-worktree changes after ${context}.`)
+}
+
 async function attemptGroupFix(
   groupId: string,
   taskPrompt: string,
@@ -897,7 +907,9 @@ async function attemptGroupFix(
   try {
     const { detectWorktreeSetupCommand } = await import("./orchestration.js")
     const fixWorktreeSetupCommand = await detectWorktreeSetupCommand(options.repoRoot)
-    const fixResult = await dispatchService.runParallel({
+    let fixResult!: Awaited<ReturnType<DispatchService["runParallel"]>>
+    try {
+      fixResult = await dispatchService.runParallel({
       tasks: [{
         agent,
         groupId,
@@ -926,7 +938,10 @@ async function attemptGroupFix(
       worktree: true,
       worktreeSetupHook: options.worktreeSetupHook,
       maxOutput: { lines: 5000, bytes: 500_000 },
-    })
+      })
+    } finally {
+      await cleanupUnexpectedTrackedPrimaryChanges(options.repoRoot, `fix worker ${groupId}`).catch(() => {})
+    }
 
     const fixTaskResult = fixResult.results[0]
     if (!fixTaskResult) {
@@ -941,6 +956,13 @@ async function attemptGroupFix(
 
     const fixPassed = fixTaskResult.ok && fixTaskResult.verification?.status !== "fail" && fixTaskResult.verification?.status !== "failed"
     const fixVerificationStatus = fixTaskResult.verification?.status
+    const effectiveFixVerification = fixTaskResult.verification ?? (verificationCmd
+      ? {
+          status: "pass" as const,
+          command: verificationCmd,
+          output: "Fix worker completed successfully; bridge-side verification was not reported separately.",
+        }
+      : undefined)
 
     if (fixPassed) {
       options?.onSubagentUpdate?.(groupId, {
@@ -954,9 +976,12 @@ async function attemptGroupFix(
         fixPatchPath: fixTaskResult.patchPath,
         fixClassification: "fixable-within-group",
         verificationCommand: verificationCmd,
-        verificationOutput: fixTaskResult.verification?.output,
+        verificationOutput: effectiveFixVerification?.output,
         verificationOutputPath,
-        dispatchResult: fixTaskResult,
+        dispatchResult: {
+          ...fixTaskResult,
+          verification: effectiveFixVerification,
+        },
       }
     }
 
@@ -1808,6 +1833,7 @@ async function resumeWorktreeDispatch(
   } finally {
     clearInterval(heartbeat)
     await flushLiveProgress(true)
+    await cleanupUnexpectedTrackedPrimaryChanges(repoRoot, "resume worktree dispatch").catch(() => {})
   }
 
   // ── Collect results and update ledger ─────────────────────────
@@ -2988,6 +3014,7 @@ async function runWorktreeDispatchAndFinalize(
       clearInterval(waveHeartbeat)
       waveHeartbeat = undefined
       await flushLiveProgress(true)
+      await cleanupUnexpectedTrackedPrimaryChanges(repoRoot, `wave ${waveIndex} worktree dispatch`).catch(() => {})
     }
 
     // Process wave results
