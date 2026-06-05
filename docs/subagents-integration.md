@@ -183,11 +183,18 @@ function assembleSubagentPrompt(
 ### Prompt structure
 
 ```
-<role prompt>              — always present, defines the agent's purpose
-<mode fragment>            — present only when the workflow state requires it
-<runtime reminders>        — present only for active state events
-<active constraints>       — appended last when they change allowed behavior
+<stable prompt prefix>
+  <role prompt>            — always present, defines the agent's purpose
+  <mode fragment>          — present only when the workflow state requires it
+  <skills/invariants>      — stable references and constraints
+  <canonical paths>        — stable file-backed references
+
+<volatile prompt suffix>
+  <runtime reminders>      — present only for active state events
+  <transient diagnostics>  — compaction/drift/tool-denied notices
 ```
+
+The stable prefix is fingerprinted for cache diagnostics. Reminder-only changes should normally affect only the volatile suffix, not the stable prompt hash.
 
 ### What NOT to do
 

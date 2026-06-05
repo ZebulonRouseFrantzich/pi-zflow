@@ -123,6 +123,42 @@ describe("assemblePrompt", () => {
     )
   })
 
+  it("keeps the stable fingerprint unchanged when only reminder content changes", () => {
+    const base = assemblePrompt({
+      agentName: "zflow.planner-frontier",
+      mode: "change-prepare",
+      skills: ["change-doc-workflow"],
+    })
+    const withReminder = assemblePrompt({
+      agentName: "zflow.planner-frontier",
+      mode: "change-prepare",
+      skills: ["change-doc-workflow"],
+      activeReminders: ["approved-plan-loaded"],
+    })
+
+    assert.equal(
+      base.stableFingerprint.stablePromptHash,
+      withReminder.stableFingerprint.stablePromptHash,
+    )
+    assert.notEqual(base.reminderHash, withReminder.reminderHash)
+  })
+
+  it("changes the stable fingerprint when the workflow mode changes", () => {
+    const prepare = assemblePrompt({
+      agentName: "zflow.planner-frontier",
+      mode: "change-prepare",
+    })
+    const implement = assemblePrompt({
+      agentName: "zflow.planner-frontier",
+      mode: "change-implement",
+    })
+
+    assert.notEqual(
+      prepare.stableFingerprint.stablePromptHash,
+      implement.stableFingerprint.stablePromptHash,
+    )
+  })
+
   it("skips reminders whose files do not exist silently", () => {
     const tmpRoot = createTempPackageRoot()
     try {

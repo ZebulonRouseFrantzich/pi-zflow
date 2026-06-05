@@ -5442,6 +5442,10 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
           `✅ Durable plan artifacts published to: ${publishResult.durableDir}`,
           "info",
         )
+        ctx.ui.notify(
+          "ℹ️ zflow plan/implement recovery normally uses runtime artifacts and `/zflow-change-implement <change> --resume`, not Pi `/resume`.",
+          "info",
+        )
 
         const inspectionSummary = formatPlanInspectionPaths({
           changeId: result.changeId,
@@ -6334,7 +6338,9 @@ export default function activateZflowChangeWorkflowsExtension(pi: ExtensionAPI):
               ? `Retained worktrees: ${unfinishedCheck.retainedWorktrees.join(", ")}\n`
               : "") +
             `\nAvailable options:\n${choices}\n\n` +
+            `To resume this zflow workflow, use:\n  /zflow-change-implement ${changeInput} --resume\n\n` +
             `To start fresh now, run:\n  /zflow-change-implement ${changeInput} --abandon\n\n` +
+            `Pi /resume restores Pi sessions, but this workflow usually resumes from zflow runtime artifacts.\n\n` +
             `Or clean separately with:\n  /zflow-clean ${changeInput}`,
             "warning",
           )

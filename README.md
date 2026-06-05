@@ -2,23 +2,25 @@
 
 A modular Pi harness customization suite — profiles, planning safety, review workflows, change orchestration, runtime artifacts, RuneContext integration, and compaction hooks.
 
+The suite now includes first-pass prompt-cache stability primitives (stable prompt fingerprinting and volatile reminder separation) plus redacted cache telemetry summaries surfaced through `/zflow-help doctor`.
+
 ## Architecture
 
 pi-zflow is a monorepo of individually installable Pi packages:
 
-| Package                     | Type                | Description                                                                                                |
-| --------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `pi-zflow-core`             | library             | Shared types, registry, version constants                                                                  |
-| `pi-zflow-artifacts`        | Pi extension        | Runtime state paths, artifact helpers, `zflow_write_plan_artifact` tool                                    |
-| `pi-zflow-profiles`         | Pi extension        | Profile/lane resolution, `/zflow-profile` commands                                                         |
-| `pi-zflow-plan-mode`        | Pi extension        | Ad-hoc read-only planning mode, `/zflow-plan` commands                                                     |
-| `pi-zflow-agents`           | Pi extension        | Custom agent markdown, chains, skills, prompts, setup/update commands                                      |
-| `pi-zflow-review`           | Pi extension        | Plan/code/PR review workflows, `/zflow-review-code`, `/zflow-review-pr`                                    |
+| Package                     | Type                | Description                                                                                                                           |
+| --------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `pi-zflow-core`             | library             | Shared types, registry, version constants                                                                                             |
+| `pi-zflow-artifacts`        | Pi extension        | Runtime state paths, artifact helpers, `zflow_write_plan_artifact` tool                                                               |
+| `pi-zflow-profiles`         | Pi extension        | Profile/lane resolution, `/zflow-profile` commands                                                                                    |
+| `pi-zflow-plan-mode`        | Pi extension        | Ad-hoc read-only planning mode, `/zflow-plan` commands                                                                                |
+| `pi-zflow-agents`           | Pi extension        | Custom agent markdown, chains, skills, prompts, setup/update commands                                                                 |
+| `pi-zflow-review`           | Pi extension        | Plan/code/PR review workflows, `/zflow-review-code`, `/zflow-review-pr`                                                               |
 | `pi-zflow-change-workflows` | Pi extension        | Formal plan/prepare/implement orchestration, `/zflow-change-plan`, `/zflow-change-prepare`, `/zflow-change-implement`, `/zflow-clean` |
-| `pi-zflow-runecontext`      | Pi extension        | RuneContext integration                                                                                    |
-| `pi-zflow-compaction`       | Pi extension        | Proactive compaction hooks                                                                                 |
-| `pi-zflow-subagents-bridge` | Pi extension        | Dispatch adapter capability and diagnostics for subagent/worktree execution                                |
-| `pi-zflow`                  | umbrella Pi package | Bundles the suite; registers `/zflow-help` and startup hint                                                |
+| `pi-zflow-runecontext`      | Pi extension        | RuneContext integration                                                                                                               |
+| `pi-zflow-compaction`       | Pi extension        | Proactive compaction hooks                                                                                                            |
+| `pi-zflow-subagents-bridge` | Pi extension        | Dispatch adapter capability and diagnostics for subagent/worktree execution                                                           |
+| `pi-zflow`                  | umbrella Pi package | Bundles the suite; registers `/zflow-help` and startup hint                                                                           |
 
 ### Install from GitHub
 
@@ -460,12 +462,12 @@ planner agents — they cannot use `edit`, `write`, or mutation-capable `bash`.
 
 ### Contract
 
-| Parameter     | Type   | Validation                                                        | Notes                                                                     |
-| ------------- | ------ | ----------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `changeId`    | string | `assertSafeChangeId()` — kebab-case, alphanumeric + hyphens only  | Uniquely identifies the change (e.g. `add-auth-flow` or `fix-cache-race`) |
-| `planVersion` | string | Must match `/^v\d+$/` (e.g. `v1`, `v2`)                           | Plans start at `v1`; replanning increments                                |
+| Parameter     | Type   | Validation                                                                                | Notes                                                                     |
+| ------------- | ------ | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `changeId`    | string | `assertSafeChangeId()` — kebab-case, alphanumeric + hyphens only                          | Uniquely identifies the change (e.g. `add-auth-flow` or `fix-cache-race`) |
+| `planVersion` | string | Must match `/^v\d+$/` (e.g. `v1`, `v2`)                                                   | Plans start at `v1`; replanning increments                                |
 | `artifact`    | string | One of: `design`, `execution-groups`, `standards`, `verification`, `implementation-tasks` | The five mandatory plan artifact types                                    |
-| `content`     | string | Markdown body (no additional validation beyond size limits)       | Full markdown content of the artifact                                     |
+| `content`     | string | Markdown body (no additional validation beyond size limits)                               | Full markdown content of the artifact                                     |
 
 ### Destination path
 
@@ -497,9 +499,13 @@ function writePlanArtifact({ changeId, planVersion, artifact, content }) {
   assertSafeChangeId(changeId); // kebab-case only
   assert(/^v\d+$/.test(planVersion)); // v1, v2, ...
   assert(
-    ["design", "execution-groups", "standards", "verification", "implementation-tasks"].includes(
-      artifact,
-    ),
+    [
+      "design",
+      "execution-groups",
+      "standards",
+      "verification",
+      "implementation-tasks",
+    ].includes(artifact),
   );
   const target = resolvePlanArtifactPath(changeId, planVersion, artifact);
   atomicWrite(target, content); // write .tmp → rename
@@ -741,7 +747,7 @@ Each layer is delivered by a different mechanism and serves a distinct purpose.
 | ----------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
 | Pi default        | Built into Pi                                                 | Dynamic tool listings, guidelines, documentation paths, global rules                                                                                                                               | Every session                                         |
 | Root constitution | `APPEND_SYSTEM.md` (not `SYSTEM.md`)                          | Compact orchestrator constitution: tool discipline, truthfulness taxonomy, safety rules, workflow boundaries, context discipline, engineering judgment, platform-documentation-awareness invariant | Orchestrator and subagents that inherit system prompt |
-| Mode fragments    | Injected by extension at mode entry                           | Role-specific behaviour for `/zflow-plan`, `/zflow-change-plan`, `/zflow-change-prepare`, `/zflow-change-implement`, `/zflow-review-pr`, `/zflow-clean`                                           | Active during specific modes                          |
+| Mode fragments    | Injected by extension at mode entry                           | Role-specific behaviour for `/zflow-plan`, `/zflow-change-plan`, `/zflow-change-prepare`, `/zflow-change-implement`, `/zflow-review-pr`, `/zflow-clean`                                            | Active during specific modes                          |
 | Runtime reminders | Injected by extension on events                               | Short factual reminders for active plan mode, approved plan loaded, drift detected, compaction handoff, tool denied, external file change, verification status                                     | On specific state transitions                         |
 | Agent prompts     | Agent markdown body (frontmatter `systemPromptMode: replace`) | Narrow role contract for each `zflow.*` agent; replaces rather than appends                                                                                                                        | The specific agent only                               |
 

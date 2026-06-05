@@ -36,6 +36,14 @@ import { getZflowRegistry } from "pi-zflow-core/registry"
 import type { CapabilityClaim } from "pi-zflow-core/registry"
 import { PI_ZFLOW_COMPACTION_VERSION } from "pi-zflow-core"
 import {
+  calculateCacheHitRate,
+  hashNormalizedText,
+  inferRegressionCause,
+  normalizePromptText,
+  type ZflowCacheTraceEntry,
+} from "pi-zflow-core"
+import { appendCacheTraceEntry } from "pi-zflow-artifacts"
+import {
   createCompactionService,
   getCompactionThreshold,
   chooseCheapCompactionModel,
@@ -81,6 +89,13 @@ export default function activateZflowCompactionExtension(pi: ExtensionAPI): void
   // Set to true after a compaction cycle completes so the next agent start
   // receives the compaction-handoff reminder.
   let pendingCompactionHandoff = false
+  let compactionOccurredRecently = false
+  let lastPromptHash: string | null = null
+  let lastReminderHash: string | null = null
+  let lastWorkflowMode: string | null = null
+  let lastModel: string | null = null
+  let turnCounter = 0
+  let lastTraceEntry: ZflowCacheTraceEntry | null = null
 
   // ── State for proactive compaction guard ─────────────────────────
 
@@ -118,6 +133,72 @@ export default function activateZflowCompactionExtension(pi: ExtensionAPI): void
   // threshold.
 
   pi.on("turn_end", (_event, ctx) => {
+    const usage = ctx.getContextUsage()
+
+    try {
+      const dynamicCtx = ctx as Record<string, unknown>
+      const dynamicEvent = _event as Record<string, unknown>
+      const eventModel = typeof dynamicEvent.model === "object" && dynamicEvent.model !== null
+        ? dynamicEvent.model as Record<string, unknown>
+        : null
+      const ctxModel = typeof dynamicCtx.model === "object" && dynamicCtx.model !== null
+        ? dynamicCtx.model as Record<string, unknown>
+        : null
+      const workflowMode = typeof dynamicCtx.activeWorkflowMode === "string"
+        ? dynamicCtx.activeWorkflowMode
+        : null
+      const modelId = typeof ctxModel?.id === "string"
+        ? ctxModel.id
+        : typeof eventModel?.id === "string"
+          ? eventModel.id
+          : null
+      const provider = typeof ctxModel?.provider === "string"
+        ? ctxModel.provider
+        : typeof eventModel?.provider === "string"
+          ? eventModel.provider
+          : null
+      const inputTokens = usage?.tokens ?? null
+      const traceEntry: ZflowCacheTraceEntry = {
+        sessionId: typeof ctx.sessionManager?.getSessionId === "function"
+          ? ctx.sessionManager.getSessionId()
+          : process.env.PI_SESSION_ID ?? "unknown-session",
+        turnId: `turn-${++turnCounter}`,
+        timestamp: new Date().toISOString(),
+        cwdHash: hashNormalizedText(ctx.cwd ?? process.cwd()) ?? "unknown-cwd",
+        workflowMode,
+        agentName: null,
+        profileName: null,
+        provider,
+        model: modelId,
+        stablePromptHash: lastPromptHash,
+        reminderHash: lastReminderHash,
+        contextUsagePercent: usage?.percent ?? null,
+        inputTokens,
+        outputTokens: null,
+        cacheReadTokens: null,
+        cacheWriteTokens: null,
+        cacheHitRate: calculateCacheHitRate(inputTokens, null),
+        compactionOccurredRecently,
+        promptFingerprintChanged: false,
+        modelChanged: modelId !== null && lastModel !== null ? modelId !== lastModel : false,
+        modeChanged: workflowMode !== null && lastWorkflowMode !== null ? workflowMode !== lastWorkflowMode : false,
+        toolBurstHint: false,
+        regressionCause: null,
+      }
+      traceEntry.promptFingerprintChanged =
+        traceEntry.stablePromptHash !== null && lastTraceEntry?.stablePromptHash !== null
+          ? traceEntry.stablePromptHash !== lastTraceEntry.stablePromptHash
+          : false
+      traceEntry.regressionCause = inferRegressionCause(traceEntry, lastTraceEntry)
+      void appendCacheTraceEntry(traceEntry, { cwd: ctx.cwd }).catch(() => {})
+      lastWorkflowMode = workflowMode
+      lastModel = modelId
+      lastTraceEntry = traceEntry
+      compactionOccurredRecently = false
+    } catch {
+      // Cache telemetry is best-effort only.
+    }
+
     if (compactionInProgress) {
       // A compaction we requested is still in flight or has just
       // finished — let usage climb again before re-evaluating.
@@ -125,9 +206,6 @@ export default function activateZflowCompactionExtension(pi: ExtensionAPI): void
     }
 
     const threshold = getCompactionThreshold()
-
-    // Check usage via the official context-usage API if available.
-    const usage = ctx.getContextUsage()
 
     let shouldTrigger = false
 
@@ -305,6 +383,7 @@ export default function activateZflowCompactionExtension(pi: ExtensionAPI): void
     // After successful compaction, flag that the next agent start should
     // receive the compaction-handoff reminder so it rereads canonical artifacts.
     pendingCompactionHandoff = true
+    compactionOccurredRecently = true
 
     // Reset the proactive-trigger guard so a new compaction can be
     // triggered once usage climbs back above threshold.
@@ -335,6 +414,9 @@ export default function activateZflowCompactionExtension(pi: ExtensionAPI): void
   // ── before_agent_start hook ─────────────────────────────────────
 
   pi.on("before_agent_start", async (event, ctx) => {
+    lastPromptHash = hashNormalizedText(normalizePromptText(event.systemPrompt ?? ""))
+    lastReminderHash = null
+
     if (!pendingCompactionHandoff) {
       return {}
     }
@@ -373,6 +455,8 @@ export default function activateZflowCompactionExtension(pi: ExtensionAPI): void
     } catch {
       // Non-critical: persisted entry discovery is best-effort
     }
+
+    lastReminderHash = hashNormalizedText(`${handoffSection}${persistedPathsSection}`)
 
     return {
       systemPrompt: event.systemPrompt + `\n\n${handoffSection}${persistedPathsSection}`,

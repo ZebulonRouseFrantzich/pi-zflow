@@ -24,6 +24,11 @@
 import { readFileSync, existsSync, readdirSync } from "node:fs"
 import { resolve, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
+import {
+  buildPromptFingerprint,
+  hashNormalizedText,
+  type ZflowPromptFingerprint,
+} from "pi-zflow-core"
 
 // ── Package root resolution ─────────────────────────────────────
 
@@ -115,6 +120,12 @@ export interface AssembledPrompt {
   /** Full assembled prompt text. */
   prompt: string
 
+  /** Stable prefix text excluding volatile reminders. */
+  stablePrompt: string
+
+  /** Volatile reminder/diagnostic suffix text. */
+  volatilePrompt: string
+
   /** The role prompt (agent body text after frontmatter). */
   rolePrompt: string
 
@@ -132,6 +143,18 @@ export interface AssembledPrompt {
 
   /** Distilled orchestrator invariants, if provided. */
   orchestratorInvariants?: string
+
+  /** Stable prompt fingerprint for cache diagnostics. */
+  stableFingerprint: ZflowPromptFingerprint
+
+  /** Hash of the volatile reminder layer, when present. */
+  reminderHash: string | null
+
+  /** Fragment IDs included in the stable prefix. */
+  stableFragmentIds: string[]
+
+  /** Fragment IDs included in the volatile suffix. */
+  volatileFragmentIds: string[]
 
   /** Debug info: which files were loaded. */
   debug: {
@@ -310,7 +333,8 @@ export function assemblePrompt(input: PromptAssemblyInput): AssembledPrompt {
   let artifactContext: string | undefined
   if (input.artifactPaths && Object.keys(input.artifactPaths).length > 0) {
     const lines = ["## Canonical paths", ""]
-    for (const [key, path] of Object.entries(input.artifactPaths)) {
+    for (const [key, path] of Object.entries(input.artifactPaths)
+      .sort(([left], [right]) => left.localeCompare(right))) {
       lines.push(`- **${key}**: \`${path}\``)
     }
     artifactContext = lines.join("\n")
@@ -319,12 +343,13 @@ export function assemblePrompt(input: PromptAssemblyInput): AssembledPrompt {
   // 5. Build skills reference
   let skillsContext: string | undefined
   if (input.skills && input.skills.length > 0) {
+    const sortedSkills = [...input.skills].sort((left, right) => left.localeCompare(right))
     skillsContext = [
       "## Relevant skills",
       "",
       "The following skills are active for this agent:",
       "",
-      ...input.skills.map((s) => `- \`${s}\``),
+      ...sortedSkills.map((s) => `- \`${s}\``),
       "",
       "Refer to the skill documents for detailed guidance.",
     ].join("\n")
@@ -336,72 +361,98 @@ export function assemblePrompt(input: PromptAssemblyInput): AssembledPrompt {
     input.distilledOrchestratorInvariants &&
     input.distilledOrchestratorInvariants.length > 0
   ) {
+    const sortedInvariants = [...input.distilledOrchestratorInvariants].sort((left, right) => left.localeCompare(right))
     orchestratorInvariants = [
       "## Orchestrator invariants (distilled for this role)",
       "",
-      ...input.distilledOrchestratorInvariants.map((s) => `- ${s}`),
+      ...sortedInvariants.map((s) => `- ${s}`),
     ].join("\n")
   }
 
-  // 7. Assemble the full prompt
-  const sections: string[] = []
+  // 7. Assemble the full prompt with a stable prefix and volatile suffix
+  const stableSections: string[] = []
+  const volatileSections: string[] = []
+  const stableFragmentIds: string[] = ["role-prompt"]
+  const volatileFragmentIds: string[] = []
 
   // Role prompt always first
-  sections.push(rolePrompt.trim())
+  stableSections.push(rolePrompt.trim())
 
   // Mode fragment if active
   if (modeFragment) {
-    sections.push("")
-    sections.push("---")
-    sections.push("")
-    sections.push(modeFragment.trim())
+    stableSections.push("")
+    stableSections.push("---")
+    stableSections.push("")
+    stableSections.push(modeFragment.trim())
+    stableFragmentIds.push(`mode:${input.mode}`)
   }
 
   // Reminders if active
   if (Object.keys(includedReminders).length > 0) {
-    sections.push("")
-    sections.push("---")
-    sections.push("")
-    sections.push("## Active reminders")
-    sections.push("")
+    volatileSections.push("## Active reminders")
+    volatileSections.push("")
     for (const content of Object.values(includedReminders)) {
-      sections.push(content.trim())
-      sections.push("")
+      volatileSections.push(content.trim())
+      volatileSections.push("")
+    }
+    for (const reminderId of Object.keys(includedReminders)) {
+      volatileFragmentIds.push(`reminder:${reminderId}`)
     }
   }
 
   // Skills reference
   if (skillsContext) {
-    sections.push("")
-    sections.push("---")
-    sections.push("")
-    sections.push(skillsContext)
+    stableSections.push("")
+    stableSections.push("---")
+    stableSections.push("")
+    stableSections.push(skillsContext)
+    stableFragmentIds.push("skills")
   }
 
   // Distilled orchestrator invariants near the end
   if (orchestratorInvariants) {
-    sections.push("")
-    sections.push("---")
-    sections.push("")
-    sections.push(orchestratorInvariants)
+    stableSections.push("")
+    stableSections.push("---")
+    stableSections.push("")
+    stableSections.push(orchestratorInvariants)
+    stableFragmentIds.push("orchestrator-invariants")
   }
 
   // Artifact paths last (concrete paths, lowest ambiguity risk)
   if (artifactContext) {
-    sections.push("")
-    sections.push("---")
-    sections.push("")
-    sections.push(artifactContext)
+    stableSections.push("")
+    stableSections.push("---")
+    stableSections.push("")
+    stableSections.push(artifactContext)
+    stableFragmentIds.push("artifact-context")
   }
 
+  const stablePrompt = stableSections.join("\n").trim()
+  const volatilePrompt = volatileSections.join("\n").trim()
+  const prompt = [stablePrompt, volatilePrompt].filter(Boolean).join("\n\n---\n\n").trim()
+  const stableFingerprint = buildPromptFingerprint({
+    agentName: input.agentName,
+    mode: input.mode ?? null,
+    stableFragmentIds,
+    skillIds: input.skills ? [...input.skills].sort((left, right) => left.localeCompare(right)) : [],
+    stablePrompt,
+  })
+  const reminderHash = hashNormalizedText(volatilePrompt)
+
   return {
-    prompt: sections.join("\n").trim(),
+    prompt,
+    stablePrompt,
+    volatilePrompt,
     rolePrompt: rolePrompt.trim(),
     modeFragment: modeFragment?.trim(),
     includedReminders,
     artifactContext,
     skillsContext,
     orchestratorInvariants,
+    stableFingerprint,
+    reminderHash,
+    stableFragmentIds,
+    volatileFragmentIds,
     debug,
   }
 }

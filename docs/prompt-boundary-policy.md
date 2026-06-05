@@ -81,6 +81,15 @@ Supported labelling patterns:
 
 ### Rule 4: Put active mode/state constraints in clearly labelled sections
 
+### Rule 4.5: Keep the stable prompt prefix separate from volatile reminders
+
+Prompt assembly should preserve a byte-stable prefix whenever possible.
+
+- **Stable prefix**: role prompt, mode fragment, skills references, stable invariants, canonical path references
+- **Volatile suffix**: compaction handoff, tool-denied notices, drift reminders, verification-status reminders, other transient diagnostics
+
+Reminder-only changes should not require rebuilding or re-hashing the stable prompt prefix.
+
 Mode-specific restrictions (e.g. "read-only", "no mutations", "deviation protocol") must be in a dedicated section rather than buried inside a general workflow description.
 
 **Good:**

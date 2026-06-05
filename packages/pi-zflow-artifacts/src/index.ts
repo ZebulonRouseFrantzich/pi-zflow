@@ -96,6 +96,24 @@ export type {
   CleanupResult,
 } from "./cleanup-metadata.js"
 
+// Re-export cache telemetry storage helpers
+export {
+  resolveRuntimeCacheDir,
+  resolveSessionCacheTracePath,
+  resolveCacheSummaryPath,
+  resolveUserCacheDir,
+  resolveUserCacheTracePath,
+} from "./cache-paths.js"
+
+export {
+  appendCacheTraceEntry,
+  readSessionCacheTrace,
+  writeCacheSummary,
+  readCacheSummary,
+  rebuildCacheSummary,
+  buildCacheSummary,
+} from "./cache-trace.js"
+
 // Re-export plan artifact write tool (Phase 2+ implementation)
 // Also importable directly from "pi-zflow-artifacts/write-plan-artifact"
 export { writePlanArtifact } from "./write-plan-artifact.js"

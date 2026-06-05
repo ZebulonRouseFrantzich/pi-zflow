@@ -32,8 +32,10 @@ import {
   renderTopicMarkdown,
   sortTopicsByFlow,
   getTopic,
+  shortHash,
 } from "pi-zflow-core"
 import { ZFLOW_HELP_TOPICS as PROFILE_HELP } from "pi-zflow-profiles"
+import { readCacheSummary } from "pi-zflow-artifacts"
 import { ZFLOW_HELP_TOPICS as AGENTS_HELP } from "pi-zflow-agents"
 import { ZFLOW_HELP_TOPICS as PLAN_MODE_HELP } from "pi-zflow-plan-mode"
 import { ZFLOW_HELP_TOPICS as ARTIFACTS_HELP } from "pi-zflow-artifacts"
@@ -123,7 +125,9 @@ export default function activateZflowHelpExtension(pi: ExtensionAPI): void {
     handler: async (args, _ctx) => {
       const arg = args.trim().toLowerCase()
 
-      const rendered = renderForArg(arg)
+      const rendered = arg === "doctor"
+        ? await renderDoctor(_ctx.cwd)
+        : renderForArg(arg)
       if (rendered === null) {
         _ctx.ui.notify(
           `Unknown help topic: "${arg}". ` +
@@ -167,7 +171,7 @@ function renderForArg(arg: string): string | null {
   }
 
   if (arg === "doctor") {
-    return renderDoctor()
+    return null
   }
 
   const topicId = TOPIC_ALIASES[arg]
@@ -313,10 +317,11 @@ function renderFlowGuidance(topics: ZflowHelpTopic[]): string {
 /**
  * Render diagnostics information from the capability registry.
  */
-function renderDoctor(): string {
+async function renderDoctor(cwd?: string): Promise<string> {
   const registry = getZflowRegistry()
   const diags = registry.getDiagnostics()
   const caps = registry.getCapabilities()
+  const cacheSummary = await readCacheSummary(cwd).catch(() => null)
 
   const lines: string[] = []
   lines.push("# pi-zflow Diagnostics")
@@ -330,6 +335,28 @@ function renderDoctor(): string {
       `| ${name} | ${cap.claim.provider} | ${cap.claim.version} | ` +
       `${cap.service !== undefined ? "✓" : "✗"} |`,
     )
+  }
+  lines.push("")
+  lines.push("### Session and resume")
+  lines.push("")
+  lines.push("- Pi `/resume` restores prior **Pi sessions/conversations**.")
+  lines.push("- zflow workflow recovery usually uses `/zflow-change-implement <change> --resume` and runtime artifacts, not a new Pi session.")
+  lines.push("- Current default zflow change flows do **not** auto-fork a new implementation session after prepare.")
+  lines.push("")
+  lines.push("### Cache telemetry")
+  lines.push("")
+  if (cacheSummary) {
+    lines.push(`- Health: **${cacheSummary.health}**`)
+    lines.push(`- Session turns traced: **${cacheSummary.totalTurns}**`)
+    lines.push(`- Provider/model: **${cacheSummary.provider ?? "unknown"} / ${cacheSummary.model ?? "unknown"}**`)
+    lines.push(`- Stable prompt fingerprint: \`${shortHash(cacheSummary.stablePromptHash)}\``)
+    lines.push(`- Volatile reminder fingerprint: \`${shortHash(cacheSummary.reminderHash)}\``)
+    lines.push(`- Cache read/write tokens: **${cacheSummary.cacheReadTokens} / ${cacheSummary.cacheWriteTokens}**`)
+    lines.push(`- Average cache hit rate: **${cacheSummary.averageCacheHitRate !== null ? `${(cacheSummary.averageCacheHitRate * 100).toFixed(1)}%` : "unknown"}**`)
+    lines.push(`- Last regression cause: **${cacheSummary.lastRegressionCause ?? "none observed"}**`)
+    lines.push(`- Recent compaction observed: **${cacheSummary.compactionOccurredRecently ? "yes" : "no"}**`)
+  } else {
+    lines.push("No cache telemetry recorded yet for the current runtime state.")
   }
   lines.push("")
 

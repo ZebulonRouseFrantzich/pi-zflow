@@ -10,6 +10,7 @@ import * as assert from "node:assert"
 
 import activateZflowHelpExtension from "../extensions/zflow-help/index.js"
 import { resetZflowRegistry } from "pi-zflow-core"
+import { writeCacheSummary } from "pi-zflow-artifacts"
 
 // ── Test helpers ─────────────────────────────────────────────────
 
@@ -189,6 +190,41 @@ describe("zflow-help extension", () => {
     assert.ok(!sentMessages[0].content.includes("//zflow-"), "usage must not render with doubled slashes")
   })
 
+  it("renders doctor with resume guidance and cache telemetry", async () => {
+    const { commands, pi, sentMessages } = makePiStub()
+
+    await writeCacheSummary({
+      sessionId: "session-1",
+      totalTurns: 3,
+      provider: "openai",
+      model: "gpt-test",
+      stablePromptHash: "abcdef1234567890",
+      reminderHash: "9876543210fedcba",
+      cacheReadTokens: 400,
+      cacheWriteTokens: 50,
+      inputTokens: 1000,
+      outputTokens: 250,
+      averageCacheHitRate: 0.4,
+      hitRateSamples: 3,
+      health: "warming",
+      lastRegressionCause: "compaction-recent",
+      lastUpdatedAt: new Date().toISOString(),
+      compactionOccurredRecently: true,
+    })
+
+    activateZflowHelpExtension(pi as any)
+    const handler = commands.get("zflow-help")!.handler!
+
+    await handler("doctor", makePiStub().makeCtx())
+
+    assert.equal(sentMessages.length, 1)
+    assert.ok(sentMessages[0].content.includes("Pi `/resume` restores prior"))
+    assert.ok(sentMessages[0].content.includes("/zflow-change-implement <change> --resume"))
+    assert.ok(sentMessages[0].content.includes("Cache telemetry"))
+    assert.ok(sentMessages[0].content.includes("warming"))
+    assert.ok(sentMessages[0].content.includes("compaction-recent"))
+  })
+
   // ── Topic rendering — per-topic args ─────────────────────────
 
   it("renders profiles topic", () => {
@@ -260,12 +296,12 @@ describe("zflow-help extension", () => {
 
   // ── Topic rendering — doctor ─────────────────────────────────
 
-  it("renders diagnostics for doctor", () => {
+  it("renders diagnostics for doctor", async () => {
     const { commands, pi, sentMessages } = makePiStub()
     activateZflowHelpExtension(pi as any)
     const handler = commands.get("zflow-help")!.handler!
 
-    handler("doctor", makePiStub().makeCtx())
+    await handler("doctor", makePiStub().makeCtx())
 
     assert.equal(sentMessages.length, 1)
     assert.ok(sentMessages[0].content.includes("pi-zflow Diagnostics"))

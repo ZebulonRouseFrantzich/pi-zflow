@@ -240,3 +240,24 @@ export type {
   ZflowCommandHelp,
   ZflowHelpTopic,
 } from "./help-catalog.js"
+
+// Re-export prompt cache normalization, fingerprinting, and telemetry types
+export {
+  normalizePromptText,
+  sortAndNormalizeList,
+  hashNormalizedText,
+  buildPromptFingerprint,
+  calculateCacheHitRate,
+  classifyCacheHealth,
+  inferRegressionCause,
+  shortHash,
+} from "./prompt-cache.js"
+
+export type {
+  ZflowPromptFingerprint,
+  ZflowCacheTraceEntry,
+  ZflowCacheRegressionCause,
+  ZflowCacheHealth,
+  ZflowCacheSummary,
+  BuildPromptFingerprintInput,
+} from "./prompt-cache.js"
