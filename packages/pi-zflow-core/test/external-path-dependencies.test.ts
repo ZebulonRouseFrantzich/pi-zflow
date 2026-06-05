@@ -6,6 +6,7 @@ import * as os from "node:os"
 import * as path from "node:path"
 
 import {
+  hasExternalPathDependencies,
   materializeExternalPathDependencies,
   normalizeExternalPathDependenciesConfig,
 } from "../src/external-path-dependencies.js"
@@ -53,6 +54,17 @@ describe("external path dependencies", () => {
   test("normalizes config with auto-copy default", () => {
     assert.deepEqual(normalizeExternalPathDependenciesConfig(undefined), { mode: "copy-readonly", allow: [] })
     assert.deepEqual(normalizeExternalPathDependenciesConfig({ mode: "off", allow: ["../deps"] }), { mode: "off", allow: ["../deps"] })
+  })
+
+  test("detects manifest-declared sibling pubspec path dependencies", async () => {
+    const fixture = await makeRepoFixture()
+    try {
+      assert.equal(hasExternalPathDependencies(fixture.repo), true)
+      await fs.writeFile(path.join(fixture.repo, "pi-zflow.config.json"), JSON.stringify({ externalPathDependencies: { mode: "off" } }))
+      assert.equal(hasExternalPathDependencies(fixture.repo), false)
+    } finally {
+      await fs.rm(fixture.root, { recursive: true, force: true })
+    }
   })
 
   test("copies manifest-declared sibling pubspec path dependencies into the sandbox", async () => {

@@ -135,6 +135,7 @@ export {
 // Re-export external path dependency materialisation helpers
 export {
   normalizeExternalPathDependenciesConfig,
+  hasExternalPathDependencies,
   materializeExternalPathDependencies,
 } from "./external-path-dependencies.js"
 export type {

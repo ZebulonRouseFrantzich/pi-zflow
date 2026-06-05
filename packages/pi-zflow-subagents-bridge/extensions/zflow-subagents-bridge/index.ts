@@ -56,6 +56,7 @@ import {
   inferTaskRepoRoot,
   runWorktreeSetupHook,
   runAgentWithRateLimitRetries,
+  hasExternalPathDependencies,
   materializeExternalPathDependencies,
   type WorktreeSetupHookConfig,
 } from "pi-zflow-core"
@@ -241,12 +242,13 @@ function describeMissingCapabilities(
 function requiresCompatWorktreeTaskCwds(input: ParallelDispatchInput): boolean {
   if (!input.worktree) return false
   const sharedCwd = safeGetCwd(input.cwd)
+  if (hasExternalPathDependencies(sharedCwd)) return true
   return input.tasks.some((task) => {
     if (!task.cwd) return false
     const taskCwd = path.isAbsolute(task.cwd)
       ? task.cwd
       : path.resolve(sharedCwd, task.cwd)
-    return path.resolve(taskCwd) !== path.resolve(sharedCwd)
+    return path.resolve(taskCwd) !== path.resolve(sharedCwd) || hasExternalPathDependencies(taskCwd)
   })
 }
 

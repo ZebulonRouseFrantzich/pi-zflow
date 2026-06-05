@@ -276,6 +276,31 @@ function copyDirectorySafe(source: string, target: string): void {
   }
 }
 
+export function hasExternalPathDependencies(repoRootInput: string): boolean {
+  const repoRoot = safeRealpathSync(repoRootInput)
+  if (!repoRoot) return false
+  const config = loadExternalPathDependenciesConfig(repoRoot)
+  if (config.mode === "off") return false
+
+  for (const manifestPathRaw of listFilesRecursive(repoRoot, "pubspec.yaml")) {
+    const manifestPath = safeRealpathSync(manifestPathRaw)
+    if (!manifestPath) continue
+    let content = ""
+    try {
+      content = fs.readFileSync(manifestPath, "utf-8")
+    } catch {
+      continue
+    }
+    const manifestDir = path.dirname(manifestPath)
+    for (const dependency of parsePubspecPathDependencies(content)) {
+      const sourcePath = safeRealpathSync(path.resolve(manifestDir, dependency.dependencyPath))
+      if (sourcePath && !isWithin(sourcePath, repoRoot)) return true
+    }
+  }
+
+  return false
+}
+
 export function materializeExternalPathDependencies(
   options: MaterializeExternalPathDependenciesOptions,
 ): MaterializeExternalPathDependenciesResult {
