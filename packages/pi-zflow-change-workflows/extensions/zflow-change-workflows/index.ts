@@ -86,6 +86,22 @@ import {
   extractChangePlanReference,
 } from "./commands/args.js"
 
+function isRuneContextReference(referencePath: string | null | undefined): boolean {
+  if (!referencePath) return false
+  const normalized = referencePath
+    .trim()
+    .replace(/^@+/, "")
+    .replace(/\\/g, "/")
+    .toLowerCase()
+  if (!normalized) return false
+  return normalized.split("/").some((segment) =>
+    segment === "runecontext" ||
+    segment === ".runecontext" ||
+    segment === "runectx" ||
+    segment === "rune-context"
+  )
+}
+
 export {
   isAdHocPlanModeActive,
   shouldForkImplementationSessionAfterPrepare,
