@@ -764,14 +764,28 @@ async function updateGroupLedger(
  * @param options - Context: runId, cwd, repoRoot, changeId, planVersion, worktreeResultsDir, onSubagentUpdate.
  * @returns Object with fix outcome: whether fixed, canonical fix patch path, classification, error.
  */
-async function cleanupUnexpectedTrackedPrimaryChanges(repoRoot: string, context: string): Promise<void> {
+async function cleanupUnexpectedPrimaryChanges(repoRoot: string, context: string): Promise<void> {
   const { execFile } = await import("node:child_process")
   const { promisify } = await import("node:util")
   const execFileAsync = promisify(execFile)
-  const { stdout } = await execFileAsync("git", ["status", "--porcelain=v1", "--untracked-files=no"], { cwd: repoRoot })
+  const { stdout } = await execFileAsync("git", ["status", "--porcelain=v1", "--untracked-files=all"], { cwd: repoRoot })
   if (!stdout.trim()) return
-  await execFileAsync("git", ["restore", "--staged", "--worktree", "."], { cwd: repoRoot })
-  console.warn(`[zflow] Cleaned unexpected tracked primary-worktree changes after ${context}.`)
+
+  const trackedLines = stdout.split("\n").filter((line) => line.trim() && !line.startsWith("?? "))
+  if (trackedLines.length > 0) {
+    await execFileAsync("git", ["restore", "--staged", "--worktree", "."], { cwd: repoRoot })
+  }
+
+  const untrackedPaths = stdout
+    .split("\n")
+    .filter((line) => line.startsWith("?? "))
+    .map((line) => line.slice(3).trim())
+    .filter(Boolean)
+  for (const untrackedPath of untrackedPaths) {
+    await execFileAsync("git", ["clean", "-fd", "--", untrackedPath], { cwd: repoRoot })
+  }
+
+  console.warn(`[zflow] Cleaned unexpected primary-worktree changes after ${context}.`)
 }
 
 async function attemptGroupFix(
@@ -945,7 +959,7 @@ async function attemptGroupFix(
       maxOutput: { lines: 5000, bytes: 500_000 },
       })
     } finally {
-      await cleanupUnexpectedTrackedPrimaryChanges(options.repoRoot, `fix worker ${groupId}`).catch(() => {})
+      await cleanupUnexpectedPrimaryChanges(options.repoRoot, `fix worker ${groupId}`).catch(() => {})
     }
 
     const fixTaskResult = fixResult.results[0]
@@ -1660,7 +1674,8 @@ async function resumeWorktreeDispatch(
       dependencies: string[]
       parallelizable: boolean
     }
-    const lineage = t.worktreeStrategy?.baseStrategy === "dependency-lineage"
+    const shouldUseLineage = t.worktreeStrategy?.baseStrategy === "dependency-lineage" || (t.dependencies?.length ?? 0) > 0
+    const lineage = shouldUseLineage
       ? await materializeDependencyLineageRef(
           runId,
           repoRoot,
@@ -1838,7 +1853,7 @@ async function resumeWorktreeDispatch(
   } finally {
     clearInterval(heartbeat)
     await flushLiveProgress(true)
-    await cleanupUnexpectedTrackedPrimaryChanges(repoRoot, "resume worktree dispatch").catch(() => {})
+    await cleanupUnexpectedPrimaryChanges(repoRoot, "resume worktree dispatch").catch(() => {})
   }
 
   // ── Collect results and update ledger ─────────────────────────
@@ -2883,7 +2898,8 @@ async function runWorktreeDispatchAndFinalize(
         parallelizable: boolean
         baseStrategy?: "head" | "dependency-lineage"
       }
-      if (baseTask.worktreeStrategy?.baseStrategy !== "dependency-lineage") {
+      const shouldUseLineage = baseTask.worktreeStrategy?.baseStrategy === "dependency-lineage" || (baseTask.dependencies?.length ?? 0) > 0
+      if (!shouldUseLineage) {
         return baseTask
       }
 
@@ -3019,7 +3035,7 @@ async function runWorktreeDispatchAndFinalize(
       clearInterval(waveHeartbeat)
       waveHeartbeat = undefined
       await flushLiveProgress(true)
-      await cleanupUnexpectedTrackedPrimaryChanges(repoRoot, `wave ${waveIndex} worktree dispatch`).catch(() => {})
+      await cleanupUnexpectedPrimaryChanges(repoRoot, `wave ${waveIndex} worktree dispatch`).catch(() => {})
     }
 
     // Process wave results
@@ -3144,7 +3160,17 @@ async function runWorktreeDispatchAndFinalize(
         )
 
         if (fixResult.fixed) {
-          const mergedResult = mergeSuccessfulFixResult(r, fixResult.dispatchResult)
+          let canonicalFixPatchPath = fixResult.fixPatchPath
+          if (canonicalFixPatchPath) {
+            const patchesDir = path.join(runDir, "patches")
+            await fs.mkdir(patchesDir, { recursive: true })
+            const destPatchPath = path.join(patchesDir, `${gid}.patch`)
+            if (path.resolve(canonicalFixPatchPath) !== path.resolve(destPatchPath)) {
+              await fs.copyFile(canonicalFixPatchPath, destPatchPath)
+            }
+            canonicalFixPatchPath = destPatchPath
+          }
+          const mergedResult = mergeSuccessfulFixResult(r, fixResult.dispatchResult ? { ...fixResult.dispatchResult, patchPath: canonicalFixPatchPath ?? fixResult.dispatchResult.patchPath } : undefined)
           const mergedVerification = normalizeDispatchVerification(mergedResult.verification)
           const resultEntry = allResults.find((entry) => entry.groupId === gid)
           if (resultEntry) {
@@ -3155,14 +3181,14 @@ async function runWorktreeDispatchAndFinalize(
             title: `fix: ${gid} (attempt ${currentFixAttempts + 1})`,
             status: "completed",
             finishedAt: Date.now(),
-            lastCommand: `fix succeeded${fixResult.fixPatchPath ? `; fix patch: ${fixResult.fixPatchPath}` : ""}`,
+            lastCommand: `fix succeeded${canonicalFixPatchPath ? `; fix patch: ${canonicalFixPatchPath}` : ""}`,
           })
           await updateGroupLedger(runId, gid, {
             status: "succeeded",
             agent: mergedResult.agent ?? "zflow.implement-routine",
             error: undefined,
             failureKind: undefined,
-            patchPath: fixResult.fixPatchPath ?? mergedResult.patchPath,
+            patchPath: canonicalFixPatchPath ?? mergedResult.patchPath,
             changedFiles: mergedResult.changedFiles ?? group?.files,
             scopedVerification: mergedVerification
               ? {
@@ -3172,7 +3198,7 @@ async function runWorktreeDispatchAndFinalize(
               : undefined,
             fixResult: "succeeded",
             fixClassification: fixResult.fixClassification,
-            fixPatchPath: fixResult.fixPatchPath,
+            fixPatchPath: canonicalFixPatchPath,
           }, cwd).catch(() => {})
           continue
         }
@@ -3282,6 +3308,20 @@ async function runWorktreeDispatchAndFinalize(
     }
 
     await recordDispatchFailurePolicy(runId, cwd, decisions, reportPath, "partial")
+    try {
+      const { updateStateIndexEntry, getChangeLifecycle, upsertChangeLifecycle } = await import("pi-zflow-artifacts/state-index")
+      await updateStateIndexEntry(runId, { status: "partial" }, cwd)
+      const lifecycle = await getChangeLifecycle(changeId, cwd)
+      if (lifecycle) {
+        await upsertChangeLifecycle({
+          ...lifecycle,
+          lastPhase: "partial",
+          unfinishedRuns: [runId],
+        }, cwd)
+      }
+    } catch {
+      // Best-effort state-index sync.
+    }
     throw new Error(
       `Implementation dispatch failed:\n` +
       errorParts.join("\n") +
@@ -3349,7 +3389,15 @@ async function runWorktreeDispatchAndFinalize(
         )
 
         if (fixResult.fixed) {
-          resultToCapture = mergeSuccessfulFixResult(resultToCapture, fixResult.dispatchResult)
+          let canonicalFixPatchPath = fixResult.fixPatchPath
+          if (canonicalFixPatchPath) {
+            const destPatchPath = path.join(patchesDir, `${group.id}.patch`)
+            if (path.resolve(canonicalFixPatchPath) !== path.resolve(destPatchPath)) {
+              await fs.copyFile(canonicalFixPatchPath, destPatchPath)
+            }
+            canonicalFixPatchPath = destPatchPath
+          }
+          resultToCapture = mergeSuccessfulFixResult(resultToCapture, fixResult.dispatchResult ? { ...fixResult.dispatchResult, patchPath: canonicalFixPatchPath ?? fixResult.dispatchResult.patchPath } : undefined)
           verification = normalizeDispatchVerification(resultToCapture.verification)
           options?.onSubagentUpdate?.(group.id, {
             agent: resultToCapture.agent ?? tasks[idx]?.agent,
@@ -3363,7 +3411,7 @@ async function runWorktreeDispatchAndFinalize(
             agent: resultToCapture.agent ?? "zflow.implement-routine",
             error: undefined,
             failureKind: undefined,
-            patchPath: fixResult.fixPatchPath ?? resultToCapture.patchPath,
+            patchPath: canonicalFixPatchPath ?? resultToCapture.patchPath,
             changedFiles: resultToCapture.changedFiles ?? group.files,
             scopedVerification: verification
               ? {
@@ -3373,7 +3421,7 @@ async function runWorktreeDispatchAndFinalize(
               : undefined,
             fixResult: "succeeded",
             fixClassification: fixResult.fixClassification,
-            fixPatchPath: fixResult.fixPatchPath,
+            fixPatchPath: canonicalFixPatchPath,
           }, cwd).catch(() => {})
         } else {
           emitWorkflowUpdate(`Fix attempt ${currentFixAttempts + 1} for ${group.id} failed: ${fixResult.error ?? "unknown"}`)

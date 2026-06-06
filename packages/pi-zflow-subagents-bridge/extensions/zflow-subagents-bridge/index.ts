@@ -1516,6 +1516,16 @@ function runCompatScopedVerification(
 
 function materializeCompatExternalPathDependencies(repoRoot: string, worktree: CompatWorktreeInfo): void {
   const result = materializeExternalPathDependencies({ repoRoot, worktreeRoot: worktree.agentCwd })
+  for (const dependency of result.materialized) {
+    const relative = path.relative(path.dirname(worktree.agentCwd), dependency.targetPath)
+    let current = path.dirname(worktree.agentCwd)
+    for (const segment of relative.split(path.sep).filter(Boolean)) {
+      current = path.join(current, segment)
+      if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) {
+        throw new Error(`External path dependency materialization left symlink in sandbox: ${current}`)
+      }
+    }
+  }
   if (result.materialized.length === 0) return
   worktree.syntheticPaths = [
     ...(worktree.syntheticPaths ?? []),
